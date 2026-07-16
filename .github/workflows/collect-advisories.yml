@@ -1,0 +1,192 @@
+name: Collect vulnerability advisories
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+      timezone: Asia/Tokyo
+    - cron: "23 6 * * *"
+      timezone: Asia/Tokyo
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Collection profile
+        required: true
+        default: daily
+        type: choice
+        options:
+          - edge
+          - daily
+      since:
+        description: Collection window
+        required: true
+        default: 90d
+        type: string
+
+concurrency:
+  group: vulnerability-advisory-publish
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      profile: ${{ steps.parameters.outputs.profile }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install collector
+        run: python -m pip install --editable .
+      - name: Resolve collection parameters
+        id: parameters
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PROFILE: ${{ inputs.profile }}
+          MANUAL_SINCE: ${{ inputs.since }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          profile=edge
+          since=90d
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            profile="$MANUAL_PROFILE"
+            since="$MANUAL_SINCE"
+          elif [ "$SCHEDULE" = "23 6 * * *" ]; then
+            profile=daily
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+          echo "since=$since" >> "$GITHUB_OUTPUT"
+      - name: Collect advisories
+        env:
+          PROFILE: ${{ steps.parameters.outputs.profile }}
+          SINCE: ${{ steps.parameters.outputs.since }}
+        run: vulnwatch collect --profile "$PROFILE" --since "$SINCE" --output staging
+      - name: Upload collected JSON
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: collected-advisories
+          path: staging
+          if-no-files-found: error
+          retention-days: 1
+
+  summarize:
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install summarizer
+        run: python -m pip install --editable '.[ai]'
+      - name: Download collected JSON
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: collected-advisories
+          path: staging
+      - name: Generate optional AI summaries
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: vulnwatch summarize --root staging
+      - name: Generate daily report
+        run: vulnwatch report --root staging
+      - name: Upload publish tree
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: summarized-advisories
+          path: staging
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [collect, summarize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install validator
+        run: python -m pip install --editable .
+      - name: Download publish tree
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: summarized-advisories
+          path: staging
+      - name: Validate generated tree
+        run: vulnwatch validate --root staging
+      - name: Detect publishable changes
+        id: changes
+        run: |
+          count=$(jq '[.changes[] | select(.status != "unchanged")] | length' staging/run-manifest.json)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - name: Update bot branch
+        if: steps.changes.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROFILE: ${{ needs.collect.outputs.profile }}
+        run: |
+          branch=bot/vulnerability-updates
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout -B "$branch"
+          for directory in data state reports quarantine; do
+            rm -rf "$directory"
+            if [ -d "staging/$directory" ]; then
+              cp -a "staging/$directory" "$directory"
+            fi
+          done
+          git add -A -- data state reports quarantine
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: update vulnerability advisories"
+          git push --force-with-lease origin "$branch"
+
+          new=$(jq '[.changes[] | select(.status == "new")] | length' staging/run-manifest.json)
+          updated=$(jq '[.changes[] | select(.status == "updated" or .status == "withdrawn")] | length' staging/run-manifest.json)
+          quarantined=$(jq '[.changes[] | select(.status == "quarantined")] | length' staging/run-manifest.json)
+          p1=$(jq '[.changes[] | select(.priority == "P1" and .status != "unchanged")] | length' staging/run-manifest.json)
+          p2=$(jq '[.changes[] | select(.priority == "P2" and .status != "unchanged")] | length' staging/run-manifest.json)
+          body=$(printf 'Automated vulnerability advisory update.\n\n- Profile: %s\n- New: %s\n- Updated/withdrawn: %s\n- Quarantined: %s\n- P1: %s\n- P2: %s\n' "$PROFILE" "$new" "$updated" "$quarantined" "$p1" "$p2")
+          number=$(gh pr list --head "$branch" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number')
+          if [ -z "$number" ]; then
+            gh pr create --base "$DEFAULT_BRANCH" --head "$branch" --title "Vulnerability advisory updates" --body "$body"
+            number=$(gh pr list --head "$branch" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number')
+          else
+            gh pr edit "$number" --body "$body"
+          fi
+          if [ "$p1" -gt 0 ]; then
+            gh label create priority/P1 --color B60205 --description "Contains P1 vulnerability advisories" --force
+            gh pr edit "$number" --add-label priority/P1
+          else
+            gh pr edit "$number" --remove-label priority/P1 || true
+          fi
