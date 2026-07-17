@@ -18,9 +18,7 @@ from vulnwatch.report import generate_report
 def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
     changes: list[ChangeRecord] = []
     for index, advisory in enumerate(advisories):
-        advisory_path = Path(
-            f"data/vendors/example/advisories/2026/example-{index}/advisory.json"
-        )
+        advisory_path = Path(f"data/vendors/example/advisories/2026/example-{index}/advisory.json")
         output_path = tmp_path / advisory_path
         output_path.parent.mkdir(parents=True)
         output_path.write_text(advisory.model_dump_json(), encoding="utf-8")
