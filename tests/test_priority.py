@@ -48,3 +48,46 @@ def test_priority_rules() -> None:
     )
     assert decide_priority(AdvisoryFacts(), matched).priority == Priority.P3
     assert decide_priority(AdvisoryFacts(), AdvisoryEnrichment()).priority == Priority.INFO
+
+
+def test_asset_matching_ignores_disabled_assets_and_wrong_vendors() -> None:
+    registry = ProductRegistry(
+        products=[
+            ProductAsset(
+                id="disabled",
+                vendor="Example",
+                names=["Product"],
+                exposure=Exposure.INTERNET,
+                owner="team",
+                enabled=False,
+            ),
+            ProductAsset(
+                id="wrong-vendor",
+                vendor="Other",
+                names=["Product"],
+                exposure=Exposure.INTERNET,
+                owner="team",
+            ),
+        ]
+    )
+
+    enrichment = enrich_assets("Example", ["Product"], registry)
+
+    assert not enrichment.asset_match
+    assert not enrichment.internet_exposed
+    assert enrichment.matched_asset_ids == []
+
+
+def test_cisa_kev_promotes_matched_asset_to_p1() -> None:
+    decision = decide_priority(AdvisoryFacts(), AdvisoryEnrichment(asset_match=True, cisa_kev=True))
+
+    assert decision.priority == Priority.P1
+    assert decision.reasons == ["資産一致かつ悪用確認済み"]
+
+
+def test_high_severity_requires_fixed_version_for_p2() -> None:
+    decision = decide_priority(
+        AdvisoryFacts(vendor_severity="High"), AdvisoryEnrichment(asset_match=True)
+    )
+
+    assert decision.priority == Priority.P3
