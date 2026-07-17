@@ -18,9 +18,7 @@ from vulnwatch.report import generate_report
 def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
     changes: list[ChangeRecord] = []
     for index, advisory in enumerate(advisories):
-        advisory_path = Path(
-            f"data/vendors/example/advisories/2026/example-{index}/advisory.json"
-        )
+        advisory_path = Path(f"data/vendors/example/advisories/2026/example-{index}/advisory.json")
         output_path = tmp_path / advisory_path
         output_path.parent.mkdir(parents=True)
         output_path.write_text(advisory.model_dump_json(), encoding="utf-8")
@@ -81,6 +79,11 @@ def test_generate_report_adds_matrix_and_orders_by_severity(
     assert "| Example | 1(1,1) | 1(0,0) | 1(0,0) | 1(0,0) | 4(1,1) |" in report
     assert "| 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | 悪用状況 |" in report
     assert "悪用済み<br>PoC公開済み" in report
+    assert "## Critical・悪用確認済み" in report
+    assert "### [Critical advisory](https://security.example.com/ADV-1)" in report
+    assert "- 識別子: CVE-2026-10001" in report
+    assert "- 深刻度: CVSS 9.8" in report
+    assert "### [High advisory]" not in report
     assert report.index("| Critical | INFO |") < report.index("| High | INFO |")
     assert report.index("| High | INFO |") < report.index("| Moderate | INFO |")
     assert report.index("| Moderate | INFO |") < report.index("| その他 | INFO |")
@@ -94,4 +97,5 @@ def test_generate_report_marks_missing_values_as_unconfirmed(
 
     report = generate_report(tmp_path).read_text(encoding="utf-8")
 
+    assert "該当するアドバイザリはありません。" in report
     assert "| その他 | INFO | new | Example | - | - | 確認なし |" in report

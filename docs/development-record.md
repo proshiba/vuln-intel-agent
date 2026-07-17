@@ -1,0 +1,459 @@
+# vulnwatch 開発記録・現状仕様
+
+最終更新: 2026-07-17
+
+この文書は、プロジェクト開始から現在までに実装された内容、今回の開発作業、現行仕様、
+検証結果、既知の制約、今後の作業を一つにまとめた引き継ぎ資料です。
+
+## 1. プロジェクトの目的
+
+vulnwatchは、公式ベンダー情報を優先して脆弱性アドバイザリを収集し、出典付きの
+構造化JSON、日本語要約、日次レポートを生成するPython 3.12製ツールです。
+
+目標は次のとおりです。
+
+- ベンダー公式情報を機械的かつ継続的に収集する。
+- ベンダーごとに異なる形式を共通モデルへ正規化する。
+- CISA KEVや組織の製品台帳を使い、対応優先度を決定する。
+- 更新、取り下げ、収集障害を安全に検出する。
+- AI要約を任意機能として利用し、失敗しても収集・公開を継続する。
+- 生成結果を検証後にGitHub上のPRとして公開する。
+
+## 2. 開発履歴
+
+### リポジトリ既存履歴
+
+| コミット | 内容 |
+|---|---|
+| `7709835` | Initial commit |
+| `0b55c33` | 基本アプリ、設定、Collector、Parser、保存、AI要約、CI、テストを実装 |
+| `3a53e5a` | 収集対象、Parser、悪用判定、レポートを拡張 |
+
+今回の作業開始時点のHEADは`3a53e5a`でした。
+
+### 今回実施した作業
+
+1. リポジトリ全体を調査し、構成と現行機能を確認した。
+2. 既存`.venv`へ`.[dev]`をeditable installした。
+3. 設定検証、Ruff、mypy、pytestを実行できる環境を整えた。
+4. 既存のRuff format差分4ファイルを整形した。
+5. 公式GitHub Repository Security Advisories APIを利用する25ソースを追加した。
+6. 有効ソース数を25件から50件へ増やした。
+7. 日次レポートへCriticalかつ悪用確認済みの専用概要セクションを追加した。
+8. コードガイドと本開発記録を追加した。
+9. Git対象外の`staging/`へセッション継続用のローカル履歴を作成した。
+
+## 3. 現在の構成
+
+```text
+config/sources.yaml -> Collector -> RawRecord -> Parser -> AdvisoryDraft
+                                                            |
+config/products.yaml -> asset matching ---------------------+
+CISA KEV -----------> exploitation enrichment --------------+
+                                                            v
+                                                    Advisory + Priority
+                                                            |
+                                     +----------------------+--------------+
+                                     v                      v              v
+                              advisory.json           AI summary      daily report
+```
+
+主なモジュールは次のとおりです。
+
+| パス | 責務 |
+|---|---|
+| `src/vulnwatch/cli.py` | Typer CLI、引数の解析と検証 |
+| `src/vulnwatch/pipeline.py` | 収集から保存までのオーケストレーション |
+| `src/vulnwatch/models.py` | Pydanticによる厳密なデータモデル |
+| `src/vulnwatch/config.py` | YAML設定の読み込みと検証 |
+| `src/vulnwatch/collectors/` | 外部情報の安全な取得 |
+| `src/vulnwatch/parsers/` | ベンダー形式から共通形式への変換 |
+| `src/vulnwatch/identity.py` | canonical ID、slug、semantic hash |
+| `src/vulnwatch/priority.py` | 資産照合と優先度判定 |
+| `src/vulnwatch/exploitation.py` | 明示文から悪用・PoC状態を推定 |
+| `src/vulnwatch/storage/filesystem.py` | atomic write、状態、索引管理 |
+| `src/vulnwatch/summarizers/` | 任意のOpenAI日本語要約 |
+| `src/vulnwatch/report.py` | Markdown日次レポート生成 |
+| `src/vulnwatch/validation.py` | 設定・公開ツリーの検証 |
+
+詳細なコード構成は`docs/codebase.md`も参照してください。
+
+## 4. CLI
+
+```bash
+vulnwatch config validate
+vulnwatch collect --profile edge --since 90d --output staging
+vulnwatch collect --profile daily --since 90d --output staging
+vulnwatch summarize --root staging --priority P1,P2
+vulnwatch validate --root staging
+vulnwatch report --root staging
+vulnwatch source test cisco --fixture tests/fixtures/vendors/cisco.json
+```
+
+- `edge`: 境界機器とCISA KEVを中心とするソースを収集する。
+- `daily`: 有効な全ソースを収集する。
+- `since`: `90d`の形式で収集対象期間を指定する。
+
+## 5. 収集パイプライン
+
+`Pipeline.run()`は次の処理を行います。
+
+1. 公開済みの`data`、`state`、`reports`、`quarantine`をstagingへコピーする。
+2. profile、tier、enabledから今回の対象を選ぶ。
+3. CISA KEVなどの補強ソースを先に収集する。
+4. ソースごとのCollectorを実行し、失敗時はfallback Collectorを試す。
+5. ETagとLast-Modifiedを状態ファイルへ保存し、条件付き取得に使用する。
+6. RawRecordをParserへ渡してAdvisoryDraftを生成する。
+7. CVE、製品、CVSS、修正版、悪用情報などをAdvisoryへ正規化する。
+8. 製品台帳とCISA KEVで補強し、優先度を決定する。
+9. semantic hashで既存アドバイザリと比較する。
+10. new、updated、unchanged、withdrawn、quarantinedを記録する。
+11. ベンダー索引、run manifest、run summaryを生成する。
+
+## 6. CollectorとParser
+
+現在有効な50ソースのCollector内訳は次のとおりです。
+
+| Collector | 有効ソース数 |
+|---|---:|
+| JSON API | 37 |
+| Feed | 8 |
+| CSAF | 4 |
+| HTML | 1 |
+
+実装済みCollectorはCSAF、JSON API、RSS/Atom feed、HTML、Playwright browser、PDFです。
+browserとPDFは任意依存です。
+
+Parserは次を扱います。
+
+- CSAF 2.x
+- GitHub Repository Security Advisory
+- ベンダー固有JSON
+- 汎用JSON
+- RSS/Atom/HTML由来の汎用レコード
+- CISA KEV補強データ
+
+## 7. 情報源
+
+設定全体は130件、有効な収集源は50件です。tier内訳はdaily 44件、edge 6件です。
+
+### 開発開始時から有効だった25件
+
+- Cisco
+- Fortinet
+- Palo Alto Networks
+- Juniper Networks
+- SonicWall
+- Veeam
+- Microsoft
+- Red Hat
+- Canonical
+- Debian
+- SUSE
+- GitLab
+- Jenkins
+- Kubernetes
+- Redis
+- Grafana
+- Matrix Synapse
+- Prometheus
+- etcd
+- Gitea
+- Traefik
+- MinIO
+- Jupyter Server
+- JVN
+- CISA KEV
+
+### 今回追加した25件
+
+- Helm
+- Argo CD
+- Flux
+- containerd
+- Moby
+- Docker Compose
+- OpenTelemetry Collector
+- Immich
+- Jellyfin
+- Home Assistant Core
+- Deno
+- Caddy
+- Envoy
+- Prometheus Alertmanager
+- OAuth2 Proxy
+- Syncthing
+- Tailscale
+- NetBird
+- Keycloak
+- gRPC-Go
+- Electron
+- Next.js
+- Nuxt
+- Ruby on Rails
+- Laravel Framework
+
+追加した25件は各プロジェクトの公式GitHub Repository Security Advisories APIを使用します。
+設定追加前に、各APIが公開され、少なくとも1件のアドバイザリを返すことを確認しました。
+
+共通設定は次の方針です。
+
+- Collector: `json_api`
+- Parser: `github_advisory`
+- API取得上限: 100件
+- 許可ホスト: `api.github.com`、`github.com`
+- Content-Type: JSONまたはGitHub JSON
+- tier: `daily`
+
+## 8. データモデル
+
+主要モデルは未知フィールドを拒否し、代入時にも検証します。
+
+- `SourceDefinition`: 収集URL、許可ホスト、Collector、Parser、制限値
+- `RawRecord`: Collectorが返す未正規化データ
+- `AdvisoryDraft`: Parserが生成する中間形式
+- `AdvisoryFacts`: ベンダー情報から得た事実
+- `AdvisoryEnrichment`: CISA KEVと資産一致結果
+- `AdvisoryDecision`: 優先度と理由
+- `Provenance`: 取得形式、content hash、extractor version
+- `AiMetadata`: AI要約の状態と構造化出力
+- `Advisory`: 保存・公開する最終形式
+- `SourceState`: 条件付き取得と消失検知の状態
+- `RunManifest`: 1回の実行結果
+
+ベンダー由来の事実、補強情報、判断、AI出力を分離しているため、AIが原典の事実を
+上書きすることはありません。
+
+## 9. 識別と差分検出
+
+- ベンダーアドバイザリIDを優先してcanonical IDを生成する。
+- IDがない場合も安定した識別子を生成する。
+- semantic hashはAI状態や観測時刻ではなく、意味のある内容変更を判定する。
+- 新規は`new`、意味のある変更は`updated`、同一内容は`unchanged`とする。
+- 消失は即時に取り下げず、3回以上かつ24時間以上欠落した場合に`withdrawn`とする。
+
+## 10. 悪用・PoC判定
+
+悪用と公開PoCについて、ベンダー本文の明示的な英語表現のみを正規表現で推定します。
+
+- active exploitation
+- in-the-wild exploitation
+- exploitation observed/confirmed
+- publicly available proof-of-concept
+- no evidence/reports of exploitation
+- not aware of public PoC
+
+否定表現を先に除去してから肯定表現を調べ、単に「exploit」という単語があるだけでは
+悪用済みと判定しません。CISA KEV掲載は独立した強い悪用根拠として扱います。
+
+## 11. 資産照合と優先度
+
+| 優先度 | 条件 |
+|---|---|
+| P1 | 資産一致かつCISA KEV掲載または悪用確認済み |
+| P1 | インターネット公開資産に一致し、認証不要のリモート攻撃が可能 |
+| P2 | 資産一致、高深刻度、修正版あり |
+| P3 | 資産一致したが攻撃条件または修正版の追加確認が必要 |
+| INFO | 資産不一致または判定情報不足 |
+
+現在の`config/products.yaml`は空です。このため、実際の製品台帳を登録するまで資産一致は
+発生せず、原則としてINFOになります。
+
+製品台帳には製品名、別名、公開区分、担当部署のみを保存します。IPアドレス、ホスト名、
+認証情報などの機密情報は保存しません。
+
+## 12. 日次レポート
+
+日次レポートはAsia/Tokyoの日付で次へ生成します。
+
+```text
+reports/daily/<year>/<month>/<YYYY-MM-DD>.md
+```
+
+レポートには次が含まれます。
+
+- ベンダー×危険度の件数マトリクス
+- 各セルの総数、悪用済み件数、PoC公開済み件数
+- Critical、High、Moderate、その他の順に並ぶ詳細一覧
+- CVE、CVSS、優先度、変更状態、悪用状況、原典リンク
+
+### Critical・悪用確認済みセクション
+
+今回、Criticalかつ悪用確認済みのアドバイザリをサマリ内で目立たせる専用セクションを
+追加しました。
+
+該当項目ごとに次を表示します。
+
+- タイトルと原典リンク
+- ベンダー
+- CVE。未採番の場合はその旨
+- CVSS。未確認の場合はその旨
+- 悪用済み、CISA KEV、PoC公開済みの状態
+- 概要。AI日本語要約があれば使用し、なければタイトルを使用
+
+該当項目がない場合は「該当するアドバイザリはありません」と表示します。
+
+## 13. AI要約
+
+OpenAI要約は任意です。使用時のみ`OPENAI_API_KEY`と`LLM_MODEL`を設定します。
+
+AI出力は次の構造です。
+
+- 日本語概要
+- 影響対象資産
+- 攻撃成立条件
+- 推奨対応
+- 不確実な点
+- 根拠URL
+
+APIキー未設定、拒否、timeout、schema違反はAI状態へ記録されますが、収集、検証、公開を
+失敗させません。意味のあるアドバイザリ更新があった場合のみAI状態をリセットします。
+
+## 14. 安全設計
+
+- HTTPS以外のURLを拒否する。
+- redirect先も含めて`allowed_hosts`と照合する。
+- 許可していないContent-Typeを拒否する。
+- response size、timeout、rate limit、redirect回数を制限する。
+- timeout、network error、HTTP 429、5xxを制限付きでretryする。
+- 取得件数0を正常扱いしない。
+- 前回から85%以上件数が減った場合に異常とする。
+- 1,000件超または前回の10倍を超える異常増加を検知する。
+- 収集・parse失敗はソース単位でquarantineへ隔離する。
+- 一つのソースが失敗しても他ソースの処理を継続する。
+- 一時ファイルへの書き込み後に`os.replace()`でatomicに更新する。
+- stagingで生成・検証してから公開する。
+
+## 15. 保存形式
+
+```text
+data/vendors/<vendor>/
+  index.json
+  advisories/<year>/<advisory-id>/advisory.json
+state/sources/<source-id>.json
+reports/daily/<year>/<month>/<date>.md
+quarantine/<source-id>/latest.json
+run-manifest.json
+run-summary.md
+```
+
+各アドバイザリにはsource URL、content SHA-256、extractor versionを保存し、出典と生成元を
+追跡できるようにしています。
+
+## 16. GitHub Actions
+
+通常CIは次を実行します。
+
+1. Python 3.12セットアップ
+2. `.[dev]`インストール
+3. 設定検証
+4. Ruff lint
+5. Ruff format check
+6. mypy strict type check
+7. fixtureを使ったoffline pytest
+
+定期収集workflowは次の3 jobです。
+
+1. `collect`: edgeまたはdaily profileでstagingを生成
+2. `summarize`: 任意AI要約と日次レポートを生成
+3. `publish`: 生成ツリーを検証し、bot branchへcommitしてPRを作成
+
+P1が含まれる場合はPRへ`priority/P1`ラベルを付けます。
+
+## 17. 開発環境
+
+既存の`.venv`はPython 3.12.13です。今回、次を実行済みです。
+
+```bash
+.venv/bin/python -m pip install -e '.[dev]'
+```
+
+依存関係の`pip check`結果は`No broken requirements found.`でした。
+
+通常の検証コマンドは次のとおりです。
+
+```bash
+.venv/bin/vulnwatch config validate
+.venv/bin/ruff check src tests
+.venv/bin/ruff format --check src tests
+.venv/bin/mypy src
+.venv/bin/pytest -q
+```
+
+AI、browser、PDFの任意依存は今回導入していません。
+
+## 18. テストと現在の品質状態
+
+今回の最終検証結果は次のとおりです。
+
+- 設定検証: `130 sources, 50 enabled`
+- Ruff lint: 成功
+- Ruff format check: 成功
+- mypy: 30 source files、問題なし
+- pytest: 47 passed
+- pip check: 問題なし
+- git diff check: 空白エラーなし
+
+テストはCollector、CSAF、設定、モデル、Parser、identity、storage、pipeline、priority、
+悪用推定、AI要約、reportを対象にしています。通常テストは保存fixtureを使い、外部サイトへ
+接続しません。
+
+## 19. ドキュメントとローカル履歴
+
+| ファイル | 用途 | Git管理 |
+|---|---|---|
+| `README.md` | 利用者向け概要 | 対象 |
+| `docs/codebase.md` | コード構成と拡張方法 | 対象 |
+| `docs/development-record.md` | 開発履歴と現状仕様の統合文書 | 対象 |
+| `staging/DEVELOPMENT_HISTORY.md` | セッション再開用メモ | 対象外 |
+| `staging/history/*.md` | 作業単位の詳細履歴 | 対象外 |
+
+新しいセッションでは、まず本書、`docs/codebase.md`、Git差分、ローカル履歴を確認します。
+
+## 20. 既知の制約と注意事項
+
+### GitHub API rate limit
+
+今回の追加によりGitHub APIを利用するソースが増えました。現在の1回のdaily収集は
+未認証GitHub APIの一般的な上限内に収まる想定ですが、同一送信元からの追加アクセスや
+再試行があると制限へ近づく可能性があります。実運用でHTTP 403、429、rate-limit headerを
+監視し、必要に応じて認証token対応やrequest集約を検討してください。
+
+### 製品台帳
+
+製品台帳が空のため、現時点では資産ベースのP1～P3判定を実運用できません。組織の対象製品を
+機密情報なしで登録する必要があります。
+
+### 汎用Parser
+
+feedや汎用JSONはベンダー固有形式より抽出できる項目が少ない場合があります。fixtureと
+期待値を追加しながら、必要なソースだけ専用Parserへ段階的に移行してください。
+
+### 検討中のParser整理
+
+JSON Parserでは複数候補キーを`or`で選択する箇所があり、明示的な`False`または`0`を
+後続候補へ置き換える可能性があります。値選択helperと回帰テストを追加するリファクタリングを
+検討済みですが、まだ実装していません。
+
+## 21. 次の推奨作業
+
+1. GitHub APIのrate limit headerを状態またはmanifestへ記録する。
+2. GitHub API用の任意tokenと共通request制御を設計する。
+3. `config/products.yaml`へ実運用対象製品を登録する。
+4. JSON Parserの明示的な`False`と`0`の扱いを修正する。
+5. 新規25ソースの代表fixtureを増やし、プロジェクト固有フィールドを確認する。
+6. stagingでdaily収集を試行し、50ソースの実運用結果とquarantineを評価する。
+7. AI要約を使用する場合はP1/P2だけから段階的に有効化する。
+
+## 22. セッション再開手順
+
+```bash
+git status --short
+sed -n '1,260p' docs/development-record.md
+sed -n '1,220p' staging/DEVELOPMENT_HISTORY.md
+.venv/bin/vulnwatch config validate
+.venv/bin/pytest -q
+```
+
+未完了作業は`staging/history/`の最新ファイルへ追記します。APIキー、token、認証情報、
+IPアドレス、ホスト名などは開発履歴へ記載しないでください。

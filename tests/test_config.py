@@ -9,7 +9,7 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
     registry = load_sources()
     enabled = {source.id for source in registry.sources if source.enabled}
 
-    assert len(registry.sources) == 105
+    assert len(registry.sources) == 130
     assert enabled == {
         "cisco",
         "fortinet",
@@ -36,6 +36,31 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
         "traefik_github",
         "minio_github",
         "jupyter_server_github",
+        "helm_github",
+        "argo_cd_github",
+        "flux_github",
+        "containerd_github",
+        "moby_github",
+        "docker_compose_github",
+        "otel_collector_github",
+        "immich_github",
+        "jellyfin_github",
+        "home_assistant_github",
+        "deno_github",
+        "caddy_github",
+        "envoy_github",
+        "alertmanager_github",
+        "oauth2_proxy_github",
+        "syncthing_github",
+        "tailscale_github",
+        "netbird_github",
+        "keycloak_github",
+        "grpc_go_github",
+        "electron_github",
+        "nextjs_github",
+        "nuxt_github",
+        "rails_github",
+        "laravel_github",
     }
     assert all(source.allowed_hosts for source in registry.sources if source.enabled)
     assert all(isinstance(source.products, list) for source in registry.sources)

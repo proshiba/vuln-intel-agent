@@ -100,6 +100,7 @@ def test_cisa_kev_fixture_is_enrichment_only() -> None:
 
     assert parse_cisa_kev(records) == {"CVE-2026-10001"}
 
+
 def test_github_advisory_normalizes_nested_vulnerability_fields() -> None:
     registry = load_sources()
     source = next(item for item in registry.sources if item.id == "grafana_github")

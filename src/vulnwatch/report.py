@@ -129,6 +129,35 @@ def _exploitation_label(entry: ReportEntry) -> str:
     return "<br>".join(labels) or "確認なし"
 
 
+def _critical_exploited_lines(entries: list[ReportEntry]) -> list[str]:
+    critical = [entry for entry in entries if entry.severity == "Critical" and entry.exploited]
+    lines = ["", "## Critical・悪用確認済み", ""]
+    if not critical:
+        return [*lines, "該当するアドバイザリはありません。"]
+    for entry in critical:
+        advisory = entry.advisory
+        cves = "、".join(advisory.facts.cves) or "CVE未採番"
+        cvss = (
+            f"CVSS {advisory.facts.cvss_score:.1f}"
+            if advisory.facts.cvss_score is not None
+            else "CVSS未確認"
+        )
+        summary = advisory.ai.summary_ja or advisory.title
+        lines.extend(
+            [
+                f"### [{advisory.title}]({advisory.source_url})",
+                "",
+                f"- ベンダー: {advisory.vendor}",
+                f"- 識別子: {cves}",
+                f"- 深刻度: {cvss}",
+                f"- 悪用状況: {_exploitation_label(entry)}",
+                f"- 概要: {summary}",
+                "",
+            ]
+        )
+    return lines[:-1]
+
+
 def generate_report(root: Path) -> Path:
     manifest = RunManifest.model_validate_json(
         (root / "run-manifest.json").read_text(encoding="utf-8")
@@ -143,6 +172,7 @@ def generate_report(root: Path) -> Path:
         return path
 
     lines.extend(_matrix_lines(entries))
+    lines.extend(_critical_exploited_lines(entries))
     lines.extend(
         [
             "",
