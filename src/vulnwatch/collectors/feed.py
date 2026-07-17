@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
 from typing import Any
 
 import feedparser
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from dateutil.parser import parse as parse_date
 
 from vulnwatch.collectors.base import CollectorError, ParserChangedError, SafeHttpClient
@@ -98,7 +99,9 @@ class FeedCollector:
             except CollectorError as exc:
                 record.metadata["detail_error"] = str(exc)[:500]
                 continue
-            soup = BeautifulSoup(detail.body, "lxml")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+                soup = BeautifulSoup(detail.body, "lxml")
             body = soup.select_one("main, article, body")
             if body:
                 record.content = body.get_text("\n", strip=True)[:100_000]

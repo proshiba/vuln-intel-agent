@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from datetime import UTC, datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -45,8 +45,8 @@ class CsafCollector:
                         links.extend(self._html_links(directory, directory_content.body))
         elif "xml" in fetched.content_type or "rss" in fetched.content_type:
             feed = feedparser.parse(fetched.body)
-            links.extend(str(entry.get("link")) for entry in feed.entries if entry.get("link"))
-        elif "csv" in fetched.content_type:
+            links.extend(self._feed_links(feed.entries, since))
+        elif "csv" in fetched.content_type or urlsplit(fetched.url).path.endswith(".csv"):
             links.extend(self._csv_links(fetched.url, fetched.body, since))
         elif "html" in fetched.content_type:
             links.extend(self._html_links(source.url, fetched.body))
@@ -58,8 +58,7 @@ class CsafCollector:
                 f"{source.id}: CSAF index exceeds configured limit of {source.max_items} items"
             )
         for link in unique_links:
-            if link.startswith("http://"):
-                link = "https://" + link.removeprefix("http://")
+            link = self._force_https(link)
             try:
                 detail = await client.fetch(link)
                 payload = json.loads(detail.body)
@@ -107,6 +106,36 @@ class CsafCollector:
                     pass
             links.append(urljoin(base, row[0]))
         return links
+
+    @staticmethod
+    def _feed_links(entries: list[object], since: datetime) -> list[str]:
+        links: list[str] = []
+        since_utc = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+        for entry in entries:
+            link = entry.get("link")  # type: ignore[attr-defined]
+            if not link:
+                continue
+            observed = entry.get("updated") or entry.get("published")  # type: ignore[attr-defined]
+            if observed:
+                try:
+                    parsed = parse_date(str(observed))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    if parsed.astimezone(UTC) < since_utc:
+                        continue
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            links.append(str(link))
+        return links
+
+    @staticmethod
+    def _force_https(url: str) -> str:
+        parsed = urlsplit(url)
+        if parsed.scheme != "http":
+            return url
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port and parsed.port != 80 else ""
+        return urlunsplit(("https", f"{host}{port}", parsed.path, parsed.query, ""))
 
     @staticmethod
     def _record(

@@ -9,7 +9,7 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
     registry = load_sources()
     enabled = {source.id for source in registry.sources if source.enabled}
 
-    assert len(registry.sources) == 97
+    assert len(registry.sources) == 105
     assert enabled == {
         "cisco",
         "fortinet",
@@ -22,6 +22,20 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
         "sonicwall",
         "veeam",
         "cisa_kev",
+        "canonical",
+        "debian",
+        "jenkins",
+        "gitlab",
+        "jvn",
+        "redis",
+        "grafana_github",
+        "matrix_synapse_github",
+        "prometheus_github",
+        "etcd_github",
+        "gitea_github",
+        "traefik_github",
+        "minio_github",
+        "jupyter_server_github",
     }
     assert all(source.allowed_hosts for source in registry.sources if source.enabled)
     assert all(isinstance(source.products, list) for source in registry.sources)

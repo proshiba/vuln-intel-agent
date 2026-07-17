@@ -24,6 +24,12 @@ VENDOR_FIXTURES = {
     "sonicwall": "sonicwall.xml",
     "veeam": "veeam.xml",
     "juniper_networks": "juniper_networks.html",
+    "canonical": "canonical.xml",
+    "debian": "debian.xml",
+    "jenkins": "jenkins.xml",
+    "gitlab": "gitlab.xml",
+    "jvn": "jvn.xml",
+    "grafana_github": "github_advisory.json",
 }
 
 
@@ -93,3 +99,17 @@ def test_cisa_kev_fixture_is_enrichment_only() -> None:
     ]
 
     assert parse_cisa_kev(records) == {"CVE-2026-10001"}
+
+def test_github_advisory_normalizes_nested_vulnerability_fields() -> None:
+    registry = load_sources()
+    source = next(item for item in registry.sources if item.id == "grafana_github")
+
+    draft = parse_record(source, _record("grafana_github", "github_advisory.json"))
+
+    assert draft.products == ["github.com/grafana/grafana"]
+    assert draft.affected_versions == ["github.com/grafana/grafana: >= 11.0.0, < 11.1.2"]
+    assert draft.fixed_versions == ["github.com/grafana/grafana: 11.1.2"]
+    assert draft.cvss_score == 9.8
+    assert draft.remote is True
+    assert draft.authentication_required is False
+    assert draft.poc_public is True

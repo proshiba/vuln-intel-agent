@@ -222,7 +222,9 @@ class Pipeline:
             raise CollectorError(f"{source.id}: HTTP success with zero records")
         if state.item_count >= 20 and count <= state.item_count * 0.15:
             raise CollectorError(f"{source.id}: item count dropped by at least 85%")
-        if count > 1000 or (state.item_count and count > state.item_count * 10):
+        if source.role == SourceRole.ADVISORY and (
+            count > 1000 or (state.item_count and count > state.item_count * 10)
+        ):
             raise CollectorError(f"{source.id}: anomalous new item volume")
 
     def _normalize(
@@ -243,6 +245,7 @@ class Pipeline:
             remote=draft.remote,
             authentication_required=draft.authentication_required,
             known_exploited=draft.known_exploited,
+            poc_public=draft.poc_public,
             mitigations=draft.mitigations,
         )
         enrichment = enrich_assets(source.vendor, facts.products, self.products)

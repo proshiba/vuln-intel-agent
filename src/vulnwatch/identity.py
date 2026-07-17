@@ -56,6 +56,7 @@ def semantic_hash(advisory: Advisory) -> str:
         "status": advisory.status,
         "mitigations": advisory.facts.mitigations,
         "known_exploited": advisory.facts.known_exploited,
+        "poc_public": advisory.facts.poc_public,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

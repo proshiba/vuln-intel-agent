@@ -211,6 +211,7 @@ class AdvisoryDraft(StrictModel):
     remote: bool | None = None
     authentication_required: bool | None = None
     known_exploited: bool | None = None
+    poc_public: bool | None = None
     mitigations: list[str] = Field(default_factory=list)
     body_excerpt: str = ""
     raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -237,6 +238,7 @@ class AdvisoryFacts(StrictModel):
     remote: bool | None = None
     authentication_required: bool | None = None
     known_exploited: bool | None = None
+    poc_public: bool | None = None
     mitigations: list[str] = Field(default_factory=list)
 
     @field_validator("cves")

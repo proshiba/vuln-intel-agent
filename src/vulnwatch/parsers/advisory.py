@@ -8,9 +8,10 @@ from typing import Any, cast
 
 from dateutil.parser import parse as parse_date
 
-from vulnwatch.models import AdvisoryDraft, RawRecord, SourceDefinition
+from vulnwatch.exploitation import infer_exploitation_status
+from vulnwatch.models import AdvisoryDraft, AdvisoryStatus, RawRecord, SourceDefinition
 
-CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+CVE_PATTERN = re.compile(r"(?<![A-Z0-9])CVE-\d{4}-\d{4,}(?![A-Z0-9])", re.IGNORECASE)
 
 
 def _date(value: Any) -> datetime | None:
@@ -32,6 +33,24 @@ def _list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (dict, list)):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1", "public", "available", "published"}:
+            return True
+        if normalized in {"false", "no", "0", "none", "unavailable"}:
+            return False
+        if normalized.startswith(("http://", "https://")):
+            return True
+    return None
+
+
 def _sha(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
@@ -39,6 +58,8 @@ def _sha(content: str) -> str:
 def parse_record(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     if source.parser == "csaf":
         return _parse_csaf(source, raw)
+    if source.parser == "github_advisory":
+        return _parse_github_advisory(source, raw)
     if source.parser in {"palo_alto", "json_feed", "json"}:
         return _parse_json(source, raw)
     return _parse_generic(source, raw)
@@ -47,6 +68,7 @@ def parse_record(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
 def _parse_generic(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     title = str(raw.metadata.get("title") or raw.metadata.get("summary") or source.vendor)
     text = f"{title}\n{raw.content}"
+    known_exploited, poc_public = infer_exploitation_status(text)
     return AdvisoryDraft(
         source_id=source.id,
         vendor=source.vendor,
@@ -57,6 +79,8 @@ def _parse_generic(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         updated_at=_date(raw.metadata.get("updated")),
         cves=sorted(set(CVE_PATTERN.findall(text.upper()))),
         products=source.products,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
         body_excerpt=raw.content[:30_000],
         raw_sha256=_sha(raw.content),
     )
@@ -74,12 +98,24 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     )
     advisory_id = (
         item.get("id")
+        or item.get("ID")
         or item.get("cve")
         or item.get("cveID")
         or item.get("advisory_id")
         or item.get("advisoryId")
     )
     text = json.dumps(item, ensure_ascii=False)
+    inferred_exploited, inferred_poc = infer_exploitation_status(text)
+    known_value = item.get("known_exploited")
+    if known_value is None:
+        known_value = item.get("knownExploited")
+    poc_value = item.get("poc_public")
+    if poc_value is None:
+        poc_value = item.get("pocPublic")
+    if poc_value is None:
+        poc_value = item.get("proof_of_concept") or item.get("proofOfConcept")
+    known_exploited = _optional_bool(known_value)
+    poc_public = _optional_bool(poc_value)
     products = (
         _list(
             item.get("products")
@@ -98,7 +134,9 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         or item.get("fixedVersions")
         or item.get("solution")
     )
-    score = item.get("cvss") or item.get("cvss_score") or item.get("cvssScore")
+    score = (
+        item.get("cvss") or item.get("cvss_score") or item.get("cvssScore") or item.get("baseScore")
+    )
     try:
         cvss = float(score) if score is not None else None
     except (TypeError, ValueError):
@@ -108,12 +146,21 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         vendor=source.vendor,
         vendor_advisory_id=str(advisory_id) if advisory_id else None,
         title=title,
-        source_url=str(item.get("url") or item.get("external_url") or raw.url),
+        source_url=str(
+            item.get("url")
+            or item.get("external_url")
+            or (
+                f"{source.advisory_url.rstrip('/')}/{advisory_id}"
+                if source.parser == "palo_alto" and advisory_id
+                else raw.url
+            )
+        ),
         published_at=_date(
             item.get("date_published")
             or item.get("published")
             or item.get("datePublished")
             or item.get("published_at")
+            or item.get("date")
         ),
         updated_at=_date(
             item.get("date_modified")
@@ -125,11 +172,102 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         products=products,
         affected_versions=affected,
         fixed_versions=fixed,
-        vendor_severity=str(item.get("severity")) if item.get("severity") else None,
+        vendor_severity=(
+            str(item.get("severity") or item.get("baseSeverity"))
+            if item.get("severity") or item.get("baseSeverity")
+            else None
+        ),
         cvss_score=cvss,
-        known_exploited=item.get("known_exploited"),
+        known_exploited=known_exploited if known_exploited is not None else inferred_exploited,
+        poc_public=poc_public if poc_public is not None else inferred_poc,
         body_excerpt=text[:30_000],
         raw_sha256=_sha(text),
+    )
+
+
+def _parse_github_advisory(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
+    item = raw.metadata
+    content = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    description = str(item.get("description") or "")
+    known_exploited, poc_public = infer_exploitation_status(description)
+
+    cves = set(CVE_PATTERN.findall(content.upper()))
+    cve_id = item.get("cve_id")
+    if isinstance(cve_id, str) and CVE_PATTERN.fullmatch(cve_id.upper()):
+        cves.add(cve_id.upper())
+    for identifier in item.get("identifiers", []):
+        if not isinstance(identifier, dict) or identifier.get("type") != "CVE":
+            continue
+        value = str(identifier.get("value") or "").upper()
+        if CVE_PATTERN.fullmatch(value):
+            cves.add(value)
+
+    products: list[str] = []
+    affected_versions: list[str] = []
+    fixed_versions: list[str] = []
+    for vulnerability in item.get("vulnerabilities", []):
+        if not isinstance(vulnerability, dict):
+            continue
+        package = vulnerability.get("package")
+        package_name = ""
+        if isinstance(package, dict):
+            package_name = str(package.get("name") or "").strip()
+        if package_name:
+            products.append(package_name)
+        affected = str(vulnerability.get("vulnerable_version_range") or "").strip()
+        if affected:
+            affected_versions.append(f"{package_name}: {affected}" if package_name else affected)
+        fixed = str(vulnerability.get("patched_versions") or "").strip()
+        if fixed:
+            fixed_versions.append(f"{package_name}: {fixed}" if package_name else fixed)
+
+    cvss = item.get("cvss")
+    if not isinstance(cvss, dict):
+        cvss = {}
+    if cvss.get("score") is None:
+        severities = item.get("cvss_severities")
+        if isinstance(severities, dict):
+            for key in ("cvss_v4", "cvss_v3"):
+                candidate = severities.get(key)
+                if isinstance(candidate, dict) and candidate.get("score") is not None:
+                    cvss = candidate
+                    break
+    try:
+        score = float(cvss["score"]) if cvss.get("score") is not None else None
+    except (TypeError, ValueError):
+        score = None
+    vector = str(cvss.get("vector_string") or "") or None
+    remote = "/AV:N" in vector if vector else None
+    authentication_required = None
+    if vector:
+        if "/PR:N" in vector:
+            authentication_required = False
+        elif "/PR:L" in vector or "/PR:H" in vector:
+            authentication_required = True
+
+    withdrawn = bool(item.get("withdrawn_at")) or item.get("state") == "withdrawn"
+    return AdvisoryDraft(
+        source_id=source.id,
+        vendor=source.vendor,
+        vendor_advisory_id=str(item.get("ghsa_id") or "") or None,
+        title=str(item.get("summary") or item.get("ghsa_id") or source.vendor),
+        source_url=str(item.get("html_url") or raw.url),
+        published_at=_date(item.get("published_at")),
+        updated_at=_date(item.get("updated_at")),
+        status=AdvisoryStatus.WITHDRAWN if withdrawn else AdvisoryStatus.ACTIVE,
+        cves=sorted(cves),
+        products=sorted(set(products)) or source.products,
+        affected_versions=sorted(set(affected_versions)),
+        fixed_versions=sorted(set(fixed_versions)),
+        vendor_severity=str(item.get("severity") or "") or None,
+        cvss_score=score,
+        cvss_vector=vector,
+        remote=remote,
+        authentication_required=authentication_required,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
+        body_excerpt=content[:30_000],
+        raw_sha256=_sha(content),
     )
 
 
@@ -175,6 +313,7 @@ def _parse_csaf(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     aggregate = document.get("aggregate_severity") if isinstance(document, dict) else None
     severity = aggregate.get("text") if isinstance(aggregate, dict) else None
     content = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    known_exploited, poc_public = infer_exploitation_status(content)
     return AdvisoryDraft(
         source_id=source.id,
         vendor=source.vendor,
@@ -189,6 +328,8 @@ def _parse_csaf(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         vendor_severity=str(severity) if severity else None,
         cvss_score=max(scores) if scores else None,
         cvss_vector=vectors[0] if vectors else None,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
         mitigations=sorted(set(mitigations)),
         body_excerpt=content[:30_000],
         raw_sha256=_sha(content),
