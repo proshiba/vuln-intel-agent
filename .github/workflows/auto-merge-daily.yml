@@ -1,0 +1,65 @@
+name: Auto-merge daily advisories
+
+# routine（Claude Code）が bot/vulnwatch-daily へ日次収集結果を push すると、
+# 構文チェックとユニットテスト、生成データの検証を実行し、通れば main へ自動マージする。
+on:
+  push:
+    branches: [bot/vulnwatch-daily]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-merge-daily-advisories
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out pushed branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install --editable '.[dev]'
+      - name: Syntax check (configuration and lint)
+        run: |
+          vulnwatch config validate
+          ruff check src tests
+      - name: Validate generated advisory tree
+        run: vulnwatch validate --root .
+      - name: Run unit tests
+        run: pytest
+
+  merge:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge daily advisories into main
+        env:
+          BOT_BRANCH: bot/vulnwatch-daily
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$BOT_BRANCH"
+          if git merge-base --is-ancestor "origin/$BOT_BRANCH" HEAD; then
+            echo "main already contains $BOT_BRANCH; nothing to merge."
+            exit 0
+          fi
+          git merge --ff-only "origin/$BOT_BRANCH" \
+            || git merge --no-edit -m "chore: merge daily vulnerability advisories" \
+              "origin/$BOT_BRANCH"
+          git push origin HEAD:main
