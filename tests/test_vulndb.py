@@ -16,8 +16,9 @@ LATER = datetime(2026, 7, 19, 9, 0, tzinfo=UTC)
 
 def _read_entry(root: Path, vuln_id: str) -> VulnRecord:
     yaml = YAML(typ="safe")
-    path = root / "vulndb" / "vulns" / f"{vuln_id}.yaml"
-    return VulnRecord.model_validate(yaml.load(path.read_text(encoding="utf-8")))
+    matches = list((root / "vulndb" / "vulns").rglob(f"{vuln_id}.yaml"))
+    assert matches, f"vulndb entry not found: {vuln_id}"
+    return VulnRecord.model_validate(yaml.load(matches[0].read_text(encoding="utf-8")))
 
 
 def _read_csv(root: Path) -> list[dict[str, str]]:
@@ -71,7 +72,7 @@ def test_cve_less_advisory_gets_internal_id_then_cve_attaches(
     entry = _read_entry(tmp_path, "VW-2026-0001")
     assert entry.cve == "CVE-2026-99999"
     assert entry.cve_assigned_at == LATER
-    assert not (tmp_path / "vulndb" / "vulns" / "VW-2026-0002.yaml").exists()
+    assert not list((tmp_path / "vulndb" / "vulns").rglob("VW-2026-0002.yaml"))
     assert validate_vulndb(tmp_path) == 1
 
 
@@ -174,12 +175,39 @@ def test_leftover_internal_entry_is_superseded_when_cve_resolves_elsewhere(
     assert validate_vulndb(tmp_path) == 2
 
 
+def test_entries_are_partitioned_by_vendor_year_month(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    db.write()
+
+    expected = tmp_path / "vulndb" / "vulns" / "example" / "2026" / "07" / "VW-2026-0001.yaml"
+    assert expected.is_file()
+    assert not (tmp_path / "vulndb" / "vulns" / "VW-2026-0001.yaml").exists()
+    assert validate_vulndb(tmp_path) == 1
+
+
+def test_flat_entries_are_migrated_to_partitioned_layout(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    db.write()
+    nested = next((tmp_path / "vulndb" / "vulns").rglob("VW-2026-0001.yaml"))
+    flat = tmp_path / "vulndb" / "vulns" / "VW-2026-0001.yaml"
+    nested.rename(flat)
+
+    VulnDb(tmp_path).write()
+
+    assert not flat.exists()
+    migrated = tmp_path / "vulndb" / "vulns" / "example" / "2026" / "07" / "VW-2026-0001.yaml"
+    assert migrated.is_file()
+    assert validate_vulndb(tmp_path) == 1
+
+
 def test_validate_vulndb_rejects_mismatched_file_name(tmp_path: Path, advisory_factory) -> None:
     db = VulnDb(tmp_path)
     db.apply([advisory_factory()], NOW)
     db.write()
-    original = tmp_path / "vulndb" / "vulns" / "VW-2026-0001.yaml"
-    original.rename(tmp_path / "vulndb" / "vulns" / "VW-2026-9999.yaml")
+    original = next((tmp_path / "vulndb" / "vulns").rglob("VW-2026-0001.yaml"))
+    original.rename(original.with_name("VW-2026-9999.yaml"))
 
     with pytest.raises(ValueError, match="does not match its file name"):
         validate_vulndb(tmp_path)

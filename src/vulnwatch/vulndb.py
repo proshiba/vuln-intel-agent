@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import Field
 from ruamel.yaml import YAML
 
+from vulnwatch.identity import slugify
 from vulnwatch.models import Advisory, AdvisoryStatus, Priority, StrictModel
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
@@ -88,6 +89,32 @@ class VulnRegistry(StrictModel):
     advisory_index: dict[str, list[str]] = Field(default_factory=dict)
 
 
+def _partition_vendor(record: VulnRecord) -> str:
+    """フォルダ分けに使う代表ベンダー。最初の出典（採番時のベンダー）を用いる。"""
+
+    if record.sources:
+        return record.sources[0].vendor
+    if record.vendors:
+        return record.vendors[0]
+    return "unknown"
+
+
+def relative_entry_path(record: VulnRecord) -> Path:
+    """脆弱性YAMLの相対パス: <ベンダー>/<年>/<月>/<vuln_id>.yaml。
+
+    年・月は最初に観測したタイミング（created_at）を用いる。created_atは採番時に
+    一度だけ設定され以後不変なので、ファイルの配置は恒久的に安定する。
+    """
+
+    observed = _aware(record.created_at)
+    return (
+        Path(slugify(_partition_vendor(record)))
+        / f"{observed.year:04d}"
+        / f"{observed.month:02d}"
+        / f"{record.vuln_id}.yaml"
+    )
+
+
 class VulnDb:
     """CVE単位の脆弱性台帳。全体索引CSVと脆弱性ごとのYAMLを生成する。
 
@@ -104,6 +131,7 @@ class VulnDb:
         self.registry = self._load_registry()
         self._entries: dict[str, VulnRecord] = {}
         self._dirty: set[str] = set()
+        self._paths: dict[str, Path] = self._scan_paths()
 
     @property
     def initialized(self) -> bool:
@@ -114,14 +142,21 @@ class VulnDb:
             return VulnRegistry()
         return VulnRegistry.model_validate_json(self.registry_path.read_text(encoding="utf-8"))
 
-    def entry_path(self, vuln_id: str) -> Path:
-        return self.vulns_root / f"{vuln_id}.yaml"
+    def _scan_paths(self) -> dict[str, Path]:
+        """既存のYAML（新旧レイアウトを問わず）をvuln_id→パスで索引する。"""
+
+        if not self.vulns_root.exists():
+            return {}
+        return {path.stem: path for path in self.vulns_root.rglob("*.yaml")}
+
+    def desired_path(self, record: VulnRecord) -> Path:
+        return self.vulns_root / relative_entry_path(record)
 
     def load_entry(self, vuln_id: str) -> VulnRecord | None:
         if vuln_id in self._entries:
             return self._entries[vuln_id]
-        path = self.entry_path(vuln_id)
-        if not path.exists():
+        path = self._paths.get(vuln_id)
+        if path is None or not path.exists():
             return None
         yaml = YAML(typ="safe")
         record = VulnRecord.model_validate(yaml.load(path.read_text(encoding="utf-8")))
@@ -285,21 +320,42 @@ class VulnDb:
     def write(self) -> None:
         """registry、変更されたYAMLエントリ、全体索引CSVを書き出す。"""
 
-        yaml = YAML(typ="safe")
-        yaml.default_flow_style = False
         for vuln_id in sorted(self._dirty):
-            record = self._entries[vuln_id]
-            buffer = io.StringIO()
-            yaml.dump(record.model_dump(mode="json", exclude_none=True), buffer)
-            atomic_write_text(self.entry_path(vuln_id), buffer.getvalue())
+            self._write_entry(self._entries[vuln_id])
+        self._migrate_flat_entries()
         write_json(self.registry_path, self.registry.model_dump(mode="json"))
         self._write_csv()
         self._dirty.clear()
 
+    def _write_entry(self, record: VulnRecord) -> None:
+        yaml = YAML(typ="safe")
+        yaml.default_flow_style = False
+        buffer = io.StringIO()
+        yaml.dump(record.model_dump(mode="json", exclude_none=True), buffer)
+        target = self.desired_path(record)
+        atomic_write_text(target, buffer.getvalue())
+        previous = self._paths.get(record.vuln_id)
+        if previous is not None and previous != target and previous.exists():
+            previous.unlink()
+        self._paths[record.vuln_id] = target
+
+    def _migrate_flat_entries(self) -> None:
+        """旧レイアウト（vulns/直下のフラットなYAML）を新レイアウトへ移設する。"""
+
+        if not self.vulns_root.exists():
+            return
+        yaml = YAML(typ="safe")
+        for path in sorted(self.vulns_root.glob("*.yaml")):
+            record = self._entries.get(path.stem)
+            if record is None:
+                record = VulnRecord.model_validate(yaml.load(path.read_text(encoding="utf-8")))
+                self._entries[record.vuln_id] = record
+            self._write_entry(record)
+
     def _write_csv(self) -> None:
         entries = [
             record
-            for path in sorted(self.vulns_root.glob("VW-*.yaml"))
+            for path in sorted(self.vulns_root.rglob("*.yaml"))
             if (record := self.load_entry(path.stem)) is not None
         ]
         buffer = io.StringIO()
@@ -341,11 +397,18 @@ def validate_vulndb(root: Path) -> int:
         (base / "registry.json").read_text(encoding="utf-8")
     )
     yaml = YAML(typ="safe")
+    vulns_root = base / "vulns"
     entries: dict[str, VulnRecord] = {}
-    for path in sorted((base / "vulns").glob("*.yaml")):
+    for path in sorted(vulns_root.rglob("*.yaml")):
         record = VulnRecord.model_validate(yaml.load(path.read_text(encoding="utf-8")))
         if record.vuln_id != path.stem:
             raise ValueError(f"vulndb entry ID does not match its file name: {path}")
+        expected = relative_entry_path(record)
+        if path.relative_to(vulns_root) != expected:
+            raise ValueError(
+                f"vulndb entry is in the wrong folder: {path.relative_to(vulns_root)} "
+                f"(expected {expected})"
+            )
         if record.cve and registry.cve_index.get(record.cve) != record.vuln_id:
             raise ValueError(f"vulndb registry does not index {record.cve} to {record.vuln_id}")
         entries[record.vuln_id] = record
