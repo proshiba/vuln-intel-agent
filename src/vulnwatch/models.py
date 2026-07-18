@@ -52,6 +52,7 @@ class CollectorKind(StrEnum):
     HTML = "html"
     BROWSER = "browser"
     PDF = "pdf"
+    OSV = "osv"
 
 
 class Tier(StrEnum):
@@ -107,6 +108,8 @@ class SourceDefinition(StrictModel):
     max_index_items: int = Field(default=100_000, gt=0, le=1_000_000)
     max_detail_fetches: int = Field(default=100, ge=0, le=1000)
     parser: str | None = None
+    osv_ecosystem: str | None = None
+    osv_packages: list[str] = Field(default_factory=list)
     detail_collector: CollectorKind | None = None
     selectors: dict[str, str] = Field(default_factory=dict)
     wait_for: str | None = None
@@ -127,6 +130,8 @@ class SourceDefinition(StrictModel):
 
     @model_validator(mode="after")
     def validate_runtime_source(self) -> SourceDefinition:
+        if self.osv_packages and not self.osv_ecosystem:
+            raise ValueError("osv_packages require osv_ecosystem")
         if self.enabled:
             if self.collector is None or self.url is None:
                 raise ValueError("enabled sources require collector and url")

@@ -125,6 +125,29 @@ class SafeHttpClient:
                 )
         raise CollectorError(f"{self.source.id}: fetch failed")
 
+    async def post_json(self, url: str, payload: dict[str, object]) -> FetchedContent:
+        self._validate_url(url)
+        timeout = httpx.Timeout(self.source.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            headers = self._headers(url, None, conditional=False)
+            headers["Content-Type"] = "application/json"
+            response = await self._request_with_retry(client, url, headers, json=payload)
+            if response.status_code >= 400:
+                raise CollectorError(f"{self.source.id}: HTTP {response.status_code} from {url}")
+            body = await response.aread()
+            if len(body) > self.source.max_response_bytes:
+                raise CollectorError(
+                    f"{self.source.id}: response exceeds {self.source.max_response_bytes} bytes"
+                )
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            return FetchedContent(
+                url=str(response.url),
+                body=body,
+                content_type=content_type,
+                etag=None,
+                last_modified=None,
+            )
+
     def _headers(
         self,
         url: str,
@@ -160,11 +183,16 @@ class SafeHttpClient:
         client: httpx.AsyncClient,
         url: str,
         headers: dict[str, str],
+        *,
+        json: dict[str, object] | None = None,
     ) -> httpx.Response:
         for attempt in range(3):
             await self._pace()
             try:
-                response = await client.get(url, headers=headers)
+                if json is not None:
+                    response = await client.post(url, headers=headers, json=json)
+                else:
+                    response = await client.get(url, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt == 2:
                     raise CollectorError(f"{self.source.id}: network failure: {exc}") from exc

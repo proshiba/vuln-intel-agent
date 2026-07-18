@@ -6,6 +6,7 @@ from vulnwatch.collectors.csaf import CsafCollector
 from vulnwatch.collectors.feed import FeedCollector
 from vulnwatch.collectors.html import HtmlCollector
 from vulnwatch.collectors.json_api import JsonApiCollector
+from vulnwatch.collectors.osv import OsvCollector
 from vulnwatch.collectors.pdf import PdfCollector
 from vulnwatch.models import CollectorKind
 
@@ -21,4 +22,6 @@ def create_collector(kind: CollectorKind) -> Collector:
         return HtmlCollector()
     if kind == CollectorKind.BROWSER:
         return BrowserCollector()
+    if kind == CollectorKind.OSV:
+        return OsvCollector()
     return PdfCollector()
