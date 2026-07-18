@@ -36,18 +36,20 @@ CISA KEV -----> exploitation enrichment -------------+
 | モジュール | 責務 |
 |---|---|
 | `cli.py` | Typer CLIと引数検証 |
-| `pipeline.py` | 収集、正規化、差分判定、隔離、保存の統括 |
+| `pipeline.py` | 収集、正規化、差分判定、隔離、保存、取り込み元切り替えの統括 |
 | `models.py` | 設定、収集結果、アドバイザリ、実行結果のPydanticモデル |
 | `config.py` | YAML設定の読み込みと検証 |
-| `collectors/` | CSAF、JSON API、feed、HTML、browser、PDFからの取得 |
-| `parsers/` | ベンダー形式から共通の`AdvisoryDraft`への変換 |
+| `collectors/` | CSAF、JSON API、feed、HTML、browser、PDF、OSV(osv.dev)からの取得 |
+| `parsers/` | ベンダー形式から共通の`AdvisoryDraft`への変換（OSVスキーマ含む） |
 | `identity.py` | canonical ID、slug、semantic hashの生成 |
 | `priority.py` | 製品台帳との照合と優先度判定 |
 | `exploitation.py` | 明示表現から悪用・公開PoC状態を推定 |
-| `storage/filesystem.py` | atomic write、状態管理、索引再構築 |
+| `risk.py` | CVSS・悪用/PoC・修正経過・攻撃経路・機器分類・資産一致を合成した日次レポート用リスク評価 |
+| `vulndb.py` | CVE単位の脆弱性台帳（`index.csv`＋`vulns/<vendor>/<year>/<month>/*.yaml`）の生成・増分更新・検証 |
+| `storage/filesystem.py` | atomic write、状態管理、索引再構築、公開ツリー同期 |
 | `summarizers/` | 個別・日次セクションのOpenAI日本語要約と構造化出力検証 |
-| `report.py` | AIサマリsidecarとMarkdown日次レポート生成 |
-| `validation.py` | 設定、生成ツリー、日次AIサマリの公開前検証 |
+| `report.py` | リスク評価・AIサマリsidecar・Markdown日次レポート生成 |
+| `validation.py` | 設定、生成ツリー、日次AIサマリ、vulndbの公開前検証 |
 
 ## データモデル
 
@@ -97,13 +99,18 @@ state/sources/<source-id>.json
 reports/daily/<year>/<month>/<date>.md
 reports/daily/<year>/<month>/<date>.summary.json
 quarantine/<source-id>/latest.json
+vulndb/index.csv
+vulndb/registry.json
+vulndb/vulns/<vendor>/<year>/<month>/<内部ID>.yaml
 run-manifest.json
 run-summary.md
 ```
 
 結果はstagingに生成し、検証成功後に`vulnwatch publish`で上記の全パスをリポジトリ直下へ
-同期します。GitHub Actionsは個別JSON、索引、状態、隔離データ、レポート、実行manifest/summaryを
-すべてbot branchへ反映してPRにします。重複する一時領域`staging/`だけはGit対象外です。
+同期します。定期実行ではGitHub Actionsが収集した生ツリーを`bot/collected-raw`へcommitし、
+Webhookで起動したClaude Code routineが要約・レポート・検証・公開を行って`bot/vulnwatch-daily`
+へpushし、auto-mergeワークフローが検証のうえ`main`へマージします。重複する一時領域
+`staging/`だけはGit対象外です。
 
 ## ソース追加
 

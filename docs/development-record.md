@@ -5,6 +5,20 @@
 この文書は、プロジェクト開始から現在までに実装された内容、今回の開発作業、現行仕様、
 検証結果、既知の制約、今後の作業を一つにまとめた引き継ぎ資料です。
 
+> 追補（2026-07-18 以降）: 本記録の3節以降はプロジェクト前半のスナップショットです。
+> 以降のセッションで次を追加・変更しました。最新の運用フローとレイアウトは
+> `README.md`、`docs/codebase.md`、`docs/collection-artifacts.md` を参照してください。
+>
+> - **vulndb**: CVE単位の脆弱性台帳（`vulndb/index.csv` ＋ `vulndb/vulns/<ベンダー>/<年>/<月>/<内部ID>.yaml`
+>   ＋ `vulndb/registry.json`）。公開・修正・PoC公開・悪用を管理し、CVE未採番は内部ID`VW-YYYY-NNNN`で採番。
+>   年・月は最初に観測した`created_at`でフォルダ分けし、恒久的に安定させる（15・16節を更新）。
+> - **リスク評価**: 日次レポートに緊急/高/中/低のリスクスコア（CVSS・悪用/PoC・修正経過・攻撃経路・
+>   機器分類・資産一致の合成）と「要対応」節を追加し、各表をリスク順に並べる（12節を更新）。
+> - **OSVバックエンド**: `VULNWATCH_GITHUB_BACKEND=osv` でGitHub由来ソースをosv.devから取得可能（6節を更新）。
+> - **収集の自動化**: Actionsは収集のみ→`bot/collected-raw`へcommit→Webhookで Claude Code routine を起動→
+>   routineが要約・レポート・公開して`bot/vulnwatch-daily`へpush→auto-mergeで`main`へマージ（16節を更新）。
+> - CIの型チェックに`ai`エクストラを追加（`openai`型解決のため）。
+
 ## 1. プロジェクトの目的
 
 vulnwatchは、公式ベンダー情報を優先して脆弱性アドバイザリを収集し、出典付きの

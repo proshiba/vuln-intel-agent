@@ -106,16 +106,24 @@ pip install -e '.[browser,pdf]'
 playwright install --with-deps chromium
 ```
 
-通常のPR CIは保存fixtureのみを使い、外部サイトへアクセスしません。定期収集は
-GitHub Actionsで毎日1回、`collect → summarize → report → validate → publish` の順に
-daily profileで実行されます。
+通常のPR CIは保存fixtureのみを使い、外部サイトへアクセスしません。定期収集は次の分担で
+自動化されています。GitHub Actions（`.github/workflows/collect-advisories.yml`、毎朝04:00 JST）
+がAI処理なしで全ソースを収集し、生ツリーを `bot/collected-raw` へcommitしてWebhookで
+Claude Code の routine を起動します。routine は要約（Claudeが日本語サマリを代筆するため
+OpenAIキーは不要）・レポート・検証・公開を行って `bot/vulnwatch-daily` へpushし、
+`.github/workflows/auto-merge-daily.yml` が構文チェック・ユニットテスト・生成物検証を通した
+うえで main へ自動マージします。手動でGitHub直接収集したい場合は同workflowを
+`workflow_dispatch` で起動できます（`VULNWATCH_GITHUB_TOKEN` が必要）。
 
 ## vulndb（CVE単位の脆弱性台帳）
 
 収集結果から、CVE単位で公開・修正・PoC公開・悪用有無を管理する台帳を
 `vulndb/` に生成します。全体索引の `vulndb/index.csv` と、脆弱性ごとの
-`vulndb/vulns/<内部ID>.yaml` で構成され、採番状態は `vulndb/registry.json` が
-保持します。すべてGit管理対象です。
+`vulndb/vulns/<ベンダー>/<年>/<月>/<内部ID>.yaml` で構成され、採番状態は
+`vulndb/registry.json` が保持します。すべてGit管理対象です。年・月は最初に観測した
+タイミング（台帳への登録日 = `created_at`）で、一度決まると変わらないためファイル配置は
+安定します。ベンダー・年・月でフォルダ分けすることで、1フォルダあたりのファイル数を抑え、
+GitHub上でも閲覧しやすくしています。
 
 CVE未採番の脆弱性（ゼロデイなど）には内部ID `VW-YYYY-NNNN` を採番します。
 内部IDは恒久キーとしてファイル名に使い続け、後からCVEが判明した場合は

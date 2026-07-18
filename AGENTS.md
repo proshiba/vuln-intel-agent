@@ -50,12 +50,18 @@ Then validate and publish the complete generated tree:
 ```bash
 .venv/bin/vulnwatch validate --root staging
 .venv/bin/vulnwatch publish --root staging --repository .
-git add -A -- data reports state quarantine run-manifest.json run-summary.md
+git add -A -- data reports state quarantine vulndb run-manifest.json run-summary.md
 ```
 
-All generated collection data, report Markdown, and report-summary JSON are Git-managed artifacts.
-Never add credentials, tokens, `.env` files, caches, or the temporary `staging/` tree. GitHub tokens
-are used only for reading public repository/API data and must not appear in logs or generated files.
+All generated collection data, report Markdown, report-summary JSON, and the `vulndb/` ledger
+(`index.csv`, `registry.json`, and per-vulnerability YAML under `vulns/<vendor>/<year>/<month>/`)
+are Git-managed artifacts. Never add credentials, tokens, `.env` files, caches, or the temporary
+`staging/` tree. GitHub tokens are used only for reading public repository/API data and must not
+appear in logs or generated files.
+
+Scheduled runs are split between systems: GitHub Actions collects and hands the raw tree to a Claude
+Code routine over a webhook; the routine writes the summaries and report and pushes
+`bot/vulnwatch-daily`, which the auto-merge workflow verifies and merges into `main`.
 
 Before handing off a code change, run the relevant tests plus:
 
