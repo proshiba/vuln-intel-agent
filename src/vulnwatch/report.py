@@ -21,6 +21,7 @@ from vulnwatch.models import (
     RunManifest,
     StrictModel,
 )
+from vulnwatch.risk import RISK_LEVELS, RiskAssessment, assess_risk, load_source_catalog
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
 SEVERITY_ORDER = ("Critical", "High", "Moderate", "その他")
@@ -58,6 +59,7 @@ class ReportEntry:
     severity: str
     exploited: bool
     poc_public: bool
+    risk: RiskAssessment
 
 
 class ReportSummaryArtifact(StrictModel):
@@ -131,24 +133,38 @@ def _exploitation_flags(advisory: Advisory) -> tuple[bool, bool]:
 
 def load_report_entries(root: Path, manifest: RunManifest) -> list[ReportEntry]:
     entries: list[ReportEntry] = []
+    catalog = load_source_catalog()
+    report_time = report_datetime(manifest)
     for change in manifest.changes:
         if change.status in {ChangeStatus.UNCHANGED, ChangeStatus.QUARANTINED}:
             continue
         advisory_path = resolve_advisory_path(root, change)
         advisory = Advisory.model_validate_json(advisory_path.read_text(encoding="utf-8"))
         exploited, poc_public = _exploitation_flags(advisory)
+        severity = _severity(advisory)
+        category, tier = catalog.get(advisory.source_id, (None, None))
         entries.append(
             ReportEntry(
                 advisory=advisory,
                 status=change.status,
-                severity=_severity(advisory),
+                severity=severity,
                 exploited=exploited,
                 poc_public=poc_public,
+                risk=assess_risk(
+                    advisory,
+                    severity=severity,
+                    exploited=exploited,
+                    poc_public=poc_public,
+                    report_time=report_time,
+                    category=category,
+                    tier=tier,
+                ),
             )
         )
     return sorted(
         entries,
         key=lambda entry: (
+            -entry.risk.score,
             _SEVERITY_RANK[entry.severity],
             -(
                 entry.advisory.facts.cvss_score
@@ -202,6 +218,9 @@ def report_summary_payload(entries: list[ReportEntry], manifest: RunManifest) ->
             "exploited": entry.exploited,
             "poc_public": entry.poc_public,
             "cisa_kev": advisory.enrichment.cisa_kev,
+            "risk_score": entry.risk.score,
+            "risk_level": entry.risk.level,
+            "risk_reasons": list(entry.risk.reasons),
         }
 
     critical = [compact(entry) for entry in entries if entry.severity == "Critical"]
@@ -327,16 +346,16 @@ def _summary_paragraph(value: str) -> str:
 def _focused_table_lines(entries: list[ReportEntry], *, include_severity: bool) -> list[str]:
     if include_severity:
         header = (
-            "| 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | "
+            "| リスク | 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | "
+            "悪用済み | PoC公開済み | アドバイザリ |"
+        )
+        divider = "|---|---|---|---|---|---|---:|---|---|---|"
+    else:
+        header = (
+            "| リスク | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | "
             "悪用済み | PoC公開済み | アドバイザリ |"
         )
         divider = "|---|---|---|---|---|---:|---|---|---|"
-    else:
-        header = (
-            "| 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | "
-            "悪用済み | PoC公開済み | アドバイザリ |"
-        )
-        divider = "|---|---|---|---|---:|---|---|---|"
 
     lines = [header, divider]
     for entry in entries:
@@ -351,9 +370,59 @@ def _focused_table_lines(entries: list[ReportEntry], *, include_severity: bool) 
         poc_public = "○" if entry.poc_public else "-"
         severity = f"{entry.severity} | " if include_severity else ""
         lines.append(
-            f"| {severity}{advisory.decision.priority} | {entry.status} | "
+            f"| {entry.risk.level} | {severity}{advisory.decision.priority} | {entry.status} | "
             f"{vendor} | {cves} | {cvss} | {exploited} | {poc_public} | "
             f"[{title}](<{advisory.source_url}>) |"
+        )
+    return lines
+
+
+def _risk_overview_lines(entries: list[ReportEntry]) -> list[str]:
+    counts = {level: 0 for level in RISK_LEVELS}
+    for entry in entries:
+        counts[entry.risk.level] += 1
+    return [
+        "リスク評価: " + " / ".join(f"{level} {counts[level]}件" for level in RISK_LEVELS),
+        "",
+    ]
+
+
+_MAX_ATTENTION_CVES = 5
+
+
+def _attention_cves(cves: list[str]) -> str:
+    if not cves:
+        return "-"
+    listed = [_escape_table_cell(cve) for cve in cves[:_MAX_ATTENTION_CVES]]
+    if len(cves) > _MAX_ATTENTION_CVES:
+        listed.append(f"他{len(cves) - _MAX_ATTENTION_CVES}件")
+    return "<br>".join(listed)
+
+
+def _attention_table_lines(entries: list[ReportEntry]) -> list[str]:
+    targets = [entry for entry in entries if entry.risk.level in {"緊急", "高"}]
+    lines = [
+        "",
+        "## 要対応（リスク上位）",
+        "",
+        "CVSS、悪用・PoC公開状況、修正提供状況とその経過、攻撃経路、対象機器の利用され方を"
+        "組み合わせたリスクスコアで、対応を優先すべきアドバイザリを抽出しています。",
+        "",
+    ]
+    if not targets:
+        return [*lines, "リスク「緊急」「高」に該当するアドバイザリはありません。"]
+    lines.append("| リスク | スコア | ベンダー | CVE | CVSS（最大） | 主な根拠 | アドバイザリ |")
+    lines.append("|---|---:|---|---|---:|---|---|")
+    for entry in targets:
+        advisory = entry.advisory
+        title = _escape_table_cell(advisory.title, link_label=True)
+        vendor = _escape_table_cell(advisory.vendor)
+        cvss = f"{advisory.facts.cvss_score:.1f}" if advisory.facts.cvss_score is not None else "-"
+        reasons = "<br>".join(_escape_table_cell(reason) for reason in entry.risk.reasons) or "-"
+        lines.append(
+            f"| {entry.risk.level} | {entry.risk.score} | {vendor} | "
+            f"{_attention_cves(advisory.facts.cves)} | {cvss} | "
+            f"{reasons} | [{title}](<{advisory.source_url}>) |"
         )
     return lines
 
@@ -394,7 +463,9 @@ def render_report(root: Path, manifest: RunManifest, entries: list[ReportEntry])
         lines.append("新規・更新・取り下げアドバイザリはありません。")
         return "\n".join(lines) + "\n"
 
+    lines.extend(_risk_overview_lines(entries))
     lines.extend(_matrix_lines(entries))
+    lines.extend(_attention_table_lines(entries))
     summary = read_current_report_summary(root, manifest, entries)
     critical_summary = (
         summary.critical_summary_ja
@@ -413,8 +484,11 @@ def render_report(root: Path, manifest: RunManifest, entries: list[ReportEntry])
             "",
             "## 詳細",
             "",
-            "| 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | 悪用状況 | アドバイザリ |",
-            "|---|---|---|---|---|---:|---|---|",
+            "リスクスコアの高い順に掲載しています。",
+            "",
+            "| リスク | 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | "
+            "悪用状況 | アドバイザリ |",
+            "|---|---|---|---|---|---|---:|---|---|",
         ]
     )
     for entry in entries:
@@ -424,8 +498,8 @@ def render_report(root: Path, manifest: RunManifest, entries: list[ReportEntry])
         cves = "<br>".join(_escape_table_cell(cve) for cve in advisory.facts.cves) or "-"
         cvss = f"{advisory.facts.cvss_score:.1f}" if advisory.facts.cvss_score is not None else "-"
         lines.append(
-            f"| {entry.severity} | {advisory.decision.priority} | {entry.status} | "
-            f"{vendor} | {cves} | {cvss} | {_exploitation_label(entry)} | "
+            f"| {entry.risk.level} | {entry.severity} | {advisory.decision.priority} | "
+            f"{entry.status} | {vendor} | {cves} | {cvss} | {_exploitation_label(entry)} | "
             f"[{title}](<{advisory.source_url}>) |"
         )
     return "\n".join(lines) + "\n"
