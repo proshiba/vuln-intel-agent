@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Pig-Tail\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/15832659?v=4\", \"events_url\": \"https://api.github.com/users/Pig-Tail/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Pig-Tail/followers\", \"following_url\": \"https://api.github.com/users/Pig-Tail/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Pig-Tail/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Pig-Tail\", \"id\": 15832659, \"login\": \"Pig-Tail\", \"node_id\": \"MDQ6VXNlcjE1ODMyNjU5\", \"organizations_url\": \"https://api.github.com/users/Pig-Tail/orgs\", \"received_events_url\": \"https://api.github.com/users/Pig-Tail/received_events\", \"repos_url\": \"https://api.github.com/users/Pig-Tail/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Pig-Tail/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Pig-Tail/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Pig-Tail\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54764\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N\"}}, \"cwe_ids\": [\"CWE-345\"], \"cwes\": [{\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}], \"description\": \"## Summary\\n\\nThere is a medium severity vulnerability in Traefik's ForwardAuth middleware. Even when configured with `trustForwardHeader: false`, Traefik derives the `X-Forwarded-Port` header sent to the authentication service from the original incoming request instead of the sanitized forwarded request. As a result, an unauthenticated remote attacker can inject an `X-Forwarded-Proto: https` header over a plain HTTP connection and cause Traefik to forward `X-Forwarded-Port: 443` to the auth service, bypassing port-based authorization checks. This is a regression of the incomplete fix for GHSA-6384-m2mw-rf54, which addressed the `X-Forwarded-Proto` and `X-Forwarded-Prefix` spoofing vectors but missed the `X-Forwarded-Port` vector.\\n\\n## Patches\\n\\n- https://github.com/traefik/traefik/releases/tag/v2.11.51\\n- https://github.com/traefik/traefik/releases/tag/v3.6.22\\n- https://github.com/traefik/traefik/releases/tag/v3.7.6\\n\\n## For more information\\n\\nIf you have any questions or comments about this advisory, please [open an issue](https://github.com/traefik/traefik/issues).\\n\\n<details>\\n<summary>Original Description</summary>\\n\\n### Summary\\n\\n  The ForwardAuth middleware, even when configured with `trustForwardHeader: false`,\\n  still derives the `X-Forwarded-Port` header sent to the authentication service by\\n  reading the **attacker-controlled** `X-Forwarded-Proto` header from the original\\n  incoming request. This allows an unauthenticated remote attacker to cause Traefik\\n  to forward `X-Forwarded-Port: 443` to the auth service on a plain HTTP connection,\\n  creating an inconsistency that can bypass port-based authorization checks.\\n\\n  ### Details\\n\\n  The fix introduced in commit `5e1de2258` (released as part of the April 2026 security\\n  advisory GHSA-6384-m2mw-rf54) correctly strips all X-Forwarded-* headers from the\\n  forwarded auth request when `trustForwardHeader=false`, and reconstructs\\n  `X-Forwarded-Proto` from the actual TLS state of the connection (`req.TLS`).\\n\\n  However, the reconstruction of `X-Forwarded-Port` is delegated to the helper\\n  `forwardedPort(req)` which receives the **original request** (`req`) rather than\\n  the sanitized forward request (`forwardReq`):\\n\\n  ```go\\n  // pkg/middlewares/auth/forward.go – writeHeader()\\n  if !trustForwardHeader {\\n      forwardedheaders.DeleteXForwardedHeaders(forwardReq.Header) // strips all X-Fwd-* from forwardReq\\n  }\\n  // ...\\n  if _, ok := forwardReq.Header[forwardedheaders.XForwardedPort]; !ok {\\n      forwardReq.Header.Set(forwardedheaders.XForwardedPort, forwardedPort(req)) // ← req = ORIGINAL\\n  }\\n\\n  // pkg/middlewares/auth/forward.go – forwardedPort()\\n  func forwardedPort(req *http.Request) string {\\n      if _, port, err := net.SplitHostPort(req.Host); err == nil && port != \\\"\\\" {\\n          return port\\n      }\\n      // Reads attacker-controlled header on the ORIGINAL request:\\n      if req.Header.Get(forwardedheaders.XForwardedProto) == \\\"https\\\" || ... {\\n          return \\\"443\\\"\\n      }\\n      if req.TLS != nil {\\n          return \\\"443\\\"\\n      }\\n      return \\\"80\\\"\\n  }\\n\\n  Result when trustForwardHeader=false and attacker sends X-Forwarded-Proto: https\\n  on a plain HTTP connection:\\n\\n  ┌──────────────────────────────────┬──────────┬────────┐\\n  │ Header forwarded to auth service │ Expected │ Actual │\\n  ├──────────────────────────────────┼──────────┼────────┤\\n  │ X-Forwarded-Proto                │ http     │ http ✓ │\\n  ├──────────────────────────────────┼──────────┼────────┤\\n  │ X-Forwarded-Port                 │ 80       │ 443 ✗  │\\n  └──────────────────────────────────┴──────────┴────────┘\\n```\\n  The inconsistency between Proto=http and Port=443 is exploitable against any\\n  authentication service that gates access based on X-Forwarded-Port.\\n\\n  ### PoC\\n\\n  Traefik configuration:\\n\\n  ```http:\\n    middlewares:\\n      my-auth:\\n        forwardAuth:\\n          address: \\\"http://auth-service/\\\"\\n          trustForwardHeader: false  # security setting, but still bypassable\\n    routers:\\n      api:\\n        rule: \\\"PathPrefix(`/api`)\\\"\\n        middlewares:\\n          - my-auth\\n        service: backend\\n\\n  Auth service logic (example victim):\\n  # auth-service checks: only port 443 requests are considered \\\"secure\\\"\\n  port = request.headers.get(\\\"X-Forwarded-Port\\\", \\\"80\\\")\\n  proto = request.headers.get(\\\"X-Forwarded-Proto\\\", \\\"http\\\")\\n  if port == \\\"443\\\":\\n      return 200  # grant access\\n  return 403\\n```\\n  Attack:\\n\\n  Plain HTTP connection, no TLS – but spoofs port 443\\n  curl -H \\\"X-Forwarded-Proto: https\\\" http://traefik.example.com/api/admin\\n  Auth service receives X-Forwarded-Port: 443 → grants access\\n\\n  Verification: Enable Traefik debug logging and observe X-Forwarded-Port: 443\\n  in the auth request while the connection is plain HTTP.\\n\\n ### Impact\\n\\n  Any deployment using the ForwardAuth middleware with trustForwardHeader: false where\\n  the downstream authentication service uses X-Forwarded-Port to make authorization\\n  decisions is vulnerable to privilege escalation. An unauthenticated attacker can\\n  bypass port-based security checks (e.g., \\\"only allow requests arriving on HTTPS port\\n  443\\\") by injecting a single X-Forwarded-Proto: https header on a plain HTTP\\n  connection.\\n\\n  This is a regression of the incomplete fix for GHSA-6384-m2mw-rf54: while the\\n  X-Forwarded-Prefix and X-Forwarded-Proto spoofing vectors were addressed, the\\n  X-Forwarded-Port vector was missed.\\n\\n</details>\\n\\n\", \"ghsa_id\": \"GHSA-3q9r-p662-5j8m\", \"html_url\": \"https://github.com/traefik/traefik/security/advisories/GHSA-3q9r-p662-5j8m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3q9r-p662-5j8m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54764\"}], \"private_fork\": null, \"published_at\": \"2026-07-01T15:21:52Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1776972?v=4\", \"events_url\": \"https://api.github.com/users/mmatur/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mmatur/followers\", \"following_url\": \"https://api.github.com/users/mmatur/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mmatur/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mmatur\", \"id\": 1776972, \"login\": \"mmatur\", \"node_id\": \"MDQ6VXNlcjE3NzY5NzI=\", \"organizations_url\": \"https://api.github.com/users/mmatur/orgs\", \"received_events_url\": \"https://api.github.com/users/mmatur/received_events\", \"repos_url\": \"https://api.github.com/users/mmatur/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mmatur/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mmatur/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mmatur\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"ForwardAuth middleware leaks X-Forwarded-Port spoofing via untrusted X-Forwarded-Proto when trustForwardHeader=false\", \"updated_at\": \"2026-07-01T15:21:52Z\", \"url\": \"https://api.github.com/repos/traefik/traefik/security-advisories/GHSA-3q9r-p662-5j8m\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"Traefik\"}, \"patched_versions\": \"v2.11.51\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= v2.11.50\"}, {\"package\": {\"ecosystem\": \"go\", \"name\": \"Traefik\"}, \"patched_versions\": \"v3.6.22\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= v3.6.21\"}, {\"package\": {\"ecosystem\": \"go\", \"name\": \"Traefik\"}, \"patched_versions\": \"v3.7.6\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= v3.7.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "traefik-labs:ghsa-3q9r-p662-5j8m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Traefik: <= v2.11.50",
+      "Traefik: <= v3.6.21",
+      "Traefik: <= v3.7.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54764"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N",
+    "fixed_versions": [
+      "Traefik: v2.11.51",
+      "Traefik: v3.6.22",
+      "Traefik: v3.7.6"
+    ],
+    "mitigations": [],
+    "products": [
+      "Traefik"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:55.493660Z",
+  "provenance": {
+    "content_sha256": "b33923ad9bc89476aaf24bf2ec4b8e94d1590987f1d1ed60c097415e8602d0ef",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T15:21:52Z",
+  "schema_version": 1,
+  "source_id": "traefik_github",
+  "source_url": "https://github.com/traefik/traefik/security/advisories/GHSA-3q9r-p662-5j8m",
+  "status": "active",
+  "title": "ForwardAuth middleware leaks X-Forwarded-Port spoofing via untrusted X-Forwarded-Proto when trustForwardHeader=false",
+  "updated_at": "2026-07-01T15:21:52Z",
+  "vendor": "Traefik Labs",
+  "vendor_advisory_id": "GHSA-3q9r-p662-5j8m"
+}

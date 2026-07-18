@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -64,19 +65,11 @@ class SafeHttpClient:
         conditional: bool = False,
     ) -> FetchedContent:
         self._validate_url(url)
-        headers = {
-            "User-Agent": "vulnwatch/0.1 (+https://github.com/proshiba/vuln-intel-agent)",
-            "Accept": ", ".join(self.source.content_types) or "*/*",
-        }
-        if conditional and state:
-            if state.etag:
-                headers["If-None-Match"] = state.etag
-            if state.last_modified:
-                headers["If-Modified-Since"] = state.last_modified
         timeout = httpx.Timeout(self.source.timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             current = url
             for redirect_count in range(6):
+                headers = self._headers(current, state, conditional=conditional)
                 response = await self._request_with_retry(client, current, headers)
                 if response.status_code == 304:
                     return FetchedContent(
@@ -98,6 +91,15 @@ class SafeHttpClient:
                     self._validate_url(current)
                     continue
                 if response.status_code >= 400:
+                    if (
+                        response.status_code == 403
+                        and (urlsplit(current).hostname or "").casefold() == "api.github.com"
+                        and response.headers.get("x-ratelimit-remaining") == "0"
+                    ):
+                        raise CollectorError(
+                            f"{self.source.id}: GitHub API rate limit exhausted; "
+                            "set GH_TOKEN or GITHUB_TOKEN"
+                        )
                     raise CollectorError(
                         f"{self.source.id}: HTTP {response.status_code} from {current}"
                     )
@@ -122,6 +124,36 @@ class SafeHttpClient:
                     last_modified=response.headers.get("last-modified"),
                 )
         raise CollectorError(f"{self.source.id}: fetch failed")
+
+    def _headers(
+        self,
+        url: str,
+        state: SourceState | None,
+        *,
+        conditional: bool,
+    ) -> dict[str, str]:
+        headers = {
+            "User-Agent": "vulnwatch/0.1 (+https://github.com/proshiba/vuln-intel-agent)",
+            "Accept": ", ".join(self.source.content_types) or "*/*",
+        }
+        if conditional and state:
+            if state.etag:
+                headers["If-None-Match"] = state.etag
+            if state.last_modified:
+                headers["If-Modified-Since"] = state.last_modified
+        if (urlsplit(url).hostname or "").casefold() == "api.github.com":
+            token = self._github_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    @staticmethod
+    def _github_token() -> str | None:
+        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            token = os.environ.get(name, "").strip()
+            if token and "\r" not in token and "\n" not in token:
+                return token
+        return None
 
     async def _request_with_retry(
         self,

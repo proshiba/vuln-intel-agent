@@ -4,6 +4,13 @@ from pathlib import Path
 
 from vulnwatch.config import load_products, load_sources
 from vulnwatch.models import Advisory, RunManifest
+from vulnwatch.report import (
+    load_report_entries,
+    read_current_report_summary,
+    render_report,
+    report_path,
+    report_summary_path,
+)
 
 
 def validate_config(
@@ -26,4 +33,24 @@ def validate_tree(root: Path) -> tuple[int, int]:
     if manifest_path.exists():
         manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
         changes = len(manifest.changes)
+        entries = load_report_entries(root, manifest)
+        daily_report = report_path(root, manifest)
+        if not daily_report.exists():
+            raise ValueError(f"current daily report is missing: {daily_report}")
+        report_text = daily_report.read_text(encoding="utf-8")
+        if not entries:
+            if report_summary_path(root, manifest).exists():
+                raise ValueError("no-change daily report must not retain an AI summary sidecar")
+            if report_text != render_report(root, manifest, entries):
+                raise ValueError("current no-change daily report is stale")
+            return advisories, changes
+        if entries:
+            report_summary = read_current_report_summary(root, manifest, entries)
+            if report_summary is None:
+                raise ValueError(
+                    "current AI report summary is missing, unsuccessful, or stale: "
+                    f"{report_summary_path(root, manifest)}"
+                )
+            if report_text != render_report(root, manifest, entries):
+                raise ValueError("current daily report is stale or has unvalidated content")
     return advisories, changes

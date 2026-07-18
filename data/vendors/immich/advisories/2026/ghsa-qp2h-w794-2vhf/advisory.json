@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"DavidCarliez\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-601\"], \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"## Summary\\r\\n\\r\\nThe fix for GHSA-8244-8vpr-vp9c / PR #28706 added `Route.continue` to keep login continuation URLs same-origin, but the current check still accepts slash-backslash URLs. A `continue` value such as `/\\\\\\\\evil.example/oauth-callback` passes the helper because it starts with `/` and does not start with `//`. Browser-compatible URL handling treats the backslash as a path separator for special schemes, so a `Location: /\\\\\\\\evil.example/oauth-callback` redirect resolves to `https://evil.example/oauth-callback`.\\r\\n\\r\\n## Impact\\r\\n\\r\\nAn attacker can craft an Immich login URL whose continuation value bypasses the same-origin redirect check. When the authenticated-login redirect path uses the sanitized value in `redirect(307, continueUrl)`, the browser follows the response to an attacker-controlled origin. This is an incomplete fix for the public login continuation redirect class.\\r\\n\\r\\n## Reproduction\\r\\n\\r\\n1. Use a current main checkout at commit `e2de8c7c536cac5a673a3aa60cc998815b62d247`.\\r\\n2. Observe the current helper in `web/src/lib/route.ts`:\\r\\n\\r\\n```ts\\r\\ncontinue: (url: string | null, fallback: string) => {\\r\\n  if (!url || !url.startsWith('/') || url.startsWith('//')) {\\r\\n    return fallback;\\r\\n  }\\r\\n\\r\\n  return url;\\r\\n},\\r\\n```\\r\\n\\r\\n3. Decode the attacker-controlled login URL parameter:\\r\\n\\r\\n```js\\r\\nconst raw = 'https://immich.local/auth/login?continue=%2F%5Cevil.example%2Foauth-callback';\\r\\nconst parsed = new URL(raw);\\r\\nconst c = parsed.searchParams.get('continue');\\r\\n```\\r\\n\\r\\n4. Pass the decoded value through the current helper:\\r\\n\\r\\n```js\\r\\nfunction routeContinue(url, fallback) {\\r\\n  return (!url || !url.startsWith('/') || url.startsWith('//')) ? fallback : url;\\r\\n}\\r\\nconst location = routeContinue(c, '/photos');\\r\\nconsole.log(location);\\r\\nconsole.log(new URL(location, 'https://immich.local').href);\\r\\n```\\r\\n\\r\\nObserved result:\\r\\n\\r\\n```json\\r\\n{\\r\\n  \\\"searchParamContinue\\\": \\\"/\\\\\\\\evil.example/oauth-callback\\\",\\r\\n  \\\"routeContinueReturn\\\": \\\"/\\\\\\\\evil.example/oauth-callback\\\",\\r\\n  \\\"browserResolved\\\": \\\"https://evil.example/oauth-callback\\\"\\r\\n}\\r\\n```\\r\\n\\r\\n5. The login load path uses the returned value as a redirect location for already-authenticated users:\\r\\n\\r\\n```ts\\r\\nconst continueUrl = Route.continue(url.searchParams.get('continue'), Route.photos());\\r\\n\\r\\nif (authManager.authenticated) {\\r\\n  redirect(307, continueUrl);\\r\\n}\\r\\n```\\r\\n\\r\\n## Browser evidence\\r\\n\\r\\nA local Chrome proof served `307 Location: /\\\\\\\\127.0.0.1:<port>/pwn?marker=slash-backslash` from `http://localhost:<port>/start`. Chrome followed the redirect as a network request to host `127.0.0.1:<port>`, not `localhost:<port>`, and rendered the destination page. The recorded requests were:\\r\\n\\r\\n```json\\r\\n[\\r\\n  {\\\"path\\\":\\\"/start\\\",\\\"host\\\":\\\"localhost:<port>\\\"},\\r\\n  {\\\"path\\\":\\\"/pwn?marker=slash-backslash\\\",\\\"host\\\":\\\"127.0.0.1:<port>\\\"}\\r\\n]\\r\\n```\\r\\n\\r\\nThis demonstrates that a browser follows the slash-backslash Location value as an authority-changing redirect.\\r\\n\\r\\n## Root cause\\r\\n\\r\\n`Route.continue` performs string prefix checks before any URL normalization. It rejects protocol-relative values beginning with `//`, but it does not reject backslashes. Browsers normalize backslashes as slashes for special schemes during URL processing, so `/\\\\evil.example/path` is effectively treated like `//evil.example/path` by the browser even though it bypasses the helper's `startsWith('//')` check.\\r\\n\\r\\n## Remediation\\r\\n\\r\\nReject backslashes before returning a continuation URL, or parse the value against the deployment origin and require the parsed origin to match the Immich origin before using the value in a redirect or navigation sink.\\r\\n\\r\\nFor example:\\r\\n\\r\\n```ts\\r\\ncontinue: (url: string | null, fallback: string) => {\\r\\n  if (!url || url.includes('\\\\\\\\') || !url.startsWith('/') || url.startsWith('//')) {\\r\\n    return fallback;\\r\\n  }\\r\\n\\r\\n  return url;\\r\\n}\\r\\n```\\r\\n\\r\\nA stronger fix is to normalize with `new URL(url, origin)` and return only values whose parsed origin equals the expected Immich origin.\", \"ghsa_id\": \"GHSA-qp2h-w794-2vhf\", \"html_url\": \"https://github.com/immich-app/immich/security/advisories/GHSA-qp2h-w794-2vhf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qp2h-w794-2vhf\"}], \"private_fork\": null, \"published_at\": \"2026-07-06T09:50:45Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11602424?v=4\", \"events_url\": \"https://api.github.com/users/bo0tzz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bo0tzz/followers\", \"following_url\": \"https://api.github.com/users/bo0tzz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bo0tzz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bo0tzz\", \"id\": 11602424, \"login\": \"bo0tzz\", \"node_id\": \"MDQ6VXNlcjExNjAyNDI0\", \"organizations_url\": \"https://api.github.com/users/bo0tzz/orgs\", \"received_events_url\": \"https://api.github.com/users/bo0tzz/received_events\", \"repos_url\": \"https://api.github.com/users/bo0tzz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bo0tzz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bo0tzz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bo0tzz\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Incomplete fix for login continue redirect allows slash-backslash open redirect\", \"updated_at\": \"2026-07-06T09:50:45Z\", \"url\": \"https://api.github.com/repos/immich-app/immich/security-advisories/GHSA-qp2h-w794-2vhf\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"other\", \"name\": \"immich-app/immich\"}, \"patched_versions\": \"v3.0.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.7.5, and current main e2de8c7c536cac5a673a3aa60cc998815b62d247 after PR #28706\"}], \"withdrawn_at\": null}",
+  "canonical_id": "immich:ghsa-qp2h-w794-2vhf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "immich-app/immich: <= 2.7.5, and current main e2de8c7c536cac5a673a3aa60cc998815b62d247 after PR #28706"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [
+      "immich-app/immich: v3.0.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "immich-app/immich"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:58.017792Z",
+  "provenance": {
+    "content_sha256": "e4d7913765b4f1cc09115e3812306176deca21133d5f718446bf44bfc686db00",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T09:50:45Z",
+  "schema_version": 1,
+  "source_id": "immich_github",
+  "source_url": "https://github.com/immich-app/immich/security/advisories/GHSA-qp2h-w794-2vhf",
+  "status": "active",
+  "title": "Incomplete fix for login continue redirect allows slash-backslash open redirect",
+  "updated_at": "2026-07-06T09:50:45Z",
+  "vendor": "Immich",
+  "vendor_advisory_id": "GHSA-qp2h-w794-2vhf"
+}

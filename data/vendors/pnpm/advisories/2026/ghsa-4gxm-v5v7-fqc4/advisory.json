@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-55699\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-22\", \"CWE-73\"], \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"<!-- maintainer-action:start -->\\r\\n## Maintainer Action Plan\\r\\n\\r\\nThis report is ready to review with the shared patch branch. Start with the PR and the expected fixed behavior, then use the detailed exploit narrative below only if you want to replay the original path.\\r\\n\\r\\n- Advisory: `CAND-PNPM-085` / `GHSA-4gxm-v5v7-fqc4`\\r\\n- Advisory URL: https://github.com/pnpm/pnpm/security/advisories/GHSA-4gxm-v5v7-fqc4\\r\\n- Shared patch PR: https://github.com/pnpm/pnpm-ghsa-j2hc-m6cf-6jm8/pull/1\\r\\n- Shared patch branch: `security/ghsa-batch-2026-06-09`\\r\\n- Patch commit: `a93449314f398cf4bdf2e28d033c02d37395ad22`\\r\\n- Base commit: `origin/main` `55a4035abf1ae3fe7208ba1f5ef43c5eff58ccec`\\r\\n- Maintainer priority: `appendix`\\r\\n- Component: `pnpm global add/remove bin cleanup`\\r\\n- Patch area: bin name/path segment validation\\r\\n- Affected packages: `npm:pnpm`\\r\\n- CWE IDs: `CWE-22`, `CWE-73`\\r\\n- Conservative CVSS: `6.5` / `CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H`\\r\\n- Next action: review the shared patch branch for this component, set the final affected version range, merge and release the fix, then publish or close the advisory.\\r\\n\\r\\n### Expected Patched Behavior\\r\\n\\r\\nReserved, dot, and path-segment bin names are rejected or ignored; global remove leaves `PNPM_HOME` and the sentinel file intact.\\r\\n\\r\\n### Files And Tests To Review\\r\\n\\r\\n- `bins/resolver/src/index.ts`\\r\\n- `bins/resolver/test/index.ts`\\r\\n- `global/commands/test/globalRemove.test.ts`\\r\\n- `pacquet/crates/cmd-shim/src/bin_resolver.rs`\\r\\n- `pacquet/crates/cmd-shim/src/bin_resolver/tests.rs`\\r\\n- `.changeset/strange-bin-segments.md`\\r\\n\\r\\n### Focused Validation\\r\\n\\r\\nRun these from a checkout of the shared patch branch. They are the useful maintainer commands with machine-local artifact paths removed.\\r\\n\\r\\n- Use the private PR checks plus the patched replay coverage matrix for this candidate.\\r\\n\\r\\nThe full patched replay for the shared branch passed with all 20 candidates marked fixed. This candidate's replay evidence is `results/CAND-PNPM-085-patched-result.json`.\\r\\n<!-- maintainer-action:end -->\\r\\n\\r\\n## Title\\r\\n\\r\\nReserved manifest bin names can make global package operations delete outside the global bin directory\\r\\n\\r\\n## Description\\r\\n\\r\\n### Summary\\r\\n\\r\\nManifest `bin` object keys such as `\\\"\\\"`, `\\\".\\\"`, and `\\\"..\\\"` passed pnpm's bin-name guard. When a malicious package was installed globally, later global remove, update, or add-replacement flows could re-derive those names from the installed manifest and pass `path.join(globalBinDir, binName)` to `removeBin`. For `\\\".\\\"` this targets the global bin directory; for `\\\"..\\\"` this targets its parent.\\r\\n\\r\\n### Details\\r\\n\\r\\nThe vulnerable dataflow was:\\r\\n\\r\\n- `bins/resolver/src/index.ts` converted manifest `bin` object keys to `binName` and only required URL-safe text or `$`. Empty, dot, dot-dot, and scoped forms such as `@scope/..` were not rejected after scope stripping.\\r\\n- `global/packages/src/scanGlobalPackages.ts` scanned installed global package manifests and returned manifest-derived `bin.name` values.\\r\\n- `global/commands/src/globalRemove.ts`, `global/commands/src/globalUpdate.ts`, and global add replacement logic joined those names to `globalBinDir`.\\r\\n- `bins/remover/src/removeBins.ts` recursively removed the resulting path.\\r\\n\\r\\nInstall-time checks did not close the gap: bin target paths were package-root checked, conflict checks looked at the same escaped path but did not reject reserved segments, and bin-link warning paths could leave the package installed for later global operations.\\r\\n\\r\\n### PoC\\r\\n\\r\\nRun:\\r\\n\\r\\nThe script first performs a safe prepatch simulation in a temporary directory:\\r\\n\\r\\n```text\\r\\nprepatch_reserved_bin_name=..\\r\\nprepatch_delete_target=/.../cand-pnpm-085.XXXXXX/home\\r\\nprepatch_deleted_global_bin_parent=true\\r\\n```\\r\\n\\r\\nIt then validates the patched implementation:\\r\\n\\r\\n```bash\\r\\n./node_modules/.bin/tsgo --build bins/resolver/tsconfig.json\\r\\n./node_modules/.bin/tsgo --build global/commands/tsconfig.json\\r\\n./node_modules/.bin/eslint bins/resolver/src/index.ts bins/resolver/test/index.ts global/commands/test/globalRemove.test.ts\\r\\ncd bins/resolver\\r\\nNODE_OPTIONS=\\\"--experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\\\" ../../node_modules/.bin/jest test/index.ts --runInBand\\r\\ncd global/commands\\r\\nNODE_OPTIONS=\\\"--experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169\\\" ../../node_modules/.bin/jest test/globalRemove.test.ts -t \\\"global remove ignores reserved manifest bin names\\\" --runInBand\\r\\ncargo fmt --manifest-path pacquet/crates/cmd-shim/Cargo.toml --check\\r\\ncargo test --manifest-path pacquet/crates/cmd-shim/Cargo.toml bin_resolver --lib\\r\\ngit diff --check -- bins/resolver global/commands/test/globalRemove.test.ts pacquet/crates/cmd-shim .changeset/strange-bin-segments.md pnpm-lock.yaml\\r\\n```\\r\\n\\r\\nThe patched resolver no longer emits reserved bin names, and the global-remove regression proves the deletion sink receives only `path.join(globalBinDir, \\\"good\\\")`.\\r\\n\\r\\n### Impact\\r\\n\\r\\nDirect confidentiality impact was not validated for this primitive; the sink is deletion/corruption, not a read or disclosure path.\\r\\n\\r\\n## Affected Products\\r\\n\\r\\nEcosystem: npm\\r\\n\\r\\nPackage name: `pnpm`\\r\\n\\r\\nAffected versions: versions before the patch that accept reserved manifest bin names in TypeScript global package flows.\\r\\n\\r\\nPatched versions: pending release containing the shared bin-name hardening.\\r\\n\\r\\n## Severity\\r\\n\\r\\nCorrected vulnerable severity: High\\r\\n\\r\\nCorrected vulnerable vector string: `CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H`\\r\\n\\r\\nCorrected vulnerable score: 8.1\\r\\n\\r\\nFinal post-patch score: 0.0, not vulnerable after patch.\\r\\n\\r\\nThe original scan score was 8.3 with `C:H/I:H/A:L`. Revalidation removes direct confidentiality impact and raises availability to high because the sink can recursively delete the global bin directory or its parent.\\r\\n\\r\\n## Weaknesses\\r\\n\\r\\nCWE-22: Improper Limitation of a Pathname to a Restricted Directory\\r\\n\\r\\nCWE-73: External Control of File Name or Path\\r\\n\\r\\n## Patch\\r\\n\\r\\n- `bins/resolver/src/index.ts` now rejects empty, dot, and dot-dot bin names after scope stripping.\\r\\n- `bins/resolver/test/index.ts` covers empty, dot, dot-dot, and scoped reserved bin keys.\\r\\n- `global/commands/test/globalRemove.test.ts` proves global remove filters reserved manifest bin names before deletion and only removes a safe `good` shim.\\r\\n- `pacquet/crates/cmd-shim/src/bin_resolver.rs` mirrors the same reserved-name rejection; empty names were already rejected.\\r\\n- `pacquet/crates/cmd-shim/src/bin_resolver/tests.rs` extends parity coverage.\\r\\n- `.changeset/strange-bin-segments.md` records patch releases for `@pnpm/bins.resolver`, `pnpm`, and `pacquet`.\\r\\n\\r\\nPacquet parity is appropriate at the shared bin resolver/linker boundary because pacquet dependency-management commands can resolve and link package bins, even though the TypeScript-only global remove/update/add replacement flow is the concrete destructive-delete sink.\\r\\n\\r\\n## Validation\\r\\n\\r\\nPassed locally:\\r\\n\\r\\nThe script passed TypeScript builds, ESLint, `bins/resolver` Jest, global-remove sink Jest, pacquet fmt/tests, and `git diff --check`.\\r\\n\", \"ghsa_id\": \"GHSA-4gxm-v5v7-fqc4\", \"html_url\": \"https://github.com/pnpm/pnpm/security/advisories/GHSA-4gxm-v5v7-fqc4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4gxm-v5v7-fqc4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55699\"}], \"private_fork\": null, \"published_at\": \"2026-06-15T20:16:11Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1927579?v=4\", \"events_url\": \"https://api.github.com/users/zkochan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zkochan/followers\", \"following_url\": \"https://api.github.com/users/zkochan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zkochan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zkochan\", \"id\": 1927579, \"login\": \"zkochan\", \"node_id\": \"MDQ6VXNlcjE5Mjc1Nzk=\", \"organizations_url\": \"https://api.github.com/users/zkochan/orgs\", \"received_events_url\": \"https://api.github.com/users/zkochan/received_events\", \"repos_url\": \"https://api.github.com/users/zkochan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zkochan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zkochan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zkochan\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"CAND-PNPM-085: reserved bin name deletes PNPM_HOME during global remove\", \"updated_at\": \"2026-06-17T14:38:28Z\", \"url\": \"https://api.github.com/repos/pnpm/pnpm/security-advisories/GHSA-4gxm-v5v7-fqc4\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"pnpm\"}, \"patched_versions\": \">=10.34.2 <11.0.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<10.34.2\"}, {\"package\": {\"ecosystem\": \"npm\", \"name\": \"pnpm\"}, \"patched_versions\": \">=11.5.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">=11.0.0 <11.5.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "pnpm:ghsa-4gxm-v5v7-fqc4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pnpm: <10.34.2",
+      "pnpm: >=11.0.0 <11.5.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55699"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [
+      "pnpm: >=10.34.2 <11.0.0",
+      "pnpm: >=11.5.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "pnpm"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:40:07.309421Z",
+  "provenance": {
+    "content_sha256": "4b1c989a814e750c6b427e1144fd3fbc48941310a52e189be85cb3459bbcf275",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T20:16:11Z",
+  "schema_version": 1,
+  "source_id": "pnpm_github",
+  "source_url": "https://github.com/pnpm/pnpm/security/advisories/GHSA-4gxm-v5v7-fqc4",
+  "status": "active",
+  "title": "CAND-PNPM-085: reserved bin name deletes PNPM_HOME during global remove",
+  "updated_at": "2026-06-17T14:38:28Z",
+  "vendor": "pnpm",
+  "vendor_advisory_id": "GHSA-4gxm-v5v7-fqc4"
+}

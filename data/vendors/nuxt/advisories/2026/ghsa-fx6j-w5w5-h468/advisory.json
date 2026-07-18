@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Mr-In4inci3le\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/78592816?v=4\", \"events_url\": \"https://api.github.com/users/Mr-In4inci3le/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Mr-In4inci3le/followers\", \"following_url\": \"https://api.github.com/users/Mr-In4inci3le/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Mr-In4inci3le/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Mr-In4inci3le\", \"id\": 78592816, \"login\": \"Mr-In4inci3le\", \"node_id\": \"MDQ6VXNlcjc4NTkyODE2\", \"organizations_url\": \"https://api.github.com/users/Mr-In4inci3le/orgs\", \"received_events_url\": \"https://api.github.com/users/Mr-In4inci3le/received_events\", \"repos_url\": \"https://api.github.com/users/Mr-In4inci3le/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Mr-In4inci3le/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Mr-In4inci3le/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Mr-In4inci3le\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45669\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:L/VI:L/VA:N/SC:L/SI:L/SA:N\"}}, \"cwe_ids\": [\"CWE-83\"], \"cwes\": [{\"cwe_id\": \"CWE-83\", \"name\": \"Improper Neutralization of Script in Attributes in a Web Page\"}], \"description\": \"### Summary\\r\\n`navigateTo()` with `external: true` generates a server-side HTML redirect body containing a `<meta http-equiv=\\\"refresh\\\">` tag. The destination URL is only sanitized by replacing `\\\"` with `%22`, leaving `<`, `>`, `&`, and `'` unencoded. An attacker who can influence the URL passed to `navigateTo(url, { external: true })` can break out of the `content=\\\"…\\\"` attribute and inject arbitrary HTML/JavaScript that executes under the application's origin.\\r\\n\\r\\nThis is a different root cause from CVE-2024-34343 (GHSA-vf6r-87q4-2vjf), which addressed `javascript:` protocol bypass. The issue here is triggered by any valid URL containing `>`.\\r\\n\\r\\n### Impact\\r\\nApplications that pass user-controlled input to `navigateTo(url, { external: true })` — typically via a `?next=` / `?redirect=` query parameter used for post-login or \\\"return to\\\" flows — are vulnerable to reflected cross-site scripting. The injected script runs in the context of the application's origin during the server-rendered redirect response, before the meta-refresh fires.\\r\\n\\r\\n### Details\\r\\nIn `packages/nuxt/src/app/composables/router.ts`, the SSR redirect path builds an HTML response body with only `\\\"` percent-encoded in the destination URL:\\r\\n\\r\\n```ts\\r\\nconst encodedLoc = location.replace(/\\\"/g, '%22')\\r\\nnuxtApp.ssrContext!['~renderResponse'] = {\\r\\nstatus: sanitizeStatusCode(options?.redirectCode || 302, 302),\\r\\nbody: `<!DOCTYPE html><html><head><meta http-equiv=\\\"refresh\\\" content=\\\"0; url=${encodedLoc}\\\"></head></html>`,\\r\\nheaders: { location: encodeURL(location, isExternalHost) },\\r\\n}\\r\\n```\\r\\n\\r\\nThe `Location` header is normalised through `encodeURL()` (which uses the `URL` constructor and correctly percent-encodes attribute-significant characters). The HTML body uses a narrower sanitiser. That mismatch is the root cause.\\r\\n\\r\\n### Proof of concept\\r\\n\\r\\nGlobal middleware that forwards a query parameter to `navigateTo`:\\r\\n\\r\\n```ts\\r\\n// middleware/redirect.global.ts\\r\\nexport default defineNuxtRouteMiddleware((to) => {\\r\\nconst next = to.query.next as string | undefined\\r\\nif (next) {\\r\\n return navigateTo(next, { external: true })\\r\\n}\\r\\n})\\r\\n```\\r\\n\\r\\nRequest:\\r\\n\\r\\n```\\r\\nGET /?next=https://evil.example/x><img src=x onerror=alert(document.domain)>\\r\\n```\\r\\n\\r\\nResponse body:\\r\\n\\r\\n```html\\r\\n<!DOCTYPE html><html><head><meta http-equiv=\\\"refresh\\\" content=\\\"0; url=https://evil.example/x><img src=x onerror=alert(document.domain)>\\\"></head></html>\\r\\n```\\r\\n\\r\\nThe `>` after `evil.example/x` terminates the `content=\\\"…\\\"` attribute, and the `<img onerror>` tag executes JavaScript in the application's origin before any redirect\\r\\noccurs.\\r\\n\\r\\n### Patches\\r\\nFixed in `nuxt@4.4.6` and `nuxt@3.21.6` by [#35052](https://github.com/nuxt/nuxt/pull/35052). The fix percent-encodes the full set of HTML-attribute-significant characters (`&`, `\\\"`, `'`, `<`, `>`) before interpolating the URL into the meta-refresh body\\r\\n\\r\\n### Workarounds\\r\\nIf you can't upgrade immediately, validate user-controlled URLs before passing them to `navigateTo(url, { external: true })`. At minimum, normalise through `new URL(input).toString()` and reject inputs containing `<` or `>` (a normalised URL with these characters is malformed and safe to refuse).\\r\\n\", \"ghsa_id\": \"GHSA-fx6j-w5w5-h468\", \"html_url\": \"https://github.com/nuxt/nuxt/security/advisories/GHSA-fx6j-w5w5-h468\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fx6j-w5w5-h468\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45669\"}], \"private_fork\": null, \"published_at\": \"2026-05-18T11:07:53Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28706372?v=4\", \"events_url\": \"https://api.github.com/users/danielroe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/danielroe/followers\", \"following_url\": \"https://api.github.com/users/danielroe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/danielroe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/danielroe\", \"id\": 28706372, \"login\": \"danielroe\", \"node_id\": \"MDQ6VXNlcjI4NzA2Mzcy\", \"organizations_url\": \"https://api.github.com/users/danielroe/orgs\", \"received_events_url\": \"https://api.github.com/users/danielroe/received_events\", \"repos_url\": \"https://api.github.com/users/danielroe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/danielroe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/danielroe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/danielroe\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Reflected XSS in `navigateTo` external redirect\", \"updated_at\": \"2026-05-18T11:07:53Z\", \"url\": \"https://api.github.com/repos/nuxt/nuxt/security-advisories/GHSA-fx6j-w5w5-h468\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"patched_versions\": \"> 3.21.5, < 4.0.0-alpha.1\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.4.3, <= 3.21.5\"}, {\"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"patched_versions\": \"> 4.4.5\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0-alpha.1, <= 4.4.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "nuxt:ghsa-fx6j-w5w5-h468",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nuxt: >= 3.4.3, <= 3.21.5",
+      "nuxt: >= 4.0.0-alpha.1, <= 4.4.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2024-34343",
+      "CVE-2026-45669"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:L/VI:L/VA:N/SC:L/SI:L/SA:N",
+    "fixed_versions": [
+      "nuxt: > 3.21.5, < 4.0.0-alpha.1",
+      "nuxt: > 4.4.5"
+    ],
+    "mitigations": [],
+    "products": [
+      "nuxt"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:40:02.457255Z",
+  "provenance": {
+    "content_sha256": "c3b87aef925cba269cbd3979d7ba349a838f33d724eab254e00d3478c9eb06d7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-18T11:07:53Z",
+  "schema_version": 1,
+  "source_id": "nuxt_github",
+  "source_url": "https://github.com/nuxt/nuxt/security/advisories/GHSA-fx6j-w5w5-h468",
+  "status": "active",
+  "title": "Reflected XSS in `navigateTo` external redirect",
+  "updated_at": "2026-05-18T11:07:53Z",
+  "vendor": "Nuxt",
+  "vendor_advisory_id": "GHSA-fx6j-w5w5-h468"
+}

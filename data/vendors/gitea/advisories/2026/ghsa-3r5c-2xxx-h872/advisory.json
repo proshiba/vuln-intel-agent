@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-58511\", \"cvss\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-200\"], \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"## Summary\\r\\n\\r\\nThe `ToHook()` function in `services/webhook/general.go` decrypts the webhook's `HeaderAuthorizationEncrypted` field and returns the plaintext authorization header in the API response. Any repository admin can read the full plaintext value of webhook authorization headers (Bearer tokens, Basic auth credentials, API keys) set by other admins.\\r\\n\\r\\nThe authorization header is stored encrypted in the database using the server's `SecretKey`, but `ToHook()` decrypts it before serializing it into the API response — converting a write-only secret into a readable credential.\\r\\n\\r\\n## Vulnerable Code\\r\\n\\r\\n**File:** `services/webhook/general.go:407-420`\\r\\n\\r\\n```go\\r\\nfunc ToHook(repoLink string, w *webhook_model.Webhook) (*api.Hook, error) {\\r\\n    // ...\\r\\n    authorizationHeader, err := w.HeaderAuthorization()  // DECRYPTS from DB\\r\\n    if err != nil {\\r\\n        return nil, err\\r\\n    }\\r\\n    return &api.Hook{\\r\\n        // ...\\r\\n        AuthorizationHeader: authorizationHeader,  // PLAINTEXT in response\\r\\n        // ...\\r\\n    }, nil\\r\\n}\\r\\n```\\r\\n\\r\\n**Decryption function:** `models/webhook/webhook.go:209-216`\\r\\n\\r\\n```go\\r\\nfunc (w Webhook) HeaderAuthorization() (string, error) {\\r\\n    if w.HeaderAuthorizationEncrypted == \\\"\\\" {\\r\\n        return \\\"\\\", nil\\r\\n    }\\r\\n    return secret.DecryptSecret(setting.SecretKey, w.HeaderAuthorizationEncrypted)\\r\\n}\\r\\n```\\r\\n\\r\\n## Affected Endpoints\\r\\n\\r\\nAll call `ToHook()`:\\r\\n- `GET /api/v1/repos/{owner}/{repo}/hooks` (requires repo admin)\\r\\n- `GET /api/v1/repos/{owner}/{repo}/hooks/{id}` (requires repo admin)\\r\\n- `GET /api/v1/admin/hooks` (requires site admin)\\r\\n- `GET /api/v1/orgs/{org}/hooks` (requires org admin)\\r\\n- `GET /api/v1/user/hooks` (requires authenticated user)\\r\\n\\r\\n## Steps to Reproduce\\r\\n\\r\\n1. Admin A creates a webhook with a sensitive authorization header.\\r\\n2. Admin B (different repo admin) lists webhooks via `GET /api/v1/repos/{owner}/{repo}/hooks`.\\r\\n3. The API response includes the full plaintext authorization header set by Admin A.\\r\\n\\r\\n## Impact\\r\\n\\r\\n- Cross-admin secret exposure on shared repositories\\r\\n- Credential harvesting if a repo admin's Gitea token is stolen\\r\\n- External service compromise via leaked Bearer tokens and API keys\\r\\n- Undermines the intentional encryption-at-rest protection\\r\\n\\r\\n## Suggested Fix\\r\\n\\r\\nThe authorization header should be write-only. Return a masked/redacted version or a boolean `has_authorization_header` flag instead.\\r\\n\\r\\n## References\\r\\n\\r\\n- Vulnerable function: `services/webhook/general.go:392-425`\\r\\n- Decryption function: `models/webhook/webhook.go:209-216`\\r\\n- Verified against commit 19f0169\", \"ghsa_id\": \"GHSA-3r5c-2xxx-h872\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-3r5c-2xxx-h872\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3r5c-2xxx-h872\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58511\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:38:20Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"low\", \"state\": \"published\", \"submission\": null, \"summary\": \"Webhook Authorization Header Returned in Plaintext via API\", \"updated_at\": \"2026-07-13T17:38:20Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-3r5c-2xxx-h872\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-3r5c-2xxx-h872",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-58511"
+    ],
+    "cvss_score": 2.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-17T23:39:53.095345Z",
+  "provenance": {
+    "content_sha256": "b8072ec6b41691a41c70b23505a8a494516e3b6807fef6ead355f0dbf13c5927",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:38:20Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-3r5c-2xxx-h872",
+  "status": "active",
+  "title": "Webhook Authorization Header Returned in Plaintext via API",
+  "updated_at": "2026-07-13T17:38:20Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-3r5c-2xxx-h872"
+}

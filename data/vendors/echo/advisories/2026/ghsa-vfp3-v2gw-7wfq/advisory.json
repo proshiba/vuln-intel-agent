@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"a-tt-om\", \"type\": \"reporter\"}, {\"login\": \"oran-gugu\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92680067?v=4\", \"events_url\": \"https://api.github.com/users/a-tt-om/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/a-tt-om/followers\", \"following_url\": \"https://api.github.com/users/a-tt-om/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/a-tt-om/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/a-tt-om\", \"id\": 92680067, \"login\": \"a-tt-om\", \"node_id\": \"U_kgDOBYYvgw\", \"organizations_url\": \"https://api.github.com/users/a-tt-om/orgs\", \"received_events_url\": \"https://api.github.com/users/a-tt-om/received_events\", \"repos_url\": \"https://api.github.com/users/a-tt-om/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/a-tt-om/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/a-tt-om/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/a-tt-om\", \"user_view_type\": \"public\"}}, {\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/146875962?v=4\", \"events_url\": \"https://api.github.com/users/oran-gugu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/oran-gugu/followers\", \"following_url\": \"https://api.github.com/users/oran-gugu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/oran-gugu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/oran-gugu\", \"id\": 146875962, \"login\": \"oran-gugu\", \"node_id\": \"U_kgDOCMEmOg\", \"organizations_url\": \"https://api.github.com/users/oran-gugu/orgs\", \"received_events_url\": \"https://api.github.com/users/oran-gugu/received_events\", \"repos_url\": \"https://api.github.com/users/oran-gugu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/oran-gugu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/oran-gugu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/oran-gugu\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55677\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-22\"], \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\r\\n\\r\\nEcho's router and static file handler disagree on URL path decoding. The router matches routes using the raw encoded path (preserving `%2F` as-is), while `StaticDirectoryHandler` unescapes `%2F` to `/` before resolving filesystem paths. This allows an attacker to bypass route-level access controls and read static files without authorization.\\r\\n\\r\\n### Details\\r\\n\\r\\n**Root cause 1 — `router.go` lines 798-802:**\\r\\nThe router uses `req.URL.RawPath` for route matching when `useEscapedPathForRouting` is false (the default). This means `/admin%2Fsecret.txt` is treated as a single path segment and does NOT match the `/admin/*` route pattern.\\r\\n\\r\\n```go\\r\\nif !r.useEscapedPathForRouting && req.URL.RawPath != \\\"\\\" {\\r\\n    path = req.URL.RawPath\\r\\n}\\r\\n```\\r\\n\\r\\n**Root cause 2 — `echo.go` lines 559-568:**\\r\\n`StaticDirectoryHandler` calls `url.PathUnescape()` on the path parameter before opening files. This converts `%2F` back to `/`, resolving `admin/secret.txt` on disk.\\r\\n\\r\\n```go\\r\\nif !disablePathUnescaping {\\r\\n    tmpPath, err := url.PathUnescape(p)\\r\\n    p = tmpPath\\r\\n}\\r\\nname := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(p, \\\"/\\\")))\\r\\n```\\r\\n\\r\\n### PoC (Screenshot)\\r\\nSample:\\r\\n<img width=\\\"1291\\\" height=\\\"970\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/0bc58059-3e6d-4678-ab25-a5c79b006738\\\" />\\r\\n\\r\\n403:\\r\\n<img width=\\\"526\\\" height=\\\"194\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/2f55ffdd-87b2-4a1b-8a13-130ebad0f257\\\" />\\r\\n\\r\\nBypass with encoded slash:\\r\\n<img width=\\\"592\\\" height=\\\"203\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/1191cd39-ae8f-4d7e-8fb1-cb9cf31f484f\\\" />\\r\\n\\r\\n### Impact\\r\\n\\r\\nUnauthorized static file disclosure. Applications that protect route prefixes with authentication middleware while also serving static files from a broader root are vulnerable. An attacker only needs to encode the slash (`/` → `%2F`) in the URL to bypass all route-level protection.\\r\\n\\r\\nCommon affected pattern:\\r\\n```go\\r\\nadminGroup := e.Group(\\\"/admin\\\", authMiddleware)\\r\\ne.StaticFS(\\\"/\\\", os.DirFS(\\\"public\\\"))\\r\\n```\\r\\n\\r\\n\", \"ghsa_id\": \"GHSA-vfp3-v2gw-7wfq\", \"html_url\": \"https://github.com/labstack/echo/security/advisories/GHSA-vfp3-v2gw-7wfq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vfp3-v2gw-7wfq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55677\"}], \"private_fork\": null, \"published_at\": \"2026-06-14T15:08:45Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/314036?v=4\", \"events_url\": \"https://api.github.com/users/vishr/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vishr/followers\", \"following_url\": \"https://api.github.com/users/vishr/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vishr/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vishr\", \"id\": 314036, \"login\": \"vishr\", \"node_id\": \"MDQ6VXNlcjMxNDAzNg==\", \"organizations_url\": \"https://api.github.com/users/vishr/orgs\", \"received_events_url\": \"https://api.github.com/users/vishr/received_events\", \"repos_url\": \"https://api.github.com/users/vishr/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vishr/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vishr/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vishr\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Encoded slash (%2F) bypasses route-level protection and exposes static files\", \"updated_at\": \"2026-06-17T14:32:45Z\", \"url\": \"https://api.github.com/repos/labstack/echo/security-advisories/GHSA-vfp3-v2gw-7wfq\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/labstack/echo/v5\"}, \"patched_versions\": \"5.2.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.1.1\"}, {\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/labstack/echo/v4\"}, \"patched_versions\": \"4.15.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.15.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "echo:ghsa-vfp3-v2gw-7wfq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/labstack/echo/v4: <= 4.15.2",
+      "github.com/labstack/echo/v5: <= 5.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55677"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [
+      "github.com/labstack/echo/v4: 4.15.3",
+      "github.com/labstack/echo/v5: 5.2.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/labstack/echo/v4",
+      "github.com/labstack/echo/v5"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:40:08.372796Z",
+  "provenance": {
+    "content_sha256": "a4c755353a897e8bba69177f6de79d5d313b2faf6cccc34accfb575ad41e4644",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-14T15:08:45Z",
+  "schema_version": 1,
+  "source_id": "echo_github",
+  "source_url": "https://github.com/labstack/echo/security/advisories/GHSA-vfp3-v2gw-7wfq",
+  "status": "active",
+  "title": "Encoded slash (%2F) bypasses route-level protection and exposes static files",
+  "updated_at": "2026-06-17T14:32:45Z",
+  "vendor": "Echo",
+  "vendor_advisory_id": "GHSA-vfp3-v2gw-7wfq"
+}

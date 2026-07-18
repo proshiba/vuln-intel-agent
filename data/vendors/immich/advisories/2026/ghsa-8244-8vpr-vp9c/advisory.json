@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Revanth011\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/83944100?v=4\", \"events_url\": \"https://api.github.com/users/Revanth011/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Revanth011/followers\", \"following_url\": \"https://api.github.com/users/Revanth011/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Revanth011/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Revanth011\", \"id\": 83944100, \"login\": \"Revanth011\", \"node_id\": \"MDQ6VXNlcjgzOTQ0MTAw\", \"organizations_url\": \"https://api.github.com/users/Revanth011/orgs\", \"received_events_url\": \"https://api.github.com/users/Revanth011/received_events\", \"repos_url\": \"https://api.github.com/users/Revanth011/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Revanth011/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Revanth011/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Revanth011\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53662\", \"cvss\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-79\", \"CWE-601\"], \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"**Affected:** `main` branch builds since commit `4ffa26c9` (PR #27831, merged 2026-04-15), including the `:main` Docker tag and any nightly. **No tagged release is affected** — v2.7.5 (the current stable) and earlier are safe.\\r\\n\\r\\n**Patched in:** not yet patched; the bug currently sits on `main` and will ship in the next tagged release unless fixed before then.\\r\\n\\r\\n### Summary\\r\\n\\r\\nA reflected cross-site scripting (XSS) vulnerability on the `/auth/login` page allows an attacker to fully compromise any authenticated user's account with a single link click. The `continue` query parameter is read from the URL and passed to SvelteKit's `redirect()` without any scheme or origin validation, allowing attacker-controlled JavaScript to execute inside Immich's origin. The payload then uses the victim's existing session to mint an `all`-permission API key on their account, leading to persistent account takeover.\\r\\n\\r\\n### Details\\r\\n\\r\\nIn `web/src/routes/auth/login/+page.ts` (introduced by PR #27831, commit `4ffa26c9`, 2026-04-15):\\r\\n\\r\\n```ts\\r\\nconst continueUrl = url.searchParams.get('continue') || Route.photos();\\r\\nif (authManager.authenticated) {\\r\\n  redirect(307, continueUrl);\\r\\n}\\r\\n```\\r\\n\\r\\nThe `continue` value is taken from the URL and handed directly to `redirect()`. SvelteKit's `redirect()` performs no validation on the destination, and the client-side runtime ultimately resolves the redirect via `location.href = url.href` inside `native_navigation`. For a `javascript:` URL, this causes the browser to evaluate the JS expression in Immich's origin, with the victim's session cookie attached automatically to any subsequent same-origin request.\\r\\n\\r\\nBecause the cookies are `HttpOnly`, the attacker does not need to read them — the browser attaches them to any `fetch('/api/...')` the injected script makes.\\r\\n\\r\\n### PoC\\r\\n\\r\\n\\r\\n1. Run a vulnerable Immich (any build from `main` since 2026-04-15, e.g. the `ghcr.io/immich-app/immich-server:main` Docker tag).\\r\\n2. As the victim, log in normally.\\r\\n3. Cause the victim to visit (chat, email, hidden iframe, link shortener) — replace `<immich-host>` with the real hostname of the target instance:\\r\\n\\r\\n```\\r\\nhttp://<immich-host>/auth/login?continue=javascript:fetch('/api/api-keys',{method:'POST',headers:{'content-type':'application/json'},body:'{\\\"name\\\":\\\"pwned\\\",\\\"permissions\\\":[\\\"all\\\"]}'}).then(r=>r.json()).then(d=>{alert('PWNED\\\\nSECRET='.concat(d.secret));window.__pwned=d});void(0)\\r\\n```\\r\\n\\r\\n<img width=\\\"1470\\\" height=\\\"691\\\" alt=\\\"Screenshot 2026-05-11 at 9 21 27 PM\\\" src=\\\"https://github.com/user-attachments/assets/9ee49238-7949-4391-8bde-2dc22ef64f57\\\" />\\r\\nObserved in a real browser (Chrome, latest):\\r\\n\\r\\n- The browser navigates to `/auth/login?continue=…`.\\r\\n- A native alert dialog pops, reading:\\r\\n\\r\\n```\\r\\nPWNED\\r\\nSECRET=<a working, full-permission API key>\\r\\n```\\r\\n\\r\\n- DevTools → Network shows a real `POST /api/api-keys` with `{\\\"name\\\":\\\"pwned\\\",\\\"permissions\\\":[\\\"all\\\"]}`, response 201.\\r\\n- The new key appears in Account Settings → API Keys, named `pwned`, with the full permission list checked.\\r\\n- The captured secret authenticates against `/api/users/me` from any host via the `x-api-key` header, proving the access is persistent across logout, password change, and session expiry.\\r\\n\\r\\nVerified end-to-end on 2026-05-11 against `ghcr.io/immich-app/immich-server:main`.\\r\\n\\r\\n### Impact\\r\\n\\r\\n- **Type:** Reflected XSS leading to full account takeover.\\r\\n- **Precondition:** Victim is authenticated at the time of the click. Immich sessions persist for long periods, so this is satisfied for typical users.\\r\\n- **What an attacker obtains:** A persistent, full-permission API key on the victim's account. Works from any machine on the internet that can reach the Immich instance. Survives logout, password rotation, and session expiry. Can only be revoked by manually deleting it from Account Settings → API Keys.\\r\\n- **Concrete capabilities:** read/delete every photo and video, modify settings, change email/password, exfiltrate face and GPS data, invite the attacker into shared albums. If the victim is an admin, modify global instance settings and lock the real admin out.\\r\\n\\r\\n### Suggested fix\\r\\n\\r\\nValidate that `continueUrl` is a same-origin relative path before passing it to `redirect()`:\\r\\n\\r\\n```ts\\r\\nconst raw = url.searchParams.get('continue');\\r\\nconst continueUrl =\\r\\n  raw && raw.startsWith('/') && !raw.startsWith('//')\\r\\n    ? raw\\r\\n    : Route.photos();\\r\\n```\\r\\n\\r\\n- `startsWith('/')`\\r\\n keeps the destination inside the app.\\r\\n- `!startsWith('//')` blocks protocol-relative URLs like `//evil.com`.\\r\\n- Together, this rejects `javascript:`, `data:`, `https://evil.com`, and `//evil.com`.\\r\\n\\r\\nApply the same check to `web/src/routes/auth/pin-prompt/+page.ts` for consistency — that sink is currently neutralized by a different SvelteKit guard but would benefit from the same allow-list.\\r\\n\", \"ghsa_id\": \"GHSA-8244-8vpr-vp9c\", \"html_url\": \"https://github.com/immich-app/immich/security/advisories/GHSA-8244-8vpr-vp9c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8244-8vpr-vp9c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53662\"}], \"private_fork\": null, \"published_at\": \"2026-06-01T17:46:22Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4334196?v=4\", \"events_url\": \"https://api.github.com/users/jrasm91/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jrasm91/followers\", \"following_url\": \"https://api.github.com/users/jrasm91/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jrasm91/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jrasm91\", \"id\": 4334196, \"login\": \"jrasm91\", \"node_id\": \"MDQ6VXNlcjQzMzQxOTY=\", \"organizations_url\": \"https://api.github.com/users/jrasm91/orgs\", \"received_events_url\": \"https://api.github.com/users/jrasm91/received_events\", \"repos_url\": \"https://api.github.com/users/jrasm91/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jrasm91/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jrasm91/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jrasm91\", \"user_view_type\": \"public\"}, \"severity\": \"critical\", \"state\": \"published\", \"submission\": null, \"summary\": \"One-click account takeover via XSS in login page continue redirect\", \"updated_at\": \"2026-06-10T17:21:27Z\", \"url\": \"https://api.github.com/repos/immich-app/immich/security-advisories/GHSA-8244-8vpr-vp9c\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"docker\", \"name\": \"immich-server\"}, \"patched_versions\": \"> main@4eb1003\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"> main@4ffa26c9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "immich:ghsa-8244-8vpr-vp9c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "immich-server: > main@4ffa26c9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53662"
+    ],
+    "cvss_score": 9.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H",
+    "fixed_versions": [
+      "immich-server: > main@4eb1003"
+    ],
+    "mitigations": [],
+    "products": [
+      "immich-server"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-17T23:39:58.224373Z",
+  "provenance": {
+    "content_sha256": "2218f90a15e7b6f14fe46898cf46b3fcfa11c28e227f1bdaec3ed3237df7ea6c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-01T17:46:22Z",
+  "schema_version": 1,
+  "source_id": "immich_github",
+  "source_url": "https://github.com/immich-app/immich/security/advisories/GHSA-8244-8vpr-vp9c",
+  "status": "active",
+  "title": "One-click account takeover via XSS in login page continue redirect",
+  "updated_at": "2026-06-10T17:21:27Z",
+  "vendor": "Immich",
+  "vendor_advisory_id": "GHSA-8244-8vpr-vp9c"
+}

@@ -15,8 +15,9 @@ from vulnwatch.config import load_sources
 from vulnwatch.models import Priority, RawRecord, Tier
 from vulnwatch.parsers import parse_record
 from vulnwatch.pipeline import Pipeline
-from vulnwatch.report import generate_report
+from vulnwatch.report import generate_report, write_agent_report_summary
 from vulnwatch.schemas import export_schemas
+from vulnwatch.storage import publish_tree
 from vulnwatch.summarizers import summarize_tree
 from vulnwatch.validation import validate_config, validate_tree
 
@@ -72,8 +73,33 @@ def validate(root: Annotated[Path, typer.Option()] = Path("staging")) -> None:
 
 
 @app.command()
-def report(root: Annotated[Path, typer.Option()] = Path("staging")) -> None:
+def report(
+    root: Annotated[Path, typer.Option()] = Path("staging"),
+    critical_summary: Annotated[
+        str | None, typer.Option(help="AI-authored Japanese summary for the Critical table")
+    ] = None,
+    exploitation_summary: Annotated[
+        str | None,
+        typer.Option(help="AI-authored Japanese summary for the exploited/PoC table"),
+    ] = None,
+) -> None:
+    if (critical_summary is None) != (exploitation_summary is None):
+        raise typer.BadParameter(
+            "--critical-summary and --exploitation-summary must be supplied together"
+        )
+    if critical_summary is not None and exploitation_summary is not None:
+        write_agent_report_summary(root, critical_summary, exploitation_summary)
     typer.echo(str(generate_report(root)))
+
+
+@app.command()
+def publish(
+    root: Annotated[Path, typer.Option()] = Path("staging"),
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    validate_tree(root)
+    published = publish_tree(root, repository)
+    typer.echo(f"published {published} generated files to {repository.resolve()}")
 
 
 @source_app.command("test")

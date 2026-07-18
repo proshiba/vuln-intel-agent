@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"m2hcz\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/202376560?v=4\", \"events_url\": \"https://api.github.com/users/m2hcz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/m2hcz/followers\", \"following_url\": \"https://api.github.com/users/m2hcz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/m2hcz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/m2hcz\", \"id\": 202376560, \"login\": \"m2hcz\", \"node_id\": \"U_kgDODBAFcA\", \"organizations_url\": \"https://api.github.com/users/m2hcz/orgs\", \"received_events_url\": \"https://api.github.com/users/m2hcz/received_events\", \"repos_url\": \"https://api.github.com/users/m2hcz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/m2hcz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/m2hcz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/m2hcz\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-28740\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-639\", \"CWE-863\"], \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\r\\n\\r\\nI found an authorization issue in Gitea's Git LFS object reuse flow.\\r\\n\\r\\nA user with Code write access to one repository may be able to associate an existing Git LFS object from a private source repository with their target repository, even when they do not have Code access to the source repository that currently owns the LFS object.\\r\\n\\r\\nThe issue appears to be caused by the source-object authorization check using broad repository accessibility instead of requiring Code-unit access to at least one repository that owns the requested LFS object.\\r\\n\\r\\n## Impact\\r\\n\\r\\nThis issue breaks the expected authorization boundary between repository units.\\r\\n\\r\\nA user who does not have Code access to a private source repository should not be able to reuse or associate Git LFS objects owned by that repository. However, because the source-object accessibility check accepts broad repository access, non-Code access such as Issues access may be sufficient for the LFS object to be treated as accessible.\\r\\n\\r\\nIf the reused object becomes downloadable through the attacker-controlled target repository after metadata association, this can result in cross-repository Git LFS content disclosure.\\r\\n\\r\\nThe target repository write authorization is still enforced. The problem is specifically in the authorization decision for whether the source LFS object is accessible and may be reused.\\r\\n\\r\\n## Preconditions\\r\\n\\r\\nThe attacker needs:\\r\\n\\r\\n* an authenticated Gitea account;\\r\\n* Code write access to a target repository;\\r\\n* non-Code access, such as Issues access, to a private source repository;\\r\\n* knowledge of an existing Git LFS object OID and size from the private source repository.\\r\\n\\r\\n## Affected Area\\r\\n\\r\\nThe issue affects the Git LFS upload/object reuse path.\\r\\n\\r\\nRelevant paths:\\r\\n\\r\\n```text\\r\\nservices/lfs/server.go\\r\\n```\\r\\n\\r\\nRelevant handlers:\\r\\n\\r\\n```text\\r\\nBatchHandler\\r\\nUploadHandler\\r\\n```\\r\\n\\r\\nBoth paths can call:\\r\\n\\r\\n```go\\r\\ngit_model.LFSObjectAccessible(ctx, ctx.Doer, p.Oid)\\r\\n```\\r\\n\\r\\nThe helper is located in:\\r\\n\\r\\n```text\\r\\nmodels/git/lfs.go\\r\\n```\\r\\n\\r\\nThe authorization check uses:\\r\\n\\r\\n```go\\r\\nrepo_model.AccessibleRepositoryCondition(user, unit.TypeInvalid)\\r\\n```\\r\\n\\r\\nWhen `unit.TypeInvalid` is used, the repository access condition can include broad repository access, such as organization team membership through `team_repo` and `team_user`, without requiring that the user has access to the Code unit of the source repository.\\r\\n\\r\\nBy contrast, Code-specific repository access checks use a concrete unit type and include `team_unit` validation.\\r\\n\\r\\n## Validation\\r\\n\\r\\nI reproduced this locally using Gitea's Go test harness.\\r\\n\\r\\nValidated against commit:\\r\\n\\r\\n```text\\r\\ndac41a124fd34820a3c8caf3b3592ba62cd514ff\\r\\n```\\r\\n\\r\\nThe PoC creates the following scenario:\\r\\n\\r\\n1. The attacker has Code write access to the target repository.\\r\\n2. The source repository is private.\\r\\n3. The attacker does not have Code access to the source repository.\\r\\n4. The attacker only has Issues access to the source repository through an organization team.\\r\\n5. An LFS object exists in the source repository.\\r\\n6. `LFSObjectAccessible(ctx, attacker, oid)` returns `true`.\\r\\n7. `NewLFSMetaObject(ctx, targetRepo.ID, pointer)` successfully creates LFS metadata for the target repository.\\r\\n\\r\\nTest result:\\r\\n\\r\\n```text\\r\\n=== RUN   TestLFSObjectAccessibleAllowsNonCodeSourceAccess\\r\\n--- PASS: TestLFSObjectAccessibleAllowsNonCodeSourceAccess\\r\\nPASS\\r\\nok  \\tgitea.dev/models/git\\r\\n```\\r\\n\\r\\nNo live instance was tested. Validation was performed only against a local test database.\\r\\n\\r\\n## Security Expectation\\r\\n\\r\\nA user should not be allowed to reuse or associate an LFS object from a private source repository unless they have Code access to that source repository, or another permission level explicitly intended to grant access to repository file contents.\\r\\n\\r\\nNon-Code permissions such as Issues access should not authorize access to Git LFS object content or allow Git LFS object reuse.\\r\\n\\r\\n## Suggested Fix\\r\\n\\r\\n`LFSObjectAccessible` should require Code-unit access to at least one repository that owns the requested LFS object.\\r\\n\\r\\nThe check should avoid using `unit.TypeInvalid` for this source-object authorization decision. A Code-specific repository access condition should be used instead.\\r\\n\\r\\nA regression test should cover:\\r\\n\\r\\n* private source repository;\\r\\n* user has Issues-only access to the source repository;\\r\\n* user does not have Code access to the source repository;\\r\\n* user has Code write access to the target repository;\\r\\n* known LFS object exists in the source repository;\\r\\n* object reuse must be rejected unless the user has Code access to the source repository.\\r\\n\\r\\n## Suggested Severity\\r\\n\\r\\nSuggested severity: Medium to High.\\r\\n\\r\\nThe severity depends on whether the associated LFS object becomes downloadable through the target repository after reuse.\\r\\n\\r\\nIf the object becomes downloadable through the target repository, the issue should be considered High because it can lead to cross-repository Git LFS content disclosure.\\r\\n\\r\\nSuggested CVSS v3.1 if content disclosure is confirmed:\\r\\n\\r\\n```text\\r\\nCVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N\\r\\n```\\r\\n\\r\\nRationale:\\r\\n\\r\\n* network reachable through Git LFS endpoints;\\r\\n* requires authentication;\\r\\n* requires knowledge of the LFS object OID and size;\\r\\n* no user interaction required;\\r\\n* breaks repository-level authorization expectations;\\r\\n* primary impact is confidentiality of private Git LFS content;\\r\\n* limited integrity impact through unauthorized LFS metadata association in the target repository.\\r\\n\\r\\n## Evidence\\r\\n\\r\\nI can provide the local regression test and passing test log privately if needed.\\r\\n\", \"ghsa_id\": \"GHSA-2m9v-5q2g-58vq\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-2m9v-5q2g-58vq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2m9v-5q2g-58vq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-28740\"}], \"private_fork\": null, \"published_at\": \"2026-06-21T17:38:16Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Git LFS object reuse allows non-Code access to authorize private source objects\", \"updated_at\": \"2026-06-21T17:38:16Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-2m9v-5q2g-58vq\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"gitea.dev\"}, \"patched_versions\": \"1.26.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<=1.26.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-2m9v-5q2g-58vq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitea.dev: <=1.26.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-28740"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [
+      "gitea.dev: 1.26.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "gitea.dev"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.604420Z",
+  "provenance": {
+    "content_sha256": "847cce170329df360a014d9ce14ca42b2933dd1a888f21402bb42238805dd6dd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-21T17:38:16Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-2m9v-5q2g-58vq",
+  "status": "active",
+  "title": "Git LFS object reuse allows non-Code access to authorize private source objects",
+  "updated_at": "2026-06-21T17:38:16Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-2m9v-5q2g-58vq"
+}

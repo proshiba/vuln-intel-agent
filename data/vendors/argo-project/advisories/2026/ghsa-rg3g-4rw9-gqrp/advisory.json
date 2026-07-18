@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-45737\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-200\", \"CWE-212\"], \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-212\", \"name\": \"Improper Removal of Sensitive Information Before Storage or Transfer\"}], \"description\": \"### Summary\\r\\nThe original fix for [GHSA-3v3m-wc6v-x4x3](https://github.com/argoproj/argo-cd/security/advisories/GHSA-3v3m-wc6v-x4x3) is incomplete. argocd app diff --server-side-diff can still expose Kubernetes Secret values embedded in the kubectl.kubernetes.io/last-applied-configuration annotation.\\r\\n\\r\\nThe prior fix masks top-level Secret data in ServerSideDiff responses, but it does not fully sanitize Secret data stored inside the last-applied-configuration annotation. If a Secret was previously created or updated using client-side apply, that annotation may contain raw data, stringData, and sensitive annotations. These values can be shown in UI/CLI diffs.\\r\\n\\r\\n### Details\\r\\nThe ServerSideDiff endpoint returns ResourceDiff.TargetState / LiveState based on server-side dry-run output. Kubernetes server-side dry-run can return a full predicted live Secret object that carries forward existing live annotations, including:\\r\\n\\r\\nkubectl.kubernetes.io/last-applied-configuration\\r\\nFor Secrets created with client-side apply, that annotation can contain a JSON-serialized Secret manifest with sensitive values.\\r\\n\\r\\nThe masking path calls HideSecretData(target, live, ...). However, HideSecretData only rewrites the last-applied annotation on the second argument (live). In server-side diff, the first argument can be predictedLive, not a clean Git target. predictedLive can also contain kubectl.kubernetes.io/last-applied-configuration, so the first object’s embedded annotation can remain unmasked.\\r\\n\\r\\n### PoC\\r\\nCreate an app containing this Secret manifest:\\r\\n```yaml\\r\\napiVersion: v1\\r\\nkind: Namespace\\r\\nmetadata:\\r\\n  name: last-applied-secret-repro\\r\\n---\\r\\napiVersion: v1\\r\\nkind: Secret\\r\\nmetadata:\\r\\n  name: secret\\r\\n  namespace: last-applied-secret-repro\\r\\n  annotations:\\r\\n    app: test\\r\\n    token: SECRETVAL\\r\\ntype: Opaque\\r\\ndata:\\r\\n  password: U0VDUkVUVkFM\\r\\n  username: U0VDUkVUVkFM\\r\\n```\\r\\nCreate and Sync Argo App\\r\\n```yaml\\r\\napiVersion: argoproj.io/v1alpha1\\r\\nkind: Application\\r\\nmetadata:\\r\\n  name: last-applied-secret-repro\\r\\n  namespace: argocd\\r\\n  annotations:\\r\\n    argocd.argoproj.io/compare-options: ServerSideDiff=true,IncludeMutationWebhook=true\\r\\nspec:\\r\\n  project: default\\r\\n  destination:\\r\\n    server: https://kubernetes.default.svc\\r\\n    namespace: last-applied-secret-repro\\r\\n  source:\\r\\n    repoURL: https://github.com/YOUR_ORG/YOUR_REPO.git\\r\\n    targetRevision: HEAD\\r\\n    path: last-applied-secret-repro\\r\\n  syncPolicy:\\r\\n    automated:\\r\\n      prune: true\\r\\n      selfHeal: true\\r\\n    syncOptions:\\r\\n      - CreateNamespace=true\\r\\n      - ServerSideApply=true\\r\\n```\\r\\nRun argo cd app diff\\r\\n`argocd app diff last-applied-secret-repro --server-side-diff --exit-code=false`\\r\\n```\\r\\n❯ argocd app diff last-applied-secret-repro --server-side-diff --exit-code=false\\r\\n\\r\\n===== /Secret last-applied-secret-repro/secret ======\\r\\n10c10,11\\r\\n<     kubectl.kubernetes.io/last-applied-configuration: '{\\\"apiVersion\\\":\\\"v1\\\",\\\"data\\\":{\\\"password\\\":\\\"++++++++\\\",\\\"username\\\":\\\"++++++++\\\"},\\\"kind\\\":\\\"Secret\\\",\\\"metadata\\\":{\\\"annotations\\\":{\\\"app\\\":\\\"test\\\",\\\"argocd.argoproj.io/tracking-id\\\":\\\"last-applied-secret-repro:/Secret:last-applied-secret-repro/secret\\\",\\\"token\\\":\\\"SECRETVAL\\\"},\\\"name\\\":\\\"secret\\\",\\\"namespace\\\":\\\"last-applied-secret-repro\\\"},\\\"type\\\":\\\"Opaque\\\"}'\\r\\n---\\r\\n>     kubectl.kubernetes.io/last-applied-configuration: |\\r\\n>       {\\\"apiVersion\\\":\\\"v1\\\",\\\"data\\\":{\\\"password\\\":\\\"U0VDUkVUVkFM\\\",\\\"username\\\":\\\"U0VDUkVUVkFM\\\"},\\\"kind\\\":\\\"Secret\\\",\\\"metadata\\\":{\\\"annotations\\\":{\\\"app\\\":\\\"test\\\",\\\"argocd.argoproj.io/tracking-id\\\":\\\"last-applied-secret-repro:/Secret:last-applied-secret-repro/secret\\\",\\\"token\\\":\\\"SECRETVAL\\\"},\\\"name\\\":\\\"secret\\\",\\\"namespace\\\":\\\"last-applied-secret-repro\\\"},\\\"type\\\":\\\"Opaque\\\"}\\r\\n```\\r\\nWe can see secret value inside the diff\\r\\n\\r\\n### Impact\\r\\nAuthenticated Argo CD users who can view application diffs may be able to read Secret values that should be masked.\\r\\n\\r\\nImpacted values include:\\r\\nSecret data embedded in kubectl.kubernetes.io/last-applied-configuration\\r\\n\", \"ghsa_id\": \"GHSA-rg3g-4rw9-gqrp\", \"html_url\": \"https://github.com/argoproj/argo-cd/security/advisories/GHSA-rg3g-4rw9-gqrp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rg3g-4rw9-gqrp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45737\"}], \"private_fork\": null, \"published_at\": \"2026-05-13T17:57:01Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/350466?v=4\", \"events_url\": \"https://api.github.com/users/crenshaw-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/crenshaw-dev/followers\", \"following_url\": \"https://api.github.com/users/crenshaw-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/crenshaw-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/crenshaw-dev\", \"id\": 350466, \"login\": \"crenshaw-dev\", \"node_id\": \"MDQ6VXNlcjM1MDQ2Ng==\", \"organizations_url\": \"https://api.github.com/users/crenshaw-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/crenshaw-dev/received_events\", \"repos_url\": \"https://api.github.com/users/crenshaw-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/crenshaw-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/crenshaw-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/crenshaw-dev\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Kubernetes Secret Extraction via ArgoCD ServerSideDiff via sensitive annotations\", \"updated_at\": \"2026-05-13T17:57:01Z\", \"url\": \"https://api.github.com/repos/argoproj/argo-cd/security-advisories/GHSA-rg3g-4rw9-gqrp\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/argoproj/argo-cd/v3\"}, \"patched_versions\": \"3.2.12, 3.3.10, 3.4.2\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"3.2.0 through 3.2.11, 3.3.9, and 3.4.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "argo-project:ghsa-rg3g-4rw9-gqrp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/argoproj/argo-cd/v3: 3.2.0 through 3.2.11, 3.3.9, and 3.4.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45737"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [
+      "github.com/argoproj/argo-cd/v3: 3.2.12, 3.3.10, 3.4.2"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/argoproj/argo-cd/v3"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:57.235456Z",
+  "provenance": {
+    "content_sha256": "b7fbb9e553e56407638c827909b8dd5eaa972a9bba148c5a1004a306bff8d950",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-13T17:57:01Z",
+  "schema_version": 1,
+  "source_id": "argo_cd_github",
+  "source_url": "https://github.com/argoproj/argo-cd/security/advisories/GHSA-rg3g-4rw9-gqrp",
+  "status": "active",
+  "title": "Kubernetes Secret Extraction via ArgoCD ServerSideDiff via sensitive annotations",
+  "updated_at": "2026-05-13T17:57:01Z",
+  "vendor": "Argo Project",
+  "vendor_advisory_id": "GHSA-rg3g-4rw9-gqrp"
+}

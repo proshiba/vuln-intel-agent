@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -44,6 +45,7 @@ class Pipeline:
 
     async def run(self, profile: Tier, since: datetime) -> RunManifest:
         FileSystemStorage.prepare_staging(self.repository_root, self.output_root)
+        self.storage.reset_advisory_cache()
         started = datetime.now(UTC)
         baseline = not any(
             (self.repository_root / "data" / "vendors").glob("*/advisories/*/*/advisory.json")
@@ -60,14 +62,23 @@ class Pipeline:
             if source.enabled and (profile == Tier.DAILY or source.tier == Tier.EDGE)
         ]
         results: dict[str, CollectionResult] = {}
-        states: dict[str, SourceState] = {}
-        for source in sorted(selected, key=lambda item: item.role != SourceRole.ENRICHMENT):
-            state = self.storage.load_state(source.id)
-            states[source.id] = state
+        ordered_sources = sorted(selected, key=lambda item: item.role != SourceRole.ENRICHMENT)
+        states = {source.id: self.storage.load_state(source.id) for source in ordered_sources}
+        semaphore = asyncio.Semaphore(6)
+        attempts = await asyncio.gather(
+            *(
+                self._collect_limited(source, states[source.id], since, semaphore)
+                for source in ordered_sources
+            )
+        )
+        for source, (result, error) in zip(ordered_sources, attempts, strict=True):
+            state = states[source.id]
             try:
-                result = await self._collect_with_fallbacks(source, state, since)
-                results[source.id] = result
+                if error is not None:
+                    raise error
+                assert result is not None
                 self._validate_volume(source, state, result)
+                results[source.id] = result
                 state.etag = result.etag or state.etag
                 state.last_modified = result.last_modified or state.last_modified
                 state.last_success_at = datetime.now(UTC)
@@ -161,6 +172,9 @@ class Pipeline:
                     )
                 )
             if parsed_count == 0:
+                if not selected_result.records and not selected_result.complete_snapshot:
+                    self.storage.write_state(states[source.id])
+                    continue
                 quarantine_path = self.storage.write_quarantine(
                     source.id,
                     {
@@ -181,8 +195,16 @@ class Pipeline:
                     )
                 )
                 continue
-            self._handle_missing(source, states[source.id], current_ids, manifest)
-            states[source.id].known_ids = sorted(current_ids)
+            if selected_result.complete_snapshot:
+                self._handle_missing(source, states[source.id], current_ids, manifest)
+                states[source.id].known_ids = sorted(set(current_ids))
+            else:
+                for present in current_ids:
+                    states[source.id].missing_counts.pop(present, None)
+                    states[source.id].first_missing_at.pop(present, None)
+                states[source.id].known_ids = sorted(
+                    set(states[source.id].known_ids) | set(current_ids)
+                )
             self.storage.write_state(states[source.id])
 
         self.storage.rebuild_indexes()
@@ -209,6 +231,19 @@ class Pipeline:
                 errors.append(f"{kind}: {exc}")
         raise CollectorError("; ".join(errors))
 
+    async def _collect_limited(
+        self,
+        source: SourceDefinition,
+        state: SourceState,
+        since: datetime,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[CollectionResult | None, Exception | None]:
+        async with semaphore:
+            try:
+                return await self._collect_with_fallbacks(source, state, since), None
+            except Exception as exc:
+                return None, exc
+
     @staticmethod
     def _validate_volume(
         source: SourceDefinition,
@@ -218,12 +253,16 @@ class Pipeline:
         if result.not_modified:
             return
         count = len(result.records)
+        if source.role == SourceRole.ADVISORY and count > 1000:
+            raise CollectorError(f"{source.id}: anomalous new item volume")
+        if not result.complete_snapshot:
+            return
         if count == 0:
             raise CollectorError(f"{source.id}: HTTP success with zero records")
         if state.item_count >= 20 and count <= state.item_count * 0.15:
             raise CollectorError(f"{source.id}: item count dropped by at least 85%")
         if source.role == SourceRole.ADVISORY and (
-            count > 1000 or (state.item_count and count > state.item_count * 10)
+            state.item_count and count > state.item_count * 10
         ):
             raise CollectorError(f"{source.id}: anomalous new item volume")
 

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"khoadb175\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/97925674?v=4\", \"events_url\": \"https://api.github.com/users/khoadb175/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/khoadb175/followers\", \"following_url\": \"https://api.github.com/users/khoadb175/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/khoadb175/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/khoadb175\", \"id\": 97925674, \"login\": \"khoadb175\", \"node_id\": \"U_kgDOBdY6Kg\", \"organizations_url\": \"https://api.github.com/users/khoadb175/orgs\", \"received_events_url\": \"https://api.github.com/users/khoadb175/received_events\", \"repos_url\": \"https://api.github.com/users/khoadb175/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/khoadb175/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/khoadb175/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/khoadb175\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55987\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-863\"], \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Description\\r\\n\\r\\nGitea's OAuth2 sign-in callback reactivates a deactivated user account (`IsActive=false`) when the user signs in through an authentication source that does not issue refresh tokens (notably GitHub, and any OIDC/OAuth2 source configured without `offline_access`). PR #38009 added a gate intended to reactivate users only when the OAuth2 auto-sync cron had disabled them, using \\\"the stored refresh token is empty\\\" as the signal. That signal is wrong: for sources that never issue refresh tokens, an empty refresh token is the normal state of every user, so the gate cannot distinguish a cron-disabled account from one an administrator deliberately deactivated. The next time the administrator-deactivated user signs in through the provider, Gitea sets `IsActive=true` and grants a full session, silently undoing the administrator's action. This is the exact behavior #38009 was written to prevent. (`ProhibitLogin`, the hard ban, is enforced separately and is not affected.)\\r\\n\\r\\nNo special privileges are required beyond being the deactivated user and being able to sign in through the source.\\r\\n\\r\\n### Root Cause\\r\\n\\r\\n`routers/web/auth/oauth.go` (the `handleOAuth2SignIn` reactivation gate):\\r\\n\\r\\n```go\\r\\nif !u.IsActive {\\r\\n    extLogin, hasExt, err := user_model.GetExternalLogin(ctx, authSource.ID, gothUser.UserID)\\r\\n    if err != nil { ctx.ServerError(\\\"GetExternalLogin\\\", err); return }\\r\\n    isDisabledByAutoSync := hasExt && extLogin.RefreshToken == \\\"\\\"   // wrong signal\\r\\n    if isDisabledByAutoSync {\\r\\n        opts.IsActive = optional.Some(true)                          // reactivates the account\\r\\n    }\\r\\n}\\r\\n```\\r\\n\\r\\nThe assumption that `RefreshToken == \\\"\\\"` is produced only by the auto-sync cron is false:\\r\\n\\r\\n- The cron's disable path is unreachable for sources without refresh tokens. `services/auth/source/oauth2/source_sync.go` returns early: `if !provider.RefreshTokenAvailable() { return ... }`, so it never disables (or touches the tokens of) such users.\\r\\n- The stored token is exactly what the provider returned, with no synthesizing: `services/externalaccount/user.go` stores `RefreshToken: gothUser.RefreshToken`. When the provider issues none, this is `\\\"\\\"` from the first login.\\r\\n- GitHub never issues a refresh token: `goth` hardcodes `func (p *Provider) RefreshTokenAvailable() bool { return false }` (`providers/github/github.go`). OIDC/OAuth2 without `offline_access` likewise store `\\\"\\\"`.\\r\\n\\r\\nSo for a GitHub (or no-refresh-token) source, `RefreshToken == \\\"\\\"` is the state of every user, including one an administrator deactivated, and the gate reactivates them.\\r\\n\\r\\n### Proof of Concept\\r\\n\\r\\nSetup:\\r\\n- A Gitea instance with a GitHub authentication source (Admin Panel -> Authentication Sources -> OAuth2 -> GitHub), or any OAuth2/OIDC source configured without `offline_access`.\\r\\n- Account V: a normal user who has signed in at least once through that source (an `external_login_user` row exists with empty `refresh_token`).\\r\\n\\r\\nSteps:\\r\\n1. As an administrator, open Admin Panel -> Users -> V and uncheck \\\"Activated\\\" (`is_active=false`). Confirm V's requests now bounce to the activation page.\\r\\n2. As V, sign in again via \\\"Sign in with GitHub\\\" and complete the provider flow.\\r\\n3. V lands in the application with a working session. `SELECT is_active FROM \\\"user\\\" WHERE lower_name='v';` now returns `true`.\\r\\n\\r\\nExpected (intended by #38009): V stays `is_active=false` and is routed to the activation page.\\r\\nActual: V is `is_active=true` with a full session — the administrator's deactivation is undone.\\r\\n\\r\\n```\\r\\n- GitHub user, ADMIN deactivated                 refreshToken=\\\"\\\"    -> REACTIVATED + session granted   <<< admin action undone\\r\\n- OIDC user w/ refresh token, ADMIN deactivated  refreshToken=\\\"...\\\" -> stays disabled  (control)\\r\\n- OIDC user, AUTO-SYNC cron disabled             refreshToken=\\\"\\\"    -> REACTIVATED (intended)\\r\\nRESULT: BYPASS CONFIRMED.\\r\\n```\\r\\n\\r\\nGitea's own regression test `TestOAuth2CallbackReactivationGating` (\\\"auto-sync-disabled user is reactivated\\\") sets `RefreshToken=\\\"\\\"` and asserts reactivation after a full OIDC callback — that state is identical to a GitHub-source user an administrator deactivated.\\r\\n\\r\\n### Impact\\r\\n\\r\\nAny Gitea instance using a GitHub authentication source (one of the most common) or an OIDC/OAuth2 source without refresh tokens, that relies on the \\\"Activated\\\" toggle to disable accounts, is affected. A deactivated user restores their own account to active and obtains a session, regaining whatever access the account had. Deactivation does not clear `IsAdmin`, so a deactivated administrator regains admin access. Bound: accounts disabled with \\\"Prohibit Login\\\" stay blocked; this defeats the `IsActive=false` deactivation only.\", \"ghsa_id\": \"GHSA-vrhc-jjfc-m3m3\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-vrhc-jjfc-m3m3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vrhc-jjfc-m3m3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55987\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:38:08Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"OAuth2 sign-in reactivates an administrator-deactivated account on auth sources without refresh tokens (incomplete fix of #38009)\", \"updated_at\": \"2026-07-13T17:38:08Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-vrhc-jjfc-m3m3\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-vrhc-jjfc-m3m3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55987"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:53.676381Z",
+  "provenance": {
+    "content_sha256": "834615ebc39b3424653b051f3d77a3655f3d542e3b8f56b1ebc62df58a66756a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:38:08Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-vrhc-jjfc-m3m3",
+  "status": "active",
+  "title": "OAuth2 sign-in reactivates an administrator-deactivated account on auth sources without refresh tokens (incomplete fix of #38009)",
+  "updated_at": "2026-07-13T17:38:08Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-vrhc-jjfc-m3m3"
+}

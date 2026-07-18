@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"de3erve\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/63722109?v=4\", \"events_url\": \"https://api.github.com/users/de3erve/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/de3erve/followers\", \"following_url\": \"https://api.github.com/users/de3erve/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/de3erve/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/de3erve\", \"id\": 63722109, \"login\": \"de3erve\", \"node_id\": \"MDQ6VXNlcjYzNzIyMTA5\", \"organizations_url\": \"https://api.github.com/users/de3erve/orgs\", \"received_events_url\": \"https://api.github.com/users/de3erve/received_events\", \"repos_url\": \"https://api.github.com/users/de3erve/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/de3erve/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/de3erve/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/de3erve\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58438\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\r\\nI found that Gitea's \\\"remove issue dependency\\\" action lets a user delete a cross-repository issue-dependency link - and force an attacker-authored comment onto the other issue - even when they have no read access to the repository that other issue belongs to. The \\\"add dependency\\\" action in the same file correctly checks this; \\\"remove\\\" doesn't.\\r\\n\\r\\n### Details\\r\\n`RemoveDependency` in `routers/web/repo/issue_dependency.go` takes a `removeDependencyID` form parameter identifying the other issue by its global numeric ID, and fetches it with `issues_model.GetIssueByID(ctx, depID)` - no repository or permission check at all. It then calls `issues_model.RemoveIssueDependency(ctx, ctx.Doer, issue, dep, depType)` (`models/issues/dependency.go`), which deletes the dependency join row and then writes a comment referencing the removal, attributed to the calling user, onto the dependency record.\\r\\n\\r\\nThe sibling function in the very same file, `AddDependency`, does this correctly when the two issues are in different repos (which `ALLOW_CROSS_REPOSITORY_DEPENDENCIES`, on by default, permits):\\r\\n\\r\\n```go\\r\\nif issue.RepoID != dep.RepoID {\\r\\n  if !setting.Service.AllowCrossRepositoryDependencies { ... }\\r\\n  depRepoPerm, err := access_model.GetDoerRepoPermission(ctx, dep.Repo, ctx.Doer)\\r\\n  if !depRepoPerm.CanReadIssuesOrPulls(dep.IsPull) {\\r\\n    return // you can't see this dependency\\r\\n  }\\r\\n}\\r\\n```\\r\\n\\r\\n`RemoveDependency` has no equivalent block at all - it goes straight from resolving `dep` by ID to deleting the link, regardless of which repo `dep` lives in or whether the caller can see it. I confirmed this same code is present in the current latest release, v1.26.4.\\r\\n\\r\\n### PoC\\r\\nPrerequisites: an account with write access to issues on some repo `ownerA/repoA`, and the global numeric issue ID of an issue in a private repo `repoB` that is (or was) legitimately dependency-linked to one of the attacker's issues in `repoA` (cross-repo dependencies are commonly used between related public/private repos, and `ALLOW_CROSS_REPOSITORY_DEPENDENCIES` defaults to enabled).\\r\\n\\r\\n```bash\\r\\ncurl -s -b \\\"gitea_session=$ATTACKER_SESSION_COOKIE\\\" -X POST \\\\\\r\\n  --data-urlencode \\\"removeDependencyID=<repoB_issue_global_id>\\\" \\\\\\r\\n  --data-urlencode \\\"dependencyType=blockedBy\\\" \\\\\\r\\n  \\\"https://TARGET_HOST/ownerA/repoA/issues/N/dependency/delete\\\"\\r\\n# Expected: the dependency link is deleted and a \\\"removed dependency\\\" comment\\r\\n# authored by the attacker is added to the repoB issue, even though the\\r\\n# attacker has no read access to repoB.\\r\\n```\\r\\n\\r\\n### Impact\\r\\nThis is a cross-repository IDOR / broken access control issue. An attacker can tamper with issue-tracking state (dependency relationships) and inject an attacker-authored comment into a private repository they cannot otherwise read or write to, crossing a trust boundary the \\\"add\\\" path explicitly enforces. Impact is bounded - it requires an existing dependency link and discloses no repository content - but it is a genuine unauthorized-write primitive across a private-repo boundary.\\r\\n\\r\\n### Fix\\r\\nAdd the same cross-repo permission check used in `AddDependency` (`access_model.GetDoerRepoPermission(ctx, dep.Repo, ctx.Doer).CanReadIssuesOrPulls(dep.IsPull)`) to `RemoveDependency` before allowing the deletion to proceed when `issue.RepoID != dep.RepoID`.\\r\\n\\r\\n**If possible, please apply for a CVE number when publishing. I would greatly appreciate it.**\\r\\n\", \"ghsa_id\": \"GHSA-xv9x-fj9g-vj6h\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-xv9x-fj9g-vj6h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xv9x-fj9g-vj6h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58438\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:27:39Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Cross-repository IDOR in issue-dependency removal lets an attacker tamper with and comment on private repos they cannot access\", \"updated_at\": \"2026-07-13T17:27:39Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-xv9x-fj9g-vj6h\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"gitea.dev\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-xv9x-fj9g-vj6h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitea.dev: <= 1.26.4"
+    ],
+    "cves": [
+      "CVE-2026-58438"
+    ],
+    "fixed_versions": [
+      "gitea.dev: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "gitea.dev"
+    ],
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.212644Z",
+  "provenance": {
+    "content_sha256": "5f8233ffb44f14d40ea8b9063b1e6a0da53cc0a095279ab0e5ad84b36f554371",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:27:39Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-xv9x-fj9g-vj6h",
+  "status": "active",
+  "title": "Cross-repository IDOR in issue-dependency removal lets an attacker tamper with and comment on private repos they cannot access",
+  "updated_at": "2026-07-13T17:27:39Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-xv9x-fj9g-vj6h"
+}

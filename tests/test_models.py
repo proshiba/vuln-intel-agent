@@ -39,3 +39,17 @@ def test_draft_normalizes_cves_and_validates_cvss() -> None:
             cves=["not-a-cve"],
             raw_sha256="short",
         )
+
+    for unsafe_url in (
+        "https://security.example.com/>malformed",
+        "https://security.example.com/bad|column",
+        "https://security.example.com/trailing\\",
+    ):
+        with pytest.raises(ValidationError):
+            AdvisoryDraft(
+                source_id="example",
+                vendor="Example",
+                title="Example",
+                source_url=unsafe_url,
+                raw_sha256="a" * 64,
+            )

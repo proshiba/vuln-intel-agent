@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-918\"], \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\r\\n\\r\\nThe OAuth profile picture synchronization feature in Immich is vulnerable to Server-Side Request Forgery (SSRF). When a user authenticates via OIDC/OAuth, the `profile.picture` URL from the identity provider's userinfo response is fetched server-side without any URL validation or IP filtering.\\r\\n\\r\\n## Vulnerable Code\\r\\n\\r\\n**`server/src/repositories/oauth.repository.ts` line 96-106:**\\r\\n```typescript\\r\\nasync getProfilePicture(url: string) {\\r\\n  const response = await fetch(url);  // No validation\\r\\n  if (!response.ok) {\\r\\n    throw new Error(`Failed to fetch picture: ${response.statusText}`);\\r\\n  }\\r\\n  return {\\r\\n    data: await response.arrayBuffer(),\\r\\n    contentType: response.headers.get('content-type'),\\r\\n  };\\r\\n}\\r\\n```\\r\\n\\r\\n**Called from `server/src/services/auth.service.ts` line 334-335:**\\r\\n```typescript\\r\\nif (!user.profileImagePath && profile.picture) {\\r\\n  await this.syncProfilePicture(user, profile.picture);\\r\\n}\\r\\n```\\r\\n\\r\\nThe `profile.picture` value comes from the OIDC provider's UserInfoResponse. Many identity providers (Keycloak, Authentik, Authelia, etc.) allow users to set arbitrary profile picture URLs.\\r\\n\\r\\n## Attack Scenario\\r\\n\\r\\n1. Attacker registers on the configured OIDC provider and sets their profile picture URL to `http://169.254.169.254/latest/meta-data/iam/security-credentials/` (AWS metadata) or `http://10.0.0.1:8080/admin` (internal service)\\r\\n2. Attacker authenticates to Immich via OAuth\\r\\n3. Immich server fetches the attacker-controlled URL at `oauth.repository.ts:97`\\r\\n4. Response data (including cloud credentials or internal service responses) is written to disk as a profile image file\\r\\n\\r\\n## Impact\\r\\n\\r\\n- **Cloud metadata theft**: Access AWS/GCP/Azure instance metadata endpoints to steal IAM credentials, service account tokens\\r\\n- **Internal network scanning**: Probe internal services on private IP ranges (10.x, 172.16.x, 192.168.x)\\r\\n- **Information disclosure**: Read responses from internal APIs, databases, admin panels\\r\\n- **No authentication bypass needed**: The attacker authenticates normally via the configured OIDC provider\\r\\n\\r\\n## Missing Protections\\r\\n\\r\\n- No URL scheme validation (allows `file://`, `gopher://`)\\r\\n- No IP address filtering against private/reserved ranges\\r\\n- No DNS rebinding protection\\r\\n- No redirect following limits\\r\\n- No request timeout\\r\\n- No `request-filtering-agent` or equivalent SSRF guard anywhere in the codebase\\r\\n\\r\\n## Remediation\\r\\n\\r\\nValidate the URL before fetching:\\r\\n1. Restrict to `https://` scheme only\\r\\n2. Resolve the hostname and check the IP against private/reserved ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, fd00::/8)\\r\\n3. Use a library like `ssrf-req-filter` or `request-filtering-agent` to enforce these checks\\r\\n4. Add a timeout to the fetch request\\r\\n5. Optionally allowlist image content types in the response\", \"ghsa_id\": \"GHSA-hq46-gw2v-q86p\", \"html_url\": \"https://github.com/immich-app/immich/security/advisories/GHSA-hq46-gw2v-q86p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hq46-gw2v-q86p\"}], \"private_fork\": null, \"published_at\": \"2026-07-06T09:50:44Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11602424?v=4\", \"events_url\": \"https://api.github.com/users/bo0tzz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bo0tzz/followers\", \"following_url\": \"https://api.github.com/users/bo0tzz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bo0tzz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bo0tzz\", \"id\": 11602424, \"login\": \"bo0tzz\", \"node_id\": \"MDQ6VXNlcjExNjAyNDI0\", \"organizations_url\": \"https://api.github.com/users/bo0tzz/orgs\", \"received_events_url\": \"https://api.github.com/users/bo0tzz/received_events\", \"repos_url\": \"https://api.github.com/users/bo0tzz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bo0tzz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bo0tzz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bo0tzz\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"SSRF via OAuth Profile Picture URL (CWE-918)\", \"updated_at\": \"2026-07-06T09:50:44Z\", \"url\": \"https://api.github.com/repos/immich-app/immich/security-advisories/GHSA-hq46-gw2v-q86p\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"@immich/server\"}, \"patched_versions\": \"v3.0.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.129.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "immich:ghsa-hq46-gw2v-q86p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@immich/server: <= 1.129.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 4.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N",
+    "fixed_versions": [
+      "@immich/server: v3.0.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "@immich/server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:58.151524Z",
+  "provenance": {
+    "content_sha256": "6152ca5784856675bf2de1b6649039a6c9566969c683b2b4450b880e32858964",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T09:50:44Z",
+  "schema_version": 1,
+  "source_id": "immich_github",
+  "source_url": "https://github.com/immich-app/immich/security/advisories/GHSA-hq46-gw2v-q86p",
+  "status": "active",
+  "title": "SSRF via OAuth Profile Picture URL (CWE-918)",
+  "updated_at": "2026-07-06T09:50:44Z",
+  "vendor": "Immich",
+  "vendor_advisory_id": "GHSA-hq46-gw2v-q86p"
+}

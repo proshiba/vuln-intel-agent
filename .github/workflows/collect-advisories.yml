@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       profile: ${{ steps.parameters.outputs.profile }}
     steps:
@@ -46,6 +47,40 @@ jobs:
           cache: pip
       - name: Install collector
         run: python -m pip install --editable .
+      - name: Restore unpublished generated artifacts
+        env:
+          BOT_BRANCH: bot/vulnerability-updates
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          open_prs=$(gh pr list --head "$BOT_BRANCH" --base "$DEFAULT_BRANCH" --state open \
+            --json number,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository == false)] | length')
+          if [ "$open_prs" -eq 0 ]; then
+            exit 0
+          fi
+          if ! git ls-remote --exit-code --heads origin "refs/heads/$BOT_BRANCH" >/dev/null 2>&1; then
+            exit 0
+          fi
+          git fetch --depth=1 origin "refs/heads/$BOT_BRANCH"
+          for required in data reports state run-manifest.json run-summary.md; do
+            if ! git cat-file -e "FETCH_HEAD:$required" 2>/dev/null; then
+              exit 0
+            fi
+          done
+          baseline=$(mktemp -d)
+          paths=(data reports state run-manifest.json run-summary.md)
+          if git cat-file -e FETCH_HEAD:quarantine 2>/dev/null; then
+            paths+=(quarantine)
+          fi
+          git archive FETCH_HEAD "${paths[@]}" | tar -x -C "$baseline"
+          if ! vulnwatch validate --root "$baseline"; then
+            echo "::warning::Ignoring an incompatible unpublished artifact baseline"
+            rm -rf "$baseline"
+            exit 0
+          fi
+          vulnwatch publish --root "$baseline" --repository .
+          rm -rf "$baseline"
       - name: Resolve collection parameters
         id: parameters
         env:
@@ -68,7 +103,13 @@ jobs:
         env:
           PROFILE: ${{ steps.parameters.outputs.profile }}
           SINCE: ${{ steps.parameters.outputs.since }}
-        run: vulnwatch collect --profile "$PROFILE" --since "$SINCE" --output staging
+          GH_TOKEN: ${{ secrets.VULNWATCH_GITHUB_TOKEN }}
+        run: |
+          if [ "$PROFILE" = "daily" ] && [ -z "$GH_TOKEN" ]; then
+            echo "::error::VULNWATCH_GITHUB_TOKEN is required for all 80 sources"
+            exit 1
+          fi
+          vulnwatch collect --profile "$PROFILE" --since "$SINCE" --output staging
       - name: Upload collected JSON
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -100,11 +141,16 @@ jobs:
         with:
           name: collected-advisories
           path: staging
-      - name: Generate optional AI summaries
+      - name: Generate AI summaries
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-        run: vulnwatch summarize --root staging
+        run: |
+          if [ -z "$OPENAI_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::error::OPENAI_API_KEY and LLM_MODEL are required for daily report summaries"
+            exit 1
+          fi
+          vulnwatch summarize --root staging
       - name: Generate daily report
         run: vulnwatch report --root staging
       - name: Upload publish tree
@@ -134,7 +180,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install validator
-        run: python -m pip install --editable .
+        # Keep the workflow revision installed even after switching the worktree to the base branch.
+        run: python -m pip install .
       - name: Download publish tree
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -142,13 +189,7 @@ jobs:
           path: staging
       - name: Validate generated tree
         run: vulnwatch validate --root staging
-      - name: Detect publishable changes
-        id: changes
-        run: |
-          count=$(jq '[.changes[] | select(.status != "unchanged")] | length' staging/run-manifest.json)
-          echo "count=$count" >> "$GITHUB_OUTPUT"
       - name: Update bot branch
-        if: steps.changes.outputs.count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -157,19 +198,9 @@ jobs:
           branch=bot/vulnerability-updates
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git checkout -B "$branch"
-          rm -rf data reports state quarantine
-          if [ -d staging/data/vendors ]; then
-            while IFS= read -r index; do
-              target="${index#staging/}"
-              mkdir -p "$(dirname "$target")"
-              cp "$index" "$target"
-            done < <(find staging/data/vendors -name index.json -type f -print)
-          fi
-          if [ -d staging/reports ]; then
-            cp -a staging/reports reports
-          fi
-          git add -A -- data reports state quarantine
+          git checkout -B "$branch" "origin/$DEFAULT_BRANCH"
+          vulnwatch publish --root staging --repository .
+          git add -A -- data reports state quarantine run-manifest.json run-summary.md
           if git diff --cached --quiet; then
             exit 0
           fi

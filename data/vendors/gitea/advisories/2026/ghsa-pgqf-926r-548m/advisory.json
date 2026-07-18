@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"CassianStarck\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/109820030?v=4\", \"events_url\": \"https://api.github.com/users/CassianStarck/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CassianStarck/followers\", \"following_url\": \"https://api.github.com/users/CassianStarck/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CassianStarck/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CassianStarck\", \"id\": 109820030, \"login\": \"CassianStarck\", \"node_id\": \"U_kgDOBou4fg\", \"organizations_url\": \"https://api.github.com/users/CassianStarck/orgs\", \"received_events_url\": \"https://api.github.com/users/CassianStarck/received_events\", \"repos_url\": \"https://api.github.com/users/CassianStarck/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CassianStarck/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CassianStarck/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CassianStarck\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58445\", \"cvss\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-203\", \"CWE-639\"], \"cwes\": [{\"cwe_id\": \"CWE-203\", \"name\": \"Observable Discrepancy\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\r\\n\\r\\nThe API endpoint `DELETE /repos/{owner}/{repo}/issues/{index}/labels/{id}` loads the label by ID with a **global,\\r\\nunscoped** lookup and never verifies the label belongs to the URL's repository (or its owning organization). Because\\r\\nthe response status differs by whether the label ID exists **anywhere on the instance** (204) versus not (422), an\\r\\nauthenticated user can use the endpoint as a **cross-repository label-ID existence / enumeration oracle**, including\\r\\nfor labels in repositories and organizations they cannot access.\\r\\n\\r\\n## Severity\\r\\n\\r\\n- The leaked information is minimal (existence/count of label IDs instance-wide); **no label name, color, or owning\\r\\n  repository is disclosed, and no cross-repository write occurs.**\\r\\n\\r\\n## Affected / patched versions\\r\\n\\r\\n- **Affected:** through **1.26.3** (latest at time of report).\\r\\n- **Patched:** none yet.\\r\\n\\r\\n## Details\\r\\n\\r\\n`DeleteIssueLabel` resolves the label with a global loader and never checks its scope:\\r\\n\\r\\n```go\\r\\n// routers/api/v1/repo/issue_label.go  (DeleteIssueLabel)\\r\\nlabel, err := issues_model.GetLabelByID(ctx, ctx.PathParamInt64(\\\"id\\\"))   // global, unscoped\\r\\n```\\r\\n\\r\\n`GetLabelByID` (`models/issues/label.go`) is `e.ID(labelID).Get(l)` with **no** `repo_id` / `org_id` filter. The\\r\\nhandler never verifies `label.RepoID == ctx.Repo.Repository.ID` (nor the org-label equivalent), and the downstream\\r\\n`issue_service.RemoveLabel` (`services/issue/label.go`) only re-checks the doer's write permission on the **issue's\\r\\nown** repository — never that the label belongs to it.\\r\\n\\r\\nEvery sibling label handler is correctly scoped — `GetLabel` / `EditLabel` / `DeleteLabel` (repo and org) use\\r\\n`GetLabelInRepoByID` / `GetLabelInOrgByID` and return 404 for a foreign ID. `DeleteIssueLabel` is the only outlier.\\r\\n\\r\\n**Why it is only an oracle:** `deleteIssueLabel` (`models/issues/issue_label.go`) deletes the `issue_label` row keyed\\r\\nby `(issue.ID, label.ID)`. For a foreign label, no such row exists → the function returns early **before** any\\r\\nmutation or comment creation. So there is no cross-repo write and no leak of the label's name. But the HTTP status\\r\\ndiffers:\\r\\n\\r\\n- label ID exists anywhere on the instance (incl. private repos/orgs) → **204 No Content**\\r\\n- label ID does not exist → **422** (`ErrLabelNotExist`)\\r\\n\\r\\nLabel IDs are sequential auto-increment, so this enumerates the instance-wide label population and probes existence\\r\\nof specific IDs across tenant boundaries.\\r\\n\\r\\n## Proof of Concept\\r\\n\\r\\nVerified end-to-end on a build of the `v1.26.3` tag.\\r\\n\\r\\n- `alice` (private repo `alice/secret`) creates a label → internal id **1**.\\r\\n- Attacker `bob` (separate user; public repo `bob/pub` with issue #1; **no access** to `alice/secret`) holds a token\\r\\n  with `write:issue` on his own repo.\\r\\n\\r\\n```text\\r\\nbob DELETE /api/v1/repos/bob/pub/issues/1/labels/1          -> HTTP 204   (alice's PRIVATE label id exists)\\r\\nbob DELETE /api/v1/repos/bob/pub/issues/1/labels/99999999   -> HTTP 422   (no such label)\\r\\n```\\r\\n\\r\\nDiffering only by the label ID: `204` vs `422` distinguishes \\\"label ID exists\\\" from \\\"does not exist.\\\" `bob` has zero rights to `alice/secret` but can still learn label id 1 exists. (Alice's label is untouched — no write.)\\r\\n\\r\\nReproduction steps:\\r\\n1. Create two users `alice`, `bob`. As `alice`, create a private repo and a label on it (note the label `id` from\\r\\n   the API response).\\r\\n2. As `bob`, create any repo with an issue, and a token with `write:issue`.\\r\\n3. `curl -u bob:$T -X DELETE https://<gitea>/api/v1/repos/bob/pub/issues/1/labels/<alice_label_id>` → **204**.\\r\\n4. `curl -u bob:$T -X DELETE https://<gitea>/api/v1/repos/bob/pub/issues/1/labels/99999999` → **422**.\\r\\n5. The differing status across an ID `bob` cannot otherwise see is the oracle.\\r\\n\\r\\n## Impact\\r\\n\\r\\nCross-tenant authorization-key bypass producing a label-ID existence/enumeration oracle: an authenticated user can\\r\\ndetermine whether arbitrary label IDs (including in private repositories and organizations they cannot access) exist,\\r\\nand enumerate the instance-wide label population.\\r\\n\\r\\n## Remediation\\r\\n\\r\\nScope the loader like every sibling handler, returning 404 for a label that is not in the URL repository (or its\\r\\nowning organization), so the status no longer distinguishes existence:\\r\\n\\r\\n```go\\r\\n// routers/api/v1/repo/issue_label.go — in DeleteIssueLabel, after loading the label\\r\\nif label.RepoID != ctx.Repo.Repository.ID && label.OrgID != ctx.Repo.Repository.OwnerID {\\r\\n    ctx.APIErrorNotFound()\\r\\n    return\\r\\n}\\r\\n```\\r\\n\\r\\n(Equivalently, resolve via `GetLabelInRepoByID` and, for org repositories, also accept the repo owner's org labels —\\r\\nmirroring the scoping in `GetLabel`/`EditLabel`/`DeleteLabel`.)\", \"ghsa_id\": \"GHSA-pgqf-926r-548m\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-pgqf-926r-548m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pgqf-926r-548m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58445\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:30:31Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"low\", \"state\": \"published\", \"submission\": null, \"summary\": \"Cross-repository label-ID enumeration oracle via unscoped DeleteIssueLabel API\", \"updated_at\": \"2026-07-13T17:30:31Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-pgqf-926r-548m\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<=1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-pgqf-926r-548m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <=1.26.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-58445"
+    ],
+    "cvss_score": 2.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.025967Z",
+  "provenance": {
+    "content_sha256": "6363908edc5ac01bf4b7e8d19f86f8b24d4053b742fb90c48f565156e6bec783",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:30:31Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-pgqf-926r-548m",
+  "status": "active",
+  "title": "Cross-repository label-ID enumeration oracle via unscoped DeleteIssueLabel API",
+  "updated_at": "2026-07-13T17:30:31Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-pgqf-926r-548m"
+}

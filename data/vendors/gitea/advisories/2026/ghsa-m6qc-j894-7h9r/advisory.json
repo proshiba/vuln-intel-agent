@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"de3erve\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/63722109?v=4\", \"events_url\": \"https://api.github.com/users/de3erve/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/de3erve/followers\", \"following_url\": \"https://api.github.com/users/de3erve/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/de3erve/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/de3erve\", \"id\": 63722109, \"login\": \"de3erve\", \"node_id\": \"MDQ6VXNlcjYzNzIyMTA5\", \"organizations_url\": \"https://api.github.com/users/de3erve/orgs\", \"received_events_url\": \"https://api.github.com/users/de3erve/received_events\", \"repos_url\": \"https://api.github.com/users/de3erve/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/de3erve/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/de3erve/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/de3erve\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58433\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\r\\nI found that Gitea's \\\"add repository to team\\\" API endpoint lets any ordinary team member grant their entire team access to a repository they personally have admin rights on, completely bypassing the organization's `RepoAdminChangeTeamAccess` setting - a setting whose entire purpose is to prevent exactly this. There's a second, equivalent endpoint for the same action that correctly enforces this setting, which is how I noticed the gap.\\r\\n\\r\\n### Details\\r\\n`PUT /api/v1/teams/{id}/repos/{owner}/{repo}` is implemented by `AddTeamRepository` in `routers/api/v1/org/team.go`. It's registered in `routers/api/v1/api.go` behind `reqTeamMembership()`, which - per its own doc comment \\\"user should be a team member, or a site admin\\\" - passes for any ordinary member of the team in question (verified via `IsTeamMember`), not just a team admin or org owner. Inside the handler, the only authorization check is:\\r\\n\\r\\n```go\\r\\nif access, err := access_model.AccessLevel(ctx, ctx.Doer, repo); err != nil {\\r\\n  ...\\r\\n} else if access < perm.AccessModeAdmin {\\r\\n  ctx.APIError(http.StatusForbidden, \\\"Must have admin-level access to the repository\\\")\\r\\n}\\r\\n```\\r\\n\\r\\nThis checks that the caller has admin access on the repo being attached - but says nothing about whether the org allows repo admins to attach teams in the first place. There's a dedicated setting for exactly that, `RepoAdminChangeTeamAccess` (default `false`, defined in `models/user/user.go`), and Gitea does enforce it - just not here. The other endpoint that links a team to a repo, `PUT /api/v1/repos/{owner}/{repo}/teams/{team}` (`changeRepoTeam` in `routers/api/v1/repo/teams.go`), does it correctly:\\r\\n\\r\\n```go\\r\\nif !ctx.Repo.Owner.RepoAdminChangeTeamAccess && !ctx.Repo.Permission.IsOwner() {\\r\\n  ctx.APIError(http.StatusForbidden, \\\"user is nor repo admin nor owner\\\")\\r\\n}\\r\\n```\\r\\n\\r\\nSo with the default setting, only the org owner can link a team to a repo through that endpoint - but through `AddTeamRepository`, anyone who is both a repo admin (a very common role to hand out to trusted external contributors on a single private repo) and an ordinary member of some other team can link that entire team to the repo, silently granting every current and future member of that team access to it. I confirmed this same code path is present in the current latest release, v1.26.4.\\r\\n\\r\\n### PoC\\r\\nPrerequisites: an account that (a) has Admin-level access on a target private repository `org/private-repo` - a level of access an org owner might hand to a trusted contributor for just that one repo - and (b) is an ordinary (non-admin) member of some team in the same org, say team ID 5. The org has `RepoAdminChangeTeamAccess` left at its default (`false`).\\r\\n\\r\\n```bash\\r\\ncurl -s -X PUT -H \\\"Authorization: token $ATTACKER_TOKEN\\\" \\\\\\r\\n  \\\"https://TARGET_HOST/api/v1/teams/5/repos/org/private-repo\\\"\\r\\n# Expected: HTTP 204 No Content - every current and future member of team 5\\r\\n# now has whatever access level team 5 grants (up to Write/Admin) to\\r\\n# org/private-repo, despite RepoAdminChangeTeamAccess being disabled.\\r\\n\\r\\n# Compare: the equivalent, correctly-guarded endpoint refuses the same actor:\\r\\ncurl -s -X PUT -H \\\"Authorization: token $ATTACKER_TOKEN\\\" \\\\\\r\\n  \\\"https://TARGET_HOST/api/v1/repos/org/private-repo/teams/some-team-name\\\"\\r\\n# Expected: HTTP 403 {\\\"message\\\":\\\"user is nor repo admin nor owner\\\"}\\r\\n```\\r\\n\\r\\n### Impact\\r\\nThis is a broken access control / privilege escalation issue. It lets a non-owner who holds admin rights on a single repository silently expand access to that repository to an entire team's worth of other users, bypassing an org-level control specifically designed to prevent that. On orgs that grant per-repo admin access to external contributors (a common pattern), this could expose private repository code and history to users the org owner never intended to grant access to.\\r\\n\\r\\n### Fix\\r\\n`AddTeamRepository` (and its `RemoveTeamRepository` counterpart, which likely has the same gap) should enforce the same check as `changeRepoTeam`: require `ctx.Org.Organization.RepoAdminChangeTeamAccess` or org-owner status before proceeding, instead of only checking the caller's access level on the target repo.\\r\\n\\r\\n**If possible, please apply for a CVE number when publishing. I would greatly appreciate it.**\\r\\n\", \"ghsa_id\": \"GHSA-m6qc-j894-7h9r\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-m6qc-j894-7h9r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m6qc-j894-7h9r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58433\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:27:13Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Team-repository linking endpoint bypasses the RepoAdminChangeTeamAccess organization setting\", \"updated_at\": \"2026-07-13T17:27:13Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-m6qc-j894-7h9r\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-m6qc-j894-7h9r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.4"
+    ],
+    "cves": [
+      "CVE-2026-58433"
+    ],
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.236234Z",
+  "provenance": {
+    "content_sha256": "ba4b4d772a2aac88fef1fbbcf702acaf7b13a9a5691cb1ed0e350f10d6fb994b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:27:13Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-m6qc-j894-7h9r",
+  "status": "active",
+  "title": "Team-repository linking endpoint bypasses the RepoAdminChangeTeamAccess organization setting",
+  "updated_at": "2026-07-13T17:27:13Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-m6qc-j894-7h9r"
+}

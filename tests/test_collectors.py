@@ -89,3 +89,80 @@ async def test_content_type_and_size_limits() -> None:
         await SafeHttpClient(_source(max_response_bytes=4)).fetch(
             "https://security.example.com/feed.json"
         )
+
+
+@respx.mock
+async def test_github_token_is_scoped_to_api_host_and_gh_token_has_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "preferred-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "fallback-token")
+    api_url = "https://api.github.com/repos/example/project/security-advisories"
+    source = _source(
+        advisory_url="https://github.com/example/project/security/advisories",
+        url=api_url,
+        allowed_hosts=["api.github.com", "github.com"],
+    )
+    api_route = respx.get(api_url).mock(
+        return_value=httpx.Response(200, json=[], headers={"content-type": "application/json"})
+    )
+    vendor_route = respx.get("https://security.example.com/feed.json").mock(
+        return_value=httpx.Response(200, json={}, headers={"content-type": "application/json"})
+    )
+
+    await SafeHttpClient(source).fetch(api_url)
+    await SafeHttpClient(_source()).fetch("https://security.example.com/feed.json")
+
+    assert api_route.calls[0].request.headers["authorization"] == "Bearer preferred-token"
+    assert "authorization" not in vendor_route.calls[0].request.headers
+
+
+@respx.mock
+async def test_github_token_falls_back_and_is_removed_on_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "   ")
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    api_url = "https://api.github.com/repos/example/project/security-advisories"
+    redirected_url = "https://github.com/example/project/security/advisories.json"
+    source = _source(
+        advisory_url="https://github.com/example/project/security/advisories",
+        url=api_url,
+        allowed_hosts=["api.github.com", "github.com"],
+    )
+    api_route = respx.get(api_url).mock(
+        return_value=httpx.Response(302, headers={"location": redirected_url})
+    )
+    redirected_route = respx.get(redirected_url).mock(
+        return_value=httpx.Response(200, json=[], headers={"content-type": "application/json"})
+    )
+
+    await SafeHttpClient(source).fetch(api_url)
+
+    assert api_route.calls[0].request.headers["authorization"] == "Bearer workflow-token"
+    assert "authorization" not in redirected_route.calls[0].request.headers
+
+
+@respx.mock
+async def test_github_rate_limit_error_does_not_expose_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "secret-value-that-must-not-leak"
+    monkeypatch.setenv("GH_TOKEN", token)
+    api_url = "https://api.github.com/repos/example/project/security-advisories"
+    source = _source(
+        advisory_url="https://github.com/example/project/security/advisories",
+        url=api_url,
+        allowed_hosts=["api.github.com", "github.com"],
+    )
+    respx.get(api_url).mock(
+        return_value=httpx.Response(
+            403,
+            headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"},
+        )
+    )
+
+    with pytest.raises(CollectorError, match="set GH_TOKEN or GITHUB_TOKEN") as caught:
+        await SafeHttpClient(source).fetch(api_url)
+
+    assert token not in str(caught.value)

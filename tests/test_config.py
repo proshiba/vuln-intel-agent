@@ -9,7 +9,7 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
     registry = load_sources()
     enabled = {source.id for source in registry.sources if source.enabled}
 
-    assert len(registry.sources) == 130
+    assert len(registry.sources) == 160
     assert enabled == {
         "cisco",
         "fortinet",
@@ -61,6 +61,36 @@ def test_registry_has_all_sources_and_expected_initial_set() -> None:
         "nuxt_github",
         "rails_github",
         "laravel_github",
+        "flask_github",
+        "express_github",
+        "fastapi_github",
+        "starlette_github",
+        "aiohttp_github",
+        "sveltekit_github",
+        "angular_github",
+        "werkzeug_github",
+        "jinja_github",
+        "urllib3_github",
+        "requests_github",
+        "cryptography_github",
+        "pillow_github",
+        "pydantic_github",
+        "scrapy_github",
+        "tornado_github",
+        "strapi_github",
+        "directus_github",
+        "payload_github",
+        "vite_github",
+        "webpack_github",
+        "pnpm_github",
+        "npm_cli_github",
+        "nestjs_github",
+        "koa_github",
+        "socketio_github",
+        "gofiber_github",
+        "echo_github",
+        "gorilla_websocket_github",
+        "rustls_github",
     }
     assert all(source.allowed_hosts for source in registry.sources if source.enabled)
     assert all(isinstance(source.products, list) for source in registry.sources)
@@ -72,6 +102,21 @@ def test_alternative_channels_are_separate_from_machine_feeds() -> None:
 
     assert "email" in zyxel.alternative_channels
     assert "email" not in zyxel.feed_formats
+
+
+def test_runtime_sources_use_bounded_machine_readable_channels() -> None:
+    registry = load_sources()
+    by_id = {source.id: source for source in registry.sources}
+
+    juniper = by_id["juniper_networks"]
+    assert juniper.collector == "feed"
+    assert juniper.url == "https://supportportal.juniper.net/knowledgerss?type=Security"
+    assert juniper.fallback_collectors == []
+
+    for source_id in ("microsoft", "red_hat", "suse"):
+        source = by_id[source_id]
+        assert source.max_index_items == 100_000
+        assert source.max_detail_fetches == 100
 
 
 def test_products_registry_starts_empty_and_contains_no_sensitive_fields() -> None:

@@ -21,7 +21,17 @@ def _normalize_cves(values: list[str]) -> list[str]:
 
 def _validate_https_url(value: str) -> str:
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname:
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or any(
+            character.isspace()
+            or ord(character) < 32
+            or ord(character) == 127
+            or character in "<>|\\"
+            for character in value
+        )
+    ):
         raise ValueError("URL must be an absolute HTTPS URL")
     return value
 
@@ -94,6 +104,7 @@ class SourceDefinition(StrictModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     max_response_bytes: int = Field(default=20_000_000, gt=0)
     max_items: int = Field(default=1000, gt=0, le=10_000)
+    max_index_items: int = Field(default=100_000, gt=0, le=1_000_000)
     max_detail_fetches: int = Field(default=100, ge=0, le=1000)
     parser: str | None = None
     detail_collector: CollectorKind | None = None
@@ -323,6 +334,7 @@ class CollectionResult(StrictModel):
     etag: str | None = None
     last_modified: str | None = None
     not_modified: bool = False
+    complete_snapshot: bool = True
 
 
 class ChangeRecord(StrictModel):

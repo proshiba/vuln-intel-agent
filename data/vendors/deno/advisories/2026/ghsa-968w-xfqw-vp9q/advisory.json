@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-49406\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [], \"cwes\": [], \"description\": \"## Summary\\r\\n\\r\\nWhen Deno was run in BYONM mode (`nodeModulesDir: \\\"manual\\\"`), the module resolver did not validate that a package's resolved entrypoint stayed within its `node_modules/<pkg>/` directory. A malicious `package.json` whose `main` field contained `..` segments was able to resolve to an arbitrary path on disk, and the resolver then read that file without consulting the `--allow-read` allowlist. This let a `require(\\\"evil-pkg\\\")` call return the contents of a file that a direct `Deno.readTextFileSync(...)` call would have been blocked from reading.\\r\\n\\r\\n## Details\\r\\n\\r\\nIn BYONM mode, Deno resolved npm packages directly from a user-managed `node_modules` tree. Resolution of `require(\\\"pkg\\\")` proceeded by reading `pkg/package.json`, taking the `main` field, joining it to the package directory, and loading the result as a module.\\r\\n\\r\\nThe path joined from `main` was not constrained to the package root. A `package.json` such as:\\r\\n\\r\\n```json\\r\\n{ \\\"main\\\": \\\"../../../secret.json\\\" }\\r\\n```\\r\\n\\r\\nresolved to `node_modules/pkg/../../../secret.json`, escaping `node_modules` entirely. The BYONM permission check accepted any path that contained a `node_modules` component and did not reject `..` traversal, so the resolved path was loaded without a read-permission check.\\r\\n\\r\\nBecause resolution loaded JSON entrypoints by parsing their contents and returning them through `require`, this exposed the contents of arbitrary `.json` files reachable by the OS user to the requiring code, even when `--allow-read` had been narrowed to a specific directory.\\r\\n\\r\\nThe same file accessed via `Deno.readTextFileSync` was correctly blocked. The bug was that module resolution did not enforce the same read-permission boundary that the filesystem APIs enforced.\\r\\n\\r\\n## Proof of concept\\r\\n\\r\\nThe reporter supplied a self-contained PoC. Layout:\\r\\n\\r\\n```\\r\\n/tmp/deno_byonm_poc/\\r\\n├── app/\\r\\n│   ├── deno.json            (BYONM enabled)\\r\\n│   ├── exploit.ts           (require(\\\"evil-pkg\\\"))\\r\\n│   └── node_modules/\\r\\n│       └── evil-pkg/\\r\\n│           └── package.json (main: \\\"../../../secret.json\\\")\\r\\n└── secret.json              (outside --allow-read scope)\\r\\n```\\r\\n\\r\\nRun:\\r\\n\\r\\n```bash\\r\\ndeno run --no-prompt --allow-read=/tmp/deno_byonm_poc/app exploit.ts\\r\\n```\\r\\n\\r\\nObserved:\\r\\n\\r\\n- `Deno.readTextFileSync(\\\"/tmp/deno_byonm_poc/secret.json\\\")` — blocked, as\\r\\n  expected.\\r\\n- `require(\\\"evil-pkg\\\")` — returned the parsed contents of `secret.json`,\\r\\n  bypassing the read allowlist.\\r\\n\\r\\nA control run with BYONM disabled (`--no-config`) blocked the `require` call.\\r\\n\\r\\n## Impact\\r\\n\\r\\nThe vulnerability allowed a hostile npm package installed under a BYONM `node_modules` to read JSON files outside the directories granted via `--allow-read`, up to the privileges of the OS user running Deno. In practice this exposed configuration and credential files (`.env.json`, cloud credentials, package lockfiles, etc.) that the user had deliberately excluded from the read scope.\\r\\n\\r\\nThe vulnerability did not grant any capability beyond what the OS user already held, did not affect runs that granted unrestricted `--allow-read`, and required the user to have installed and then required a hostile package, i.e. an existing supply-chain compromise. The reason it warranted a security advisory rather than a routine bug fix is that Deno's permission model\\r\\npromised that `--allow-read=<scope>` was a hard boundary *even over untrusted npm code*, and that promise was broken.\\r\\n\\r\\nNot affected:\\r\\n\\r\\n- Runs without BYONM (default npm resolution went through a separate code\\r\\n  path that rejected the traversal).\\r\\n- Runs with full `--allow-read` (no boundary to bypass).\\r\\n- Non-JSON entrypoints, in practice — `.js`/`.cjs`/`.mjs` targets executed\\r\\n  rather than exposing file contents, which already implied attacker code\\r\\n  execution within the granted permission set.\\r\\n\\r\\n## Workarounds\\r\\n\\r\\nUsers on unpatched versions could mitigate by:\\r\\n\\r\\n- Avoiding BYONM mode (`nodeModulesDir: \\\"manual\\\"`) for projects that depended\\r\\n  on untrusted packages.\\r\\n- Auditing `package.json` `main` fields in `node_modules` for `..` segments\\r\\n  before running.\\r\\n- Granting `--allow-read` only when the read scope already covered every file\\r\\n  the OS user could see (in which case there was no boundary to bypass and no\\r\\n  additional exposure).\\r\\n\", \"ghsa_id\": \"GHSA-968w-xfqw-vp9q\", \"html_url\": \"https://github.com/denoland/deno/security/advisories/GHSA-968w-xfqw-vp9q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-968w-xfqw-vp9q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49406\"}], \"private_fork\": null, \"published_at\": \"2026-05-27T13:09:16Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/13602871?v=4\", \"events_url\": \"https://api.github.com/users/bartlomieju/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bartlomieju/followers\", \"following_url\": \"https://api.github.com/users/bartlomieju/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bartlomieju/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bartlomieju\", \"id\": 13602871, \"login\": \"bartlomieju\", \"node_id\": \"MDQ6VXNlcjEzNjAyODcx\", \"organizations_url\": \"https://api.github.com/users/bartlomieju/orgs\", \"received_events_url\": \"https://api.github.com/users/bartlomieju/received_events\", \"repos_url\": \"https://api.github.com/users/bartlomieju/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bartlomieju/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bartlomieju/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bartlomieju\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"BYONM module resolution allows `package.json` main path traversal to bypass `--allow-read` restrictions\", \"updated_at\": \"2026-05-30T04:02:31Z\", \"url\": \"https://api.github.com/repos/denoland/deno/security-advisories/GHSA-968w-xfqw-vp9q\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"\", \"name\": \"Deno\"}, \"patched_versions\": \"2.7.12\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<=2.7.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "deno:ghsa-968w-xfqw-vp9q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Deno: <=2.7.11"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-49406"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [
+      "Deno: 2.7.12"
+    ],
+    "mitigations": [],
+    "products": [
+      "Deno"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:58.913751Z",
+  "provenance": {
+    "content_sha256": "8bb8060183561780122b6f9e38e1ae49b57e984805f8fde5ced554fd3ca9ef16",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-27T13:09:16Z",
+  "schema_version": 1,
+  "source_id": "deno_github",
+  "source_url": "https://github.com/denoland/deno/security/advisories/GHSA-968w-xfqw-vp9q",
+  "status": "active",
+  "title": "BYONM module resolution allows `package.json` main path traversal to bypass `--allow-read` restrictions",
+  "updated_at": "2026-05-30T04:02:31Z",
+  "vendor": "Deno",
+  "vendor_advisory_id": "GHSA-968w-xfqw-vp9q"
+}

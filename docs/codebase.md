@@ -23,12 +23,12 @@ CISA KEV -----> exploitation enrichment -------------+
 `vulnwatch collect`は次の順番で処理します。
 
 1. 既存の公開データと状態をstagingへコピーする。
-2. profileと`enabled`設定から対象を選び、補強ソースを先に収集する。
+2. profileと`enabled`設定から対象を選び、最大6ソースを並行収集する。
 3. ETagとLast-Modifiedを利用して条件付き取得を行う。
 4. 取得結果をソース別パーサーで`AdvisoryDraft`へ変換する。
 5. CVE、製品、深刻度、修正版、悪用状況を`Advisory`へ正規化する。
 6. CISA KEVと製品台帳の一致結果を付加し、優先度を決定する。
-7. semantic hashを既存データと比較し、変更状態を判定する。
+7. 既存アドバイザリのメモリ索引を使い、semantic hashで変更状態を判定する。
 8. JSON、状態、索引、run manifest、run summaryをstagingへ出力する。
 
 ## モジュール
@@ -45,9 +45,9 @@ CISA KEV -----> exploitation enrichment -------------+
 | `priority.py` | 製品台帳との照合と優先度判定 |
 | `exploitation.py` | 明示表現から悪用・公開PoC状態を推定 |
 | `storage/filesystem.py` | atomic write、状態管理、索引再構築 |
-| `summarizers/` | 任意のOpenAI日本語要約と構造化出力検証 |
-| `report.py` | Markdown日次レポート生成 |
-| `validation.py` | 設定および生成ツリーの公開前検証 |
+| `summarizers/` | 個別・日次セクションのOpenAI日本語要約と構造化出力検証 |
+| `report.py` | AIサマリsidecarとMarkdown日次レポート生成 |
+| `validation.py` | 設定、生成ツリー、日次AIサマリの公開前検証 |
 
 ## データモデル
 
@@ -77,11 +77,14 @@ CISA KEV -----> exploitation enrichment -------------+
 ## 安全性と障害処理
 
 - HTTPSのみ許可し、redirect先を含めて`allowed_hosts`と照合する。
+- GitHub tokenは`api.github.com`へのrequestだけに付与し、redirect先へ転送しない。
 - response size、Content-Type、timeout、rate limit、redirect回数を制限する。
 - network error、HTTP 429、5xxを制限付きでretryする。
-- 取得件数0、85%以上の急減、異常増加を正常データとして公開しない。
+- 取得件数0と異常増加を拒否し、完全スナップショットでは85%以上の急減も拒否する。
 - 収集・parse失敗はソース単位で`quarantine`へ記録する。
 - withdrawn判定には3回以上かつ24時間以上の欠落を必要とする。
+- CSAFの上限制御とローリングfeedは部分取得として既知IDを和集合で保持し、未取得レコードを
+  withdrawn判定しない。
 - 一時ファイルと`os.replace()`を使ってatomicに更新する。
 - AI要約の失敗で収集全体を失敗させない。
 
@@ -92,12 +95,15 @@ data/vendors/<vendor>/index.json
 data/vendors/<vendor>/advisories/<year>/<id>/advisory.json
 state/sources/<source-id>.json
 reports/daily/<year>/<month>/<date>.md
+reports/daily/<year>/<month>/<date>.summary.json
 quarantine/<source-id>/latest.json
 run-manifest.json
 run-summary.md
 ```
 
-結果はstagingに生成し、検証成功後にGitHub Actionsのbot branchへ反映してPRにします。
+結果はstagingに生成し、検証成功後に`vulnwatch publish`で上記の全パスをリポジトリ直下へ
+同期します。GitHub Actionsは個別JSON、索引、状態、隔離データ、レポート、実行manifest/summaryを
+すべてbot branchへ反映してPRにします。重複する一時領域`staging/`だけはGit対象外です。
 
 ## ソース追加
 

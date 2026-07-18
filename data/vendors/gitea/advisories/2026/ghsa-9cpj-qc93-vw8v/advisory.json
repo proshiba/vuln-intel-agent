@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"yonatan-pl\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/214832030?v=4\", \"events_url\": \"https://api.github.com/users/yonatan-pl/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yonatan-pl/followers\", \"following_url\": \"https://api.github.com/users/yonatan-pl/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yonatan-pl/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yonatan-pl\", \"id\": 214832030, \"login\": \"yonatan-pl\", \"node_id\": \"U_kgDODM4Tng\", \"organizations_url\": \"https://api.github.com/users/yonatan-pl/orgs\", \"received_events_url\": \"https://api.github.com/users/yonatan-pl/received_events\", \"repos_url\": \"https://api.github.com/users/yonatan-pl/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yonatan-pl/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yonatan-pl/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yonatan-pl\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-28737\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [], \"cwes\": [], \"description\": \"## Summary\\r\\n\\r\\nMe again.\\r\\n\\r\\nGitea's built-in 3D file viewer (powered by Online3DViewer) is vulnerable to stored cross-site scripting (XSS) through crafted `.gltf` files. When a glTF file declares an unsupported required extension, Online3DViewer generates an error message containing the extension name and Gitea inserts it into the DOM using `innerHTML` without sanitization. An attacker who can push a `.gltf` file to any repository can execute arbitrary JavaScript in the context of any user who views the file.\\r\\n\\r\\n## Affected Versions\\r\\n\\r\\n- Gitea **1.25.0** and later (3D file preview was introduced in 1.25 via the Online3DViewer integration)\\r\\n- Confirmed on `gitea:1.25-nightly` (SHA `e33d1da...`), which bundles `online-3d-viewer` npm package v0.16.0\\r\\n- The upstream [Online3DViewer](https://github.com/kovacsv/Online3DViewer) library is the root cause\\r\\n\\r\\n## Severity\\r\\n\\r\\n- Stored XSS: the payload persists in the repository and fires on every page view\\r\\n- Executes under the Gitea origin with the victim's session (cookies, CSRF tokens)\\r\\n- Any authenticated user viewing the file is compromised\\r\\n- Enables full account takeover (token creation, settings modification, repository manipulation)\\r\\n- No user interaction beyond viewing the file page is required\\r\\n\\r\\n## Details\\r\\n\\r\\n### Root Cause\\r\\n\\r\\nWhen Online3DViewer parses a glTF file, it checks whether all `extensionsRequired` entries are supported. For unsupported extensions, it calls:\\r\\n\\r\\n```javascript\\r\\n// In the Online3DViewer bundle (online-3d-viewer.js)\\r\\n// Approximate offset 1142618 in the bundled chunk\\r\\nthis.SetError(yp(\\\"Unsupported extension: {0}.\\\", unsupportedExtensions.join(\\\", \\\")));\\r\\n```\\r\\n\\r\\nThe `SetError` method stores this message, and Gitea's rendering code inserts it into the page using `innerHTML`:\\r\\n\\r\\n```javascript\\r\\n// Gitea's error display handler\\r\\nelement.innerHTML = errorMessage;  // unsanitized\\r\\n```\\r\\n\\r\\nThe extension names from `extensionsRequired` are taken directly from the JSON file with no escaping or sanitization, allowing HTML injection.\\r\\n\\r\\n### Attack Vector\\r\\n\\r\\n1. An attacker creates a `.gltf` file with a malicious `extensionsRequired` value:\\r\\n\\r\\n```json\\r\\n{\\r\\n  \\\"asset\\\": {\\\"version\\\": \\\"2.0\\\"},\\r\\n  \\\"buffers\\\": [],\\r\\n  \\\"extensionsRequired\\\": [\\\"<img src=x onerror=\\\\\\\"alert(document.cookie)\\\\\\\">\\\"],\\r\\n  \\\"scenes\\\": []\\r\\n}\\r\\n```\\r\\n\\r\\n2. The attacker pushes this file to any Gitea repository they have write access to (including forks of public repositories).\\r\\n\\r\\n3. When any user navigates to the file's page in the Gitea web UI, the 3D viewer attempts to render it, encounters the \\\"unsupported extension,\\\" and inserts the error message (containing the attacker's HTML) into the DOM via `innerHTML`.\\r\\n\\r\\n4. The injected `<img onerror>` handler executes arbitrary JavaScript under the Gitea origin with the victim's authenticated session.\\r\\n\\r\\n### Impact\\r\\n\\r\\nFrom the XSS context, an attacker can:\\r\\n\\r\\n- **Create API access tokens** for the victim by POSTing to `/user/settings/applications` with the page's CSRF token\\r\\n- **Read private repositories** via same-origin API calls\\r\\n- **Modify repository contents** (supply chain attacks)\\r\\n- **Escalate to admin** if the victim is a Gitea administrator\\r\\n- **Exfiltrate data** via `fetch`, `XMLHttpRequest`, or `navigator.sendBeacon`\\r\\n\\r\\n## Proof of Concept\\r\\n\\r\\n### Minimal PoC (alert box)\\r\\n\\r\\nSave as `poc.gltf` and push to any Gitea 1.25+ repository:\\r\\n\\r\\n```json\\r\\n{\\r\\n  \\\"asset\\\": {\\\"version\\\": \\\"2.0\\\"},\\r\\n  \\\"buffers\\\": [],\\r\\n  \\\"extensionsRequired\\\": [\\\"<img src=x onerror=\\\\\\\"alert('XSS: '+document.domain)\\\\\\\">\\\"],\\r\\n  \\\"scenes\\\": []\\r\\n}\\r\\n```\\r\\n\\r\\nNavigate to the file in the Gitea web UI. The alert will fire.\\r\\n\\r\\n\\r\\n## Suggested Fixes\\r\\n\\r\\nSanitize or text-encode the error message before DOM insertion. Replace `innerHTML` with `textContent` for error display:\\r\\n\\r\\n```javascript\\r\\n// Instead of:\\r\\nelement.innerHTML = errorMessage;\\r\\n\\r\\n// Use:\\r\\nelement.textContent = errorMessage;\\r\\n```\\r\\n\\r\\nAlternatively, escape HTML entities in the error message before insertion.\\r\\n\\r\\n### Additional hardening\\r\\n\\r\\n- Render 3D file previews inside a sandboxed `<iframe>` with `sandbox=\\\"allow-scripts\\\"` and a restrictive CSP (`default-src 'none'`), similar to how Gitea already handles SVG attachments\\r\\n- Apply Content-Security-Policy headers to file preview pages that restrict inline script execution\\r\\n\", \"ghsa_id\": \"GHSA-9cpj-qc93-vw8v\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-9cpj-qc93-vw8v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9cpj-qc93-vw8v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-28737\"}], \"private_fork\": null, \"published_at\": \"2026-06-14T20:13:42Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/81045?v=4\", \"events_url\": \"https://api.github.com/users/lunny/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lunny/followers\", \"following_url\": \"https://api.github.com/users/lunny/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lunny/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lunny\", \"id\": 81045, \"login\": \"lunny\", \"node_id\": \"MDQ6VXNlcjgxMDQ1\", \"organizations_url\": \"https://api.github.com/users/lunny/orgs\", \"received_events_url\": \"https://api.github.com/users/lunny/received_events\", \"repos_url\": \"https://api.github.com/users/lunny/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lunny/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lunny/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lunny\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Stored XSS via glTF `extensionsRequired` in Gitea 3D File Viewer\", \"updated_at\": \"2026-06-14T20:13:42Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-9cpj-qc93-vw8v\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.26.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.25.0, < 1.26.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-9cpj-qc93-vw8v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: >= 1.25.0, < 1.26.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-28737"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.26.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.873776Z",
+  "provenance": {
+    "content_sha256": "f16d59edef84d8d07a2273a359518e8a62c7fb3217f5d37bf71800e671e06dc1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-14T20:13:42Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-9cpj-qc93-vw8v",
+  "status": "active",
+  "title": "Stored XSS via glTF `extensionsRequired` in Gitea 3D File Viewer",
+  "updated_at": "2026-06-14T20:13:42Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-9cpj-qc93-vw8v"
+}

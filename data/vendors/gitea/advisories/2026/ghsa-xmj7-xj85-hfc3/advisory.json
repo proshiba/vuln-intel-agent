@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"yoojoon2\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/84561249?v=4\", \"events_url\": \"https://api.github.com/users/yoojoon2/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yoojoon2/followers\", \"following_url\": \"https://api.github.com/users/yoojoon2/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yoojoon2/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yoojoon2\", \"id\": 84561249, \"login\": \"yoojoon2\", \"node_id\": \"MDQ6VXNlcjg0NTYxMjQ5\", \"organizations_url\": \"https://api.github.com/users/yoojoon2/orgs\", \"received_events_url\": \"https://api.github.com/users/yoojoon2/received_events\", \"repos_url\": \"https://api.github.com/users/yoojoon2/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yoojoon2/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yoojoon2/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yoojoon2\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58441\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-918\"], \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\r\\nGitea's `restore-repo` CLI command restores a repository from a dump\\r\\ndirectory/archive. When parsing `pull_request.yml` from that dump, the\\r\\n`Head.CloneURL` field is used to add a git remote and fetch from it with\\r\\nno validation, because the safety check that's supposed to guard it\\r\\n(`CheckAndEnsureSafePR`) is called with an empty `commonCloneBaseURL`,\\r\\nwhich silently disables it. This lets a malicious dump make the Gitea\\r\\nserver execute `git fetch` against an attacker-chosen URL (SSRF), or\\r\\ndisclose a local git repository via `file://`. This is a different root\\r\\ncause from the recently fixed path-traversal issue in the same command\\r\\n(#38215), which patched `DownloadURL`/`PatchURL` but not `Head.CloneURL`.\\r\\n\\r\\n### Details\\r\\n`services/migrations/restore.go`'s `GetPullRequests()` unmarshals\\r\\n`pull_request.yml` directly into `base.PullRequest` structs with no\\r\\nvalidation of `Head.CloneURL`:\\r\\n\\r\\n```go\\r\\nerr = yaml.Unmarshal(bs, &pulls)\\r\\n...\\r\\nfor _, pr := range pulls {\\r\\n    if pr.PatchURL != \\\"\\\" {\\r\\n        pr.PatchURL = \\\"file://\\\" + util.FilePathJoinAbs(r.baseDir, pr.PatchURL)\\r\\n    }\\r\\n    CheckAndEnsureSafePR(pr, \\\"\\\", r)   // <-- empty baseURL\\r\\n}\\r\\n```\\r\\n\\r\\n`CheckAndEnsureSafePR` (`services/migrations/common.go`) is supposed to\\r\\nreject `Head.CloneURL`/`PatchURL` values that don't share a common base\\r\\nURL:\\r\\n\\r\\n```go\\r\\nfunc hasBaseURL(toCheck, baseURL string) bool {\\r\\n    if len(baseURL) > 0 && baseURL[len(baseURL)-1] != '/' {\\r\\n        baseURL += \\\"/\\\"\\r\\n    }\\r\\n    return strings.HasPrefix(toCheck, baseURL)\\r\\n}\\r\\n\\r\\nfunc CheckAndEnsureSafePR(pr *base.PullRequest, commonCloneBaseURL string, g base.Downloader) bool {\\r\\n    valid := true\\r\\n    if pr.PatchURL != \\\"\\\" && !hasBaseURL(pr.PatchURL, commonCloneBaseURL) {\\r\\n        pr.PatchURL = \\\"\\\"\\r\\n        valid = false\\r\\n    }\\r\\n    if pr.Head.CloneURL != \\\"\\\" && !hasBaseURL(pr.Head.CloneURL, commonCloneBaseURL) {\\r\\n        pr.Head.CloneURL = \\\"\\\"\\r\\n        valid = false\\r\\n    }\\r\\n    return valid\\r\\n}\\r\\n```\\r\\n\\r\\n`strings.HasPrefix(anything, \\\"\\\")` is always `true` in Go. Because\\r\\n`restore.go` is the only caller that passes `\\\"\\\"` as\\r\\n`commonCloneBaseURL`, this check is a complete no-op on the restore-repo\\r\\npath — `Head.CloneURL` survives unchanged regardless of its value. Every\\r\\nother downloader (`github.go`, `gitlab.go`, `gitea_downloader.go`,\\r\\n`codebase.go`, `codecommit.go`, `onedev.go`) passes a real base URL, so\\r\\nthey are not affected.\\r\\n\\r\\n`services/migrations/gitea_uploader.go` then uses the unvalidated value\\r\\ndirectly:\\r\\n\\r\\n```go\\r\\nerr := g.gitRepo.AddRemote(remote, pr.Head.CloneURL, true)\\r\\n// ... later: fetch from that remote\\r\\n```\\r\\n\\r\\nresulting in the server executing `git fetch` against an\\r\\nattacker-controlled URL sourced from the dump file.\\r\\n\\r\\n**RCE via git's `ext::` transport helper was tested and ruled out** — a\\r\\nnormal `git` install rejects it by default (`fatal: transport 'ext' not\\r\\nallowed`), independent of Gitea's own configuration. This report is\\r\\nscoped to SSRF and local git-repository disclosure.\\r\\n\\r\\nConfirmed present, byte-for-byte identical, in `v1.26.4` (latest stable\\r\\ntag), `release/v1.27`, and `main`, by direct checkout and diff.\\r\\n\\r\\n### PoC\\r\\n1. Create a dump directory following the normal `restore-repo` layout\\r\\n   (`repo.yml`, etc.), and add a `pull_request.yml` containing at least\\r\\n   one entry with:\\r\\n```yaml\\r\\n   - number: 1\\r\\n     head:\\r\\n       cloneURL: \\\"http://<attacker-controlled-or-internal-host>:<port>/ssrf-proof\\\"\\r\\n       ref: \\\"main\\\"\\r\\n```\\r\\n2. Run `gitea restore-repo` against that dump directory for any repo\\r\\n   owner.\\r\\n3. Observe on the target host/listener: an actual `git` HTTP\\r\\n   discovery request arrives, e.g.\\r\\n   `GET /ssrf-proof/info/refs?service=git-upload-pack`, driven entirely\\r\\n   by the value from the dump file.\\r\\n\\r\\nI verified the core mechanism (steps 2–3, i.e. the unvalidated\\r\\n`Head.CloneURL` surviving `CheckAndEnsureSafePR(\\\"\\\")` and then being used\\r\\nin a real `git remote add` + `git fetch`) with a minimal, standalone Go\\r\\nprogram built from the **verbatim, unmodified** `hasBaseURL` /\\r\\n`CheckAndEnsureSafePR` function bodies (attached: `gitea_ssrf_poc.go`),\\r\\nrun end-to-end against a local HTTP listener. The listener's access log\\r\\nconfirms the request actually arrives. I was not able to compile and run\\r\\nthe full `gitea` binary / actual CLI end-to-end in my environment due to\\r\\nnetwork restrictions on the Go module proxy; the attached PoC exercises\\r\\nthe exact vulnerable code path rather than a reimplementation, but a\\r\\nfull CLI-level reproduction on your end may still be useful for triage.\\r\\n\\r\\n### Impact\\r\\nAn attacker who can get an administrator to run `gitea restore-repo`\\r\\nagainst a malicious dump (the same threat model already accepted for the\\r\\njust-fixed path-traversal issue in this command, #38215) can make the\\r\\nGitea server issue a `git fetch` against an arbitrary attacker-chosen\\r\\nURL. This allows:\\r\\n- SSRF against internal-only services or cloud metadata endpoints\\r\\n  reachable from the Gitea host.\\r\\n- Disclosure of local git repositories reachable via `file://` paths\\r\\n  readable by the Gitea process.\\r\\n\\r\\nNo public disclosure planned. Happy to provide further detail on\\r\\nrequest.\", \"ghsa_id\": \"GHSA-xmj7-xj85-hfc3\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-xmj7-xj85-hfc3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xmj7-xj85-hfc3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58441\"}], \"private_fork\": null, \"published_at\": \"2026-07-13T17:28:57Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"SSRF in restore-repo via unsanitized pull_request.yml Head.CloneURL\", \"updated_at\": \"2026-07-13T17:28:57Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-xmj7-xj85-hfc3\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"patched_versions\": \"1.27.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-xmj7-xj85-hfc3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-58441"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+    "fixed_versions": [
+      "code.gitea.io/gitea: 1.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-17T23:39:54.162906Z",
+  "provenance": {
+    "content_sha256": "9fe0bd1941998c07ae8c4edd7c10301315b5c989782b8d81c35e92ae50801fc7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:28:57Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-xmj7-xj85-hfc3",
+  "status": "active",
+  "title": "SSRF in restore-repo via unsanitized pull_request.yml Head.CloneURL",
+  "updated_at": "2026-07-13T17:28:57Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-xmj7-xj85-hfc3"
+}

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from vulnwatch.models import (
     Advisory,
     AdvisoryFacts,
@@ -12,7 +14,8 @@ from vulnwatch.models import (
     RunManifest,
     Tier,
 )
-from vulnwatch.report import generate_report
+from vulnwatch.report import generate_report, write_agent_report_summary
+from vulnwatch.validation import validate_tree
 
 
 def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
@@ -47,12 +50,12 @@ def test_generate_report_adds_matrix_and_orders_by_severity(
         advisory_factory(
             canonical_id="example:moderate",
             title="Moderate advisory",
-            facts=AdvisoryFacts(cves=["CVE-2026-10003"], cvss_score=5.5),
+            facts=AdvisoryFacts(cves=["CVE-2026-10003"], cvss_score=5.5, known_exploited=True),
         ),
         advisory_factory(
             canonical_id="example:other",
             title="Other advisory",
-            facts=AdvisoryFacts(),
+            facts=AdvisoryFacts(poc_public=True),
         ),
         advisory_factory(
             canonical_id="example:critical",
@@ -71,22 +74,51 @@ def test_generate_report_adds_matrix_and_orders_by_severity(
         ),
     ]
     _write_report_input(tmp_path, advisories)
+    write_agent_report_summary(
+        tmp_path,
+        "Critical節の検証済みAIサマリです。対象件数を確認しています。",
+        "悪用済み・PoC公開済み節の検証済みAIサマリです。重複も確認しています。",
+    )
 
     report = generate_report(tmp_path).read_text(encoding="utf-8")
 
     assert "## サマリ" in report
-    assert "`総数(悪用済み, PoC公開済み)`" in report
-    assert "| Example | 1(1,1) | 1(0,0) | 1(0,0) | 1(0,0) | 4(1,1) |" in report
+    assert (
+        "| ベンダー | Critical | High | Moderate | その他 | 合計 | 悪用済み | PoC公開済み |"
+        in report
+    )
+    assert "| Example | 1 | 1 | 1 | 1 | 4 | 2 | 2 |" in report
+    assert "| 合計 | 1 | 1 | 1 | 1 | 4 | 2 | 2 |" in report
+    matrix = report.split("## Critical", 1)[0]
+    assert "(" not in matrix
     assert "| 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | 悪用状況 |" in report
     assert "悪用済み<br>PoC公開済み" in report
-    assert "## Critical・悪用確認済み" in report
-    assert "### [Critical advisory](https://security.example.com/ADV-1)" in report
-    assert "- 識別子: CVE-2026-10001" in report
-    assert "- 深刻度: CVSS 9.8" in report
-    assert "### [High advisory]" not in report
-    assert report.index("| Critical | INFO |") < report.index("| High | INFO |")
-    assert report.index("| High | INFO |") < report.index("| Moderate | INFO |")
-    assert report.index("| Moderate | INFO |") < report.index("| その他 | INFO |")
+    assert report.index("## Critical") < report.index("## 悪用済み・PoC公開済み")
+    assert report.index("## 悪用済み・PoC公開済み") < report.index("## 詳細")
+    critical_table = report.split("## Critical", 1)[1].split("## 悪用済み・PoC公開済み", 1)[0]
+    assert "Critical節の検証済みAIサマリです。対象件数を確認しています。" in critical_table
+    assert critical_table.index(
+        "Critical節の検証済みAIサマリです。対象件数を確認しています。"
+    ) < critical_table.index("| 優先度 |")
+    assert "[Critical advisory](<https://security.example.com/ADV-1>)" in critical_table
+    assert "[High advisory]" not in critical_table
+    assert "## 悪用済み・PoC公開済み" in report
+    exploitation_table = report.split("## 悪用済み・PoC公開済み", 1)[1].split("## 詳細", 1)[0]
+    assert (
+        "悪用済み・PoC公開済み節の検証済みAIサマリです。重複も確認しています。"
+        in exploitation_table
+    )
+    assert "[Critical advisory](<https://security.example.com/ADV-1>)" in exploitation_table
+    assert "[Moderate advisory](<https://security.example.com/ADV-1>)" in exploitation_table
+    assert "[Other advisory](<https://security.example.com/ADV-1>)" in exploitation_table
+    assert "[High advisory]" not in exploitation_table
+    assert exploitation_table.count("[Critical advisory]") == 1
+    assert "| Critical | INFO | new | Example | CVE-2026-10001 | 9.8 | ○ | ○ |" in report
+    details = report.split("## 詳細", 1)[1]
+    assert details.index("| Critical | INFO |") < details.index("| High | INFO |")
+    assert details.index("| High | INFO |") < details.index("| Moderate | INFO |")
+    assert details.index("| Moderate | INFO |") < details.index("| その他 | INFO |")
+    assert validate_tree(tmp_path) == (4, 4)
 
 
 def test_generate_report_marks_missing_values_as_unconfirmed(
@@ -97,5 +129,81 @@ def test_generate_report_marks_missing_values_as_unconfirmed(
 
     report = generate_report(tmp_path).read_text(encoding="utf-8")
 
+    assert "## 悪用済み・PoC公開済み" in report
     assert "該当するアドバイザリはありません。" in report
     assert "| その他 | INFO | new | Example | - | - | 確認なし |" in report
+    with pytest.raises(ValueError, match="AI report summary"):
+        validate_tree(tmp_path)
+
+
+def test_generate_report_includes_all_critical_and_escapes_untrusted_cells(
+    tmp_path: Path, advisory_factory
+) -> None:
+    critical = advisory_factory(
+        canonical_id="example:critical-unexploited",
+        vendor="Example | Vendor",
+        title="[Critical] <noscript> advisory\ncontinued",
+        facts=AdvisoryFacts(vendor_severity="Critical"),
+    )
+    high_poc = advisory_factory(
+        canonical_id="example:high-poc",
+        title="High PoC advisory",
+        facts=AdvisoryFacts(cvss_score=8.0, poc_public=True),
+    )
+    _write_report_input(tmp_path, [critical, high_poc])
+    write_agent_report_summary(
+        tmp_path,
+        "Criticalの日本語AIサマリです。全件を確認しています。",
+        "悪用・PoCの日本語AIサマリです。和集合を確認しています。",
+    )
+
+    report = generate_report(tmp_path).read_text(encoding="utf-8")
+
+    critical_section = report.split("## Critical", 1)[1].split("## 悪用済み・PoC公開済み", 1)[0]
+    exploitation_section = report.split("## 悪用済み・PoC公開済み", 1)[1].split("## 詳細", 1)[0]
+    assert r"\[Critical\] &lt;noscript&gt; advisory continued" in critical_section
+    assert "Example &#124; Vendor" in critical_section
+    assert "High PoC advisory" not in critical_section
+    assert "High PoC advisory" in exploitation_section
+    assert "[Critical]" not in exploitation_section
+
+
+def test_validation_rejects_stale_report_content(tmp_path: Path, advisory_factory) -> None:
+    _write_report_input(tmp_path, [advisory_factory()])
+    write_agent_report_summary(
+        tmp_path,
+        "Critical対象はありません。現在の変更分を確認しています。",
+        "悪用・PoC対象はありません。現在の変更分を確認しています。",
+    )
+    path = generate_report(tmp_path)
+    path.write_text(path.read_text(encoding="utf-8") + "手動追記\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="stale or has unvalidated content"):
+        validate_tree(tmp_path)
+
+
+def test_report_rejects_missing_manifest_advisory_path(tmp_path: Path, advisory_factory) -> None:
+    _write_report_input(tmp_path, [advisory_factory()])
+    manifest_path = tmp_path / "run-manifest.json"
+    manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest.changes[0].path = None
+    manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="has no advisory path"):
+        generate_report(tmp_path)
+
+
+def test_no_change_report_removes_stale_summary_and_is_valid(tmp_path: Path) -> None:
+    _write_report_input(tmp_path, [])
+    summary_path = write_agent_report_summary(
+        tmp_path,
+        "Critical対象はありません。現在の変更分を確認しています。",
+        "悪用・PoC対象はありません。現在の変更分を確認しています。",
+    )
+    assert summary_path.exists()
+
+    path = generate_report(tmp_path)
+
+    assert not summary_path.exists()
+    assert "新規・更新・取り下げアドバイザリはありません。" in path.read_text(encoding="utf-8")
+    assert validate_tree(tmp_path) == (0, 0)

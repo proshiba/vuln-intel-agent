@@ -23,7 +23,7 @@ VENDOR_FIXTURES = {
     "fortinet": "fortinet.xml",
     "sonicwall": "sonicwall.xml",
     "veeam": "veeam.xml",
-    "juniper_networks": "juniper_networks.html",
+    "juniper_networks": "juniper_networks.xml",
     "canonical": "canonical.xml",
     "debian": "debian.xml",
     "jenkins": "jenkins.xml",
@@ -52,7 +52,7 @@ def _record(source_id: str, filename: str) -> RawRecord:
         return RawRecord(
             source_id=source_id,
             url=str(entry.link),
-            content=str(entry.summary),
+            content=str(entry.get("summary") or entry.get("title") or ""),
             metadata=dict(entry),
         )
     soup = BeautifulSoup(content, "lxml")

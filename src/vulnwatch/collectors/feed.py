@@ -41,18 +41,20 @@ class FeedCollector:
             )
         records: list[RawRecord] = []
         for entry in parsed.entries:
+            summary = str(entry.get("summary") or "")
+            title = str(entry.get("title") or "")
             metadata: dict[str, Any] = {
                 "id": entry.get("id"),
-                "title": entry.get("title"),
+                "title": title,
                 "published": entry.get("published"),
                 "updated": entry.get("updated"),
-                "summary": entry.get("summary", ""),
+                "summary": summary,
             }
             records.append(
                 RawRecord(
                     source_id=source.id,
                     url=str(entry.get("link") or source.advisory_url),
-                    content=str(entry.get("summary", "")),
+                    content=summary or title,
                     content_type=fetched.content_type,
                     metadata=metadata,
                     fetched_at=datetime.now(UTC),
@@ -67,6 +69,7 @@ class FeedCollector:
             records=records,
             etag=fetched.etag,
             last_modified=fetched.last_modified,
+            complete_snapshot=False,
         )
 
     @staticmethod

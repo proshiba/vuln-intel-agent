@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -131,6 +132,126 @@ async def test_pipeline_new_unchanged_updated_and_quarantined(
     failed_manifest = await failed.run(Tier.DAILY, since)
     assert failed_manifest.changes[0].status == ChangeStatus.QUARANTINED
     assert (failed_root / "quarantine/example/latest.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_partial_snapshot_preserves_known_ids_and_accepts_empty_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    current: dict[str, object] = {"id": "ADV-1", "complete": True}
+
+    class FakeCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            item_id = current["id"]
+            records: list[RawRecord] = []
+            if item_id is not None:
+                item = {
+                    "id": item_id,
+                    "title": str(item_id),
+                    "url": f"https://security.example.com/{item_id}",
+                    "published": "2026-07-01T00:00:00Z",
+                }
+                records.append(
+                    RawRecord(
+                        source_id=source.id,
+                        url=str(item["url"]),
+                        content=json.dumps(item),
+                        metadata=item,
+                    )
+                )
+            return CollectionResult(
+                source_id=source.id,
+                records=records,
+                complete_snapshot=bool(current["complete"]),
+            )
+
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: FakeCollector())
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+
+    first_root = tmp_path / "staging-partial-1"
+    first_manifest = await Pipeline(tmp_path, first_root, sources, products).run(Tier.DAILY, since)
+    first_id = first_manifest.changes[0].canonical_id
+    _publish(tmp_path, first_root)
+
+    current.update(id="ADV-2", complete=False)
+    second_root = tmp_path / "staging-partial-2"
+    second = Pipeline(tmp_path, second_root, sources, products)
+    second_manifest = await second.run(Tier.DAILY, since)
+    second_id = second_manifest.changes[0].canonical_id
+    second_state = second.storage.load_state("example")
+
+    assert second_id != first_id
+    assert second_state.known_ids == sorted([first_id, second_id])
+    assert all(change.status != ChangeStatus.WITHDRAWN for change in second_manifest.changes)
+    _publish(tmp_path, second_root)
+
+    current.update(id=None, complete=False)
+    empty_root = tmp_path / "staging-partial-empty"
+    empty = Pipeline(tmp_path, empty_root, sources, products)
+    empty_manifest = await empty.run(Tier.DAILY, since)
+
+    assert empty_manifest.changes == []
+    assert empty.storage.load_state("example").known_ids == sorted([first_id, second_id])
+    assert not (empty_root / "quarantine/example/latest.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_collects_independent_sources_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    pipeline = Pipeline(tmp_path, tmp_path / "staging-concurrent", sources, products)
+    original = pipeline.sources.sources[0]
+    pipeline.sources.sources.append(
+        original.model_copy(update={"id": "example_two", "vendor": "Example Two"})
+    )
+    started: set[str] = set()
+    both_started = asyncio.Event()
+
+    class FakeCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            started.add(source.id)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            item = {
+                "id": f"ADV-{source.id}",
+                "title": source.id,
+                "url": f"https://security.example.com/{source.id}",
+                "published": "2026-07-01T00:00:00Z",
+            }
+            return CollectionResult(
+                source_id=source.id,
+                records=[
+                    RawRecord(
+                        source_id=source.id,
+                        url=str(item["url"]),
+                        content=json.dumps(item),
+                        metadata=item,
+                    )
+                ],
+            )
+
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: FakeCollector())
+
+    manifest = await asyncio.wait_for(
+        pipeline.run(Tier.DAILY, datetime(2026, 1, 1, tzinfo=UTC)),
+        timeout=2,
+    )
+
+    assert started == {"example", "example_two"}
+    assert len(manifest.changes) == 2
 
 
 def test_withdrawal_requires_three_misses_and_24_hours(tmp_path: Path, advisory_factory) -> None:
