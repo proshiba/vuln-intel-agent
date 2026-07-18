@@ -1,172 +1,29 @@
 name: Collect vulnerability advisories
 
+# 収集のみ（AI処理なし）。全ソースを直接収集して生ツリーを bot/collected-raw へ commit し、
+# Webhook で Claude Code routine を起動して後続処理（要約・レポート・検証・公開）を任せる。
 on:
   schedule:
-    - cron: "23 6 * * *"
-      timezone: Asia/Tokyo
+    - cron: "0 19 * * *" # 04:00 JST
   workflow_dispatch:
     inputs:
-      profile:
-        description: Collection profile
-        required: true
-        default: daily
-        type: choice
-        options:
-          - edge
-          - daily
       since:
         description: Collection window
-        required: true
+        required: false
         default: 90d
         type: string
 
+permissions:
+  contents: write
+
 concurrency:
-  group: vulnerability-advisory-publish
+  group: vulnwatch-collect
   cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      profile: ${{ steps.parameters.outputs.profile }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Set up Python 3.12
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install collector
-        run: python -m pip install --editable .
-      - name: Restore unpublished generated artifacts
-        env:
-          BOT_BRANCH: bot/vulnerability-updates
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          open_prs=$(gh pr list --head "$BOT_BRANCH" --base "$DEFAULT_BRANCH" --state open \
-            --json number,isCrossRepository \
-            --jq '[.[] | select(.isCrossRepository == false)] | length')
-          if [ "$open_prs" -eq 0 ]; then
-            exit 0
-          fi
-          if ! git ls-remote --exit-code --heads origin "refs/heads/$BOT_BRANCH" >/dev/null 2>&1; then
-            exit 0
-          fi
-          git fetch --depth=1 origin "refs/heads/$BOT_BRANCH"
-          for required in data reports state run-manifest.json run-summary.md; do
-            if ! git cat-file -e "FETCH_HEAD:$required" 2>/dev/null; then
-              exit 0
-            fi
-          done
-          baseline=$(mktemp -d)
-          paths=(data reports state run-manifest.json run-summary.md)
-          if git cat-file -e FETCH_HEAD:quarantine 2>/dev/null; then
-            paths+=(quarantine)
-          fi
-          if git cat-file -e FETCH_HEAD:vulndb 2>/dev/null; then
-            paths+=(vulndb)
-          fi
-          git archive FETCH_HEAD "${paths[@]}" | tar -x -C "$baseline"
-          if ! vulnwatch validate --root "$baseline"; then
-            echo "::warning::Ignoring an incompatible unpublished artifact baseline"
-            rm -rf "$baseline"
-            exit 0
-          fi
-          vulnwatch publish --root "$baseline" --repository .
-          rm -rf "$baseline"
-      - name: Resolve collection parameters
-        id: parameters
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          MANUAL_PROFILE: ${{ inputs.profile }}
-          MANUAL_SINCE: ${{ inputs.since }}
-        run: |
-          profile=daily
-          since=90d
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
-            profile="$MANUAL_PROFILE"
-            since="$MANUAL_SINCE"
-          fi
-          echo "profile=$profile" >> "$GITHUB_OUTPUT"
-          echo "since=$since" >> "$GITHUB_OUTPUT"
-      - name: Collect advisories
-        env:
-          PROFILE: ${{ steps.parameters.outputs.profile }}
-          SINCE: ${{ steps.parameters.outputs.since }}
-          GH_TOKEN: ${{ secrets.VULNWATCH_GITHUB_TOKEN }}
-        run: |
-          if [ "$PROFILE" = "daily" ] && [ -z "$GH_TOKEN" ]; then
-            echo "::error::VULNWATCH_GITHUB_TOKEN is required for all 80 sources"
-            exit 1
-          fi
-          vulnwatch collect --profile "$PROFILE" --since "$SINCE" --output staging
-      - name: Upload collected JSON
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: collected-advisories
-          path: staging
-          if-no-files-found: error
-          retention-days: 1
-
-  summarize:
-    needs: collect
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Set up Python 3.12
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install summarizer
-        run: python -m pip install --editable '.[ai]'
-      - name: Download collected JSON
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: collected-advisories
-          path: staging
-      - name: Generate AI summaries
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-        run: |
-          if [ -z "$OPENAI_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::error::OPENAI_API_KEY and LLM_MODEL are required for daily report summaries"
-            exit 1
-          fi
-          vulnwatch summarize --root staging
-      - name: Generate daily report
-        run: vulnwatch report --root staging
-      - name: Upload publish tree
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: summarized-advisories
-          path: staging
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs: [collect, summarize]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -177,50 +34,100 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install validator
-        # Keep the workflow revision installed even after switching the worktree to the base branch.
-        run: python -m pip install .
-      - name: Download publish tree
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: summarized-advisories
-          path: staging
-      - name: Validate generated tree
-        run: vulnwatch validate --root staging
-      - name: Update bot branch
+      - name: Install collector
+        run: python -m pip install --editable .
+      - name: Collect advisories
         env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          PROFILE: ${{ needs.collect.outputs.profile }}
+          GH_TOKEN: ${{ secrets.VULNWATCH_GITHUB_TOKEN }}
+          SINCE: ${{ inputs.since || '90d' }}
         run: |
-          branch=bot/vulnerability-updates
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git checkout -B "$branch" "origin/$DEFAULT_BRANCH"
-          vulnwatch publish --root staging --repository .
-          git add -A -- data reports state quarantine vulndb run-manifest.json run-summary.md
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::VULNWATCH_GITHUB_TOKEN is required to collect GitHub advisories"
+            exit 1
+          fi
+          vulnwatch collect --profile daily --since "$SINCE" --output staging
+      - name: Detect changes
+        id: detect
+        run: |
+          count=$(jq '[.changes[] | select(.status == "new" or .status == "updated" or .status == "withdrawn")] | length' staging/run-manifest.json)
+          echo "changes=$count" >> "$GITHUB_OUTPUT"
+          echo "Detected $count new/updated/withdrawn advisories."
+      - name: Commit raw collection to handoff branch
+        id: handoff
+        if: steps.detect.outputs.changes != '0'
+        env:
+          COLLECTED_BRANCH: bot/collected-raw
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$COLLECTED_BRANCH"
+          for tree in data state quarantine vulndb; do
+            rm -rf "$tree"
+            if [ -d "staging/$tree" ]; then
+              cp -r "staging/$tree" "$tree"
+            fi
+          done
+          cp staging/run-manifest.json staging/run-summary.md ./
+          git add -A -- data state quarantine vulndb run-manifest.json run-summary.md
           if git diff --cached --quiet; then
+            echo "No file-level changes to hand off."
             exit 0
           fi
-          git commit -m "chore: update vulnerability advisories"
-          git push --force-with-lease origin "$branch"
+          git commit -m "chore: raw daily advisory collection"
+          git push --force-with-lease origin "$COLLECTED_BRANCH"
+          echo "branch=$COLLECTED_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Trigger Claude Code routine
+        if: steps.handoff.outputs.sha != ''
+        env:
+          ROUTINE_FIRE_URL: ${{ secrets.VULNWATCH_ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.VULNWATCH_ROUTINE_FIRE_TOKEN }}
+          COLLECTED_BRANCH: ${{ steps.handoff.outputs.branch }}
+          COLLECTED_SHA: ${{ steps.handoff.outputs.sha }}
+          CHANGES: ${{ steps.detect.outputs.changes }}
+        run: |
+          set -euo pipefail
 
-          new=$(jq '[.changes[] | select(.status == "new")] | length' staging/run-manifest.json)
-          updated=$(jq '[.changes[] | select(.status == "updated" or .status == "withdrawn")] | length' staging/run-manifest.json)
-          quarantined=$(jq '[.changes[] | select(.status == "quarantined")] | length' staging/run-manifest.json)
-          p1=$(jq '[.changes[] | select(.priority == "P1" and .status != "unchanged")] | length' staging/run-manifest.json)
-          p2=$(jq '[.changes[] | select(.priority == "P2" and .status != "unchanged")] | length' staging/run-manifest.json)
-          body=$(printf 'Automated vulnerability advisory update.\n\n- Profile: %s\n- New: %s\n- Updated/withdrawn: %s\n- Quarantined: %s\n- P1: %s\n- P2: %s\n' "$PROFILE" "$new" "$updated" "$quarantined" "$p1" "$p2")
-          number=$(gh pr list --head "$branch" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number')
-          if [ -z "$number" ]; then
-            gh pr create --base "$DEFAULT_BRANCH" --head "$branch" --title "Vulnerability advisory updates" --body "$body"
-            number=$(gh pr list --head "$branch" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number')
-          else
-            gh pr edit "$number" --body "$body"
+          if [ -z "${ROUTINE_FIRE_URL:-}" ] || [ -z "${ROUTINE_FIRE_TOKEN:-}" ]; then
+            echo "::error::VULNWATCH_ROUTINE_FIRE_URL and VULNWATCH_ROUTINE_FIRE_TOKEN must be set"
+            exit 1
           fi
-          if [ "$p1" -gt 0 ]; then
-            gh label create priority/P1 --color B60205 --description "Contains P1 vulnerability advisories" --force
-            gh pr edit "$number" --add-label priority/P1
-          else
-            gh pr edit "$number" --remove-label priority/P1 || true
-          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg branch "$COLLECTED_BRANCH" \
+            --arg sha "$COLLECTED_SHA" \
+            --arg run_url "$run_url" \
+            --arg changes "$CHANGES" \
+            '{
+              text: (
+                "GitHub Actions が脆弱性アドバイザリの収集を完了しました。保存済みのRoutine手順に従って後続処理を実行してください。\n\n" +
+                "Repository: " + $repository + "\n" +
+                "収集ブランチ: " + $branch + "\n" +
+                "収集コミットSHA: " + $sha + "\n" +
+                "変更件数(new/updated/withdrawn): " + $changes + "\n" +
+                "GitHub Actions run: " + $run_url + "\n\n" +
+                "この収集コミットの生ツリー(data/state/quarantine/vulndb/run-manifest.json/run-summary.md)を staging に展開し、" +
+                "summarize -> report(日本語サマリはClaudeが代筆) -> validate -> publish を行い、bot/vulnwatch-daily へ push してください。" +
+                "収集(api.github.com へのアクセス)は再実行しないでください。main への直接 push やPRの作成・マージはしないでください。"
+              )
+            }')"
+
+          echo "Triggering Claude Code routine..."
+          curl -sS -f -X POST "$ROUTINE_FIRE_URL" \
+            -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            | tee /tmp/routine_response.json
+
+          session_url="$(jq -r '.claude_code_session_url // empty' /tmp/routine_response.json)"
+          {
+            echo "### Claude Code routine triggered"
+            echo
+            echo "- Collected branch: ${COLLECTED_BRANCH} @ ${COLLECTED_SHA}"
+            echo "- Changes: ${CHANGES}"
+            echo "- Session URL: ${session_url:-n/a}"
+          } >> "$GITHUB_STEP_SUMMARY"

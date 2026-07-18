@@ -1,0 +1,70 @@
+name: Auto-merge daily advisories
+
+# routine（Claude Code）が bot/vulnwatch-daily へ日次収集結果を push すると、
+# 構文チェック・ユニットテスト・生成データ検証を実行し、通れば
+# bot/vulnwatch-daily -> main のPull Requestを作成して自動マージする。
+on:
+  push:
+    branches: [bot/vulnwatch-daily]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-merge-daily-advisories
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out pushed branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install --editable '.[dev]'
+      - name: Syntax check (configuration and lint)
+        run: |
+          vulnwatch config validate
+          ruff check src tests
+      - name: Validate generated advisory tree
+        run: vulnwatch validate --root .
+      - name: Run unit tests
+        run: pytest
+
+  merge:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out pushed branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Open pull request and merge into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_BRANCH: bot/vulnwatch-daily
+        run: |
+          number=$(gh pr list --head "$BOT_BRANCH" --base main --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            new=$(jq '[.changes[] | select(.status == "new")] | length' run-manifest.json)
+            updated=$(jq '[.changes[] | select(.status == "updated" or .status == "withdrawn")] | length' run-manifest.json)
+            quarantined=$(jq '[.changes[] | select(.status == "quarantined")] | length' run-manifest.json)
+            body=$(printf 'Automated daily vulnerability advisory update.\n\n- New: %s\n- Updated/withdrawn: %s\n- Quarantined: %s\n' \
+              "$new" "$updated" "$quarantined")
+            gh pr create --head "$BOT_BRANCH" --base main \
+              --title "Daily vulnerability advisory update" --body "$body"
+            number=$(gh pr list --head "$BOT_BRANCH" --base main --state open \
+              --json number --jq '.[0].number')
+          fi
+          # verify が成功した後に呼ばれるため、同一コミットのチェックは緑。
+          # ブランチ保護で verify を必須チェックにしていれば、それを満たしてマージされる。
+          gh pr merge "$number" --merge
