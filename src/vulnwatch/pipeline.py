@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from vulnwatch.collectors import CollectorError, create_collector
+from vulnwatch.collectors.osv import OSV_HOST, OSV_QUERY_URL
 from vulnwatch.config import load_products, load_sources
 from vulnwatch.identity import canonical_id, semantic_hash
 from vulnwatch.models import (
@@ -16,6 +18,7 @@ from vulnwatch.models import (
     ChangeRecord,
     ChangeStatus,
     CollectionResult,
+    CollectorKind,
     Priority,
     Provenance,
     RunManifest,
@@ -27,6 +30,38 @@ from vulnwatch.models import (
 from vulnwatch.parsers import parse_cisa_kev, parse_record
 from vulnwatch.priority import decide_priority, enrich_assets
 from vulnwatch.storage.filesystem import FileSystemStorage, write_json
+from vulnwatch.vulndb import VulnDb
+
+GITHUB_BACKEND_ENV = "VULNWATCH_GITHUB_BACKEND"
+
+
+def resolve_github_backend() -> str:
+    """GitHub由来ソースの取り込み元。'github'（直接）または'osv'。既定は'github'。"""
+
+    backend = os.environ.get(GITHUB_BACKEND_ENV, "github").strip().lower()
+    return backend if backend in {"github", "osv"} else "github"
+
+
+def apply_backend(source: SourceDefinition, backend: str) -> SourceDefinition:
+    """backendが'osv'かつOSV座標を持つGitHubソースを、OSV取得へ切り替える。"""
+
+    if (
+        backend == "osv"
+        and source.parser == "github_advisory"
+        and source.osv_ecosystem
+        and source.osv_packages
+    ):
+        return source.model_copy(
+            update={
+                "collector": CollectorKind.OSV,
+                "fallback_collectors": [],
+                "parser": "osv",
+                "url": OSV_QUERY_URL,
+                "allowed_hosts": sorted(set(source.allowed_hosts) | {OSV_HOST}),
+                "content_types": ["application/json"],
+            }
+        )
+    return source
 
 
 class Pipeline:
@@ -56,8 +91,9 @@ class Pipeline:
             since=since,
             baseline=baseline,
         )
+        backend = resolve_github_backend()
         selected = [
-            source
+            apply_backend(source, backend)
             for source in self.sources.sources
             if source.enabled and (profile == Tier.DAILY or source.tier == Tier.EDGE)
         ]
@@ -207,6 +243,7 @@ class Pipeline:
                 )
             self.storage.write_state(states[source.id])
 
+        self._update_vulndb(manifest)
         self.storage.rebuild_indexes()
         manifest.completed_at = datetime.now(UTC)
         write_json(
@@ -311,6 +348,31 @@ class Pipeline:
             ),
             body_excerpt=draft.body_excerpt,
         )
+
+    def _update_vulndb(self, manifest: RunManifest) -> None:
+        db = VulnDb(self.output_root)
+        now = datetime.now(UTC)
+        if db.initialized:
+            advisories: list[Advisory] = []
+            seen: set[str] = set()
+            for change in manifest.changes:
+                if change.status not in {
+                    ChangeStatus.NEW,
+                    ChangeStatus.UPDATED,
+                    ChangeStatus.WITHDRAWN,
+                }:
+                    continue
+                if change.canonical_id in seen:
+                    continue
+                seen.add(change.canonical_id)
+                found = self.storage.find(change.canonical_id)
+                if found:
+                    advisories.append(found[1])
+        else:
+            # 初回はリポジトリ内の全アドバイザリから台帳をシードする。
+            advisories = self.storage.all_advisories()
+        db.apply(advisories, now)
+        db.write()
 
     def _handle_missing(
         self,

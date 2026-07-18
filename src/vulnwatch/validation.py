@@ -11,6 +11,7 @@ from vulnwatch.report import (
     report_path,
     report_summary_path,
 )
+from vulnwatch.vulndb import validate_vulndb
 
 
 def validate_config(
@@ -28,6 +29,7 @@ def validate_tree(root: Path) -> tuple[int, int]:
     for path in (root / "data" / "vendors").glob("*/advisories/*/*/advisory.json"):
         Advisory.model_validate_json(path.read_text(encoding="utf-8"))
         advisories += 1
+    validate_vulndb(root)
     manifest_path = root / "run-manifest.json"
     changes = 0
     if manifest_path.exists():

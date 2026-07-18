@@ -6,12 +6,25 @@ import re
 from datetime import datetime
 from typing import Any, cast
 
+from cvss import CVSS2, CVSS3, CVSS4
+from cvss.exceptions import CVSSError
 from dateutil.parser import parse as parse_date
 
 from vulnwatch.exploitation import infer_exploitation_status
 from vulnwatch.models import AdvisoryDraft, AdvisoryStatus, RawRecord, SourceDefinition
 
 CVE_PATTERN = re.compile(r"(?<![A-Z0-9])CVE-\d{4}-\d{4,}(?![A-Z0-9])", re.IGNORECASE)
+
+
+def _cvss_base_score(vector: str) -> float | None:
+    try:
+        if vector.startswith("CVSS:4"):
+            return float(CVSS4(vector).base_score)
+        if vector.startswith("CVSS:3"):
+            return float(CVSS3(vector).base_score)
+        return float(CVSS2(vector).base_score)
+    except (CVSSError, ValueError, TypeError, ZeroDivisionError):
+        return None
 
 
 def _date(value: Any) -> datetime | None:
@@ -58,6 +71,8 @@ def _sha(content: str) -> str:
 def parse_record(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     if source.parser == "csaf":
         return _parse_csaf(source, raw)
+    if source.parser == "osv":
+        return _parse_osv(source, raw)
     if source.parser == "github_advisory":
         return _parse_github_advisory(source, raw)
     if source.parser in {"palo_alto", "json_feed", "json"}:
@@ -332,5 +347,112 @@ def _parse_csaf(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         poc_public=poc_public,
         mitigations=sorted(set(mitigations)),
         body_excerpt=content[:30_000],
+        raw_sha256=_sha(content),
+    )
+
+
+_OSV_SEVERITY_RANK = {"critical": 0, "high": 1, "moderate": 2, "medium": 2, "low": 3}
+_OSV_REFERENCE_PRIORITY = {"ADVISORY": 0, "WEB": 1, "REPORT": 2, "FIX": 3, "PACKAGE": 4}
+
+
+def _osv_source_url(references: list[Any], fallback: str) -> str:
+    candidates: list[tuple[int, str]] = []
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        url = str(reference.get("url") or "")
+        if not url.startswith("https://"):
+            continue
+        rank = _OSV_REFERENCE_PRIORITY.get(str(reference.get("type") or ""), 9)
+        if "/security/advisories/" in url:
+            rank -= 5
+        candidates.append((rank, url))
+    if not candidates:
+        return fallback
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _parse_osv(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
+    item = raw.metadata
+    content = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    identifier = str(item.get("id") or "")
+
+    cves: set[str] = set()
+    for alias in item.get("aliases", []) or []:
+        value = str(alias).upper()
+        if CVE_PATTERN.fullmatch(value):
+            cves.add(value)
+    if CVE_PATTERN.fullmatch(identifier.upper()):
+        cves.add(identifier.upper())
+
+    products: list[str] = []
+    fixed_versions: list[str] = []
+    for affected in item.get("affected", []) or []:
+        if not isinstance(affected, dict):
+            continue
+        package = affected.get("package")
+        name = str(package.get("name")) if isinstance(package, dict) and package.get("name") else ""
+        if name:
+            products.append(name)
+        for entry in affected.get("ranges", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            for event in entry.get("events", []) or []:
+                if isinstance(event, dict) and event.get("fixed"):
+                    fixed = str(event["fixed"])
+                    fixed_versions.append(f"{name}: {fixed}" if name else fixed)
+
+    best_vector: str | None = None
+    best_rank = 99
+    for severity in item.get("severity", []) or []:
+        if not isinstance(severity, dict):
+            continue
+        vector = str(severity.get("score") or "")
+        if not vector.startswith("CVSS:"):
+            continue
+        rank = 0 if severity.get("type") == "CVSS_V4" else 1
+        if rank < best_rank:
+            best_rank, best_vector = rank, vector
+    cvss_score = _cvss_base_score(best_vector) if best_vector else None
+
+    database_specific = item.get("database_specific")
+    vendor_severity = None
+    if isinstance(database_specific, dict) and database_specific.get("severity"):
+        vendor_severity = str(database_specific["severity"])
+
+    remote = "/AV:N/" in f"/{best_vector}/" if best_vector else None
+    authentication_required = None
+    if best_vector:
+        if "/PR:N" in best_vector:
+            authentication_required = False
+        elif "/PR:L" in best_vector or "/PR:H" in best_vector:
+            authentication_required = True
+
+    summary = str(item.get("summary") or "").strip()
+    details = str(item.get("details") or "").strip()
+    title = summary or details.splitlines()[0][:200] if (summary or details) else identifier
+    known_exploited, poc_public = infer_exploitation_status(f"{summary}\n{details}")
+
+    references = item.get("references", []) or []
+    return AdvisoryDraft(
+        source_id=source.id,
+        vendor=source.vendor,
+        vendor_advisory_id=identifier or None,
+        title=title or source.vendor,
+        source_url=_osv_source_url(references, raw.url),
+        published_at=_date(item.get("published")),
+        updated_at=_date(item.get("modified")),
+        status=AdvisoryStatus.WITHDRAWN if item.get("withdrawn") else AdvisoryStatus.ACTIVE,
+        cves=sorted(cves),
+        products=sorted(set(products)) or source.products,
+        fixed_versions=sorted(set(fixed_versions)),
+        vendor_severity=vendor_severity,
+        cvss_score=cvss_score,
+        cvss_vector=best_vector,
+        remote=remote,
+        authentication_required=authentication_required,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
+        body_excerpt=(details or summary)[:30_000],
         raw_sha256=_sha(content),
     )

@@ -43,9 +43,7 @@ def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
     (tmp_path / "run-manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
 
 
-def test_generate_report_adds_matrix_and_orders_by_severity(
-    tmp_path: Path, advisory_factory
-) -> None:
+def test_generate_report_adds_matrix_and_orders_by_risk(tmp_path: Path, advisory_factory) -> None:
     advisories = [
         advisory_factory(
             canonical_id="example:moderate",
@@ -83,16 +81,26 @@ def test_generate_report_adds_matrix_and_orders_by_severity(
     report = generate_report(tmp_path).read_text(encoding="utf-8")
 
     assert "## サマリ" in report
+    assert "リスク評価: 緊急 1件 / 高 1件 / 中 2件 / 低 0件" in report
     assert (
         "| ベンダー | Critical | High | Moderate | その他 | 合計 | 悪用済み | PoC公開済み |"
         in report
     )
     assert "| Example | 1 | 1 | 1 | 1 | 4 | 2 | 2 |" in report
     assert "| 合計 | 1 | 1 | 1 | 1 | 4 | 2 | 2 |" in report
-    matrix = report.split("## Critical", 1)[0]
+    matrix = report.split("## 要対応", 1)[0]
     assert "(" not in matrix
-    assert "| 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | 悪用状況 |" in report
+    attention = report.split("## 要対応", 1)[1].split("## Critical", 1)[0]
+    assert "[Critical advisory](<https://security.example.com/ADV-1>)" in attention
+    assert "[Moderate advisory](<https://security.example.com/ADV-1>)" in attention
+    assert "[High advisory]" not in attention
+    assert "| 緊急 | 85 |" in attention
+    assert "悪用確認済み<br>PoC公開済み<br>修正版未提供" in attention
+    assert (
+        "| リスク | 危険度 | 優先度 | 状態 | ベンダー | CVE | CVSS（最大） | 悪用状況 |" in report
+    )
     assert "悪用済み<br>PoC公開済み" in report
+    assert report.index("## 要対応") < report.index("## Critical")
     assert report.index("## Critical") < report.index("## 悪用済み・PoC公開済み")
     assert report.index("## 悪用済み・PoC公開済み") < report.index("## 詳細")
     critical_table = report.split("## Critical", 1)[1].split("## 悪用済み・PoC公開済み", 1)[0]
@@ -113,12 +121,31 @@ def test_generate_report_adds_matrix_and_orders_by_severity(
     assert "[Other advisory](<https://security.example.com/ADV-1>)" in exploitation_table
     assert "[High advisory]" not in exploitation_table
     assert exploitation_table.count("[Critical advisory]") == 1
-    assert "| Critical | INFO | new | Example | CVE-2026-10001 | 9.8 | ○ | ○ |" in report
+    assert "| 緊急 | Critical | INFO | new | Example | CVE-2026-10001 | 9.8 | ○ | ○ |" in report
     details = report.split("## 詳細", 1)[1]
-    assert details.index("| Critical | INFO |") < details.index("| High | INFO |")
-    assert details.index("| High | INFO |") < details.index("| Moderate | INFO |")
-    assert details.index("| Moderate | INFO |") < details.index("| その他 | INFO |")
+    assert details.index("| 緊急 | Critical |") < details.index("| 高 | Moderate |")
+    assert details.index("| 高 | Moderate |") < details.index("| 中 | High |")
+    assert details.index("| 中 | High |") < details.index("| 中 | その他 |")
     assert validate_tree(tmp_path) == (4, 4)
+
+
+def test_attention_table_truncates_long_cve_lists(tmp_path: Path, advisory_factory) -> None:
+    advisory = advisory_factory(
+        facts=AdvisoryFacts(
+            cves=[f"CVE-2026-1000{index}" for index in range(7)],
+            cvss_score=9.8,
+            known_exploited=True,
+        ),
+    )
+    _write_report_input(tmp_path, [advisory])
+
+    report = generate_report(tmp_path).read_text(encoding="utf-8")
+
+    attention = report.split("## 要対応", 1)[1].split("## Critical", 1)[0]
+    assert "CVE-2026-10004<br>他2件" in attention
+    assert "CVE-2026-10005" not in attention
+    details = report.split("## 詳細", 1)[1]
+    assert "CVE-2026-10005" in details
 
 
 def test_generate_report_marks_missing_values_as_unconfirmed(

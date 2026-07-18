@@ -10,7 +10,7 @@ from typing import Any
 from vulnwatch.identity import slugify
 from vulnwatch.models import Advisory, SourceState
 
-PUBLISHED_DIRECTORIES = ("data", "reports", "state", "quarantine")
+PUBLISHED_DIRECTORIES = ("data", "reports", "state", "quarantine", "vulndb")
 PUBLISHED_FILES = ("run-manifest.json", "run-summary.md")
 REQUIRED_PUBLISHED_DIRECTORIES = ("data/vendors", "reports/daily", "state/sources")
 
@@ -107,6 +107,10 @@ def publish_tree(source_root: Path, repository_root: Path) -> int:
             destination = repository_root / name
             backup = backup_root / name
             prepared = prepared_root / name
+            if not prepared.exists():
+                # 任意アーティファクト（vulndbなど）が旧スナップショットに無い場合、
+                # 既存の公開済みデータを温存する。
+                continue
             backup.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists() or destination.is_symlink():
                 os.replace(destination, backup)
@@ -147,7 +151,7 @@ class FileSystemStorage:
         if output_root == repository_root:
             raise ValueError("output root must not be the repository root")
         output_root.mkdir(parents=True, exist_ok=True)
-        for name in ("data", "state", "reports", "quarantine"):
+        for name in ("data", "state", "reports", "quarantine", "vulndb"):
             target = output_root / name
             if target.exists():
                 shutil.rmtree(target)
@@ -187,13 +191,22 @@ class FileSystemStorage:
         return Advisory.model_validate_json(path.read_text(encoding="utf-8"))
 
     def find(self, canonical_id: str) -> tuple[Path, Advisory] | None:
+        self._ensure_advisory_cache()
+        assert self._advisory_cache is not None
+        return self._advisory_cache.get(canonical_id)
+
+    def all_advisories(self) -> list[Advisory]:
+        self._ensure_advisory_cache()
+        assert self._advisory_cache is not None
+        return [advisory for _, advisory in self._advisory_cache.values()]
+
+    def _ensure_advisory_cache(self) -> None:
         if self._advisory_cache is None:
             self._advisory_cache = {}
             for path in (self.root / "data" / "vendors").glob("*/advisories/*/*/advisory.json"):
                 advisory = self.load(path)
                 if advisory:
                     self._advisory_cache[advisory.canonical_id] = (path, advisory)
-        return self._advisory_cache.get(canonical_id)
 
     def state_path(self, source_id: str) -> Path:
         return self.root / "state" / "sources" / f"{source_id}.json"
