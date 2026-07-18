@@ -78,7 +78,24 @@ playwright install --with-deps chromium
 ```
 
 通常のPR CIは保存fixtureのみを使い、外部サイトへアクセスしません。定期収集は
-GitHub Actionsで `collect → summarize → report → validate → publish` の順に実行されます。
+GitHub Actionsで毎日1回、`collect → summarize → report → validate → publish` の順に
+daily profileで実行されます。
+
+## vulndb（CVE単位の脆弱性台帳）
+
+収集結果から、CVE単位で公開・修正・PoC公開・悪用有無を管理する台帳を
+`vulndb/` に生成します。全体索引の `vulndb/index.csv` と、脆弱性ごとの
+`vulndb/vulns/<内部ID>.yaml` で構成され、採番状態は `vulndb/registry.json` が
+保持します。すべてGit管理対象です。
+
+CVE未採番の脆弱性（ゼロデイなど）には内部ID `VW-YYYY-NNNN` を採番します。
+内部IDは恒久キーとしてファイル名に使い続け、後からCVEが判明した場合は
+エントリの `cve` フィールドへ付与するだけで、ファイルの移動や統合は行いません。
+同一CVEを複数ベンダーが公表した場合は1エントリに出典を集約します。修正版・
+PoC公開・悪用確認は一度trueになったら維持し、観測日時を記録します。
+
+台帳は収集のたびに変更分だけ増分更新され、`vulndb/registry.json` が存在しない
+初回実行時のみ `data/vendors` 配下の全アドバイザリからシードされます。
 
 ## 資産台帳の制約
 

@@ -27,6 +27,7 @@ from vulnwatch.models import (
 from vulnwatch.parsers import parse_cisa_kev, parse_record
 from vulnwatch.priority import decide_priority, enrich_assets
 from vulnwatch.storage.filesystem import FileSystemStorage, write_json
+from vulnwatch.vulndb import VulnDb
 
 
 class Pipeline:
@@ -207,6 +208,7 @@ class Pipeline:
                 )
             self.storage.write_state(states[source.id])
 
+        self._update_vulndb(manifest)
         self.storage.rebuild_indexes()
         manifest.completed_at = datetime.now(UTC)
         write_json(
@@ -311,6 +313,31 @@ class Pipeline:
             ),
             body_excerpt=draft.body_excerpt,
         )
+
+    def _update_vulndb(self, manifest: RunManifest) -> None:
+        db = VulnDb(self.output_root)
+        now = datetime.now(UTC)
+        if db.initialized:
+            advisories: list[Advisory] = []
+            seen: set[str] = set()
+            for change in manifest.changes:
+                if change.status not in {
+                    ChangeStatus.NEW,
+                    ChangeStatus.UPDATED,
+                    ChangeStatus.WITHDRAWN,
+                }:
+                    continue
+                if change.canonical_id in seen:
+                    continue
+                seen.add(change.canonical_id)
+                found = self.storage.find(change.canonical_id)
+                if found:
+                    advisories.append(found[1])
+        else:
+            # 初回はリポジトリ内の全アドバイザリから台帳をシードする。
+            advisories = self.storage.all_advisories()
+        db.apply(advisories, now)
+        db.write()
 
     def _handle_missing(
         self,
