@@ -1,7 +1,8 @@
 name: Auto-merge daily advisories
 
 # routine（Claude Code）が bot/vulnwatch-daily へ日次収集結果を push すると、
-# 構文チェックとユニットテスト、生成データの検証を実行し、通れば main へ自動マージする。
+# 構文チェック・ユニットテスト・生成データ検証を実行し、通れば
+# bot/vulnwatch-daily -> main のPull Requestを作成して自動マージする。
 on:
   push:
     branches: [bot/vulnwatch-daily]
@@ -42,24 +43,28 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pull-requests: write
     steps:
-      - name: Check out main
+      - name: Check out pushed branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: main
-          fetch-depth: 0
-      - name: Merge daily advisories into main
+      - name: Open pull request and merge into main
         env:
+          GH_TOKEN: ${{ github.token }}
           BOT_BRANCH: bot/vulnwatch-daily
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin "$BOT_BRANCH"
-          if git merge-base --is-ancestor "origin/$BOT_BRANCH" HEAD; then
-            echo "main already contains $BOT_BRANCH; nothing to merge."
-            exit 0
+          number=$(gh pr list --head "$BOT_BRANCH" --base main --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            new=$(jq '[.changes[] | select(.status == "new")] | length' run-manifest.json)
+            updated=$(jq '[.changes[] | select(.status == "updated" or .status == "withdrawn")] | length' run-manifest.json)
+            quarantined=$(jq '[.changes[] | select(.status == "quarantined")] | length' run-manifest.json)
+            body=$(printf 'Automated daily vulnerability advisory update.\n\n- New: %s\n- Updated/withdrawn: %s\n- Quarantined: %s\n' \
+              "$new" "$updated" "$quarantined")
+            gh pr create --head "$BOT_BRANCH" --base main \
+              --title "Daily vulnerability advisory update" --body "$body"
+            number=$(gh pr list --head "$BOT_BRANCH" --base main --state open \
+              --json number --jq '.[0].number')
           fi
-          git merge --ff-only "origin/$BOT_BRANCH" \
-            || git merge --no-edit -m "chore: merge daily vulnerability advisories" \
-              "origin/$BOT_BRANCH"
-          git push origin HEAD:main
+          # verify が成功した後に呼ばれるため、同一コミットのチェックは緑。
+          # ブランチ保護で verify を必須チェックにしていれば、それを満たしてマージされる。
+          gh pr merge "$number" --merge
