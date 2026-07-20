@@ -7,6 +7,10 @@ from pathlib import Path
 
 from vulnwatch.collectors import CollectorError, create_collector
 from vulnwatch.collectors.osv import OSV_HOST, OSV_QUERY_URL
+from vulnwatch.collectors.osv_global import (
+    OSV_MODIFIED_INDEX_URL,
+    OSV_STORAGE_HOST,
+)
 from vulnwatch.config import load_products, load_sources
 from vulnwatch.identity import canonical_id, semantic_hash
 from vulnwatch.models import (
@@ -23,6 +27,8 @@ from vulnwatch.models import (
     Provenance,
     RunManifest,
     SourceDefinition,
+    SourceOutcome,
+    SourceOutcomeStatus,
     SourceRole,
     SourceState,
     Tier,
@@ -33,6 +39,8 @@ from vulnwatch.storage.filesystem import FileSystemStorage, write_json
 from vulnwatch.vulndb import VulnDb
 
 GITHUB_BACKEND_ENV = "VULNWATCH_GITHUB_BACKEND"
+_GITHUB_PUBLIC_HTML_SOURCE_IDS = frozenset({"redis", "nextcloud", "immich_github"})
+_GITHUB_ADVISORY_SELECTOR = "a[href*='/security/advisories/GHSA-']"
 
 
 def resolve_github_backend() -> str:
@@ -43,12 +51,57 @@ def resolve_github_backend() -> str:
 
 
 def apply_backend(source: SourceDefinition, backend: str) -> SourceDefinition:
-    """backendが'osv'かつOSV座標を持つGitHubソースを、OSV取得へ切り替える。"""
+    """Use bounded, credential-free alternatives for GitHub advisory API sources."""
+
+    if backend != "osv" or source.parser != "github_advisory":
+        return source
+
+    if source.id == "github_advisory_database":
+        variant = source.model_copy(
+            update={
+                "collector": CollectorKind.OSV_GLOBAL,
+                "fallback_collectors": [],
+                "parser": "osv",
+                "url": OSV_MODIFIED_INDEX_URL,
+                "allowed_hosts": sorted(
+                    set(source.allowed_hosts) | {OSV_STORAGE_HOST}
+                ),
+                "content_types": ["text/csv", "text/plain", "application/json"],
+                "max_items": 5_000,
+                "max_response_bytes": 60_000_000,
+                "max_index_items": 1_000_000,
+                "max_detail_fetches": 5_000,
+                "rate_limit_per_second": 20,
+                "bootstrap_window_hours": 1,
+                "osv_id_prefixes": ["GHSA-"],
+            }
+        )
+        # model_copy intentionally avoids validation; round-trip the backend-only
+        # fields so its endpoint/collector invariants remain enforced.
+        return SourceDefinition.model_validate(variant.model_dump())
+
+    if source.id in _GITHUB_PUBLIC_HTML_SOURCE_IDS:
+        return source.model_copy(
+            update={
+                "collector": CollectorKind.HTML,
+                "fallback_collectors": [],
+                "parser": "generic",
+                "url": source.advisory_url,
+                "allowed_hosts": ["github.com"],
+                "content_types": ["text/html", "application/xhtml+xml"],
+                "selectors": {
+                    "item": f"li.Box-row:has({_GITHUB_ADVISORY_SELECTOR})",
+                    "link": _GITHUB_ADVISORY_SELECTOR,
+                    "title": _GITHUB_ADVISORY_SELECTOR,
+                    "published_at": "relative-time[datetime]",
+                    "next": "a.next_page[rel='next'][href]",
+                },
+                "max_detail_fetches": min(source.max_items, 100),
+            }
+        )
 
     if (
-        backend == "osv"
-        and source.parser == "github_advisory"
-        and source.osv_ecosystem
+        source.osv_ecosystem
         and source.osv_packages
     ):
         return source.model_copy(
@@ -100,32 +153,43 @@ class Pipeline:
         results: dict[str, CollectionResult] = {}
         ordered_sources = sorted(selected, key=lambda item: item.role != SourceRole.ENRICHMENT)
         states = {source.id: self.storage.load_state(source.id) for source in ordered_sources}
+        collector_states = {
+            source_id: state.model_copy(deep=True) for source_id, state in states.items()
+        }
         semaphore = asyncio.Semaphore(6)
         attempts = await asyncio.gather(
             *(
-                self._collect_limited(source, states[source.id], since, semaphore)
+                self._collect_limited(source, collector_states[source.id], since, semaphore)
                 for source in ordered_sources
             )
         )
-        for source, (result, error) in zip(ordered_sources, attempts, strict=True):
+        outcomes: dict[str, SourceOutcome] = {}
+        for source, (result, collector, error) in zip(ordered_sources, attempts, strict=True):
             state = states[source.id]
+            assert source.collector is not None
+            assert source.url is not None
+            outcome = SourceOutcome(
+                source_id=source.id,
+                status=SourceOutcomeStatus.SUCCESS,
+                collector=collector or source.collector,
+                endpoint_url=source.url,
+                record_count=len(result.records) if result is not None else 0,
+            )
+            outcomes[source.id] = outcome
             try:
                 if error is not None:
                     raise error
                 assert result is not None
                 self._validate_volume(source, state, result)
+                if result.not_modified:
+                    outcome.status = SourceOutcomeStatus.NOT_MODIFIED
                 results[source.id] = result
-                state.etag = result.etag or state.etag
-                state.last_modified = result.last_modified or state.last_modified
-                state.last_success_at = datetime.now(UTC)
-                state.consecutive_failures = 0
-                if not result.not_modified:
-                    state.item_count = len(result.records)
-                self.storage.write_state(state)
+                if result.not_modified:
+                    self._write_success_state(state, result, started)
             except Exception as exc:
-                state.last_failure_at = datetime.now(UTC)
-                state.consecutive_failures += 1
-                self.storage.write_state(state)
+                outcome.status = SourceOutcomeStatus.FAILED
+                outcome.error = str(exc)
+                self._write_failure_state(state)
                 quarantine_path = self.storage.write_quarantine(
                     source.id,
                     {
@@ -148,19 +212,26 @@ class Pipeline:
         kev: set[str] = set()
         if "cisa_kev" in results:
             kev = parse_cisa_kev(results["cisa_kev"].records)
+            kev_outcome = outcomes["cisa_kev"]
+            if kev_outcome.status == SourceOutcomeStatus.SUCCESS:
+                kev_outcome.parsed_count = kev_outcome.record_count
+                self._write_success_state(states["cisa_kev"], results["cisa_kev"], started)
 
+        coverage_changes: list[Advisory] = []
         for source in selected:
-            if source.role != SourceRole.ADVISORY:
+            if source.role not in {SourceRole.ADVISORY, SourceRole.COVERAGE}:
                 continue
             selected_result = results.get(source.id)
             if selected_result is None or selected_result.not_modified:
                 continue
             current_ids: list[str] = []
             parsed_count = 0
+            parse_errors: list[str] = []
             for raw in selected_result.records:
                 try:
                     draft = parse_record(source, raw)
                 except Exception as exc:
+                    parse_errors.append(str(exc))
                     manifest.changes.append(
                         ChangeRecord(
                             canonical_id=f"{source.id}:parse",
@@ -186,6 +257,12 @@ class Pipeline:
                         if semantic_hash(existing) == semantic_hash(advisory)
                         else AiMetadata()
                     )
+                if source.role == SourceRole.COVERAGE:
+                    changed = existing is None or semantic_hash(existing) != semantic_hash(advisory)
+                    if changed:
+                        self.storage.write(advisory)
+                        coverage_changes.append(advisory)
+                    continue
                 status = (
                     ChangeStatus.NEW
                     if existing is None
@@ -207,10 +284,14 @@ class Pipeline:
                         path=str(path.relative_to(self.output_root)),
                     )
                 )
-            if parsed_count == 0:
-                if not selected_result.records and not selected_result.complete_snapshot:
-                    self.storage.write_state(states[source.id])
-                    continue
+            outcome = outcomes[source.id]
+            outcome.parsed_count = parsed_count
+            outcome.parse_failure_count = len(parse_errors)
+            if parse_errors:
+                outcome.status = SourceOutcomeStatus.PARTIAL
+                outcome.error = parse_errors[0]
+                self._write_failure_state(states[source.id])
+            if parse_errors and parsed_count == 0:
                 quarantine_path = self.storage.write_quarantine(
                     source.id,
                     {
@@ -230,20 +311,28 @@ class Pipeline:
                         message="all collected records failed to parse",
                     )
                 )
+            if parse_errors:
+                continue
+            next_state = states[source.id].model_copy(deep=True)
+            if source.role == SourceRole.COVERAGE:
+                # Coverage feeds are incremental aggregators and never participate in
+                # report withdrawal inference. Retaining their ever-growing ID union
+                # would make the Git-managed state file unbounded without adding a
+                # correctness guarantee.
+                self._write_success_state(next_state, selected_result, started)
                 continue
             if selected_result.complete_snapshot:
-                self._handle_missing(source, states[source.id], current_ids, manifest)
-                states[source.id].known_ids = sorted(set(current_ids))
+                self._handle_missing(source, next_state, current_ids, manifest)
+                next_state.known_ids = sorted(set(current_ids))
             else:
                 for present in current_ids:
-                    states[source.id].missing_counts.pop(present, None)
-                    states[source.id].first_missing_at.pop(present, None)
-                states[source.id].known_ids = sorted(
-                    set(states[source.id].known_ids) | set(current_ids)
-                )
-            self.storage.write_state(states[source.id])
+                    next_state.missing_counts.pop(present, None)
+                    next_state.first_missing_at.pop(present, None)
+                next_state.known_ids = sorted(set(next_state.known_ids) | set(current_ids))
+            self._write_success_state(next_state, selected_result, started)
 
-        self._update_vulndb(manifest)
+        manifest.source_outcomes = [outcomes[source.id] for source in selected]
+        self._update_vulndb(manifest, coverage_changes)
         self.storage.rebuild_indexes()
         manifest.completed_at = datetime.now(UTC)
         write_json(
@@ -258,12 +347,12 @@ class Pipeline:
         source: SourceDefinition,
         state: SourceState,
         since: datetime,
-    ) -> CollectionResult:
+    ) -> tuple[CollectionResult, CollectorKind]:
         assert source.collector is not None
         errors: list[str] = []
         for kind in [source.collector, *source.fallback_collectors]:
             try:
-                return await create_collector(kind).collect(source, state, since)
+                return await create_collector(kind).collect(source, state, since), kind
             except CollectorError as exc:
                 errors.append(f"{kind}: {exc}")
         raise CollectorError("; ".join(errors))
@@ -274,12 +363,13 @@ class Pipeline:
         state: SourceState,
         since: datetime,
         semaphore: asyncio.Semaphore,
-    ) -> tuple[CollectionResult | None, Exception | None]:
+    ) -> tuple[CollectionResult | None, CollectorKind | None, Exception | None]:
         async with semaphore:
             try:
-                return await self._collect_with_fallbacks(source, state, since), None
+                result, collector = await self._collect_with_fallbacks(source, state, since)
+                return result, collector, None
             except Exception as exc:
-                return None, exc
+                return None, None, exc
 
     @staticmethod
     def _validate_volume(
@@ -302,6 +392,36 @@ class Pipeline:
             state.item_count and count > state.item_count * 10
         ):
             raise CollectorError(f"{source.id}: anomalous new item volume")
+
+    def _write_success_state(
+        self,
+        state: SourceState,
+        result: CollectionResult,
+        collection_started_at: datetime,
+    ) -> None:
+        """Commit collection watermarks only after the source is fully usable.
+
+        The start boundary deliberately precedes every upstream request in this run.
+        Delta collectors therefore overlap updates that arrive while collection or
+        parsing is still in progress instead of skipping them on the next run.
+        """
+
+        success_state = state.model_copy(deep=True)
+        success_state.etag = result.etag or success_state.etag
+        success_state.last_modified = result.last_modified or success_state.last_modified
+        success_state.last_success_at = collection_started_at
+        success_state.consecutive_failures = 0
+        if not result.not_modified:
+            success_state.item_count = len(result.records)
+        self.storage.write_state(success_state)
+
+    def _write_failure_state(self, state: SourceState) -> None:
+        """Record a failed/partial attempt without advancing successful state."""
+
+        failed_state = state.model_copy(deep=True)
+        failed_state.last_failure_at = datetime.now(UTC)
+        failed_state.consecutive_failures += 1
+        self.storage.write_state(failed_state)
 
     def _normalize(
         self,
@@ -349,7 +469,11 @@ class Pipeline:
             body_excerpt=draft.body_excerpt,
         )
 
-    def _update_vulndb(self, manifest: RunManifest) -> None:
+    def _update_vulndb(
+        self,
+        manifest: RunManifest,
+        coverage_changes: list[Advisory] | None = None,
+    ) -> None:
         db = VulnDb(self.output_root)
         now = datetime.now(UTC)
         if db.initialized:
@@ -368,6 +492,7 @@ class Pipeline:
                 found = self.storage.find(change.canonical_id)
                 if found:
                     advisories.append(found[1])
+            advisories.extend(coverage_changes or [])
         else:
             # 初回はリポジトリ内の全アドバイザリから台帳をシードする。
             advisories = self.storage.all_advisories()
@@ -411,9 +536,12 @@ class Pipeline:
     def _write_summary(self, manifest: RunManifest) -> None:
         counts: dict[str, int] = {}
         priorities: dict[str, int] = {}
+        source_statuses = {status.value: 0 for status in SourceOutcomeStatus}
         for change in manifest.changes:
             counts[change.status] = counts.get(change.status, 0) + 1
             priorities[change.priority] = priorities.get(change.priority, 0) + 1
+        for outcome in manifest.source_outcomes:
+            source_statuses[outcome.status] += 1
         lines = [
             "# Vulnerability collection run",
             "",
@@ -428,6 +556,10 @@ class Pipeline:
             "## Priorities",
             "",
             *[f"- {key}: {value}" for key, value in sorted(priorities.items())],
+            "",
+            "## Source outcomes",
+            "",
+            *[f"- {key}: {value}" for key, value in sorted(source_statuses.items())],
             "",
         ]
         (self.output_root / "run-summary.md").write_text("\n".join(lines), encoding="utf-8")

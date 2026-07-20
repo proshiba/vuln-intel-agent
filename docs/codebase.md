@@ -15,9 +15,11 @@ CISA KEV -----> exploitation enrichment -------------+
                                                      v
                                              Advisory + Priority
                                                      |
-                                +--------------------+-------------+
-                                v                    v             v
-                         advisory.json         AI summary     daily report
+                 +-------------------+--------------------+-------------+
+                 v                   v                    v             v
+          advisory.json          vulndb ledger      AI summary     daily report
+
+all selected sources -> source_outcomes -> completeness gate
 ```
 
 `vulnwatch collect`は次の順番で処理します。
@@ -29,7 +31,9 @@ CISA KEV -----> exploitation enrichment -------------+
 5. CVE、製品、深刻度、修正版、悪用状況を`Advisory`へ正規化する。
 6. CISA KEVと製品台帳の一致結果を付加し、優先度を決定する。
 7. 既存アドバイザリのメモリ索引を使い、semantic hashで変更状態を判定する。
-8. JSON、状態、索引、run manifest、run summaryをstagingへ出力する。
+8. coverageソースも保存データとvulndbへ反映するが、重複防止のためレポート変更行からは除く。
+9. 全対象ソースのstatus、Collector、endpoint、件数、エラーを`source_outcomes`へ記録する。
+10. JSON、状態、索引、run manifest、run summaryをstagingへ出力する。
 
 ## モジュール
 
@@ -39,7 +43,7 @@ CISA KEV -----> exploitation enrichment -------------+
 | `pipeline.py` | 収集、正規化、差分判定、隔離、保存、取り込み元切り替えの統括 |
 | `models.py` | 設定、収集結果、アドバイザリ、実行結果のPydanticモデル |
 | `config.py` | YAML設定の読み込みと検証 |
-| `collectors/` | CSAF、JSON API、feed、HTML、browser、PDF、OSV(osv.dev)からの取得 |
+| `collectors/` | CSAF、JSON API、feed、HTML、browser、Broadcom、PDF、NVD、OSV/OSV globalからの取得 |
 | `parsers/` | ベンダー形式から共通の`AdvisoryDraft`への変換（OSVスキーマ含む） |
 | `identity.py` | canonical ID、slug、semantic hashの生成 |
 | `priority.py` | 製品台帳との照合と優先度判定 |
@@ -58,7 +62,12 @@ CISA KEV -----> exploitation enrichment -------------+
 - `AdvisoryDraft`: Parserが抽出した共通の中間形式
 - `Advisory`: 保存・公開する正規化済み形式
 - `SourceState`: ETag、成功時刻、件数、既知ID、消失回数などの状態
+- `SourceOutcome`: ソースごとのstatus、使用Collector、endpoint、取得・parse件数、エラー
 - `RunManifest`: 1回の収集における変更と結果
+
+ソースの`role`は、レポート対象の`advisory`、悪用情報を付加する`enrichment`、横断情報を
+保存データとvulndbへ補う`coverage`に分かれます。現行設定は160件すべてが有効で、
+`advisory` 155件、`coverage` 4件、`enrichment` 1件です。
 
 ベンダー由来の情報は`facts`、外部・組織情報は`enrichment`、判定結果は`decision`に
 分離されます。AI出力は`ai`に隔離され、原典由来の事実を上書きしません。
@@ -82,8 +91,13 @@ CISA KEV -----> exploitation enrichment -------------+
 - GitHub tokenは`api.github.com`へのrequestだけに付与し、redirect先へ転送しない。
 - response size、Content-Type、timeout、rate limit、redirect回数を制限する。
 - network error、HTTP 429、5xxを制限付きでretryする。
-- 取得件数0と異常増加を拒否し、完全スナップショットでは85%以上の急減も拒否する。
+- 完全スナップショットの異常な0件、設定上限を超える増加、85%以上の急減を拒否する。
 - 収集・parse失敗はソース単位で`quarantine`へ記録する。
+- Pipelineは他ソースの診断情報を残すため収集を継続し、各結果を`source_outcomes`へ記録する。
+- 定期daily実行は有効ソース数とoutcome数の一致を確認し、`failed`または`partial`が1件でも
+  あれば生ツリーのhandoff前に停止する。`not_modified`は正常な条件付き取得結果として許可する。
+- `vulnwatch validate`もprofileから期待するsource IDを算出し、outcomeの欠落・余分・重複と
+  `failed`/`partial`を拒否するため、不完全なツリーは公開できない。
 - withdrawn判定には3回以上かつ24時間以上の欠落を必要とする。
 - CSAFの上限制御とローリングfeedは部分取得として既知IDを和集合で保持し、未取得レコードを
   withdrawn判定しない。
@@ -115,6 +129,9 @@ Webhookで起動したClaude Code routineが要約・レポート・検証・公
 ## ソース追加
 
 1. `config/sources.yaml`に公式URL、collector、parser、許可ホストを追加する。
+   `catalog_runtime.enabled`が有効なため、`enabled`を省略したカタログ項目も上限付きHTML/generic
+   runtimeとして次回daily実行から自動的に収集対象になる。機械可読endpointがある場合は、
+   ソース固有のruntime設定を明示する。
 2. 必要なら`collectors/`または`parsers/`を拡張する。
 3. `tests/fixtures/vendors/`に外部接続不要の最小fixtureを追加する。
 4. `tests/fixtures/expected.json`とparser testへ期待値を追加する。
@@ -124,7 +141,8 @@ Webhookで起動したClaude Code routineが要約・レポート・検証・公
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[dev,browser]'
+.venv/bin/python -m playwright install chromium
 .venv/bin/vulnwatch config validate
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
@@ -132,5 +150,5 @@ python -m venv .venv
 .venv/bin/pytest
 ```
 
-AI要約には`.[dev,ai]`、browserまたはPDF collectorには対応する任意依存を追加します。
-通常のテストは外部ネットワークへ接続しません。
+AI要約には`ai` extraも追加します。browser extraとChromiumは9件の有効ソースを含むfull daily
+収集には必須です。PDF extraは現行設定では任意です。通常のテストは外部ネットワークへ接続しません。

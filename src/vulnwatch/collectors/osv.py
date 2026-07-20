@@ -54,7 +54,15 @@ class OsvCollector:
                     raise CollectorError(f"{source.id}: invalid OSV JSON: {exc}") from exc
                 for vuln in payload.get("vulns", []):
                     identifier = vuln.get("id") if isinstance(vuln, dict) else None
-                    if not identifier or identifier in seen:
+                    # This collector is the alternate backend for GitHub Repository
+                    # Security Advisory sources. Ecosystem databases often return a
+                    # second GO-/PYSEC-/RUSTSEC- record for the same vulnerability;
+                    # retain the GHSA member so the result matches that source scope.
+                    if (
+                        not isinstance(identifier, str)
+                        or not identifier.startswith("GHSA-")
+                        or identifier in seen
+                    ):
                         continue
                     seen.add(identifier)
                     records.append(

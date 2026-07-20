@@ -7,7 +7,8 @@
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -e '.[dev,ai]'
+.venv/bin/pip install -e '.[dev,ai,browser]'
+.venv/bin/playwright install chromium
 .venv/bin/vulnwatch config validate
 .venv/bin/pytest
 ```
@@ -16,7 +17,7 @@ python -m venv .venv
 
 ```bash
 vulnwatch config validate
-vulnwatch collect --profile edge --since 90d --output staging
+vulnwatch collect --profile daily --since 90d --output staging
 vulnwatch summarize --root staging --priority P1,P2
 vulnwatch report --root staging
 vulnwatch validate --root staging
@@ -41,7 +42,24 @@ vulnwatch source test cisco --fixture tests/fixtures/vendors/cisco.json
 `staging`だけは重複する一時作業領域としてGit対象外です。設定は `config/sources.yaml`、
 機密情報を含まない製品台帳は `config/products.yaml` です。
 
-有効な80ソースのうちGitHub APIを利用するソースは、認証なしではAPIの時間当たり上限を
+設定済みの160ソースはすべて有効です。内訳は `daily` 154件、`edge` 6件で、Collector別では
+JSON API 76件、HTML 27件、RSS/Atom feed 37件、Playwright browser 9件、CSAF 6件、Broadcom
+VMware API 1件、Ubiquiti API 1件、NVD 2件、OSV global 1件です。`catalog_runtime`により、`enabled`を明示して
+いないカタログ項目も、件数・
+詳細取得数・許可ホストを制限した公式Webソースとして自動的に有効になります。個別に検証済みの
+機械可読endpointがある場合は、そのソース固有設定が共通値より優先されます。
+
+役割は通常のアドバイザリ155件、横断coverage 4件、CISA KEV enrichment 1件です。coverageの
+JVN iPedia、NVD、GitHub Advisory Database、OSVは保存データと`vulndb`の網羅性を補いますが、
+同一脆弱性の重複を避けるため日次レポートの変更行には直接追加しません。収集成否はレポート行
+ではなく、後述の`source_outcomes`で確認します。
+
+OSV globalの`modified_id.csv`は90日で数十万件規模になるため、初回有効化だけは設定済みの
+1時間境界から開始し、その後はGit管理される`state/sources/osv.json`の`last_success_at`以降を
+欠けなく差分取得します。これは過去全件のbackfillではありません。OSVの全履歴dumpはGB級の
+別運用になるため、初回の過去網羅はNVD・GitHub Advisory Database等のcoverageで補完します。
+
+GitHub APIを利用するソースは、認証なしではAPIの時間当たり上限を
 超えます。ローカル収集では読み取り専用のGitHub tokenを`GH_TOKEN`（優先）または
 `GITHUB_TOKEN`に設定してください。tokenは`api.github.com`にだけ送信され、redirect先や
 隔離ログには渡しません。
@@ -51,10 +69,16 @@ export GH_TOKEN="..."
 vulnwatch collect --profile daily --since 90d --output staging
 ```
 
-GitHub Actionsで全80ソースを収集するには、公開情報の読み取りだけに使う専用tokenを
+GitHub Actionsで全160ソースを収集するには、公開情報の読み取りだけに使う専用tokenを
 repository secret `VULNWATCH_GITHUB_TOKEN`へ登録してください。第三者repositoryには
 Actions組み込み`GITHUB_TOKEN`の権限が及ばないため、secret未設定時は部分的な結果を公開せず
 daily収集前に停止します。GitHub APIを使わないedge profileはtokenなしでも実行できます。
+
+各実行の`run-manifest.json.source_outcomes`には、対象ソースごとのstatus、実際に使った
+Collector、endpoint、取得件数、parse件数、parse失敗数、エラーが記録されます。daily定期実行は
+全160件のoutcomeがそろい、`failed`または`partial`が0件であることを確認してから後続処理へ
+渡します。`vulnwatch validate`も同じ完全性条件を検証するため、不完全な実行はquarantineや
+manifestへ診断情報を残しても、そのままレポート・公開へ進めません。
 
 ### GitHub由来ソースの取り込み元切り替え（GitHub直接 / OSV）
 
@@ -63,18 +87,20 @@ GitHubリポジトリのSecurity Advisory（`parser: github_advisory`）は、`a
 切り替えられます。
 
 - `github`（既定）: 各リポジトリの`security-advisories` APIから、メンテナ発行分を取得。
-- `osv`: OSVへ`osv_ecosystem`/`osv_packages`で問い合わせ、当該パッケージに影響する
-  全脆弱性（第三者報告のCVEも含む）を取得。`api.github.com`を使わないため、GitHub APIへ
-  到達できない環境でも収集でき、tokenも不要です。CVSSはOSVのvectorから数値スコアを算出します。
+- `osv`: OSV座標があるソースはpackage queryのGHSAレコードへ切り替えます。OSV未収録の
+  Repository Advisoryは公式の公開HTMLをページングし、横断GitHub Advisory Databaseは
+  OSV modified indexのGHSA増分だけを取得します。`api.github.com`を使わないためtokenは不要です。
+  CVSSはOSVのvectorから数値スコアを算出します。
 
 ```bash
 export VULNWATCH_GITHUB_BACKEND=osv
 vulnwatch collect --profile daily --since 90d --output staging
 ```
 
-OSVはパッケージ単位で引くため、OSVにパッケージが存在しないソース（サーバ・アプリ本体など。
-現状はredis・OpenTelemetry Collector・Immich）は`osv_ecosystem`未設定で、`osv`指定時も
-GitHub直接取得のままです（GitHub APIへ到達できない環境ではこの3ソースのみ隔離されます）。
+OSV座標が設定された62ソースに加え、Redis、Nextcloud、Immich、横断coverageの
+GitHub Advisory Databaseにも上記の認証不要経路を適用するため、`osv`選択時の有効160ソースに
+`api.github.com` endpointは残りません。公開HTML経路は同一repository advisory pathだけを
+許可し、指定期間を過ぎるページまで有界に追跡します。
 OSVは反映に数分〜数時間の遅れがあるため、速報性が要る境界機器等は引き続き各ベンダーの
 直接ソースから即時取得します。
 
@@ -99,10 +125,11 @@ vulnwatch report --root staging \
 対象変更があるのに最新の成功済み日次サマリがなければ検証と公開は停止し、未生成文章を
 公開しません。
 
-PlaywrightとPDFは拡張用の任意依存です。
+Playwrightは9件の有効ソースが使用するため、全160ソースのdaily収集では必須です。PDFは
+Collectorとして利用できますが、現行の有効ソースでは使用していない任意依存です。
 
 ```bash
-pip install -e '.[browser,pdf]'
+pip install -e '.[browser]'
 playwright install --with-deps chromium
 ```
 
@@ -125,7 +152,7 @@ OpenAIキーは不要）・レポート・検証・公開を行って `bot/vulnw
 安定します。ベンダー・年・月でフォルダ分けすることで、1フォルダあたりのファイル数を抑え、
 GitHub上でも閲覧しやすくしています。
 
-CVE未採番の脆弱性（ゼロデイなど）には内部ID `VW-YYYY-NNNN` を採番します。
+CVE未採番の脆弱性（ゼロデイなど）には内部ID `VW-YYYY-NNNN…`（年内通番は4桁以上）を採番します。
 内部IDは恒久キーとしてファイル名に使い続け、後からCVEが判明した場合は
 エントリの `cve` フィールドへ付与するだけで、ファイルの移動や統合は行いません。
 同一CVEを複数ベンダーが公表した場合は1エントリに出典を集約します。修正版・

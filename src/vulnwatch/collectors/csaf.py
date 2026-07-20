@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -47,6 +48,16 @@ class CsafCollector:
             if isinstance(payload, dict) and "document" in payload:
                 records.append(self._record(source, fetched.url, payload, fetched.content_type))
             elif isinstance(payload, dict):
+                rolie_links, rolie_count = self._rolie_links(payload, since)
+                links.extend(rolie_links)
+                index_item_count += rolie_count
+                github_links, github_count = self._github_tree_links(
+                    source.url,
+                    payload,
+                    since,
+                )
+                links.extend(github_links)
+                index_item_count += github_count
                 for distribution in payload.get("distributions", []):
                     directory = distribution.get("directory_url")
                     if directory:
@@ -188,6 +199,91 @@ class CsafCollector:
                     modified = None
             links.append(_IndexLink(str(link), modified))
         return links, item_count
+
+    @staticmethod
+    def _rolie_links(
+        payload: dict[str, Any],
+        since: datetime,
+    ) -> tuple[list[_IndexLink], int]:
+        feed = payload.get("feed")
+        if not isinstance(feed, dict):
+            return [], 0
+        entries = feed.get("entry")
+        if not isinstance(entries, list):
+            return [], 0
+        since_utc = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+        links: list[_IndexLink] = []
+        item_count = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            content = entry.get("content")
+            url = str(content.get("src") or "") if isinstance(content, dict) else ""
+            if not url:
+                for candidate in entry.get("link", []):
+                    if not isinstance(candidate, dict) or candidate.get("rel") != "self":
+                        continue
+                    url = str(candidate.get("href") or "")
+                    if url:
+                        break
+            if not url:
+                continue
+            item_count += 1
+            modified: datetime | None = None
+            observed = entry.get("updated") or entry.get("published")
+            if observed:
+                try:
+                    modified = parse_date(str(observed))
+                    if modified.tzinfo is None:
+                        modified = modified.replace(tzinfo=UTC)
+                    modified = modified.astimezone(UTC)
+                    if modified < since_utc:
+                        continue
+                except (TypeError, ValueError, OverflowError):
+                    modified = None
+            links.append(_IndexLink(url, modified))
+        return links, item_count
+
+    @staticmethod
+    def _github_tree_links(
+        index_url: str,
+        payload: dict[str, Any],
+        since: datetime,
+    ) -> tuple[list[_IndexLink], int]:
+        tree = payload.get("tree")
+        if not isinstance(tree, list):
+            return [], 0
+        parsed = urlsplit(index_url)
+        match = re.fullmatch(
+            r"/repos/([^/]+)/([^/]+)/git/trees/([^/]+)",
+            parsed.path.rstrip("/"),
+        )
+        if parsed.hostname != "api.github.com" or match is None:
+            return [], 0
+        owner, repository, reference = match.groups()
+        first_year = (since if since.tzinfo else since.replace(tzinfo=UTC)).year
+        paths = sorted(
+            {
+                str(item.get("path"))
+                for item in tree
+                if isinstance(item, dict)
+                and item.get("type") == "blob"
+                and re.fullmatch(
+                    rf"csaf_files/OT/white/(?:{first_year}|2\d{{3}})/.+\.json",
+                    str(item.get("path") or ""),
+                )
+                and int(str(item.get("path")).split("/")[3]) >= first_year
+            },
+            reverse=True,
+        )
+        links = [
+            _IndexLink(
+                f"https://raw.githubusercontent.com/{owner}/{repository}/"
+                f"{reference}/{path}"
+            )
+            for path in paths
+        ]
+        return links, len(paths)
 
     @classmethod
     def _ordered_unique_links(cls, links: list[_IndexLink]) -> list[str]:

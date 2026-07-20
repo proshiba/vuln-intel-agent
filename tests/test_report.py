@@ -40,7 +40,11 @@ def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
         since=datetime(2026, 4, 18, tzinfo=UTC),
         changes=changes,
     )
-    (tmp_path / "run-manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+    # Report-focused tests intentionally exercise the legacy manifest path. Source
+    # outcome validation has dedicated coverage below.
+    (tmp_path / "run-manifest.json").write_text(
+        manifest.model_dump_json(exclude={"source_outcomes"}), encoding="utf-8"
+    )
 
 
 def test_generate_report_adds_matrix_and_orders_by_risk(tmp_path: Path, advisory_factory) -> None:

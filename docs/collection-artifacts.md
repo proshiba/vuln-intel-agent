@@ -1,6 +1,6 @@
 # 収集成果物のGit管理方針
 
-最終更新: 2026-07-18
+最終更新: 2026-07-19
 
 ## Gitで管理するもの
 
@@ -14,7 +14,7 @@
 - `vulndb/index.csv`: CVE単位の脆弱性台帳の全体索引
 - `vulndb/vulns/<vendor>/<year>/<month>/<内部ID>.yaml`: 脆弱性ごとの台帳エントリ（年・月は最初に観測した`created_at`）
 - `vulndb/registry.json`: 台帳の採番・索引状態
-- `run-manifest.json`: 最新収集の変更記録
+- `run-manifest.json`: 最新収集の変更記録と全対象ソースの`source_outcomes`
 - `run-summary.md`: 最新収集の実行サマリ
 
 検証済みの生成成果物はすべてGitで管理し、最終的に定期実行で`main`へ反映されます。`staging/`
@@ -27,7 +27,9 @@
 
 1. `.github/workflows/collect-advisories.yml`（毎朝04:00 JST）が全ソースを収集し、生ツリー
    （`data`、`state`、`quarantine`、`vulndb`、manifest、summary）を `bot/collected-raw` へ
-   commitする。`vulnwatch publish`は使わず、レポート生成前の生ツリーをそのまま渡す。
+   commitする。現行daily profileでは160ソースが対象で、workflowはhandoff前にoutcomeが
+   160件そろい、`failed`と`partial`が0件であることを確認する。不完全ならcommitせず停止する。
+   `vulnwatch publish`は使わず、レポート生成前の生ツリーをそのまま渡す。
 2. 同workflowがWebhookで Claude Code の routine を起動し、収集ブランチとコミットSHAを渡す。
 3. routine が収集ツリーをstagingへ展開し、`summarize`（Claudeが日本語サマリを代筆）→
    `report` → `validate` → `publish` を実行し、`bot/vulnwatch-daily` へpushする。
@@ -37,14 +39,22 @@
 ## ローカルでの更新
 
 ```bash
-vulnwatch collect --profile daily --since 90d --output staging
-vulnwatch summarize --root staging
-vulnwatch report --root staging \
+.venv/bin/vulnwatch config validate
+.venv/bin/vulnwatch collect --profile daily --since 90d --output staging
+.venv/bin/vulnwatch summarize --root staging
+.venv/bin/vulnwatch report --root staging \
   --critical-summary '<Critical全件の日本語AIサマリ>' \
   --exploitation-summary '<悪用済み・PoC公開済みの日本語AIサマリ>'
-vulnwatch validate --root staging
-vulnwatch publish --root staging --repository .
+.venv/bin/vulnwatch validate --root staging
+.venv/bin/vulnwatch publish --root staging --repository .
+git add -A -- data reports state quarantine vulndb run-manifest.json run-summary.md
 ```
+
+`collect`後は`staging/run-manifest.json`の`source_outcomes`を確認します。dailyでは有効な全160
+ソースに1件ずつ必要で、許容statusは`success`と`not_modified`です。欠落、`failed`、`partial`
+がある場合は`quarantine/<source-id>/latest.json`とoutcomeのendpoint・件数・errorを調べ、
+再収集が完了するまで`report`と`publish`へ進みません。`vulnwatch validate`自体もoutcomeの
+欠落・余分・重複と`failed`/`partial`を拒否します。
 
 新規・更新・取り下げ変更が0件の場合は、2つのサマリオプションを付けずに定型的な変更なし
 レポートを生成し、日次サマリsidecarは不要です。
@@ -55,12 +65,12 @@ vulnwatch publish --root staging --repository .
 
 ## 収集成果物の規模
 
-件数は日次収集のたびに増えます。目安（有効80ソース時点）:
+件数は日次収集のたびに増えます。現行160ソース構成で固定または増分となる単位は次のとおりです。
 
-- ベンダー別一覧: 約56ファイル
-- 個別アドバイザリJSON: 約1,000ファイル（増加）
-- 収集状態: 80ファイル（有効ソース数と一致）
-- vulndb台帳エントリ: 約2,100ファイル（`vulns/<vendor>/<year>/<month>/` 配下、増加）
+- ベンダー別一覧と個別アドバイザリJSON: 収集・正規化の成功に応じて増加
+- 収集状態: 160ファイル（full daily実行後、有効ソース数と一致）
+- `run-manifest.json.source_outcomes`: full daily実行ごとに160件
+- vulndb台帳エントリ: `vulns/<vendor>/<year>/<month>/`配下で増加
 - 日次レポートと対象変更ありの日のAIサマリsidecar
 
 vulndbはベンダー・年・月でフォルダ分けするため、1フォルダあたりのファイル数はGitHubの

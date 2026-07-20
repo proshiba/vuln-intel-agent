@@ -13,7 +13,7 @@ from vulnwatch.models import Advisory, AdvisoryStatus, Priority, StrictModel
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
 VULNDB_DIRECTORY = "vulndb"
-_VULN_ID_PATTERN = r"^VW-\d{4}-\d{4}$"
+_VULN_ID_PATTERN = r"^VW-\d{4}-\d{4,}$"
 _PRIORITY_RANK = {Priority.P1: 0, Priority.P2: 1, Priority.P3: 2, Priority.INFO: 3}
 _SEVERITY_RANK = {
     "critical": 0,
@@ -43,6 +43,13 @@ CSV_COLUMNS = (
     "created_at",
     "updated_at",
 )
+
+
+def _vuln_id_sort_key(vuln_id: str) -> tuple[int, int]:
+    """Sort internal IDs by numeric year and sequence, including 5+ digit sequences."""
+
+    _, year, sequence = vuln_id.split("-", 2)
+    return int(year), int(sequence)
 
 
 class VulnSourceRef(StrictModel):
@@ -118,7 +125,8 @@ def relative_entry_path(record: VulnRecord) -> Path:
 class VulnDb:
     """CVE単位の脆弱性台帳。全体索引CSVと脆弱性ごとのYAMLを生成する。
 
-    CVE未採番の脆弱性には内部ID（VW-YYYY-NNNN）を採番し、内部IDを恒久キーとして
+    CVE未採番の脆弱性には内部ID（VW-YYYY-年内通番、4桁以上）を採番し、
+    内部IDを恒久キーとして
     維持する。後からCVEが判明した場合はエントリのcveフィールドへ付与するだけで、
     ファイルの移動や統合は行わない。
     """
@@ -320,7 +328,7 @@ class VulnDb:
     def write(self) -> None:
         """registry、変更されたYAMLエントリ、全体索引CSVを書き出す。"""
 
-        for vuln_id in sorted(self._dirty):
+        for vuln_id in sorted(self._dirty, key=_vuln_id_sort_key):
             self._write_entry(self._entries[vuln_id])
         self._migrate_flat_entries()
         write_json(self.registry_path, self.registry.model_dump(mode="json"))
@@ -361,7 +369,7 @@ class VulnDb:
         buffer = io.StringIO()
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(CSV_COLUMNS)
-        for record in sorted(entries, key=lambda item: item.vuln_id):
+        for record in sorted(entries, key=lambda item: _vuln_id_sort_key(item.vuln_id)):
             writer.writerow(
                 [
                     record.vuln_id,

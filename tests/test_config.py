@@ -1,3 +1,4 @@
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -5,95 +6,43 @@ import pytest
 from vulnwatch.config import ConfigError, load_products, load_sources
 
 
-def test_registry_has_all_sources_and_expected_initial_set() -> None:
+def test_registry_has_all_sources_enabled_for_collection() -> None:
     registry = load_sources()
     enabled = {source.id for source in registry.sources if source.enabled}
 
     assert len(registry.sources) == 160
-    assert enabled == {
-        "cisco",
-        "fortinet",
-        "palo_alto_networks",
-        "juniper_networks",
-        "microsoft",
-        "red_hat",
-        "suse",
-        "kubernetes",
-        "sonicwall",
-        "veeam",
-        "cisa_kev",
-        "canonical",
-        "debian",
-        "jenkins",
-        "gitlab",
-        "jvn",
-        "redis",
-        "grafana_github",
-        "matrix_synapse_github",
-        "prometheus_github",
-        "etcd_github",
-        "gitea_github",
-        "traefik_github",
-        "minio_github",
-        "jupyter_server_github",
-        "helm_github",
-        "argo_cd_github",
-        "flux_github",
-        "containerd_github",
-        "moby_github",
-        "docker_compose_github",
-        "otel_collector_github",
-        "immich_github",
-        "jellyfin_github",
-        "home_assistant_github",
-        "deno_github",
-        "caddy_github",
-        "envoy_github",
-        "alertmanager_github",
-        "oauth2_proxy_github",
-        "syncthing_github",
-        "tailscale_github",
-        "netbird_github",
-        "keycloak_github",
-        "grpc_go_github",
-        "electron_github",
-        "nextjs_github",
-        "nuxt_github",
-        "rails_github",
-        "laravel_github",
-        "flask_github",
-        "express_github",
-        "fastapi_github",
-        "starlette_github",
-        "aiohttp_github",
-        "sveltekit_github",
-        "angular_github",
-        "werkzeug_github",
-        "jinja_github",
-        "urllib3_github",
-        "requests_github",
-        "cryptography_github",
-        "pillow_github",
-        "pydantic_github",
-        "scrapy_github",
-        "tornado_github",
-        "strapi_github",
-        "directus_github",
-        "payload_github",
-        "vite_github",
-        "webpack_github",
-        "pnpm_github",
-        "npm_cli_github",
-        "nestjs_github",
-        "koa_github",
-        "socketio_github",
-        "gofiber_github",
-        "echo_github",
-        "gorilla_websocket_github",
-        "rustls_github",
-    }
+    assert enabled == {source.id for source in registry.sources}
     assert all(source.allowed_hosts for source in registry.sources if source.enabled)
     assert all(isinstance(source.products, list) for source in registry.sources)
+
+    ivanti = next(source for source in registry.sources if source.id == "ivanti")
+    assert ivanti.collector == "feed"
+    assert ivanti.url == "https://www.ivanti.com/blog/topics/security-advisory/rss"
+    assert ivanti.parser == "feed"
+    assert ivanti.max_detail_fetches == 20
+
+    schneider = next(
+        source for source in registry.sources if source.id == "schneider_electric"
+    )
+    assert schneider.collector == "html"
+    assert schneider.parser == "generic"
+    assert schneider.url == schneider.advisory_url
+    assert schneider.allowed_hosts == [
+        "www.se.com",
+        "download.schneider-electric.com",
+    ]
+    assert schneider.selectors == {
+        "item": "table tr:has(td)",
+        "link": "td:nth-of-type(6) a[href]",
+        "title": "td:nth-of-type(2)",
+        "published_at": "td:nth-of-type(1)",
+        "products": "td:nth-of-type(5)",
+    }
+    assert schneider.max_detail_fetches == 0
+
+    collector_counts = Counter(source.collector for source in registry.sources)
+    assert collector_counts["html"] == 27
+    assert collector_counts["csaf"] == 6
 
 
 def test_alternative_channels_are_separate_from_machine_feeds() -> None:
@@ -117,6 +66,34 @@ def test_runtime_sources_use_bounded_machine_readable_channels() -> None:
         source = by_id[source_id]
         assert source.max_index_items == 100_000
         assert source.max_detail_fetches == 100
+
+    ibm = by_id["ibm"]
+    assert ibm.url == (
+        "https://www.ibm.com/support/pages/securityapp/api/site/datalist?"
+        "offset=0&limit=1000"
+    )
+    assert ibm.allowed_hosts == ["www.ibm.com"]
+    assert ibm.max_response_bytes == 60_000_000
+    assert ibm.max_items == 1_000
+    assert ibm.max_index_items == 1_000
+
+
+def test_feed_only_sources_do_not_fetch_unsupported_html_details() -> None:
+    registry = load_sources()
+    by_id = {source.id: source for source in registry.sources}
+
+    expected_hosts = {
+        "arista_networks": ["www.arista.com"],
+        "qnap": ["www.qnap.com"],
+        "sophos": ["support.sophos.com", "www.sophos.com"],
+        "xerox": ["security.business.xerox.com"],
+    }
+    for source_id, allowed_hosts in expected_hosts.items():
+        source = by_id[source_id]
+        assert source.collector == "feed"
+        assert source.parser == "feed"
+        assert source.max_detail_fetches == 0
+        assert source.allowed_hosts == allowed_hosts
 
 
 def test_products_registry_starts_empty_and_contains_no_sensitive_fields() -> None:

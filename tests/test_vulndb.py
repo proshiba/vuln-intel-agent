@@ -41,6 +41,29 @@ def test_advisory_with_cve_creates_entry_csv_and_yaml(tmp_path: Path, advisory_f
     assert validate_vulndb(tmp_path) == 1
 
 
+def test_sequence_grows_beyond_four_digits(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.registry.sequences["2026"] = 9998
+    first = advisory_factory()
+    second = advisory_factory(
+        canonical_id="example:ADV-2",
+        vendor_advisory_id="ADV-2",
+        source_url="https://security.example/ADV-2",
+        facts=AdvisoryFacts(cves=["CVE-2026-12346"]),
+    )
+    db.apply([first, second], NOW)
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-10000")
+    assert entry.cve == "CVE-2026-12346"
+    assert [row["vuln_id"] for row in _read_csv(tmp_path)] == [
+        "VW-2026-9999",
+        "VW-2026-10000",
+    ]
+    assert VulnDb(tmp_path).load_entry("VW-2026-10000") == entry
+    assert validate_vulndb(tmp_path) == 2
+
+
 def test_multi_cve_advisory_creates_one_entry_per_cve(tmp_path: Path, advisory_factory) -> None:
     advisory = advisory_factory(facts=AdvisoryFacts(cves=["CVE-2026-11111", "CVE-2026-22222"]))
     db = VulnDb(tmp_path)

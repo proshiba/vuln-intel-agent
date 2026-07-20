@@ -15,10 +15,13 @@ from vulnwatch.models import (
     Priority,
     RawRecord,
     SourceDefinition,
+    SourceOutcomeStatus,
+    SourceRole,
     SourceState,
     Tier,
 )
 from vulnwatch.pipeline import Pipeline
+from vulnwatch.storage.filesystem import FileSystemStorage
 
 
 def _write_config(root: Path) -> tuple[Path, Path]:
@@ -110,6 +113,20 @@ async def test_pipeline_new_unchanged_updated_and_quarantined(
     first_manifest = await first.run(Tier.DAILY, since)
     assert [change.status for change in first_manifest.changes] == [ChangeStatus.NEW]
     assert first_manifest.changes[0].priority == Priority.INFO
+    assert len(first_manifest.source_outcomes) == 1
+    first_outcome = first_manifest.source_outcomes[0]
+    assert first_outcome.source_id == "example"
+    assert first_outcome.status == SourceOutcomeStatus.SUCCESS
+    assert first_outcome.collector == "json_api"
+    assert first_outcome.endpoint_url == "https://security.example.com/feed.json"
+    assert first_outcome.record_count == 1
+    assert first_outcome.parsed_count == 1
+    assert first_outcome.parse_failure_count == 0
+    assert first_outcome.error is None
+    assert "## Source outcomes\n\n- failed: 0" in (first_root / "run-summary.md").read_text(
+        encoding="utf-8"
+    )
+    assert "- success: 1" in (first_root / "run-summary.md").read_text(encoding="utf-8")
     _publish(tmp_path, first_root)
 
     second_root = tmp_path / "staging-2"
@@ -131,6 +148,13 @@ async def test_pipeline_new_unchanged_updated_and_quarantined(
     failed = Pipeline(tmp_path, failed_root, sources, products)
     failed_manifest = await failed.run(Tier.DAILY, since)
     assert failed_manifest.changes[0].status == ChangeStatus.QUARANTINED
+    assert len(failed_manifest.source_outcomes) == 1
+    failed_outcome = failed_manifest.source_outcomes[0]
+    assert failed_outcome.status == SourceOutcomeStatus.FAILED
+    assert failed_outcome.record_count == 0
+    assert failed_outcome.parsed_count == 0
+    assert failed_outcome.parse_failure_count == 0
+    assert failed_outcome.error == "json_api: upstream failed"
     assert (failed_root / "quarantine/example/latest.json").exists()
 
 
@@ -197,8 +221,296 @@ async def test_pipeline_partial_snapshot_preserves_known_ids_and_accepts_empty_r
     empty_manifest = await empty.run(Tier.DAILY, since)
 
     assert empty_manifest.changes == []
+    assert len(empty_manifest.source_outcomes) == 1
+    assert empty_manifest.source_outcomes[0].status == SourceOutcomeStatus.SUCCESS
+    assert empty_manifest.source_outcomes[0].record_count == 0
+    assert empty_manifest.source_outcomes[0].parsed_count == 0
+    assert empty_manifest.source_outcomes[0].parse_failure_count == 0
     assert empty.storage.load_state("example").known_ids == sorted([first_id, second_id])
     assert not (empty_root / "quarantine/example/latest.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_records_partial_and_not_modified_source_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    previous_success = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    repository_storage = FileSystemStorage(tmp_path)
+    repository_storage.write_state(
+        SourceState(
+            source_id="example",
+            etag='"old-etag"',
+            last_modified="Tue, 01 Jul 2026 12:00:00 GMT",
+            last_success_at=previous_success,
+            consecutive_failures=2,
+            item_count=7,
+            known_ids=["example:existing"],
+            missing_counts={"example:existing": 1},
+            first_missing_at={"example:existing": previous_success},
+        )
+    )
+    repository_storage.write_state(
+        SourceState(
+            source_id="example_two",
+            etag='"old-two"',
+            last_success_at=previous_success,
+            consecutive_failures=2,
+            item_count=9,
+            known_ids=["example-two:existing"],
+        )
+    )
+    pipeline = Pipeline(tmp_path, tmp_path / "staging-outcomes", sources, products)
+    original = pipeline.sources.sources[0]
+    pipeline.sources.sources.append(
+        original.model_copy(update={"id": "example_two", "vendor": "Example Two"})
+    )
+
+    class FakeCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            if source.id == "example_two":
+                return CollectionResult(
+                    source_id=source.id,
+                    etag='"new-two"',
+                    last_modified="Wed, 02 Jul 2026 12:00:00 GMT",
+                    not_modified=True,
+                )
+            item = {
+                "id": "ADV-1",
+                "title": "Valid item",
+                "url": "https://security.example.com/ADV-1",
+                "published": "2026-07-01T00:00:00Z",
+            }
+            return CollectionResult(
+                source_id=source.id,
+                etag='"must-not-commit"',
+                last_modified="Wed, 02 Jul 2026 12:00:00 GMT",
+                records=[
+                    RawRecord(
+                        source_id=source.id,
+                        url=str(item["url"]),
+                        content=json.dumps(item),
+                        metadata=item,
+                    ),
+                    RawRecord(
+                        source_id=source.id,
+                        url="http://security.example.com/invalid",
+                        content="invalid",
+                    ),
+                ],
+            )
+
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: FakeCollector())
+
+    manifest = await pipeline.run(Tier.DAILY, datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert len(manifest.source_outcomes) == 2
+    outcomes = {outcome.source_id: outcome for outcome in manifest.source_outcomes}
+    partial = outcomes["example"]
+    assert partial.status == SourceOutcomeStatus.PARTIAL
+    assert partial.record_count == 2
+    assert partial.parsed_count == 1
+    assert partial.parse_failure_count == 1
+    assert partial.error is not None
+    not_modified = outcomes["example_two"]
+    assert not_modified.status == SourceOutcomeStatus.NOT_MODIFIED
+    assert not_modified.record_count == 0
+    assert not_modified.parsed_count == 0
+    assert not_modified.parse_failure_count == 0
+    assert not_modified.error is None
+    partial_state = pipeline.storage.load_state("example")
+    assert partial_state.etag == '"old-etag"'
+    assert partial_state.last_modified == "Tue, 01 Jul 2026 12:00:00 GMT"
+    assert partial_state.last_success_at == previous_success
+    assert partial_state.item_count == 7
+    assert partial_state.known_ids == ["example:existing"]
+    assert partial_state.missing_counts == {"example:existing": 1}
+    assert partial_state.first_missing_at == {"example:existing": previous_success}
+    assert partial_state.last_failure_at is not None
+    assert partial_state.consecutive_failures == 3
+    not_modified_state = pipeline.storage.load_state("example_two")
+    assert not_modified_state.etag == '"new-two"'
+    assert not_modified_state.last_modified == "Wed, 02 Jul 2026 12:00:00 GMT"
+    assert not_modified_state.last_success_at == manifest.started_at
+    assert not_modified_state.item_count == 9
+    assert not_modified_state.known_ids == ["example-two:existing"]
+    assert not_modified_state.consecutive_failures == 0
+    summary = (pipeline.output_root / "run-summary.md").read_text(encoding="utf-8")
+    assert "- not_modified: 1" in summary
+    assert "- partial: 1" in summary
+
+
+@pytest.mark.asyncio
+async def test_pipeline_volume_failure_does_not_advance_success_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    previous_success = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    FileSystemStorage(tmp_path).write_state(
+        SourceState(
+            source_id="example",
+            etag='"old-etag"',
+            last_modified="Tue, 01 Jul 2026 12:00:00 GMT",
+            last_success_at=previous_success,
+            consecutive_failures=1,
+            item_count=23,
+            known_ids=["example:existing"],
+        )
+    )
+
+    class FakeCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            return CollectionResult(
+                source_id=source.id,
+                etag='"must-not-commit"',
+                last_modified="Wed, 02 Jul 2026 12:00:00 GMT",
+                records=[],
+                complete_snapshot=True,
+            )
+
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: FakeCollector())
+    pipeline = Pipeline(tmp_path, tmp_path / "staging-volume-failure", sources, products)
+
+    manifest = await pipeline.run(Tier.DAILY, datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert manifest.source_outcomes[0].status == SourceOutcomeStatus.FAILED
+    state = pipeline.storage.load_state("example")
+    assert state.etag == '"old-etag"'
+    assert state.last_modified == "Tue, 01 Jul 2026 12:00:00 GMT"
+    assert state.last_success_at == previous_success
+    assert state.item_count == 23
+    assert state.known_ids == ["example:existing"]
+    assert state.last_failure_at is not None
+    assert state.consecutive_failures == 2
+
+
+@pytest.mark.asyncio
+async def test_pipeline_delta_watermark_uses_collection_start_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    late_update_at: datetime | None = None
+    call_count = 0
+
+    class FakeDeltaCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            nonlocal call_count, late_update_at
+            call_count += 1
+            if call_count == 1:
+                late_update_at = datetime.now(UTC)
+                await asyncio.sleep(0.01)
+                item_id = "ADV-initial"
+                observed = late_update_at
+            else:
+                assert late_update_at is not None
+                if state.last_success_at is not None and state.last_success_at > late_update_at:
+                    return CollectionResult(
+                        source_id=source.id,
+                        records=[],
+                        complete_snapshot=False,
+                    )
+                item_id = "ADV-late-update"
+                observed = late_update_at
+            item = {
+                "id": item_id,
+                "title": item_id,
+                "url": f"https://security.example.com/{item_id}",
+                "updated": observed.isoformat(),
+            }
+            return CollectionResult(
+                source_id=source.id,
+                records=[
+                    RawRecord(
+                        source_id=source.id,
+                        url=str(item["url"]),
+                        content=json.dumps(item),
+                        metadata=item,
+                    )
+                ],
+                complete_snapshot=False,
+            )
+
+    collector = FakeDeltaCollector()
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: collector)
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+
+    first_root = tmp_path / "staging-delta-1"
+    first = Pipeline(tmp_path, first_root, sources, products)
+    first_manifest = await first.run(Tier.DAILY, since)
+    first_state = first.storage.load_state("example")
+    assert first_state.last_success_at == first_manifest.started_at
+    assert late_update_at is not None
+    assert first_state.last_success_at <= late_update_at
+    _publish(tmp_path, first_root)
+
+    second_root = tmp_path / "staging-delta-2"
+    second_manifest = await Pipeline(tmp_path, second_root, sources, products).run(
+        Tier.DAILY, since
+    )
+
+    assert [change.status for change in second_manifest.changes] == [ChangeStatus.NEW]
+    assert second_manifest.changes[0].canonical_id.endswith("adv-late-update")
+
+
+@pytest.mark.asyncio
+async def test_coverage_source_updates_storage_and_vulndb_without_report_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, products = _write_config(tmp_path)
+    pipeline = Pipeline(tmp_path, tmp_path / "staging-coverage", sources, products)
+    pipeline.sources.sources[0].role = SourceRole.COVERAGE
+    item = {
+        "id": "CVE-2026-12345",
+        "title": "Coverage record CVE-2026-12345",
+        "url": "https://security.example.com/CVE-2026-12345",
+        "published": "2026-07-01T00:00:00Z",
+    }
+
+    class FakeCollector:
+        async def collect(
+            self,
+            source: SourceDefinition,
+            state: SourceState,
+            since: datetime,
+        ) -> CollectionResult:
+            return CollectionResult(
+                source_id=source.id,
+                records=[
+                    RawRecord(
+                        source_id=source.id,
+                        url=str(item["url"]),
+                        content=json.dumps(item),
+                        metadata=item,
+                    )
+                ],
+                complete_snapshot=False,
+            )
+
+    monkeypatch.setattr("vulnwatch.pipeline.create_collector", lambda kind: FakeCollector())
+
+    manifest = await pipeline.run(Tier.DAILY, datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert manifest.changes == []
+    assert manifest.source_outcomes[0].status == SourceOutcomeStatus.SUCCESS
+    assert manifest.source_outcomes[0].parsed_count == 1
+    assert pipeline.storage.all_advisories()[0].source_id == "example"
+    assert pipeline.storage.load_state("example").known_ids == []
+    assert (pipeline.output_root / "vulndb" / "registry.json").exists()
 
 
 @pytest.mark.asyncio

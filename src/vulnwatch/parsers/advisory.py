@@ -75,9 +75,414 @@ def parse_record(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         return _parse_osv(source, raw)
     if source.parser == "github_advisory":
         return _parse_github_advisory(source, raw)
+    if source.parser == "nvd":
+        return _parse_nvd(source, raw)
+    if source.parser == "netapp":
+        return _parse_netapp(source, raw)
+    if source.parser == "apache_httpd":
+        return _parse_apache_httpd(source, raw)
     if source.parser in {"palo_alto", "json_feed", "json"}:
         return _parse_json(source, raw)
     return _parse_generic(source, raw)
+
+
+def _nested_dict(value: object, *keys: str) -> dict[str, Any]:
+    current: object = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _apache_timeline_date(item: dict[str, Any]) -> datetime | None:
+    legacy_timeline = item.get("timeline")
+    cna = _nested_dict(item, "containers", "cna")
+    timeline = legacy_timeline if isinstance(legacy_timeline, list) else cna.get("timeline")
+    if not isinstance(timeline, list):
+        return None
+    release_dates: list[datetime] = []
+    other_dates: list[datetime] = []
+    for event in timeline:
+        if not isinstance(event, dict):
+            continue
+        observed = _date(event.get("time"))
+        if observed is None:
+            continue
+        other_dates.append(observed)
+        label = str(event.get("value") or "").casefold()
+        if "public" in label or "released" in label:
+            release_dates.append(observed)
+    candidates = release_dates or other_dates
+    return max(candidates) if candidates else None
+
+
+def _apache_affected(item: dict[str, Any]) -> tuple[list[str], list[str]]:
+    products: set[str] = set()
+    affected_versions: set[str] = set()
+
+    legacy_vendor = _nested_dict(item, "affects", "vendor")
+    vendor_data = legacy_vendor.get("vendor_data")
+    if isinstance(vendor_data, list):
+        for vendor in vendor_data:
+            product_data = _nested_dict(vendor, "product").get("product_data")
+            if not isinstance(product_data, list):
+                continue
+            for product in product_data:
+                if not isinstance(product, dict):
+                    continue
+                name = str(product.get("product_name") or "").strip()
+                if name:
+                    products.add(name)
+                versions = _nested_dict(product, "version").get("version_data")
+                if not isinstance(versions, list):
+                    continue
+                for version in versions:
+                    if not isinstance(version, dict):
+                        continue
+                    value = str(version.get("version_value") or "").strip()
+                    relation = str(version.get("version_affected") or "").strip()
+                    if value:
+                        detail = f"{relation} {value}".strip()
+                        affected_versions.add(f"{name}: {detail}" if name else detail)
+
+    current_affected = _nested_dict(item, "containers", "cna").get("affected")
+    if isinstance(current_affected, list):
+        for product in current_affected:
+            if not isinstance(product, dict):
+                continue
+            name = str(product.get("product") or "").strip()
+            if name:
+                products.add(name)
+            versions = product.get("versions")
+            if not isinstance(versions, list):
+                continue
+            for version in versions:
+                if not isinstance(version, dict) or version.get("status") != "affected":
+                    continue
+                bounds: list[str] = []
+                start = str(version.get("version") or "").strip()
+                if start and start not in {"0", "*"}:
+                    bounds.append(f">= {start}")
+                for key, operator in (
+                    ("lessThan", "<"),
+                    ("lessThanOrEqual", "<="),
+                ):
+                    value = str(version.get(key) or "").strip()
+                    if value and value != "*":
+                        bounds.append(f"{operator} {value}")
+                if not bounds and start:
+                    bounds.append(start)
+                if bounds:
+                    detail = ", ".join(bounds)
+                    affected_versions.add(f"{name}: {detail}" if name else detail)
+    return sorted(products), sorted(affected_versions)
+
+
+def _apache_text_values(value: object, *path: str) -> list[str]:
+    current: object = value
+    for key in path:
+        if not isinstance(current, dict):
+            return []
+        current = current.get(key)
+    if not isinstance(current, list):
+        return []
+    return [
+        str(entry.get("value"))
+        for entry in current
+        if isinstance(entry, dict) and entry.get("value")
+    ]
+
+
+def _parse_apache_httpd(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
+    """Normalize both CVE 4.0 and CVE 5.1 records in Apache's mixed JSON feed."""
+
+    item = raw.metadata
+    legacy_meta = item.get("CVE_data_meta")
+    if not isinstance(legacy_meta, dict):
+        legacy_meta = {}
+    current_meta = item.get("cveMetadata")
+    if not isinstance(current_meta, dict):
+        current_meta = {}
+    cna = _nested_dict(item, "containers", "cna")
+    identifier = str(legacy_meta.get("ID") or current_meta.get("cveId") or "").upper()
+    if not CVE_PATTERN.fullmatch(identifier):
+        raise ValueError("Apache HTTP Server record omitted a valid CVE identifier")
+
+    descriptions = _apache_text_values(item, "description", "description_data")
+    descriptions.extend(_apache_text_values(item, "containers", "cna", "descriptions"))
+    title = str(legacy_meta.get("TITLE") or cna.get("title") or identifier)
+    products, affected_versions = _apache_affected(item)
+
+    severity: str | None = None
+    impact = item.get("impact")
+    if isinstance(impact, list):
+        severity = next(
+            (
+                str(entry.get("other"))
+                for entry in impact
+                if isinstance(entry, dict) and entry.get("other")
+            ),
+            None,
+        )
+    metrics = cna.get("metrics")
+    if severity is None and isinstance(metrics, list):
+        for metric in metrics:
+            other = metric.get("other") if isinstance(metric, dict) else None
+            content = other.get("content") if isinstance(other, dict) else None
+            if isinstance(content, dict) and content.get("text"):
+                severity = str(content["text"])
+                break
+
+    fixed_versions: set[str] = set()
+    aggregate_text = "\n".join(descriptions)
+    for match in re.findall(
+        r"(?:upgrade to|fixed in|released)\s+(?:version\s+)?"
+        r"(\d+(?:\.\d+){1,3})(?!\.\d|\.x\b|\w)",
+        f"{aggregate_text}\n{json.dumps(item.get('timeline'), ensure_ascii=False)}\n"
+        f"{json.dumps(cna.get('timeline'), ensure_ascii=False)}",
+        re.IGNORECASE,
+    ):
+        fixed_versions.add(match)
+
+    content = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    known_exploited, poc_public = infer_exploitation_status(content)
+    published = _date(
+        legacy_meta.get("DATE_PUBLIC")
+        or current_meta.get("datePublished")
+        or current_meta.get("dateUpdated")
+    ) or _apache_timeline_date(item)
+    withdrawn = str(
+        legacy_meta.get("STATE") or current_meta.get("state") or ""
+    ).casefold() in {"rejected", "withdrawn"}
+    return AdvisoryDraft(
+        source_id=source.id,
+        vendor=source.vendor,
+        vendor_advisory_id=identifier,
+        title=title,
+        source_url=raw.url,
+        published_at=published,
+        updated_at=_date(current_meta.get("dateUpdated")),
+        status=AdvisoryStatus.WITHDRAWN if withdrawn else AdvisoryStatus.ACTIVE,
+        cves=[identifier],
+        products=products or source.products,
+        affected_versions=affected_versions,
+        fixed_versions=sorted(fixed_versions),
+        vendor_severity=severity.upper() if severity else None,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
+        body_excerpt=("\n\n".join(descriptions) or content)[:30_000],
+        raw_sha256=_sha(content),
+    )
+
+
+def _parse_netapp(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
+    item = raw.metadata
+    content = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    identifier = str(item.get("ntap_advisory_id") or "").strip()
+    cves = {
+        str(value).upper()
+        for value in _list(item.get("kb_cve"))
+        if CVE_PATTERN.fullmatch(str(value).upper())
+    }
+    cves.update(CVE_PATTERN.findall(content.upper()))
+
+    score_candidates: list[tuple[float, str]] = []
+    scoring = item.get("kb_scoring")
+    if isinstance(scoring, dict):
+        for candidate in scoring.values():
+            if not isinstance(candidate, str):
+                continue
+            candidate_vector = candidate.strip()
+            candidate_score = _cvss_base_score(candidate_vector)
+            if candidate_score is not None:
+                score_candidates.append((candidate_score, candidate_vector))
+    score: float | None = None
+    vector: str | None = None
+    if score_candidates:
+        score, vector = max(score_candidates, key=lambda value: value[0])
+
+    products = sorted(
+        {
+            value.strip()
+            for key in ("kb_affected_list", "kb_revised_list", "kb_investigating_list")
+            for value in _list(item.get(key))
+            if value.strip()
+        }
+    )
+    fixed_versions: list[str] = []
+    mitigations = _list(item.get("kb_workarounds"))
+    fixes = item.get("kb_fixes")
+    if isinstance(fixes, list):
+        for fix in fixes:
+            if not isinstance(fix, dict):
+                continue
+            product = str(fix.get("product") or "").strip()
+            for fixed in _list(fix.get("fixes")):
+                fixed_versions.append(f"{product}: {fixed}" if product else fixed)
+            instructions = str(fix.get("instructions") or "").strip()
+            if instructions:
+                mitigations.append(instructions)
+
+    known_exploited, poc_public = infer_exploitation_status(content)
+    severity: str | None = None
+    if score is not None:
+        if score >= 9:
+            severity = "CRITICAL"
+        elif score >= 7:
+            severity = "HIGH"
+        elif score >= 4:
+            severity = "MEDIUM"
+        else:
+            severity = "LOW"
+    remote = "/AV:N" in vector if vector else None
+    authentication_required: bool | None = None
+    if vector:
+        if "/PR:N" in vector:
+            authentication_required = False
+        elif "/PR:L" in vector or "/PR:H" in vector:
+            authentication_required = True
+    withdrawn = str(item.get("kb_status") or "").casefold() == "withdrawn"
+    return AdvisoryDraft(
+        source_id=source.id,
+        vendor=source.vendor,
+        vendor_advisory_id=identifier or None,
+        title=str(item.get("kb_title") or identifier or source.vendor),
+        source_url=raw.url,
+        published_at=_date(item.get("published_date")),
+        updated_at=_date(item.get("updated_date") or item.get("modified_date")),
+        status=AdvisoryStatus.WITHDRAWN if withdrawn else AdvisoryStatus.ACTIVE,
+        cves=sorted(cves),
+        products=products or source.products,
+        fixed_versions=sorted(set(fixed_versions)),
+        vendor_severity=severity,
+        cvss_score=score,
+        cvss_vector=vector,
+        remote=remote,
+        authentication_required=authentication_required,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
+        mitigations=sorted(set(value for value in mitigations if value.strip())),
+        body_excerpt=content[:30_000],
+        raw_sha256=_sha(content),
+    )
+
+
+def _parse_nvd(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
+    item = raw.metadata
+    identifier = str(item.get("id") or "")
+    descriptions = item.get("descriptions")
+    title = identifier or source.vendor
+    if isinstance(descriptions, list):
+        english = next(
+            (
+                str(description.get("value"))
+                for description in descriptions
+                if isinstance(description, dict)
+                and description.get("lang") == "en"
+                and description.get("value")
+            ),
+            None,
+        )
+        if english:
+            title = english
+
+    score: float | None = None
+    vector: str | None = None
+    severity: str | None = None
+    metrics = item.get("metrics")
+    if isinstance(metrics, dict):
+        candidates: list[tuple[float, str | None, str | None]] = []
+        for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            values = metrics.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                data = value.get("cvssData") if isinstance(value, dict) else None
+                if not isinstance(data, dict) or not isinstance(
+                    data.get("baseScore"), (int, float)
+                ):
+                    continue
+                candidates.append(
+                    (
+                        float(data["baseScore"]),
+                        str(data.get("vectorString")) if data.get("vectorString") else None,
+                        str(data.get("baseSeverity") or value.get("baseSeverity") or "")
+                        or None,
+                    )
+                )
+        if candidates:
+            score, vector, severity = max(candidates, key=lambda candidate: candidate[0])
+
+    products: set[str] = set()
+    affected_versions: set[str] = set()
+    fixed_versions: set[str] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, list):
+            for child in value:
+                walk(child)
+            return
+        if not isinstance(value, dict):
+            return
+        criteria = value.get("criteria")
+        if isinstance(criteria, str) and criteria.startswith("cpe:2.3:"):
+            parts = criteria.split(":")
+            if len(parts) > 4:
+                product = f"{parts[3]} {parts[4]}".replace("_", " ")
+                products.add(product)
+                bounds = [
+                    f"{key}={value[key]}"
+                    for key in (
+                        "versionStartIncluding",
+                        "versionStartExcluding",
+                        "versionEndIncluding",
+                        "versionEndExcluding",
+                    )
+                    if value.get(key)
+                ]
+                if bounds:
+                    affected_versions.add(f"{product}: {', '.join(bounds)}")
+                fixed = value.get("versionEndExcluding")
+                if isinstance(fixed, str) and fixed.strip():
+                    fixed_versions.add(f"{product}: {fixed.strip()}")
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                walk(child)
+
+    walk(item.get("configurations"))
+    content = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    known_exploited, poc_public = infer_exploitation_status(content)
+    cves = [identifier.upper()] if CVE_PATTERN.fullmatch(identifier.upper()) else []
+    remote = "/AV:N" in vector if vector else None
+    authentication_required: bool | None = None
+    if vector:
+        if "/PR:N" in vector:
+            authentication_required = False
+        elif "/PR:L" in vector or "/PR:H" in vector:
+            authentication_required = True
+    return AdvisoryDraft(
+        source_id=source.id,
+        vendor=source.vendor,
+        vendor_advisory_id=identifier or None,
+        title=title[:1000],
+        source_url=raw.url,
+        published_at=_date(item.get("published")),
+        updated_at=_date(item.get("lastModified")),
+        cves=cves,
+        products=sorted(products) or source.products,
+        affected_versions=sorted(affected_versions),
+        fixed_versions=sorted(fixed_versions),
+        vendor_severity=severity,
+        cvss_score=score,
+        cvss_vector=vector,
+        remote=remote,
+        authentication_required=authentication_required,
+        known_exploited=known_exploited,
+        poc_public=poc_public,
+        body_excerpt=content[:30_000],
+        raw_sha256=_sha(content),
+    )
 
 
 def _parse_generic(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
@@ -93,7 +498,7 @@ def _parse_generic(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         published_at=_date(raw.metadata.get("published")),
         updated_at=_date(raw.metadata.get("updated")),
         cves=sorted(set(CVE_PATTERN.findall(text.upper()))),
-        products=source.products,
+        products=_list(raw.metadata.get("products")) or source.products,
         known_exploited=known_exploited,
         poc_public=poc_public,
         body_excerpt=raw.content[:30_000],
@@ -105,6 +510,8 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     item = raw.metadata
     title = str(
         item.get("title")
+        or item.get("ADVISORY")
+        or item.get("item_title")
         or item.get("summary")
         or item.get("description")
         or item.get("cveID")
@@ -113,11 +520,15 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
     )
     advisory_id = (
         item.get("id")
+        or item.get("CVE_ID")
         or item.get("ID")
+        or item.get("documentId")
         or item.get("cve")
         or item.get("cveID")
         or item.get("advisory_id")
         or item.get("advisoryId")
+        or item.get("advisoryNumber")
+        or item.get("nid")
     )
     text = json.dumps(item, ensure_ascii=False)
     inferred_exploited, inferred_poc = infer_exploitation_status(text)
@@ -131,15 +542,24 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         poc_value = item.get("proof_of_concept") or item.get("proofOfConcept")
     known_exploited = _optional_bool(known_value)
     poc_public = _optional_bool(poc_value)
-    products = (
-        _list(
-            item.get("products")
-            or item.get("product")
-            or item.get("affected_products")
-            or item.get("product_name")
-        )
-        or source.products
+    product_value = (
+        item.get("products")
+        or item.get("product")
+        or item.get("affected_products")
+        or item.get("product_name")
+        or item.get("supportProducts")
+        or item.get("field_product")
+        or item.get("Product_list")
     )
+    if isinstance(product_value, list) and all(
+        isinstance(product, dict) for product in product_value
+    ):
+        product_value = [
+            product.get("display_value")
+            for product in product_value
+            if isinstance(product, dict) and product.get("display_value")
+        ]
+    products = _list(product_value) or source.products
     affected = _list(
         item.get("affected_versions") or item.get("affected") or item.get("affectedVersions")
     )
@@ -161,21 +581,23 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         vendor=source.vendor,
         vendor_advisory_id=str(advisory_id) if advisory_id else None,
         title=title,
-        source_url=str(
-            item.get("url")
-            or item.get("external_url")
-            or (
-                f"{source.advisory_url.rstrip('/')}/{advisory_id}"
-                if source.parser == "palo_alto" and advisory_id
-                else raw.url
-            )
+        # The collector has already resolved untrusted item links and checked the
+        # source allowlist. Reading the raw JSON link again here would bypass that
+        # boundary (some official APIs still emit plain-HTTP legacy URLs).
+        source_url=(
+            f"{source.advisory_url.rstrip('/')}/{advisory_id}"
+            if source.parser == "palo_alto" and advisory_id
+            else raw.url
         ),
         published_at=_date(
             item.get("date_published")
+            or item.get("item_date")
             or item.get("published")
             or item.get("datePublished")
             or item.get("published_at")
             or item.get("date")
+            or item.get("field_pub_date")
+            or item.get("Fixed")
         ),
         updated_at=_date(
             item.get("date_modified")
@@ -188,8 +610,16 @@ def _parse_json(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
         affected_versions=affected,
         fixed_versions=fixed,
         vendor_severity=(
-            str(item.get("severity") or item.get("baseSeverity"))
-            if item.get("severity") or item.get("baseSeverity")
+            str(
+                item.get("severity")
+                or item.get("baseSeverity")
+                or item.get("field_cvss_base_score")
+                or item.get("CVSS_Severity_Rating")
+            )
+            if item.get("severity")
+            or item.get("baseSeverity")
+            or item.get("field_cvss_base_score")
+            or item.get("CVSS_Severity_Rating")
             else None
         ),
         cvss_score=cvss,

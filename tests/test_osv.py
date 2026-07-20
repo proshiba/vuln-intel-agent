@@ -15,6 +15,7 @@ from vulnwatch.models import (
     CollectorKind,
     RawRecord,
     SourceDefinition,
+    SourceRole,
     SourceState,
 )
 from vulnwatch.parsers import parse_record
@@ -90,7 +91,11 @@ def test_parse_osv_handles_withdrawn_and_missing_severity() -> None:
 async def test_osv_collector_paginates_and_dedupes() -> None:
     source = apply_backend(_osv_source(), "osv")
     page1 = {
-        "vulns": [{"id": "GHSA-a", "summary": "a"}, {"id": "GHSA-b", "summary": "b"}],
+        "vulns": [
+            {"id": "GHSA-a", "summary": "a"},
+            {"id": "GO-2026-1", "summary": "ecosystem alias"},
+            {"id": "GHSA-b", "summary": "b"},
+        ],
         "next_page_token": "tok",
     }
     page2 = {"vulns": [{"id": "GHSA-b", "summary": "b"}, {"id": "GHSA-c", "summary": "c"}]}
@@ -152,6 +157,47 @@ def test_apply_backend_switches_only_github_sources_with_coordinates() -> None:
         parser="csaf",
     )
     assert apply_backend(csaf_source, "osv") is csaf_source
+
+
+def test_apply_backend_uses_public_html_for_unmirrored_repository_advisories() -> None:
+    source = _osv_source().model_copy(
+        update={
+            "id": "redis",
+            "advisory_url": "https://github.com/redis/redis/security/advisories",
+            "url": "https://api.github.com/repos/redis/redis/security-advisories",
+            "osv_ecosystem": None,
+            "osv_packages": [],
+        }
+    )
+
+    variant = apply_backend(source, "osv")
+
+    assert variant.collector == CollectorKind.HTML
+    assert variant.parser == "generic"
+    assert variant.url == source.advisory_url
+    assert variant.allowed_hosts == ["github.com"]
+    assert "next" in variant.selectors
+
+
+def test_apply_backend_uses_filtered_osv_delta_for_github_coverage() -> None:
+    source = _osv_source().model_copy(
+        update={
+            "id": "github_advisory_database",
+            "role": SourceRole.COVERAGE,
+            "advisory_url": "https://github.com/advisories",
+            "url": "https://api.github.com/advisories",
+            "osv_ecosystem": None,
+            "osv_packages": [],
+        }
+    )
+
+    variant = apply_backend(source, "osv")
+
+    assert variant.collector == CollectorKind.OSV_GLOBAL
+    assert variant.parser == "osv"
+    assert variant.url == "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    assert variant.bootstrap_window_hours == 1
+    assert variant.osv_id_prefixes == ["GHSA-"]
 
 
 def test_resolve_github_backend_defaults_and_validates(monkeypatch: pytest.MonkeyPatch) -> None:

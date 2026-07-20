@@ -23,7 +23,10 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The first 160-source bootstrap writes and validates tens of thousands of
+    # Git-managed advisory and vulnerability files. Leave enough headroom for
+    # slow hosted-runner filesystems; steady-state incremental runs are faster.
+    timeout-minutes: 180
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -35,7 +38,9 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install collector
-        run: python -m pip install --editable .
+        run: |
+          python -m pip install --editable '.[browser]'
+          python -m playwright install --with-deps chromium
       - name: Collect advisories
         env:
           GH_TOKEN: ${{ secrets.VULNWATCH_GITHUB_TOKEN }}
@@ -46,15 +51,37 @@ jobs:
             exit 1
           fi
           vulnwatch collect --profile daily --since "$SINCE" --output staging
+      - name: Verify complete source coverage
+        run: |
+          expected=$(python -c 'from vulnwatch.config import load_sources; print(sum(source.enabled for source in load_sources().sources))')
+          observed=$(jq '.source_outcomes | length' staging/run-manifest.json)
+          unsuccessful=$(jq '[.source_outcomes[] | select(.status == "failed" or .status == "partial")] | length' staging/run-manifest.json)
+          if [ "$observed" -ne "$expected" ] || [ "$unsuccessful" -ne 0 ]; then
+            jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "\(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            echo "::error::complete collection required: expected=$expected observed=$observed unsuccessful=$unsuccessful"
+            exit 1
+          fi
       - name: Detect changes
         id: detect
         run: |
           count=$(jq '[.changes[] | select(.status == "new" or .status == "updated" or .status == "withdrawn")] | length' staging/run-manifest.json)
+          artifact_changes=0
+          for tree in data state quarantine vulndb; do
+            if ! diff -qr "$tree" "staging/$tree" >/dev/null 2>&1; then
+              artifact_changes=1
+            fi
+          done
+          for file in run-manifest.json run-summary.md; do
+            if ! cmp -s "$file" "staging/$file"; then
+              artifact_changes=1
+            fi
+          done
           echo "changes=$count" >> "$GITHUB_OUTPUT"
-          echo "Detected $count new/updated/withdrawn advisories."
+          echo "artifact_changes=$artifact_changes" >> "$GITHUB_OUTPUT"
+          echo "Detected $count advisory changes; artifact changes: $artifact_changes."
       - name: Commit raw collection to handoff branch
         id: handoff
-        if: steps.detect.outputs.changes != '0'
+        if: steps.detect.outputs.artifact_changes == '1'
         env:
           COLLECTED_BRANCH: bot/collected-raw
         run: |

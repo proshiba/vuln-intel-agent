@@ -11,6 +11,14 @@ import httpx
 
 from vulnwatch.models import CollectionResult, SourceDefinition, SourceState
 
+_MAX_LINK_HEADER_BYTES = 16_384
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 "
+    "vulnwatch/0.1"
+)
+_SCHNEIDER_USER_AGENT = "vulnwatch/0.1 (+public vulnerability intelligence collection)"
+
 
 class CollectorError(RuntimeError):
     """A source could not be collected safely."""
@@ -41,6 +49,7 @@ class FetchedContent:
     etag: str | None
     last_modified: str | None
     not_modified: bool = False
+    next_url: str | None = None
 
 
 class SafeHttpClient:
@@ -52,10 +61,37 @@ class SafeHttpClient:
         parsed = urlsplit(url)
         if parsed.scheme != "https":
             raise CollectorError(f"{self.source.id}: non-HTTPS URL rejected: {url}")
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or any(
+                character.isspace()
+                or ord(character) < 32
+                or ord(character) == 127
+                or character in "<>|\\"
+                for character in url
+            )
+        ):
+            raise CollectorError(f"{self.source.id}: malformed URL rejected: {url}")
         if (parsed.hostname or "").lower() not in {
             host.lower() for host in self.source.allowed_hosts
         }:
             raise CollectorError(f"{self.source.id}: host is not allowed: {parsed.hostname}")
+
+    def advisory_url(self, candidate: object, *, base_url: str) -> str:
+        """Resolve an untrusted advisory link, falling back to the official landing page."""
+
+        fallback = self.source.advisory_url
+        self._validate_url(fallback)
+        if not isinstance(candidate, str) or not candidate.strip():
+            return fallback
+        try:
+            resolved = urljoin(base_url, candidate.strip())
+            self._validate_url(resolved)
+        except (CollectorError, ValueError):
+            return fallback
+        return resolved
 
     async def fetch(
         self,
@@ -122,6 +158,7 @@ class SafeHttpClient:
                     content_type=content_type,
                     etag=response.headers.get("etag"),
                     last_modified=response.headers.get("last-modified"),
+                    next_url=self._next_url(response),
                 )
         raise CollectorError(f"{self.source.id}: fetch failed")
 
@@ -156,9 +193,17 @@ class SafeHttpClient:
         conditional: bool,
     ) -> dict[str, str]:
         headers = {
-            "User-Agent": "vulnwatch/0.1 (+https://github.com/proshiba/vuln-intel-agent)",
+            "User-Agent": _USER_AGENT,
             "Accept": ", ".join(self.source.content_types) or "*/*",
         }
+        if (
+            self.source.id == "schneider_electric"
+            and (urlsplit(url).hostname or "").casefold() == "www.se.com"
+        ):
+            # se.com rejects its public server-rendered notification page when the
+            # generic browser-compatible UA has an appended product token. Use a
+            # transparent collector UA for this official host instead.
+            headers["User-Agent"] = _SCHNEIDER_USER_AGENT
         if conditional and state:
             if state.etag:
                 headers["If-None-Match"] = state.etag
@@ -168,6 +213,15 @@ class SafeHttpClient:
             token = self._github_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+        if (
+            self.source.id == "manageengine"
+            and (urlsplit(url).hostname or "").casefold()
+            == "securitycontact.manageengine.com"
+        ):
+            # The public API used by ManageEngine's advisory page enforces its
+            # documented browser CORS origin even for read-only GET requests.
+            headers["Origin"] = "https://www.manageengine.com"
+            headers["Referer"] = "https://www.manageengine.com/security/advisory/"
         return headers
 
     @staticmethod
@@ -220,3 +274,25 @@ class SafeHttpClient:
             if remaining > 0:
                 await asyncio.sleep(remaining)
         self._last_request_at = loop.time()
+
+    def _next_url(self, response: httpx.Response) -> str | None:
+        link_header = response.headers.get("link")
+        if not link_header:
+            return None
+        if len(link_header.encode("utf-8")) > _MAX_LINK_HEADER_BYTES:
+            raise CollectorError(f"{self.source.id}: Link response header is too large")
+        try:
+            links = response.links.values()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CollectorError(f"{self.source.id}: invalid Link response header") from exc
+        for link in links:
+            rel = link.get("rel")
+            candidate = link.get("url")
+            if not isinstance(rel, str) or "next" not in rel.casefold().split():
+                continue
+            if not isinstance(candidate, str) or not candidate.strip():
+                raise CollectorError(f"{self.source.id}: invalid next link")
+            next_url = urljoin(str(response.url), candidate)
+            self._validate_url(next_url)
+            return next_url
+        return None

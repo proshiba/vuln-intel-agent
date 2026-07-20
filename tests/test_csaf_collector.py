@@ -11,6 +11,125 @@ from vulnwatch.models import CollectorKind, SourceDefinition, SourceState
 
 
 @respx.mock
+async def test_csaf_rolie_feed_filters_old_documents() -> None:
+    feed_url = "https://cert.example.com/csaf/feed.json"
+    recent_url = "https://cert.example.com/csaf/recent.json"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://cert.example.com/advisories",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=feed_url,
+        allowed_hosts=["cert.example.com"],
+        parser="csaf",
+        content_types=["application/json"],
+    )
+    respx.get(feed_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "feed": {
+                    "entry": [
+                        {
+                            "id": "ADV-NEW",
+                            "updated": "2026-07-01T00:00:00Z",
+                            "content": {"src": recent_url},
+                        },
+                        {
+                            "id": "ADV-OLD",
+                            "updated": "2025-01-01T00:00:00Z",
+                            "content": {
+                                "src": "https://cert.example.com/csaf/old.json"
+                            },
+                        },
+                    ]
+                }
+            },
+            headers={"content-type": "application/json"},
+        )
+    )
+    respx.get(recent_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={"document": {"title": "Recent", "tracking": {"id": "ADV-NEW"}}},
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    result = await CsafCollector().collect(
+        source,
+        SourceState(source_id="example"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert [record.url for record in result.records] == [recent_url]
+    assert result.complete_snapshot is False
+
+
+@respx.mock
+async def test_csaf_github_tree_collects_recent_ot_documents() -> None:
+    tree_url = "https://api.github.com/repos/cisagov/CSAF/git/trees/develop?recursive=1"
+    detail_url = (
+        "https://raw.githubusercontent.com/cisagov/CSAF/"
+        "develop/csaf_files/OT/white/2026/icsa-26-200-01.json"
+    )
+    source = SourceDefinition(
+        id="cisa_ics",
+        category="cross_vendor",
+        vendor="CISA ICS",
+        advisory_url="https://www.cisa.gov/news-events/ics-advisories",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=tree_url,
+        allowed_hosts=[
+            "api.github.com",
+            "github.com",
+            "raw.githubusercontent.com",
+            "www.cisa.gov",
+        ],
+        parser="csaf",
+        content_types=["application/json", "text/plain"],
+    )
+    respx.get(tree_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "tree": [
+                    {
+                        "path": "csaf_files/OT/white/2026/icsa-26-200-01.json",
+                        "type": "blob",
+                    },
+                    {
+                        "path": "csaf_files/OT/white/2025/icsa-25-001-01.json",
+                        "type": "blob",
+                    },
+                    {"path": "csaf_files/IT/white/2026/example.json", "type": "blob"},
+                ]
+            },
+            headers={"content-type": "application/json"},
+        )
+    )
+    respx.get(detail_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={"document": {"title": "ICS", "tracking": {"id": "ICSA-26-200-01"}}},
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    result = await CsafCollector().collect(
+        source,
+        SourceState(source_id="cisa_ics"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert [record.url for record in result.records] == [detail_url]
+    assert result.complete_snapshot is False
+
+
+@respx.mock
 async def test_csaf_changes_csv_filters_old_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -57,6 +176,77 @@ async def test_csaf_changes_csv_filters_old_documents(
     assert result.complete_snapshot is False
     assert result.records[0].metadata["document"]["title"] == "Recent"
     assert recent.called
+
+
+@respx.mock
+async def test_csaf_changes_csv_accepts_octet_stream_only_by_csv_url() -> None:
+    index_url = "https://api.example.com/csaf/advisories/changes.csv"
+    recent_url = "https://api.example.com/csaf/advisories/recent.json"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://api.example.com/csaf",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["api.example.com"],
+        parser="csaf",
+        content_types=["text/csv", "application/octet-stream", "application/json"],
+    )
+    respx.get(index_url).mock(
+        return_value=httpx.Response(
+            200,
+            text='"recent.json","2026-07-01T00:00:00Z"\n',
+            headers={"content-type": "application/octet-stream"},
+        )
+    )
+    respx.get(recent_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={"document": {"title": "Recent", "tracking": {"id": "ADV-1"}}},
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    result = await CsafCollector().collect(
+        source,
+        SourceState(source_id="example"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert [record.url for record in result.records] == [recent_url]
+
+
+@respx.mock
+async def test_csaf_does_not_guess_octet_stream_as_csv_without_csv_url() -> None:
+    index_url = "https://api.example.com/csaf/advisories/index.bin"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://api.example.com/csaf",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["api.example.com"],
+        parser="csaf",
+        content_types=["application/octet-stream", "application/json"],
+    )
+    respx.get(index_url).mock(
+        return_value=httpx.Response(
+            200,
+            text='"recent.json","2026-07-01T00:00:00Z"\n',
+            headers={"content-type": "application/octet-stream"},
+        )
+    )
+
+    with pytest.raises(CollectorError, match="unsupported CSAF index type"):
+        await CsafCollector().collect(
+            source,
+            SourceState(source_id="example"),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        )
 
 
 @respx.mock

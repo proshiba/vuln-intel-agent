@@ -3,13 +3,39 @@
 ## Vulnerability collection and daily report
 
 Use the project virtual environment (`.venv/bin/...`) and generate into `staging/` first. The
-normal full run is:
+normal full run collects all 160 enabled sources. Nine of those sources use the browser
+collector, so install the browser extra and Chromium in a new environment before collecting:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,ai,browser]'
+.venv/bin/python -m playwright install --with-deps chromium
+```
+
+Then run:
 
 ```bash
 .venv/bin/vulnwatch config validate
 .venv/bin/vulnwatch collect --profile daily --since 90d --output staging
 .venv/bin/vulnwatch summarize --root staging
 ```
+
+After `collect`, verify `run-manifest.json.source_outcomes` before summarizing. A daily run must have
+exactly one outcome for every enabled source (currently 160). `success` and `not_modified` are
+acceptable; if any outcome is missing, `failed`, or `partial`, stop before summary, report, or
+publish, inspect its endpoint/count/error fields and `quarantine/`, then fix or retry the source.
+`vulnwatch validate` independently rejects incomplete or unsuccessful outcomes; use it only as a
+failure check until collection is complete. The scheduled workflow performs the same completeness
+check before handing off generated data.
+
+Sources with `role: coverage` are intentionally written to advisory storage and the `vulndb` ledger
+without creating daily report change rows. Do not mistake their absence from a report table for a
+collection failure; use `source_outcomes` to assess collection completeness.
+
+The global OSV source has an explicit one-hour bootstrap window on its first successful activation;
+the normal 90-day window would otherwise require hundreds of thousands of detail downloads. After
+that activation, it collects every delta newer than its tracked `last_success_at`. Do not delete the
+OSV source state unless intentionally reactivating it, and treat the bootstrap boundary as a known
+historical-coverage limit rather than claiming that the first run backfilled all OSV history.
 
 After collection, inspect the current `run-manifest.json`, advisory JSON, and their public source
 URLs. When the manifest contains new, updated, or withdrawn advisories, use AI to write both required
@@ -58,6 +84,11 @@ All generated collection data, report Markdown, report-summary JSON, and the `vu
 are Git-managed artifacts. Never add credentials, tokens, `.env` files, caches, or the temporary
 `staging/` tree. GitHub tokens are used only for reading public repository/API data and must not
 appear in logs or generated files.
+
+`config/sources.yaml` enables `catalog_runtime`. A catalog entry that omits an explicit `enabled`
+field therefore becomes an active, bounded official-web source automatically. Prefer a verified
+machine-readable endpoint and source-specific runtime settings when available, and treat every new
+catalog entry as part of the next full daily run.
 
 Scheduled runs are split between systems: GitHub Actions collects and hands the raw tree to a Claude
 Code routine over a webhook; the routine writes the summaries and report and pushes

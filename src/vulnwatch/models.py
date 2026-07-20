@@ -43,16 +43,21 @@ class StrictModel(BaseModel):
 class SourceRole(StrEnum):
     ADVISORY = "advisory"
     ENRICHMENT = "enrichment"
+    COVERAGE = "coverage"
 
 
 class CollectorKind(StrEnum):
     CSAF = "csaf"
     JSON_API = "json_api"
+    BROADCOM = "broadcom"
+    UBIQUITI = "ubiquiti"
     FEED = "feed"
     HTML = "html"
     BROWSER = "browser"
     PDF = "pdf"
     OSV = "osv"
+    NVD = "nvd"
+    OSV_GLOBAL = "osv_global"
 
 
 class Tier(StrEnum):
@@ -73,6 +78,13 @@ class ChangeStatus(StrEnum):
     UNCHANGED = "unchanged"
     WITHDRAWN = "withdrawn"
     QUARANTINED = "quarantined"
+
+
+class SourceOutcomeStatus(StrEnum):
+    SUCCESS = "success"
+    NOT_MODIFIED = "not_modified"
+    PARTIAL = "partial"
+    FAILED = "failed"
 
 
 class AdvisoryStatus(StrEnum):
@@ -104,12 +116,14 @@ class SourceDefinition(StrictModel):
     rate_limit_per_second: float = Field(default=1.0, gt=0, le=20)
     timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     max_response_bytes: int = Field(default=20_000_000, gt=0)
-    max_items: int = Field(default=1000, gt=0, le=10_000)
+    max_items: int = Field(default=1000, gt=0, le=100_000)
     max_index_items: int = Field(default=100_000, gt=0, le=1_000_000)
-    max_detail_fetches: int = Field(default=100, ge=0, le=1000)
+    max_detail_fetches: int = Field(default=100, ge=0, le=100_000)
+    bootstrap_window_hours: int | None = Field(default=None, gt=0, le=168)
     parser: str | None = None
     osv_ecosystem: str | None = None
     osv_packages: list[str] = Field(default_factory=list)
+    osv_id_prefixes: list[str] = Field(default_factory=list)
     detail_collector: CollectorKind | None = None
     selectors: dict[str, str] = Field(default_factory=dict)
     wait_for: str | None = None
@@ -132,6 +146,24 @@ class SourceDefinition(StrictModel):
     def validate_runtime_source(self) -> SourceDefinition:
         if self.osv_packages and not self.osv_ecosystem:
             raise ValueError("osv_packages require osv_ecosystem")
+        if self.osv_id_prefixes and self.collector != CollectorKind.OSV_GLOBAL:
+            raise ValueError("osv_id_prefixes are only supported by osv_global")
+        if any(
+            not prefix
+            or len(prefix) > 64
+            or any(
+                not character.isascii()
+                or (not character.isalnum() and character not in "-._")
+                for character in prefix
+            )
+            for prefix in self.osv_id_prefixes
+        ):
+            raise ValueError("osv_id_prefixes must contain bounded safe identifier prefixes")
+        if (
+            self.bootstrap_window_hours is not None
+            and self.collector != CollectorKind.OSV_GLOBAL
+        ):
+            raise ValueError("bootstrap_window_hours is only supported by osv_global")
         if self.enabled:
             if self.collector is None or self.url is None:
                 raise ValueError("enabled sources require collector and url")
@@ -351,6 +383,22 @@ class ChangeRecord(StrictModel):
     message: str | None = None
 
 
+class SourceOutcome(StrictModel):
+    source_id: str
+    status: SourceOutcomeStatus
+    collector: CollectorKind
+    endpoint_url: str
+    record_count: int = Field(default=0, ge=0)
+    parsed_count: int = Field(default=0, ge=0)
+    parse_failure_count: int = Field(default=0, ge=0)
+    error: str | None = None
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint_url(cls, value: str) -> str:
+        return _validate_https_url(value)
+
+
 class RunManifest(StrictModel):
     schema_version: int = 1
     started_at: datetime
@@ -359,3 +407,11 @@ class RunManifest(StrictModel):
     since: datetime
     baseline: bool = False
     changes: list[ChangeRecord] = Field(default_factory=list)
+    source_outcomes: list[SourceOutcome] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_source_outcome_ids(self) -> RunManifest:
+        source_ids = [outcome.source_id for outcome in self.source_outcomes]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("source outcome IDs must be unique")
+        return self
