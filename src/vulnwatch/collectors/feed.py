@@ -40,11 +40,7 @@ class FeedCollector:
         entries = list(parsed.entries)
         link_contains = source.selectors.get("link_contains")
         if link_contains:
-            entries = [
-                entry
-                for entry in entries
-                if link_contains in str(entry.get("link") or "")
-            ]
+            entries = [entry for entry in entries if link_contains in str(entry.get("link") or "")]
         title_pattern = source.selectors.get("title_pattern")
         if title_pattern:
             try:
@@ -54,9 +50,7 @@ class FeedCollector:
                     f"{source.id}: invalid selectors.title_pattern: {exc}"
                 ) from exc
             entries = [
-                entry
-                for entry in entries
-                if title_regex.search(str(entry.get("title") or ""))
+                entry for entry in entries if title_regex.search(str(entry.get("title") or ""))
             ]
         if len(entries) > source.max_items:
             raise CollectorError(

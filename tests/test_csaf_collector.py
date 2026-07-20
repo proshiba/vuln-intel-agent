@@ -40,9 +40,7 @@ async def test_csaf_rolie_feed_filters_old_documents() -> None:
                         {
                             "id": "ADV-OLD",
                             "updated": "2025-01-01T00:00:00Z",
-                            "content": {
-                                "src": "https://cert.example.com/csaf/old.json"
-                            },
+                            "content": {"src": "https://cert.example.com/csaf/old.json"},
                         },
                     ]
                 }

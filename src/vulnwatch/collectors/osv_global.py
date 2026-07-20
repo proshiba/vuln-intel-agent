@@ -10,9 +10,7 @@ from urllib.parse import quote
 from vulnwatch.collectors.base import CollectorError, ParserChangedError, SafeHttpClient
 from vulnwatch.models import CollectionResult, RawRecord, SourceDefinition, SourceState
 
-OSV_MODIFIED_INDEX_URL = (
-    "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
-)
+OSV_MODIFIED_INDEX_URL = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
 OSV_STORAGE_HOST = "storage.googleapis.com"
 OSV_DETAIL_BASE_URL = "https://storage.googleapis.com/osv-vulnerabilities/"
 OSV_ADVISORY_BASE_URL = "https://osv.dev/vulnerability/"
@@ -37,16 +35,13 @@ def _modified_at(value: str, source_id: str) -> datetime:
             f"{source_id}: OSV modified index has an invalid timestamp"
         ) from exc
     if parsed.tzinfo is None:
-        raise ParserChangedError(
-            f"{source_id}: OSV modified index timestamp has no timezone"
-        )
+        raise ParserChangedError(f"{source_id}: OSV modified index timestamp has no timezone")
     return parsed.astimezone(UTC)
 
 
 def _object_path(value: str, source_id: str) -> str:
     invalid_character = any(
-        ord(character) < 32 or ord(character) == 127 or character in "\\%?#"
-        for character in value
+        ord(character) < 32 or ord(character) == 127 or character in "\\%?#" for character in value
     )
     parts = value.split("/")
     if (
@@ -159,9 +154,7 @@ class OsvGlobalCollector:
     def _validate_source(source: SourceDefinition) -> None:
         if source.url != OSV_MODIFIED_INDEX_URL:
             raise CollectorError(f"{source.id}: invalid OSV modified index endpoint")
-        if OSV_STORAGE_HOST.casefold() not in {
-            host.casefold() for host in source.allowed_hosts
-        }:
+        if OSV_STORAGE_HOST.casefold() not in {host.casefold() for host in source.allowed_hosts}:
             raise CollectorError(f"{source.id}: OSV storage host is not allowed")
 
     @staticmethod
@@ -210,9 +203,7 @@ class OsvGlobalCollector:
                     seen_paths.add(path)
                     paths.append(path)
         except csv.Error as exc:
-            raise ParserChangedError(
-                f"{source.id}: invalid OSV modified index CSV"
-            ) from exc
+            raise ParserChangedError(f"{source.id}: invalid OSV modified index CSV") from exc
 
         if row_count == 0:
             raise ParserChangedError(f"{source.id}: OSV modified index contained zero rows")

@@ -276,9 +276,7 @@ async def test_web_collector_filters_explicit_items_and_reads_text_date() -> Non
 
 @respx.mock
 async def test_web_collector_extracts_schneider_security_notification_row() -> None:
-    index_url = (
-        "https://www.se.com/ww/en/work/support/cybersecurity/security-notifications/"
-    )
+    index_url = "https://www.se.com/ww/en/work/support/cybersecurity/security-notifications/"
     pdf_url = (
         "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-2026-195-01"
         "&p_enDocType=Security+and+Safety+Notice"
@@ -363,9 +361,7 @@ async def test_web_collector_paginates_explicit_items_until_window_ends() -> Non
             headers={"content-type": "text/html"},
         )
     )
-    page_three = respx.get(url__eq=page_three_url).mock(
-        return_value=httpx.Response(500)
-    )
+    page_three = respx.get(url__eq=page_three_url).mock(return_value=httpx.Response(500))
 
     result = await WebCollector().collect(
         _source(

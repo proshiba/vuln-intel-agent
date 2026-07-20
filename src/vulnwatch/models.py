@@ -152,17 +152,13 @@ class SourceDefinition(StrictModel):
             not prefix
             or len(prefix) > 64
             or any(
-                not character.isascii()
-                or (not character.isalnum() and character not in "-._")
+                not character.isascii() or (not character.isalnum() and character not in "-._")
                 for character in prefix
             )
             for prefix in self.osv_id_prefixes
         ):
             raise ValueError("osv_id_prefixes must contain bounded safe identifier prefixes")
-        if (
-            self.bootstrap_window_hours is not None
-            and self.collector != CollectorKind.OSV_GLOBAL
-        ):
+        if self.bootstrap_window_hours is not None and self.collector != CollectorKind.OSV_GLOBAL:
             raise ValueError("bootstrap_window_hours is only supported by osv_global")
         if self.enabled:
             if self.collector is None or self.url is None:

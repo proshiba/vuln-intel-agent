@@ -82,8 +82,7 @@ def _validate_source_outcomes(manifest: RunManifest) -> None:
         if unexpected:
             details.append(f"unexpected: {', '.join(unexpected)}")
         raise ValueError(
-            f"source outcomes do not match the {manifest.profile} profile "
-            f"({'; '.join(details)})"
+            f"source outcomes do not match the {manifest.profile} profile ({'; '.join(details)})"
         )
 
     unsuccessful = [
@@ -96,6 +95,5 @@ def _validate_source_outcomes(manifest: RunManifest) -> None:
             f"{outcome.source_id}={outcome.status}" for outcome in unsuccessful
         )
         raise ValueError(
-            "source outcomes include unsuccessful collection results: "
-            f"{unsuccessful_details}"
+            f"source outcomes include unsuccessful collection results: {unsuccessful_details}"
         )

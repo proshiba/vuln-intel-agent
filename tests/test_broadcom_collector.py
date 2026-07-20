@@ -188,9 +188,7 @@ async def test_broadcom_collector_enforces_item_limits(
     source_overrides: dict[str, int], message: str
 ) -> None:
     respx.post(ENDPOINT).mock(
-        return_value=_response(
-            [_item("VMSA-1", 10001), _item("VMSA-2", 10002)], total=2
-        )
+        return_value=_response([_item("VMSA-1", 10001), _item("VMSA-2", 10002)], total=2)
     )
 
     with pytest.raises(CollectorError, match=message):

@@ -181,8 +181,7 @@ class UbiquitiCollector:
             offset += len(items)
         else:
             raise CollectorError(
-                f"{source.id}: Ubiquiti pagination exceeds configured limit of "
-                f"{_MAX_PAGES} pages"
+                f"{source.id}: Ubiquiti pagination exceeds configured limit of {_MAX_PAGES} pages"
             )
         if not candidates:
             raise ParserChangedError(
@@ -244,9 +243,7 @@ class UbiquitiCollector:
         for field in ("id", "slug", "title", "createdAt"):
             field_value = value.get(field)
             if not isinstance(field_value, str) or not field_value.strip():
-                raise ParserChangedError(
-                    f"{source_id}: Ubiquiti release is missing {field}"
-                )
+                raise ParserChangedError(f"{source_id}: Ubiquiti release is missing {field}")
         return value
 
     @staticmethod
@@ -286,12 +283,8 @@ class UbiquitiCollector:
                     continue
                 content = block.get("content")
                 if isinstance(content, str) and content.strip():
-                    fragments.append(
-                        BeautifulSoup(content, "lxml").get_text("\n", strip=True)
-                    )
+                    fragments.append(BeautifulSoup(content, "lxml").get_text("\n", strip=True))
         text = "\n\n".join(fragment for fragment in fragments if fragment)
         if not text:
-            raise ParserChangedError(
-                f"{source_id}: Ubiquiti advisory detail contained no text"
-            )
+            raise ParserChangedError(f"{source_id}: Ubiquiti advisory detail contained no text")
         return text

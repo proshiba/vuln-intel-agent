@@ -215,8 +215,7 @@ class SafeHttpClient:
                 headers["Authorization"] = f"Bearer {token}"
         if (
             self.source.id == "manageengine"
-            and (urlsplit(url).hostname or "").casefold()
-            == "securitycontact.manageengine.com"
+            and (urlsplit(url).hostname or "").casefold() == "securitycontact.manageengine.com"
         ):
             # The public API used by ManageEngine's advisory page enforces its
             # documented browser CORS origin even for read-only GET requests.

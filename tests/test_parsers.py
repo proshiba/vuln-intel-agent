@@ -211,9 +211,7 @@ def test_json_parser_uses_collector_validated_source_url() -> None:
                                 }
                             }
                         ],
-                        "timeline": [
-                            {"time": "2026-05-04", "value": "2.4.67 released"}
-                        ],
+                        "timeline": [{"time": "2026-05-04", "value": "2.4.67 released"}],
                     }
                 },
             },
@@ -317,9 +315,7 @@ def test_netapp_parser_maps_official_api_fields() -> None:
         "published_date": "2026-07-18T00:00:00",
         "updated_date": "2026-07-19T00:00:00",
         "kb_cve": ["CVE-2026-12345"],
-        "kb_scoring": {
-            "CVE-2026-12345": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-        },
+        "kb_scoring": {"CVE-2026-12345": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
         "kb_affected_list": ["ONTAP 9"],
         "kb_fixes": [
             {

@@ -51,6 +51,7 @@ class BrowserCollector:
                         locale="en-US",
                     )
                     try:
+
                         async def route_handler(route: object) -> None:
                             request = route.request  # type: ignore[attr-defined]
                             parsed = urlsplit(str(request.url))
@@ -90,10 +91,7 @@ class BrowserCollector:
                                 f"{source.id}: browser HTTP {response.status} from {response.url}"
                             )
                         declared_size = self._declared_content_length(response)
-                        if (
-                            declared_size is not None
-                            and declared_size > source.max_response_bytes
-                        ):
+                        if declared_size is not None and declared_size > source.max_response_bytes:
                             raise CollectorError(
                                 f"{source.id}: browser response exceeds "
                                 f"{source.max_response_bytes} bytes"
@@ -145,10 +143,7 @@ class BrowserCollector:
                                 html = await page.content()
                                 break
                             except PlaywrightError as exc:
-                                if (
-                                    "page is navigating" not in str(exc).casefold()
-                                    or attempt == 4
-                                ):
+                                if "page is navigating" not in str(exc).casefold() or attempt == 4:
                                     raise
                                 await asyncio.sleep(0.5)
                         final_url = page.url
@@ -185,13 +180,8 @@ class BrowserCollector:
     @staticmethod
     def _validate_page_url(source_id: str, url: str, allowed_hosts: set[str]) -> None:
         parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or (parsed.hostname or "").casefold() not in allowed_hosts
-        ):
-            raise CollectorError(
-                f"{source_id}: browser navigation left allowed hosts: {url}"
-            )
+        if parsed.scheme != "https" or (parsed.hostname or "").casefold() not in allowed_hosts:
+            raise CollectorError(f"{source_id}: browser navigation left allowed hosts: {url}")
 
     @staticmethod
     def _declared_content_length(response: object) -> int | None:

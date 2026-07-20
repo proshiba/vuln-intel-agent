@@ -73,10 +73,7 @@ def _detail(item: dict[str, object]) -> dict[str, object]:
                 "importantNotes": [
                     {
                         "type": "TEXT",
-                        "content": (
-                            "<p>Affected Products: UniFi OS</p>"
-                            "<p>CVE-2026-50746</p>"
-                        ),
+                        "content": ("<p>Affected Products: UniFi OS</p><p>CVE-2026-50746</p>"),
                     }
                 ],
                 "instructions": [],
@@ -118,9 +115,7 @@ async def test_ubiquiti_collects_recent_bulletin_body_and_parses_it() -> None:
 
 @respx.mock
 async def test_ubiquiti_verifies_index_but_allows_no_new_bulletins() -> None:
-    route = respx.post(API_URL).mock(
-        return_value=httpx.Response(200, json=_index([_item()]))
-    )
+    route = respx.post(API_URL).mock(return_value=httpx.Response(200, json=_index([_item()])))
 
     result = await UbiquitiCollector().collect(
         _source(),

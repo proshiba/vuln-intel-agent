@@ -21,9 +21,7 @@ def test_registry_has_all_sources_enabled_for_collection() -> None:
     assert ivanti.parser == "feed"
     assert ivanti.max_detail_fetches == 20
 
-    schneider = next(
-        source for source in registry.sources if source.id == "schneider_electric"
-    )
+    schneider = next(source for source in registry.sources if source.id == "schneider_electric")
     assert schneider.collector == "html"
     assert schneider.parser == "generic"
     assert schneider.url == schneider.advisory_url
@@ -69,8 +67,7 @@ def test_runtime_sources_use_bounded_machine_readable_channels() -> None:
 
     ibm = by_id["ibm"]
     assert ibm.url == (
-        "https://www.ibm.com/support/pages/securityapp/api/site/datalist?"
-        "offset=0&limit=1000"
+        "https://www.ibm.com/support/pages/securityapp/api/site/datalist?offset=0&limit=1000"
     )
     assert ibm.allowed_hosts == ["www.ibm.com"]
     assert ibm.max_response_bytes == 60_000_000
