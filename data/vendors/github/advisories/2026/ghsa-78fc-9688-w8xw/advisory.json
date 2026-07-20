@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/80084861?v=4\", \"events_url\": \"https://api.github.com/users/Arron-bit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Arron-bit/followers\", \"following_url\": \"https://api.github.com/users/Arron-bit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Arron-bit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Arron-bit\", \"id\": 80084861, \"login\": \"Arron-bit\", \"node_id\": \"MDQ6VXNlcjgwMDg0ODYx\", \"organizations_url\": \"https://api.github.com/users/Arron-bit/orgs\", \"received_events_url\": \"https://api.github.com/users/Arron-bit/received_events\", \"repos_url\": \"https://api.github.com/users/Arron-bit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Arron-bit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Arron-bit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Arron-bit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40076\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 9.4, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Affected Versions\\n\\nversion ≤ 2.7.8 (latest version at time of disclosure)\\n\\nhttps://github.com/openmrs/openmrs-core\\n\\n## Impact\\n\\nThe endpoint `POST /openmrs/ws/rest/v1/module` is vulnerable to a path traversal (Zip Slip) attack. An authenticated attacker can upload a crafted `.omod` archive containing ZIP entries with directory traversal sequences. Upon automatic extraction by the server, the incomplete path validation in `WebModuleUtil.startModule()` fails to prevent entries such as `web/module/../../../../malicious.jsp` from being written outside the intended module directory. If the traversal target falls within the web application root (e.g., `/usr/local/tomcat/webapps/openmrs/`), the attacker achieves arbitrary file write and subsequent Remote Code Execution.\\n\\nNotably, other extraction methods in the same codebase (`ModuleUtil.expandJar()`, `TestInstallUtil.addZippedTestModules()`) are properly protected with `normalize().startsWith()` checks — this vulnerability is an oversight where the same fix was not applied.\\n\\nFurthermore, the `module.allow_web_admin` runtime property, which is intended to restrict administrators from managing modules via the web interface, only gates the Legacy UI controller entry point. The REST API endpoint `POST /openmrs/ws/rest/v1/module` does not check this property, allowing this restriction to be fully bypassed.\\n\\n## Steps to Reproduce\\n\\n1. Construct a malicious `.omod` file (which is a ZIP/JAR archive) containing a ZIP entry with a path traversal payload in its entry name, such as `web/module/../../../../<target_filename>`. Upload this file to `POST /openmrs/ws/rest/v1/module` with valid admin credentials via Basic Auth.\\n\\n<img width=\\\"1986\\\" height=\\\"1102\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/647f15de-7e8c-40b9-aba9-d4db5d2e0b52\\\" />\\n\\n<img width=\\\"2048\\\" height=\\\"1078\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/301412a0-e3b0-4afb-91c2-e9739de3080d\\\" />\\n\\n\\n2. The server parses and loads the module. During `WebModuleUtil.startModule()`, entries under `web/module/` are automatically extracted. The existing check `Paths.get(name).startsWith(\\\"..\\\")` only blocks entries beginning with `..`, so an entry starting with `web/module/` passes the check. The `../` sequences in the remaining path cause the file to be written outside the intended `WEB-INF/view/module/` directory — for example, into the web application root at `/usr/local/tomcat/webapps/openmrs/`.\\n\\n<img width=\\\"1439\\\" height=\\\"141\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/4bda3b1e-a80e-42ed-af2b-a1da53e8db03\\\" />\\n\\n3. The traversed file is now accessible under the web application root. If the written file is a JSP script, accessing it via the browser triggers server-side execution, achieving RCE.\\n\\n<img width=\\\"1482\\\" height=\\\"300\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/61936002-78cd-4203-80f0-f0a8702b216c\\\" />\\n\\n## Root Cause Analysis\\n\\nThe vulnerability exists in `WebModuleUtil.startModule()` (`web/src/main/java/org/openmrs/module/web/WebModuleUtil.java`).\\n\\n### Vulnerable code:\\n\\n```java\\nEnumeration<JarEntry> entries = jarFile.entries();\\nwhile (entries.hasMoreElements()) {\\n    JarEntry entry = entries.nextElement();\\n    String name = entry.getName();\\n\\n    // ❌ Incomplete check — only blocks entries starting with \\\"..\\\"\\n    if (Paths.get(name).startsWith(\\\"..\\\")) {\\n        throw new UnsupportedOperationException(\\\"...\\\");\\n    }\\n\\n    if (name.startsWith(\\\"web/module/\\\")) {\\n        String filepath = name.substring(11);\\n        StringBuilder absPath = new StringBuilder(realPath + \\\"/WEB-INF\\\");\\n        absPath.append(\\\"/view/module/\\\");\\n        absPath.append(mod.getModuleIdAsPath()).append(\\\"/\\\").append(filepath);\\n\\n        // ❌ No normalize() or startsWith() boundary check before writing\\n        File outFile = new File(absPath.toString().replace(\\\"/\\\", File.separator));\\n        outStream = new FileOutputStream(outFile, false);\\n        inStream = jarFile.getInputStream(entry);\\n        OpenmrsUtil.copyFile(inStream, outStream);\\n    }\\n}\\n```\\n\\n**Why the check fails:** For an entry named `web/module/foo/../../../../evil.jsp`, `Paths.get(name)` starts with `web`, not `..`, so the check passes. After `name.substring(11)`, the filepath `foo/../../../../evil.jsp` is concatenated directly into the output path without normalization, resulting in a write outside the intended directory.\\n\\n### Correctly protected code in the same codebase:\\n\\n**`ModuleUtil.expandJar()`:**\\n\\n```java\\n// ✅ Correct — uses normalize().startsWith()\\nif (!parent.toPath().normalize().startsWith(docBase)) {\\n    throw new UnsupportedOperationException(\\\"...\\\");\\n}\\n```\\n\\n**`TestInstallUtil.addZippedTestModules()`:**\\n\\n```java\\n// ✅ Correct — uses normalize().startsWith()\\nif (!zipEntryFile.toPath().normalize().startsWith(moduleRepository.toPath().normalize())) {\\n    throw new IOException(\\\"Bad zip entry\\\");\\n}\\n```\\n\\nThe fix pattern is already known and applied elsewhere in the codebase. `WebModuleUtil.startModule()` is an oversight.\\n\\n### Bypass of `module.allow_web_admin`\\n\\nThe `module.allow_web_admin` property only restricts module operations at the Legacy UI layer (`ModuleListController`). The REST API endpoint does not consult this property:\\n\\n```\\nLegacy UI:  POST /admin/modules/moduleList.form → allowAdmin() check → [BLOCKED]\\nREST API:   POST /ws/rest/v1/module             → No allowAdmin() check → [ALLOWED]\\n                ↓\\n        ModuleFactory.loadModule()\\n                ↓\\n        WebModuleUtil.startModule()   ← Zip Slip here, no allowAdmin check\\n                ↓\\n        FileOutputStream.write()      ← Arbitrary file write\\n```\\n\\n## Remediation\\n\\nAdd `normalize().startsWith()` boundary validation before writing, consistent with the existing pattern in `ModuleUtil.expandJar()`:\\n\\n```java\\nFile outFile = new File(absPath.toString().replace(\\\"/\\\", File.separator));\\n\\n// ✅ Add this check\\nif (!outFile.toPath().normalize().startsWith(\\n        Paths.get(realPath, \\\"WEB-INF\\\").normalize())) {\\n    throw new UnsupportedOperationException(\\n        \\\"Zip entry '\\\" + name + \\\"' would be written outside the allowed directory.\\\");\\n}\\n```\\n\\nAdditionally, enforce the `module.allow_web_admin` restriction consistently across all module upload entry points, including the REST API.\", \"epss\": {\"percentage\": 0.00853, \"percentile\": 0.53505}, \"ghsa_id\": \"GHSA-78fc-9688-w8xw\", \"github_reviewed_at\": \"2026-05-04T17:39:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-78fc-9688-w8xw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-78fc-9688-w8xw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40076\"}], \"nvd_published_at\": \"2026-05-06T20:16:31Z\", \"published_at\": \"2026-05-04T17:39:31Z\", \"references\": [\"https://github.com/openmrs/openmrs-core/security/advisories/GHSA-78fc-9688-w8xw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40076\", \"https://github.com/advisories/GHSA-78fc-9688-w8xw\"], \"repository_advisory_url\": \"https://api.github.com/repos/openmrs/openmrs-core/security-advisories/GHSA-78fc-9688-w8xw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/openmrs/openmrs-core\", \"summary\": \"OpenMRS Module Upload Vulnerable to Path Traversal (Zip Slip)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T19:25:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-78fc-9688-w8xw\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.openmrs.web:openmrs-web\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.7.8\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.openmrs.web:openmrs-web\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.8.0, <= 2.8.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-78fc-9688-w8xw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.openmrs.web:openmrs-web: <= 2.7.8",
+      "org.openmrs.web:openmrs-web: >= 2.8.0, <= 2.8.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-40076"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.openmrs.web:openmrs-web"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.292596Z",
+  "provenance": {
+    "content_sha256": "94bda55d98fe2f599cdbb6384a9298b7fcf2e5bd144b532b7d2ba8d75c5fefcf",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T17:39:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-78fc-9688-w8xw",
+  "status": "active",
+  "title": "OpenMRS Module Upload Vulnerable to Path Traversal (Zip Slip)",
+  "updated_at": "2026-05-08T19:25:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-78fc-9688-w8xw"
+}

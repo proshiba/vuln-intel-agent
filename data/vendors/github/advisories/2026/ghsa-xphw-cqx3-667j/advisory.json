@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/274170302?v=4\", \"events_url\": \"https://api.github.com/users/cloudchatsonny-stack/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cloudchatsonny-stack/followers\", \"following_url\": \"https://api.github.com/users/cloudchatsonny-stack/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cloudchatsonny-stack/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cloudchatsonny-stack\", \"id\": 274170302, \"login\": \"cloudchatsonny-stack\", \"node_id\": \"U_kgDOEFeBvg\", \"organizations_url\": \"https://api.github.com/users/cloudchatsonny-stack/orgs\", \"received_events_url\": \"https://api.github.com/users/cloudchatsonny-stack/received_events\", \"repos_url\": \"https://api.github.com/users/cloudchatsonny-stack/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cloudchatsonny-stack/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cloudchatsonny-stack/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cloudchatsonny-stack\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-6654\", \"cvss\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-415\", \"name\": \"Double Free\"}, {\"cwe_id\": \"CWE-416\", \"name\": \"Use After Free\"}], \"description\": \"### Summary\\n\\nA **Double Free / Use-After-Free (UAF)** vulnerability has been identified in the `IntoIter::drop` and `ThinVec::clear` implementations of the `thin_vec` crate.\\nBoth vulnerabilities share the same root cause and can trigger memory corruption using only safe Rust code — no `unsafe` blocks required.\\nUndefined Behavior has been confirmed via **Miri** and **AddressSanitizer (ASAN)**.\\n\\n---\\n\\n### Details\\n\\nBoth vulnerabilities share the same root cause. When a **panic occurs** during sequential element deallocation, the subsequent length cleanup code (`set_len(0)`) is never executed. During stack unwinding, the container is dropped again, causing already-freed memory to be re-freed (Double Free / UAF).\\n\\n#### Vulnerability 1 — `IntoIter::drop`\\n\\n**Location:** `thin-vec/src/lib.rs` L.2308~2314\\n\\n`IntoIter::drop` transfers ownership of the internal buffer via `mem::replace`, then sequentially frees elements via `ptr::drop_in_place`.\\nIf a panic occurs during element deallocation, `set_len_non_singleton(0)` is never reached. During unwinding, `vec` is dropped again, re-freeing already-freed elements.\\nThe standard library's `std::vec::IntoIter` prevents this with a **DropGuard pattern**, but thin-vec lacks this defense.\\n\\n```rust\\n// Problematic structure (conceptual representation)\\nimpl<T> Drop for IntoIter<T> {\\n    fn drop(&mut self) {\\n        let mut vec = mem::replace(&mut self.vec, ThinVec::new());\\n        unsafe {\\n            ptr::drop_in_place(vec.remaining_slice_mut()); // ← panic may occur here\\n            vec.set_len_non_singleton(0);                  // ← unreachable on panic\\n        }\\n        // During unwinding, vec is dropped again → Double Free\\n    }\\n}\\n```\\n\\n#### Vulnerability 2 — `ThinVec::clear`\\n\\n`clear()` calls `ptr::drop_in_place(&mut self[..])` followed by `self.set_len(0)` to reset the length.\\nIf a panic occurs during element deallocation, `set_len(0)` is never executed. When the `ThinVec` itself is subsequently dropped, already-freed elements are freed again.\\n\\n```rust\\n// Problematic structure (conceptual representation)\\npub fn clear(&mut self) {\\n    unsafe {\\n        ptr::drop_in_place(&mut self[..]); // ← panic may occur here\\n        self.set_len(0);                   // ← unreachable on panic\\n    }\\n    // ThinVec drop later → Double Free\\n}\\n```\\n\\n#### Recommended Fix\\n\\nBoth vulnerabilities can be resolved with the same pattern:\\n\\n- **DropGuard pattern:** Insert an RAII guard before `drop_in_place` to guarantee `set_len(0)` is called regardless of panic\\n- **Pre-zeroing approach:** Set the length to 0 before calling `drop_in_place`\\n\\n---\\n\\n### PoC\\n\\n**Requirements:** Rust nightly toolchain, `thin-vec = \\\"0.2.14\\\"`\\n\\n```bash\\n# Miri\\ncargo +nightly miri run\\n\\n# ASAN\\nRUSTFLAGS=\\\"-Z sanitizer=address\\\" cargo +nightly run --release\\n```\\n\\n#### PoC-1: `IntoIter::drop`\\n\\n```rust\\nuse thin_vec::ThinVec;\\n\\nstruct PanicBomb(String);\\n\\nimpl Drop for PanicBomb {\\n    fn drop(&mut self) {\\n        if self.0 == \\\"panic\\\" {\\n            panic!(\\\"panic!\\\");\\n        }\\n        println!(\\\"Dropping: {}\\\", self.0);\\n    }\\n}\\n\\nfn main() {\\n    let mut v = ThinVec::new();\\n    v.push(PanicBomb(String::from(\\\"normal1\\\")));\\n    v.push(PanicBomb(String::from(\\\"panic\\\")));  // trigger element\\n    v.push(PanicBomb(String::from(\\\"normal2\\\")));\\n\\n    let mut iter = v.into_iter();\\n    iter.next();\\n    // When iter is dropped: panic occurs at \\\"panic\\\" element\\n    // → During unwinding, Double Drop is triggered on \\\"normal1\\\" (already freed)\\n}\\n```\\n\\n**Miri output:**\\n```\\nerror: Undefined Behavior: pointer not dereferenceable:\\n       alloc227 has been freed, so this pointer is dangling\\n\\nstack backtrace:\\n   3: <PanicBomb as Drop>::drop           ← Double Drop entry\\n   6: <ThinVec<T> as Drop>::drop::drop_non_singleton\\n   9: <IntoIter<T> as Drop>::drop::drop_non_singleton  ← lib.rs:2310 (root cause)\\n```\\n\\n**ASAN output:**\\n```\\n==66150==ERROR: AddressSanitizer: heap-use-after-free on address 0x7afa685e0010\\nREAD of size 7 at 0x7afa685e0010\\n    #0 memcpy\\n    #4 drop_in_place::<PanicBomb>        ← Double Drop entry point\\n    #5 <ThinVec as Drop>::drop::drop_non_singleton\\n    #6 <IntoIter as Drop>::drop::drop_non_singleton\\n```\\n\\n#### PoC-2: `ThinVec::clear`\\n\\n```rust\\nuse thin_vec::ThinVec;\\nuse std::panic;\\n\\nstruct Poison(Box<usize>, &'static str);\\n\\nimpl Drop for Poison {\\n    fn drop(&mut self) {\\n        if self.1 == \\\"panic\\\" {\\n            panic!(\\\"panic!\\\");\\n        }\\n        println!(\\\"Dropping: {}\\\", self.0);\\n    }\\n}\\n\\nfn main() {\\n    let mut v = ThinVec::new();\\n    v.push(Poison(Box::new(1), \\\"normal1\\\")); // index 0\\n    v.push(Poison(Box::new(2), \\\"panic\\\"));   // index 1 → panic triggered here\\n    v.push(Poison(Box::new(3), \\\"normal2\\\")); // index 2\\n\\n    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {\\n        v.clear();\\n        // panic occurs at \\\"panic\\\" element during clear()\\n        // → set_len(0) is never called\\n        // → already-freed elements are re-freed when v goes out of scope\\n    }));\\n}\\n```\\n\\n---\\n\\n### Impact\\n\\n**Vulnerability classification:**\\n- CWE-415: Double Free\\n- CWE-416: Use-After-Free\\n\\n**Affected code:** All code satisfying the following conditions simultaneously:\\n\\n1. `ThinVec` stores heap-owning types (`String`, `Vec`, `Box`, etc.)\\n2. (Vulnerability 1) An iterator is created via `into_iter()` and dropped before being fully consumed, or\\n   (Vulnerability 2) `clear()` is called while a remaining element's `Drop` implementation can panic\\n3. The `Drop` implementation of a remaining element triggers a panic\\n\\nAdditionally, when combined with `Box<dyn Trait>` types, an exploit primitive enabling Arbitrary Code Execution (ACE) via heap spray and vtable hijacking has been confirmed. If the freed fat pointer slot (16 bytes) at the point of Double Drop is reclaimed by an attacker-controlled fake vtable, subsequent Drop calls can be redirected to attacker-controlled code.\", \"epss\": {\"percentage\": 0.00168, \"percentile\": 0.06496}, \"ghsa_id\": \"GHSA-xphw-cqx3-667j\", \"github_reviewed_at\": \"2026-04-15T19:24:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-xphw-cqx3-667j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xphw-cqx3-667j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-6654\"}], \"nvd_published_at\": \"2026-04-20T11:16:19Z\", \"published_at\": \"2026-04-15T19:24:54Z\", \"references\": [\"https://github.com/mozilla/thin-vec/security/advisories/GHSA-xphw-cqx3-667j\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-6654\", \"https://rustsec.org/advisories/RUSTSEC-2026-0103.html\", \"https://github.com/advisories/GHSA-xphw-cqx3-667j\"], \"repository_advisory_url\": \"https://api.github.com/repos/mozilla/thin-vec/security-advisories/GHSA-xphw-cqx3-667j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/mozilla/thin-vec\", \"summary\": \"thin-vec: Use-After-Free and Double Free in IntoIter::drop When Element Drop Panics\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T15:41:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-xphw-cqx3-667j\", \"vulnerabilities\": [{\"first_patched_version\": \"0.2.16\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"thin-vec\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.2.16\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xphw-cqx3-667j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "thin-vec: < 0.2.16"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-6654"
+    ],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "thin-vec"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.477688Z",
+  "provenance": {
+    "content_sha256": "933cf78e2e1c16200c194f6c9f50253d0397d4eca0891cf227a59e1c1bf71d60",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-15T19:24:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xphw-cqx3-667j",
+  "status": "active",
+  "title": "thin-vec: Use-After-Free and Double Free in IntoIter::drop When Element Drop Panics",
+  "updated_at": "2026-04-27T15:41:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xphw-cqx3-667j"
+}

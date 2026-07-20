@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/30373481?v=4\", \"events_url\": \"https://api.github.com/users/berkdedekarginoglu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/berkdedekarginoglu/followers\", \"following_url\": \"https://api.github.com/users/berkdedekarginoglu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/berkdedekarginoglu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/berkdedekarginoglu\", \"id\": 30373481, \"login\": \"berkdedekarginoglu\", \"node_id\": \"MDQ6VXNlcjMwMzczNDgx\", \"organizations_url\": \"https://api.github.com/users/berkdedekarginoglu/orgs\", \"received_events_url\": \"https://api.github.com/users/berkdedekarginoglu/received_events\", \"repos_url\": \"https://api.github.com/users/berkdedekarginoglu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/berkdedekarginoglu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/berkdedekarginoglu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/berkdedekarginoglu\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41277\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 7.6, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-915\", \"name\": \"Improperly Controlled Modification of Dynamically-Determined Object Attributes\"}], \"description\": \"### Summary\\nA Mass Assignment vulnerability in the DocumentStore creation endpoint allows authenticated users to control the primary key (id) and internal state fields of DocumentStore entities.\\n\\nBecause the service uses repository.save() with a client-supplied primary key, the POST create endpoint behaves as an implicit UPSERT operation. This enables overwriting existing DocumentStore objects.\\n\\nIn multi-workspace or multi-tenant deployments, this can lead to cross-workspace object takeover and broken object-level authorization (IDOR), allowing an attacker to reassign or modify DocumentStore objects belonging to other workspaces.\\n\\n### Details\\nThe DocumentStore entity defines a globally unique primary key:\\n\\n```typescript\\n@PrimaryGeneratedColumn('uuid')\\nid: string\\n```\\n\\nThe create logic is implemented as:\\n```typescript\\nconst documentStore = repo.create(newDocumentStore)\\nconst dbResponse = await repo.save(documentStore)\\n```\\n\\nHere is no DTO allowlist or field filtering before persistence. The entire request body is mapped directly to the entity.\\nTypeORM save() behavior:\\n\\n1. If the primary key (id) exists → UPDATE\\n2. If not → INSERT\\n\\nBecause id is accepted from the client, the create endpoint effectively functions as an UPSERT endpoint.\\n\\nThis allows an authenticated user to submit:\\n\\n```json\\n{\\n  \\\"id\\\": \\\"<existing_store_id>\\\",\\n  \\\"name\\\": \\\"modified\\\",\\n  \\\"description\\\": \\\"modified\\\",\\n  \\\"status\\\": \\\"SYNC\\\",\\n  \\\"embeddingConfig\\\": \\\"...\\\",\\n  \\\"vectorStoreConfig\\\": \\\"...\\\",\\n  \\\"recordManagerConfig\\\": \\\"...\\\"\\n}\\n```\\nIf a DocumentStore with the supplied id already exists, save() performs an UPDATE rather than creating a new record.\\n\\nImportantly:\\n\\nThe primary key is globally unique (uuid)\\nIt is not composite with workspaceId\\nThe create path does not enforce ownership validation before calling save()\\nThis introduces a broken object-level authorization risk.\\n\\nIf an attacker can obtain or enumerate a valid DocumentStore UUID belonging to another workspace, they can:\\nSubmit a POST create request with that UUID.\\nTrigger an UPDATE on the existing record.\\nPotentially overwrite fields including workspaceId, effectively reassigning the object to their own workspace.\\n\\nBecause the service layer does not verify that the existing record belongs to the caller’s workspace before updating, this may result in cross-workspace object takeover.\\n\\nAdditionally, several service functions retrieve DocumentStore entities by id without consistently scoping by workspaceId, increasing the risk of IDOR if controller-level protections are bypassed or misconfigured.\\n\\n### PoC\\n\\n1. Create a normal DocumentStore in Workspace A.\\n2. Capture its id from the API response.\\n3. From Workspace B (or another authenticated context), submit:\\n\\n```http\\nPOST /api/v1/document-store\\nContent-Type: application/json\\n\\n{\\n  \\\"id\\\": \\\"<id_from_workspace_A>\\\",\\n  \\\"name\\\": \\\"hijacked\\\",\\n  \\\"description\\\": \\\"hijacked\\\"\\n}\\n```\\n\\nBecause the service uses repository.save() with a client-supplied primary key:\\n\\n- The existing record is updated.\\n- The object may become reassigned depending on how workspaceId is handled at controller level.\\n- If workspaceId is overwritten during the create flow, the store is effectively migrated to the attacker’s workspace.\\n- This demonstrates object takeover via UPSERT semantics on a create endpoint.\\n\\n### Impact\\nThis vulnerability enables:\\n\\n- Mass Assignment on server-managed fields\\n- Overwrite of existing objects via implicit UPSERT behavior\\n- Broken Object Level Authorization (BOLA)\\n- Potential cross-workspace object takeover in multi-tenant deployments\\n- In a SaaS or shared-workspace environment, an attacker who can obtain or guess a valid UUID may modify or reassign DocumentStore objects belonging to other tenants.\\n\\nBecause DocumentStore objects control embedding providers, vector store configuration, and record management logic, successful takeover can affect data indexing, retrieval, and AI workflow execution.\\n\\nThis represents a high-risk authorization flaw in multi-tenant environments.\", \"epss\": {\"percentage\": 0.00333, \"percentile\": 0.25512}, \"ghsa_id\": \"GHSA-3prp-9gf7-4rxx\", \"github_reviewed_at\": \"2026-04-17T21:34:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-3prp-9gf7-4rxx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3prp-9gf7-4rxx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41277\"}], \"nvd_published_at\": \"2026-04-23T20:16:16Z\", \"published_at\": \"2026-04-17T21:34:16Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-3prp-9gf7-4rxx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41277\", \"https://github.com/advisories/GHSA-3prp-9gf7-4rxx\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-3prp-9gf7-4rxx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: Mass Assignment in DocumentStore Create Endpoint Leads to Cross-Workspace Object Takeover (IDOR)\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T21:01:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-3prp-9gf7-4rxx\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.0.13\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3prp-9gf7-4rxx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise: <= 3.0.13"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41277"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.615068Z",
+  "provenance": {
+    "content_sha256": "c580b54ad5d799c9b8418ed251870b2000057fd06aa1aa1095486b4ba1a5416c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-17T21:34:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3prp-9gf7-4rxx",
+  "status": "active",
+  "title": "Flowise: Mass Assignment in DocumentStore Create Endpoint Leads to Cross-Workspace Object Takeover (IDOR)",
+  "updated_at": "2026-04-24T21:01:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3prp-9gf7-4rxx"
+}

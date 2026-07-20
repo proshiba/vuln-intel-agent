@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11325101?v=4\", \"events_url\": \"https://api.github.com/users/August829/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/August829/followers\", \"following_url\": \"https://api.github.com/users/August829/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/August829/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/August829\", \"id\": 11325101, \"login\": \"August829\", \"node_id\": \"MDQ6VXNlcjExMzI1MTAx\", \"organizations_url\": \"https://api.github.com/users/August829/orgs\", \"received_events_url\": \"https://api.github.com/users/August829/received_events\", \"repos_url\": \"https://api.github.com/users/August829/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/August829/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/August829/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/August829\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56266\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-798\", \"name\": \"Use of Hard-coded Credentials\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nMultiple security vulnerabilities in the Crawl4AI Docker API server affecting endpoints for crawling, markdown/LLM extraction, screenshots, PDFs, webhooks, monitoring, JavaScript execution, and configuration.\\n\\n### Vulnerabilities\\n\\n#### 1. Arbitrary File Write via /screenshot and /pdf (CWE-22, CVSS 9.1)\\n\\nThe `output_path` parameter accepts arbitrary filesystem paths with no validation. An attacker can overwrite server files (DoS) or write to any appuser-writable location.\\n\\n**Fix:** Added `validate_output_path()` restricting writes to `CRAWL4AI_OUTPUT_DIR` (/tmp/crawl4ai-outputs by default). Added Pydantic `field_validator` rejecting `..` traversal sequences.\\n\\n#### 2. SSRF via Webhook URL (CWE-918, CVSS 8.6)\\n\\nWebhook URLs in `/crawl/job` and `/llm/job` accept internal/private IPs with no validation, enabling Server-Side Request Forgery against cloud metadata endpoints (169.254.169.254), internal services, and Docker networks.\\n\\n**Fix:** Added `validate_webhook_url()` with blocklist for RFC 1918, loopback, link-local, cloud metadata IPs and hostnames. Validation at both job submission and send time. Explicit `follow_redirects=False`.\\n\\n#### 3. Authentication Bypass on Monitor Endpoints (CWE-306, CVSS 6.5)\\n\\nThe monitor router was mounted without `token_dep` dependency, making all monitoring endpoints (including destructive ones like `/monitor/actions/cleanup`) accessible without authentication.\\n\\n**Fix:** Added `dependencies=[Depends(token_dep)]` to monitor router. Added explicit token check on WebSocket `/monitor/ws` endpoint.\\n\\n#### 4. Stored XSS in Monitor Dashboard (CWE-79, CVSS 6.1)\\n\\nURLs and error messages rendered in the monitor dashboard via `innerHTML` without escaping, enabling stored XSS via crafted crawl URLs.\\n\\n**Fix:** Server-side `html.escape()` on URL and error storage. Client-side `escapeHtml()` wrapper on all `innerHTML` template injections.\\n\\n#### 5. Arbitrary JavaScript Execution via /execute_js (CWE-94, CVSS 8.1)\\n\\nThe `/execute_js` endpoint accepts and executes arbitrary JavaScript in the server's browser with `--disable-web-security` enabled, combining arbitrary JS execution with SSRF capability.\\n\\n**Fix:** Disabled by default via `CRAWL4AI_EXECUTE_JS_ENABLED` env var. Added SSRF blocklist on destination URL. Removed `--disable-web-security` from default browser args.\\n\\n#### 6. Hardcoded JWT Secret Key (CWE-798, CVSS 9.8)\\n\\nThe JWT signing key defaults to `\\\"mysecret\\\"` in the public source code, allowing anyone to forge valid authentication tokens.\\n\\n**Fix:** Removed default value. Added startup validation rejecting weak/short secrets. Auto-generates ephemeral key when JWT enabled but no key set.\\n\\n#### 7. SSRF via Direct Crawl Endpoints /crawl, /md, /llm (CWE-918, CVSS 8.6)\\n\\nThe primary crawl entry points (`/crawl`, `/crawl/stream`, `/md`, `/llm`) fetch arbitrary user-supplied URLs with no destination validation, enabling Server-Side Request Forgery against internal services, Docker networks, and cloud metadata endpoints (169.254.169.254). A blocklist that only inspects the literal hostname is additionally bypassable via IPv6-mapped IPv4 addresses (e.g. `[::ffff:169.254.169.254]`, `[::ffff:10.0.0.1]`), which resolve to the blocked private/metadata ranges but evade a naive string check.\\n\\n**Fix:** Added URL destination validation on all crawl/md/llm entry points, reusing the SSRF blocklist (RFC 1918, loopback, link-local, cloud-metadata IPs and hostnames). IPv6-mapped IPv4 addresses are normalized to their IPv4 form before the blocklist check, closing the mapping bypass. `raw://` URLs are skipped. Validation applies at request entry, not only at fetch time.\\n\\n### Workarounds\\n\\n1. Upgrade to the patched version (recommended)\\n2. Set `CRAWL4AI_API_TOKEN` to enable authentication\\n3. Set a strong `SECRET_KEY` (min 32 chars) if using JWT\\n4. Restrict network access to the Docker API\\n\\n### Credits\\n\\n- Jeongbean Jeon - file write, SSRF, monitor auth bypass, stored XSS\\n- wulonchia - file write via output_path (independent report)\\n- by111 ([August829](https://github.com/August829)) - hardcoded JWT, eval in /config/dump, /execute_js, hook sandbox escape\\n- secsys_codex - SSRF via /md, /crawl, /llm endpoints + IPv6-mapped IPv4 bypass (URL destination validation)\\n- Velayutham Selvaraj ([LinkedIn](https://www.linkedin.com/in/velayuthamselvaraj)) - SSRF via missing host validation in validate_url_scheme (independent report)\\n- IcySun & Yashon - SSRF, arbitrary file write, missing-auth-by-default, hook sandbox bypass via asyncio (independent report)\", \"epss\": {\"percentage\": 0.00276, \"percentile\": 0.19504}, \"ghsa_id\": \"GHSA-365w-hqf6-vxfg\", \"github_reviewed_at\": \"2026-06-16T20:13:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-365w-hqf6-vxfg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-365w-hqf6-vxfg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56266\"}], \"nvd_published_at\": \"2026-06-22T22:16:50Z\", \"published_at\": \"2026-06-16T20:13:30Z\", \"references\": [\"https://github.com/unclecode/crawl4ai/security/advisories/GHSA-365w-hqf6-vxfg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-56266\", \"https://github.com/unclecode/crawl4ai\", \"https://www.vulncheck.com/advisories/crawl4ai-server-side-request-forgery-via-direct-crawl-endpoints\", \"https://github.com/advisories/GHSA-365w-hqf6-vxfg\"], \"repository_advisory_url\": \"https://api.github.com/repos/unclecode/crawl4ai/security-advisories/GHSA-365w-hqf6-vxfg\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/unclecode/crawl4ai\", \"summary\": \"Crawl4AI: Multiple Docker API Vulnerabilities - File Write, SSRF, Auth Bypass, XSS, JS Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-24T13:05:47Z\", \"url\": \"https://api.github.com/advisories/GHSA-365w-hqf6-vxfg\", \"vulnerabilities\": [{\"first_patched_version\": \"0.8.7\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"crawl4ai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-365w-hqf6-vxfg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "crawl4ai: <= 0.8.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-56266"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "crawl4ai"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.324839Z",
+  "provenance": {
+    "content_sha256": "468f6c19fa06435cfbc9fb533cd563e610bf425579afc2c15b08e8aaff35052a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-16T20:13:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-365w-hqf6-vxfg",
+  "status": "active",
+  "title": "Crawl4AI: Multiple Docker API Vulnerabilities - File Write, SSRF, Auth Bypass, XSS, JS Execution",
+  "updated_at": "2026-06-24T13:05:47Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-365w-hqf6-vxfg"
+}

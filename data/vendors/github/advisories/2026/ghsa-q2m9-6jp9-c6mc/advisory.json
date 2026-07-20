@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44840\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-943\", \"name\": \"Improper Neutralization of Special Elements in Data Query Logic\"}], \"description\": \"## Summary\\n\\nThe `checkUserPassword` GraphQL query in Dgraph is vulnerable to DQL (Dgraph Query Language) injection. User-supplied password values are interpolated directly into a DQL `checkpwd()` query via `fmt.Sprintf` without any escaping or parameterization. An attacker can inject a password containing a double-quote character to break out of the DQL string literal and append arbitrary DQL query blocks.\\n\\n## Details\\n\\n### Vulnerable Code Path\\n\\nThe vulnerability exists in the GraphQL-to-DQL query rewriting layer:\\n\\n1. **`query_rewriter.go` (~line 364)** — The `checkpwd()` DQL function is constructed using `fmt.Sprintf`:\\n\\n   ```go\\n   fmt.Sprintf(`checkpwd(User.password, \\\"%s\\\")`, password)\\n   ```\\n\\n   The raw password string from the GraphQL query input is embedded directly into the DQL query without escaping double quotes or other special characters.\\n\\n2. **`graphquery.go`** — The constructed query attribute is serialized into the final DQL string via `b.WriteString(query.Attr)`, passing the unsanitized content directly to the Dgraph query engine.\\n\\n### Attack Mechanism\\n\\nA password value containing a double-quote (`\\\"`) terminates the string literal in the `checkpwd()` function. Any content after the escaped quote is parsed as additional DQL, allowing the attacker to inject arbitrary query blocks.\\n\\n### Distinction from CVE-2026-41328 and CVE-2026-41327\\n\\nCVE-2026-41328 and CVE-2026-41327 address DQL injection in **`edgraph/server.go`**, where GraphQL mutation inputs (upsert/delete) are embedded unsafely into DQL mutations. Those fixes sanitize the mutation path.\\n\\nThis vulnerability is in a **completely different code path** — the **GraphQL query rewriter** (`query_rewriter.go` → `graphquery.go`). The `checkUserPassword` GraphQL query triggers a DQL *query* via `checkpwd()`, and this query construction was not covered by the patches for CVE-2026-41328/CVE-2026-41327.\\n\\n## PoC\\n\\n```bash\\ncurl -s -X POST http://TARGET:8080/graphql \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{ \\\"query\\\": \\\"query { checkUserPassword(name: \\\\\\\"admin\\\\\\\", password: \\\\\\\"x\\\\\\\\\\\\\\\") { uid } injected(func: has(User.name)) { User.name User.email } dummy(func: eq(x, \\\\\\\\\\\\\\\"x\\\\\\\") { msg } }\\\") { msg } }\\\" }'\\n```\\n\\n**What to observe:**\\n\\n- The `touched_uids` field in the `extensions` section of the response will be elevated (indicating the injected blocks executed)\\n- Dgraph server logs (`dgraph alpha` output) will show the injected query blocks being parsed and executed\\n- The response itself may be filtered by the GraphQL layer, but server-side execution is confirmed\\n\\n## Impact\\n\\n- **Data enumeration**: Injected query blocks execute server-side and can probe for the existence of predicates, types, and nodes via `touched_uids` metrics and server logs.\\n- **Schema discovery**: An attacker can enumerate all predicates and types in the database by injecting `schema {}` blocks or `has()` queries.\\n- **Resource exhaustion**: Expensive injected queries (recursive traversals, large aggregations) execute at the DQL layer, consuming server resources regardless of whether results are returned to the attacker.\\n- **Potential data disclosure**: Depending on Dgraph configuration (e.g., debug mode, custom extensions), injected query results may leak into the response.\\n\\n**CVSS 3.1: 7.5 High** — `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`\\n\\n- Network-accessible via any GraphQL endpoint\\n- No authentication required (`checkUserPassword` is an unauthenticated query)\\n- Low attack complexity (single crafted HTTP request)\\n- High confidentiality impact (server-side query execution confirmed, data enumeration possible)\\n\\n## Affected Versions\\n\\nAll versions of Dgraph that include GraphQL support with the `@secret` directive are affected:\\n\\n- <= v25.3.3\\n- Any version where `query_rewriter.go` constructs `checkpwd()` via string interpolation\\n\\n## Suggested Fix\\n\\nEscape or parameterize the password value before embedding it in the DQL query. At minimum, double-quote characters in the password must be escaped:\\n\\n```go\\n// Before (vulnerable):\\nfmt.Sprintf(`checkpwd(User.password, \\\"%s\\\")`, password)\\n\\n// After (escaped):\\nescaped := strings.ReplaceAll(password, `\\\\`, `\\\\\\\\`)\\nescaped = strings.ReplaceAll(escaped, `\\\"`, `\\\\\\\"`)\\nfmt.Sprintf(`checkpwd(User.password, \\\"%s\\\")`, escaped)\\n```\\n\\nIdeally, Dgraph should implement parameterized query support for the `checkpwd()` function to avoid string interpolation entirely, consistent with best practices for injection prevention.\\n\\n## Credit\\n\\nKai Aizen (kai.aizen.dev@gmail.com)\", \"epss\": {\"percentage\": 0.00484, \"percentile\": 0.385}, \"ghsa_id\": \"GHSA-q2m9-6jp9-c6mc\", \"github_reviewed_at\": \"2026-06-29T22:53:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-q2m9-6jp9-c6mc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q2m9-6jp9-c6mc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44840\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-29T22:53:52Z\", \"references\": [\"https://github.com/dgraph-io/dgraph/security/advisories/GHSA-q2m9-6jp9-c6mc\", \"https://github.com/dgraph-io/dgraph/commit/cee702c93f141eeb0c96a81f70830ec9e459efac\", \"https://github.com/dgraph-io/dgraph/releases/tag/v25.3.4\", \"https://github.com/advisories/GHSA-q2m9-6jp9-c6mc\"], \"repository_advisory_url\": \"https://api.github.com/repos/dgraph-io/dgraph/security-advisories/GHSA-q2m9-6jp9-c6mc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/dgraph-io/dgraph\", \"summary\": \"Dgraph Vulnerable to DQL Injection via checkUserPassword GraphQL Query\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-29T22:53:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-q2m9-6jp9-c6mc\", \"vulnerabilities\": [{\"first_patched_version\": \"25.3.4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/dgraph-io/dgraph/v25\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 25.3.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q2m9-6jp9-c6mc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/dgraph-io/dgraph/v25: <= 25.3.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41327",
+      "CVE-2026-41328",
+      "CVE-2026-44840"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/dgraph-io/dgraph/v25"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.772298Z",
+  "provenance": {
+    "content_sha256": "e8d9a0042a3b054e12a7433ad20b3c8e3e864c7afecefadb15add852b04eb7eb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-29T22:53:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q2m9-6jp9-c6mc",
+  "status": "active",
+  "title": "Dgraph Vulnerable to DQL Injection via checkUserPassword GraphQL Query",
+  "updated_at": "2026-06-29T22:53:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q2m9-6jp9-c6mc"
+}

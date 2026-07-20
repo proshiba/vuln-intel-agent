@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16567472?v=4\", \"events_url\": \"https://api.github.com/users/Lechu69/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Lechu69/followers\", \"following_url\": \"https://api.github.com/users/Lechu69/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Lechu69/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Lechu69\", \"id\": 16567472, \"login\": \"Lechu69\", \"node_id\": \"MDQ6VXNlcjE2NTY3NDcy\", \"organizations_url\": \"https://api.github.com/users/Lechu69/orgs\", \"received_events_url\": \"https://api.github.com/users/Lechu69/received_events\", \"repos_url\": \"https://api.github.com/users/Lechu69/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Lechu69/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Lechu69/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Lechu69\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54136\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"### Summary\\n\\nA resource-scoped API token can read script contents outside its allowed path scope via `GET /api/w/{workspace}/scripts/list_search`.\\n\\nThis appears to be a remaining variant of the scoped-token authorization class previously addressed for other endpoints. The route-level scope middleware validates the token domain/action, but does not enforce the resource/path segment of a scope. `scripts/list_search` then returns script `path` and `content` for scripts in the workspace without applying per-row path filtering against the token scopes.\\n\\n### Affected endpoint\\n\\n`GET /api/w/{workspace}/scripts/list_search`\\n\\n### Affected versions\\n\\nConfirmed in the current public repository code and believed to affect the latest published release at the time of review:\\n\\n`<= 1.714.1`\\n\\nPatched version: unknown.\\n\\n### Details\\n\\nWindmill supports scoped API tokens with scopes in the format:\\n\\n`{domain}:{action}[:{resource}]`\\n\\nThe parser supports resource-scoped values such as:\\n\\n`scripts:read:f/allowed/*`\\n\\nand the codebase contains helpers for resource matching, including wildcard matching.\\n\\nHowever, the route-level scope check used for requests with scoped API tokens only validates the route domain and action. It does not compare the token's resource/path restriction against the requested route or against the rows returned by list endpoints.\\n\\nFor `scripts/list_search`, the handler returns `path` and `content` for scripts in the workspace:\\n\\n`SELECT path, content from script WHERE workspace_id = $1 AND archived = false LIMIT $2`\\n\\nThere is no additional `check_scopes(...)` call in the handler and no per-row filtering based on the token's resource/path scope.\\n\\nAs a result, a token intended to read only scripts under one path prefix may be able to read script contents from unrelated paths in the same workspace.\\n\\n### Source-level reproduction\\n\\n1. Create or use a workspace containing at least two scripts:\\n\\n- `f/allowed/script_a`\\n- `f/private/script_b`\\n\\n2. Create a scoped API token intended to read only the allowed path:\\n\\n`scripts:read:f/allowed/*`\\n\\n3. Use that token to call:\\n\\n`GET /api/w/{workspace}/scripts/list_search`\\n\\n4. Expected behavior:\\n\\nThe response should include only scripts matching the token's resource scope, e.g. only scripts under:\\n\\n`f/allowed/*`\\n\\n5. Actual behavior from source review:\\n\\nThe route-level scope check accepts the request as `scripts:read`, and the handler returns script `path` and `content` for scripts in the workspace without filtering the rows by the token's resource scope.\\n\\nThis can expose script source code from paths outside the token's intended scope.\\n\\n### Impact\\n\\nA user or integration holding a path-restricted `scripts:read:{resource}` token may be able to read script contents from unrelated scripts in the same workspace.\\n\\nDepending on how scripts are used, this may disclose:\\n\\n- internal automation logic,\\n- integration details,\\n- business logic,\\n- inline configuration,\\n- accidentally hardcoded secrets or credentials.\\n\\nThis does not require admin privileges. It requires possession of a valid scoped API token for the workspace.\\n\\n### Related context\\n\\nThis appears related to the broader class of issues where route-level token scope enforcement validates domain/action but not the resource/path portion of the scope. Similar scoped-token issues appear to have been fixed for other endpoints, such as resources/variables listing and job preview/run paths, but I did not find an equivalent fix for `scripts/list_search`.\\n\\n### Suggested fix\\n\\nApply resource/path scope enforcement to `scripts/list_search`.\\n\\nPossible approaches:\\n\\n1. Add explicit handler-level authorization similar to per-resource endpoints.\\n2. Filter returned rows so that a scoped token only receives scripts whose `path` is included by at least one `scripts:read:{resource}` scope.\\n3. Add regression tests for:\\n   - `scripts:read:f/allowed/*` cannot see `f/private/script_b`,\\n   - broad `scripts:read` still sees all accessible scripts,\\n   - unscoped tokens preserve current behavior,\\n   - filter-tag-only tokens preserve current compatibility behavior.\\n\\nA more defensive long-term fix would be to make route-level scope enforcement aware of resource/path restrictions where the route contains a concrete resource path, while list endpoints should apply per-row filtering.\", \"epss\": {\"percentage\": 0.00022, \"percentile\": 0.06534}, \"ghsa_id\": \"GHSA-2ppx-66jv-wpw5\", \"github_reviewed_at\": \"2026-07-10T19:28:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-2ppx-66jv-wpw5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2ppx-66jv-wpw5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54136\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-10T19:28:06Z\", \"references\": [\"https://github.com/windmill-labs/windmill/security/advisories/GHSA-2ppx-66jv-wpw5\", \"https://github.com/advisories/GHSA-2ppx-66jv-wpw5\"], \"repository_advisory_url\": \"https://api.github.com/repos/windmill-labs/windmill/security-advisories/GHSA-2ppx-66jv-wpw5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/windmill-labs/windmill\", \"summary\": \"Windmill: Resource-scoped API tokens can read script contents outside their allowed path via scripts/list_search\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T19:28:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-2ppx-66jv-wpw5\", \"vulnerabilities\": [{\"first_patched_version\": \"1.715.0\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"windmill-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.714.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2ppx-66jv-wpw5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "windmill-api: <= 1.714.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54136"
+    ],
+    "cvss_score": 5.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "windmill-api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.242585Z",
+  "provenance": {
+    "content_sha256": "77fc2306ddfde22bf403ff918dd88f2e5b5605be2e27a1c3a7faca781b3e9627",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T19:28:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2ppx-66jv-wpw5",
+  "status": "active",
+  "title": "Windmill: Resource-scoped API tokens can read script contents outside their allowed path via scripts/list_search",
+  "updated_at": "2026-07-10T19:28:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2ppx-66jv-wpw5"
+}

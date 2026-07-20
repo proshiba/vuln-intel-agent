@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86569763?v=4\", \"events_url\": \"https://api.github.com/users/sajdakabir/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sajdakabir/followers\", \"following_url\": \"https://api.github.com/users/sajdakabir/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sajdakabir/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sajdakabir\", \"id\": 86569763, \"login\": \"sajdakabir\", \"node_id\": \"MDQ6VXNlcjg2NTY5NzYz\", \"organizations_url\": \"https://api.github.com/users/sajdakabir/orgs\", \"received_events_url\": \"https://api.github.com/users/sajdakabir/received_events\", \"repos_url\": \"https://api.github.com/users/sajdakabir/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sajdakabir/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sajdakabir/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sajdakabir\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/263321994?v=4\", \"events_url\": \"https://api.github.com/users/zerotrail-ai/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zerotrail-ai/followers\", \"following_url\": \"https://api.github.com/users/zerotrail-ai/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zerotrail-ai/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zerotrail-ai\", \"id\": 263321994, \"login\": \"zerotrail-ai\", \"node_id\": \"U_kgDOD7H5ig\", \"organizations_url\": \"https://api.github.com/users/zerotrail-ai/orgs\", \"received_events_url\": \"https://api.github.com/users/zerotrail-ai/received_events\", \"repos_url\": \"https://api.github.com/users/zerotrail-ai/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zerotrail-ai/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zerotrail-ai/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zerotrail-ai\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42572\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nA missing authorization directive on the `GET /api/v1/stable/dags/tasks` endpoint caused Hatchet's tenant-membership check to be skipped for this route. A user authenticated to any tenant on the same Hatchet instance could query the endpoint with another tenant's UUID and a DAG UUID belonging to that tenant, and receive task metadata for that DAG.\\n\\nThis issue has been patched in **v0.83.39**. Hatchet Cloud has been patched and requires no action from users. Self-hosted users should upgrade.\\n\\n## Impact\\n\\n**Who is affected.** Multi-tenant Hatchet instances reachable by an attacker who can obtain an account on that instance. On Hatchet Cloud, account creation is open by default. On self-hosted instances, the API must be reachable by the attacker and the hostname known; instances deployed inside a VPC or with signup restricted are not exposed to arbitrary external actors.\\n\\n**Prerequisites for exploitation.** An attacker needed:\\n\\n1. An account on the target Hatchet instance.\\n2. The victim tenant's UUID.\\n3. At least one DAG UUID (`external_id`) belonging to that tenant.\\n\\nThe two UUIDs are not treated as secrets — they appear in URLs, API responses, audit logs, invitation flows, shared run links, and dashboard screenshots — but an attacker does need to learn them through some out-of-band channel before exploitation is possible.\\n\\n**What could be disclosed.** For each child task of a targeted DAG, the endpoint returned:\\n\\n- `display_name`, `action_id`, `step_id`\\n- `workflow_id`, `workflow_version_id`, `workflow_run_id`, `task_external_id`\\n- `tenant_id`, `retry_count`, `status`, timestamps\\n- `additional_metadata` (JSON)\\n\\nThe `additional_metadata` field is the most sensitive: Hatchet workflows commonly use it to carry domain context such as user identifiers, customer IDs, feature flags, or correlation tokens. Its contents vary by deployment.\\n\\n**What was not disclosed.** The raw task `input` payload is not part of this endpoint's response shape and was not exposed through this issue. The scope is limited to task metadata, not task arguments or results.\\n\\n**Exploitation status.** We have no evidence that this vulnerability was exploited prior to the patch.\\n\\n## Root cause\\n\\nHatchet's multi-tenant authorization relies on an OpenAPI-driven middleware pipeline. Each authenticated operation declares `x-resources: [\\\"tenant\\\", ...]` in its spec. The `populator` middleware reads the declared resources, looks up the corresponding entities from request parameters, and stores them on the request context. The `authz` middleware then verifies that the authenticated user is a member of the tenant found on the context.\\n\\nThe `listTasksByDAGIds` operation accepted a `tenant` UUID as a query parameter, but its OpenAPI definition did not declare `x-resources: [\\\"tenant\\\"]`. As a result:\\n\\n1. The populator, which early-returns when no resources are declared, did not populate the tenant onto the request context.\\n2. The authz middleware, which runs its membership check only when a tenant is present on the context, silently passed the request through.\\n3. The handler read the tenant UUID directly from the query parameter and used it as the filter in the downstream OLAP query.\\n\\nThe SQL query itself correctly filters by `tenant_id`, so it returned only rows matching the supplied UUID — but the UUID came from the caller rather than from an authorization-validated context, so the filter bounded the response to the *attacker-named* tenant rather than to a tenant the caller was authorized to read.\\n\\nEvery other authenticated operation in the same path file (`tasks.yaml`) correctly declared `x-resources`. This endpoint was the only authenticated operation in the file that did not.\\n\\n## Patch\\n\\nThe fix adds the missing resource authz checks inline on the handler, enforcing valid tenant membership before the handler runs.\\n\\nShipped in **v0.83.39**.\\n\\n## Remediation\\n\\n**Hatchet Cloud.** No action required. The patch was deployed on April 23, 2026 within the same day it was reported.\\n\\n**Self-hosted — recommended.** Upgrade to **v0.83.39** or later.\\n\\n**Self-hosted — if you cannot upgrade immediately.** Either of the following reduces exposure until you can upgrade:\\n\\n- Restrict account creation by setting `SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS` to an allowlist of domains you control. This prevents arbitrary users from registering an account on your instance, which removes the most common path to the prerequisite account.\\n- Ensure the Hatchet API is not exposed to untrusted networks. We generally recommend running Hatchet inside a VPC and fronting the API with authenticated network controls; deployments configured this way were not reachable by arbitrary external attackers.\\n\\n## Timeline\\n\\nAll times April 23, 2026.\\n\\n- **14:05** — Reported to Hatchet.\\n- **16:28** — Patch deployed to Hatchet Cloud and released as v0.83.39.\\n- Public disclosure — this advisory.\\n\\n## Credit\\n\\nReported by @sajdakabir.\\n\\nHatchet thanks the reporter for responsibly disclosing this issue and for the clear, reproducible writeup.\", \"epss\": {\"percentage\": 0.00181, \"percentile\": 0.07814}, \"ghsa_id\": \"GHSA-55gc-6fmc-fpx9\", \"github_reviewed_at\": \"2026-05-06T21:59:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-55gc-6fmc-fpx9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-55gc-6fmc-fpx9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42572\"}], \"nvd_published_at\": \"2026-05-14T18:16:47Z\", \"published_at\": \"2026-05-06T21:59:05Z\", \"references\": [\"https://github.com/hatchet-dev/hatchet/security/advisories/GHSA-55gc-6fmc-fpx9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42572\", \"https://github.com/advisories/GHSA-55gc-6fmc-fpx9\"], \"repository_advisory_url\": \"https://api.github.com/repos/hatchet-dev/hatchet/security-advisories/GHSA-55gc-6fmc-fpx9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/hatchet-dev/hatchet\", \"summary\": \"Hatchet affected by cross-tenant information disclosure in `listTasksByDAGIds`\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:53:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-55gc-6fmc-fpx9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.83.39\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/hatchet-dev/hatchet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.83.38\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-55gc-6fmc-fpx9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/hatchet-dev/hatchet: <= 0.83.38"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42572"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "known_exploited": false,
+    "mitigations": [],
+    "products": [
+      "github.com/hatchet-dev/hatchet"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.187805Z",
+  "provenance": {
+    "content_sha256": "37f4dcffc05df0980e3f65c62213c7f9a3d63d749c4441af07e7a95fa5818dac",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T21:59:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-55gc-6fmc-fpx9",
+  "status": "active",
+  "title": "Hatchet affected by cross-tenant information disclosure in `listTasksByDAGIds`",
+  "updated_at": "2026-05-14T20:53:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-55gc-6fmc-fpx9"
+}

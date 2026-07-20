@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74800891?v=4\", \"events_url\": \"https://api.github.com/users/therawdev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/therawdev/followers\", \"following_url\": \"https://api.github.com/users/therawdev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/therawdev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/therawdev\", \"id\": 74800891, \"login\": \"therawdev\", \"node_id\": \"MDQ6VXNlcjc0ODAwODkx\", \"organizations_url\": \"https://api.github.com/users/therawdev/orgs\", \"received_events_url\": \"https://api.github.com/users/therawdev/received_events\", \"repos_url\": \"https://api.github.com/users/therawdev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/therawdev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/therawdev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/therawdev\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 9.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"## Description\\n\\nA vulnerability was discovered in TSDProxy where it forwards its internal per-process authentication token to all proxied backend services. When `identityHeaders` is enabled (the default), tsdproxy injects `x-tsdproxy-auth-token` into every upstream HTTP request alongside user identity headers. This token is the same secret used by the management HTTP server to trust forwarded Tailscale identity claims. A backend that receives this token can replay it from localhost to the management port with an arbitrary `x-tsdproxy-id` value, bypassing Tailscale authentication entirely.\\n\\nThe token is forwarded unconditionally: `ProviderUserMiddleware` always calls `WhoisNewContext` regardless of whether the user is authenticated. In the `ReverseProxy.Rewrite` function, `WhoisFromContext` returns `ok=true` even for zero-value `Whois{}` (unauthenticated or Funnel requests). The `HeaderAuthToken` is set for every request when `identityHeaders=true`.\\n\\nThe attack requires the backend to reach `127.0.0.1:8080`. This holds in: (1) non-Docker deployments where tsdproxy and a backend run on the same host, (2) Docker host-network-mode containers, (3) containers sharing tsdproxy's network namespace.\\n\\n## Affected files\\n\\n- `internal/proxymanager/port.go:123-132`\\n- `internal/core/admin.go:160-182`\\n\\n```go\\n// port.go: auth token forwarded regardless of user authentication state\\nif identityHeaders {\\n    if user, ok := model.WhoisFromContext(r.In.Context()); ok {\\n        // ok=true even for empty Whois{} stored by ProviderUserMiddleware\\n        r.Out.Header.Set(consts.HeaderAuthToken, core.ProxyAuthToken()) // token sent to backend\\n    }\\n}\\n\\n// admin.go: management port trusts x-tsdproxy-id from localhost when token is valid\\nfunc ResolveWhois(r *http.Request) model.Whois {\\n    if IsLocalhost(r.RemoteAddr) {\\n        return model.Whois{\\n            ID: r.Header.Get(consts.HeaderID), // attacker-controlled after stealing token\\n        }\\n    }\\n    return model.Whois{}\\n}\\n```\\n\\n## Steps to reproduce\\n\\n1. Deploy tsdproxy on a host (non-Docker) with a backend at `http://localhost:3000`.\\n2. Make a request through the Tailscale proxy. The backend receives `x-tsdproxy-auth-token` in the request headers.\\n3. From the host, replay the token to the management API:\\n\\n```bash\\n# Capture token from backend headers (e.g., via a header-reflection endpoint)\\nTOKEN=$(curl -s http://localhost:3000/debug/headers | python3 -c \\\"import sys,json; d=json.load(sys.stdin); print(d['headers'].get('X-Tsdproxy-Auth-Token',''))\\\")\\n\\n# Replay from localhost to gain admin access\\ncurl -H \\\"x-tsdproxy-auth-token: $TOKEN\\\" \\\\\\n     -H \\\"x-tsdproxy-id: attacker\\\" \\\\\\n     http://127.0.0.1:8080/api/v1/proxies\\n# Returns full proxy list with admin access\\n```\\n\\n## Fix\\n\\nRemove `HeaderAuthToken` from the outgoing backend request, and guard identity-header injection on `user.ID != \\\"\\\"`:\\n\\n```go\\n// port.go: only inject headers for actually authenticated users\\nif identityHeaders {\\n    if user, ok := model.WhoisFromContext(r.In.Context()); ok && user.ID != \\\"\\\" {\\n        r.Out.Header.Set(consts.HeaderID, user.ID)\\n        // HeaderAuthToken should NOT be forwarded to backends\\n    }\\n}\\n```\\n\\n## Impact\\n\\nAn attacker with code execution in any backend proxied by tsdproxy (on the same host) gains full management API control: restart or pause all proxied services (DoS), enumerate all proxy configurations and backend network topology, and trigger webhook deliveries (SSRF via configured webhook URLs).\\n\\n## Credits\\n\\nReported by Vishal Shukla (@shukla304 / @therawdev).\\n\\n## Sponsorship\\n\\nThis audit is from an AI-assisted research agent at [sechub.dev](https://sechub.dev). Running it on OSS projects is free for maintainers.\", \"ghsa_id\": \"GHSA-g936-7jqj-mwv8\", \"github_reviewed_at\": \"2026-07-10T21:43:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-g936-7jqj-mwv8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g936-7jqj-mwv8\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-10T21:43:13Z\", \"references\": [\"https://github.com/almeidapaulopt/tsdproxy/security/advisories/GHSA-g936-7jqj-mwv8\", \"https://github.com/advisories/GHSA-g936-7jqj-mwv8\"], \"repository_advisory_url\": \"https://api.github.com/repos/almeidapaulopt/tsdproxy/security-advisories/GHSA-g936-7jqj-mwv8\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/almeidapaulopt/tsdproxy\", \"summary\": \"TSDProxy: Internal proxy auth token forwarded to backend services enables management API escalation\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T21:43:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-g936-7jqj-mwv8\", \"vulnerabilities\": [{\"first_patched_version\": \"1.4.4-0.20260603142855-434819b4421e\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/almeidapaulopt/tsdproxy\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.4.4-0.20260603142855-434819b4421e\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g936-7jqj-mwv8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/almeidapaulopt/tsdproxy: < 1.4.4-0.20260603142855-434819b4421e"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/almeidapaulopt/tsdproxy"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.197097Z",
+  "provenance": {
+    "content_sha256": "d90c90be87e50fc5962ad7d8bca3905c07939646f0ce8d711fb4e9770eed1dad",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T21:43:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g936-7jqj-mwv8",
+  "status": "active",
+  "title": "TSDProxy: Internal proxy auth token forwarded to backend services enables management API escalation",
+  "updated_at": "2026-07-10T21:43:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g936-7jqj-mwv8"
+}

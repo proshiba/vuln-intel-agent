@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1075304?v=4\", \"events_url\": \"https://api.github.com/users/TristanInSec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/TristanInSec/followers\", \"following_url\": \"https://api.github.com/users/TristanInSec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/TristanInSec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/TristanInSec\", \"id\": 1075304, \"login\": \"TristanInSec\", \"node_id\": \"MDQ6VXNlcjEwNzUzMDQ=\", \"organizations_url\": \"https://api.github.com/users/TristanInSec/orgs\", \"received_events_url\": \"https://api.github.com/users/TristanInSec/received_events\", \"repos_url\": \"https://api.github.com/users/TristanInSec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/TristanInSec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/TristanInSec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/TristanInSec\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/835733?v=4\", \"events_url\": \"https://api.github.com/users/gaby/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/gaby/followers\", \"following_url\": \"https://api.github.com/users/gaby/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/gaby/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/gaby\", \"id\": 835733, \"login\": \"gaby\", \"node_id\": \"MDQ6VXNlcjgzNTczMw==\", \"organizations_url\": \"https://api.github.com/users/gaby/orgs\", \"received_events_url\": \"https://api.github.com/users/gaby/received_events\", \"repos_url\": \"https://api.github.com/users/gaby/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/gaby/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/gaby/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/gaby\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7063188?v=4\", \"events_url\": \"https://api.github.com/users/ReneWerner87/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ReneWerner87/followers\", \"following_url\": \"https://api.github.com/users/ReneWerner87/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ReneWerner87/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ReneWerner87\", \"id\": 7063188, \"login\": \"ReneWerner87\", \"node_id\": \"MDQ6VXNlcjcwNjMxODg=\", \"organizations_url\": \"https://api.github.com/users/ReneWerner87/orgs\", \"received_events_url\": \"https://api.github.com/users/ReneWerner87/received_events\", \"repos_url\": \"https://api.github.com/users/ReneWerner87/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ReneWerner87/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ReneWerner87/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ReneWerner87\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44332\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-203\", \"name\": \"Observable Discrepancy\"}], \"description\": \"## Summary\\n\\nThe default `Authorizer` function in GoFiber's BasicAuth middleware uses short-circuit evaluation that skips password hash comparison for non-existent usernames. With bcrypt-hashed passwords (the primary use case), the timing difference between a valid and invalid username is approximately 1,000,000:1 (~100ms vs ~100ns), enabling reliable remote username enumeration.\\n\\n## Vulnerable Code\\n\\n**File:** `middleware/basicauth/config.go`, lines 126-138\\n\\n```go\\nif cfg.Authorizer == nil {\\n    verifiers := make(map[string]func(string) bool, len(cfg.Users))\\n    for u, hpw := range cfg.Users {\\n        v, err := parseHashedPassword(hpw)\\n        if err != nil {\\n            panic(err)\\n        }\\n        verifiers[u] = v\\n    }\\n    cfg.Authorizer = func(user, pass string, _ fiber.Ctx) bool {\\n        verify, ok := verifiers[user]\\n        return ok && verify(pass)   // line 137: short-circuit skips verify() if user unknown\\n    }\\n}\\n```\\n\\n## Data Flow\\n\\n1. Attacker sends `Authorization: Basic <base64(candidate:wrongpass)>`\\n2. BasicAuth middleware decodes credentials and calls `cfg.Authorizer(user, pass, c)`\\n3. Map lookup `verifiers[user]` returns `ok=false` for non-existent users\\n4. Go `&&` short-circuit: `false && verify(pass)` returns immediately without calling `verify()`\\n5. For valid users, `verify(pass)` executes `bcrypt.CompareHashAndPassword()` (line 167: ~100ms at default cost 10)\\n6. Timing difference: ~100ns (invalid user) vs ~100ms (valid user) = 1,000,000:1 ratio\\n\\n**Timing comparison by hash type:**\\n\\n| Hash Type | Valid User | Invalid User | Ratio |\\n|-----------|-----------|--------------|-------|\\n| bcrypt ($2) | ~100 ms | ~100 ns | 1,000,000:1 |\\n| SHA-512 | ~1-5 us | ~100 ns | 10-50:1 |\\n| SHA-256 | ~1-5 us | ~100 ns | 10-50:1 |\\n\\n## Impact\\n\\n- **Username enumeration:** Attacker reliably determines which usernames exist by measuring response latency\\n- **Targeted brute force:** After enumerating valid usernames, password brute force is focused only on real accounts\\n- **Account discovery:** In applications where usernames are sensitive (internal tools, admin panels), leaking their existence is itself a security issue\\n\\n## Notes\\n\\n- Password hash comparisons themselves are timing-safe: `subtle.ConstantTimeCompare` is used correctly for SHA-256 (line 185), SHA-512 (line 176), and bcrypt uses its own constant-time comparison\\n- The fix is to always execute a dummy hash comparison for unknown users: `bcrypt.CompareHashAndPassword(dummyHash, []byte(pass))` and discard the result\\n- This pattern matches CVE-2023-36456 (Authentik timing oracle) and similar findings in other auth libraries\", \"epss\": {\"percentage\": 0.00517, \"percentile\": 0.405}, \"ghsa_id\": \"GHSA-g5vh-55hw-rxm8\", \"github_reviewed_at\": \"2026-07-02T13:46:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-g5vh-55hw-rxm8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g5vh-55hw-rxm8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44332\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T13:46:25Z\", \"references\": [\"https://github.com/gofiber/fiber/security/advisories/GHSA-g5vh-55hw-rxm8\", \"https://github.com/advisories/GHSA-g5vh-55hw-rxm8\"], \"repository_advisory_url\": \"https://api.github.com/repos/gofiber/fiber/security-advisories/GHSA-g5vh-55hw-rxm8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/gofiber/fiber\", \"summary\": \"GoFiber Vulnerable to Username Enumeration via Timing Oracle in BasicAuth Default Authorizer\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T13:46:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-g5vh-55hw-rxm8\", \"vulnerabilities\": [{\"first_patched_version\": \"3.3.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/gofiber/fiber/v3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g5vh-55hw-rxm8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/gofiber/fiber/v3: <= 3.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2023-36456",
+      "CVE-2026-44332"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/gofiber/fiber/v3"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.350700Z",
+  "provenance": {
+    "content_sha256": "acb3c5c0661483e485817cc7f8f489275d339f56b200aebd991d7a717e12f001",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T13:46:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g5vh-55hw-rxm8",
+  "status": "active",
+  "title": "GoFiber Vulnerable to Username Enumeration via Timing Oracle in BasicAuth Default Authorizer",
+  "updated_at": "2026-07-02T13:46:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g5vh-55hw-rxm8"
+}

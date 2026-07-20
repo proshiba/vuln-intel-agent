@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/102463772?v=4\", \"events_url\": \"https://api.github.com/users/subhanUmer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/subhanUmer/followers\", \"following_url\": \"https://api.github.com/users/subhanUmer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/subhanUmer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/subhanUmer\", \"id\": 102463772, \"login\": \"subhanUmer\", \"node_id\": \"U_kgDOBht5HA\", \"organizations_url\": \"https://api.github.com/users/subhanUmer/orgs\", \"received_events_url\": \"https://api.github.com/users/subhanUmer/received_events\", \"repos_url\": \"https://api.github.com/users/subhanUmer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/subhanUmer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/subhanUmer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/subhanUmer\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-327\", \"name\": \"Use of a Broken or Risky Cryptographic Algorithm\"}, {\"cwe_id\": \"CWE-757\", \"name\": \"Selection of Less-Secure Algorithm During Negotiation ('Algorithm Downgrade')\"}, {\"cwe_id\": \"CWE-1188\", \"name\": \"Initialization of a Resource with an Insecure Default\"}], \"description\": \"### Am I affected?\\n\\nUsers are affected if all of the following are true:\\n\\n- Their application uses `better-auth` at a version below the patched release.\\n- Their application enables `oidcProvider()` from `better-auth/plugins/oidc-provider` or `mcp()` from `better-auth/plugins/mcp` (the mcp plugin delegates to `oidcProvider` and inherits both defaults).\\n- For the algorithm-negotiation impact: relying parties of the application's OIDC server use a JWT verification library that performs algorithm negotiation from the discovery document without pinning to a specific signing algorithm.\\n- For the PKCE impact: the authorization URL is exposed to any party other than the user agent and the application's OP.\\n\\nIf the application only uses `@better-auth/oauth-provider` (the canonical replacement) and have not enabled the legacy plugins, it is not affected. The new package's discovery document excludes `none` and its authorize schema rejects `plain` at parse time.\\n\\nFix:\\n\\n1. Upgrade to `better-auth@1.6.11` or later.\\n2. Migrate from the deprecated `oidcProvider` and `mcp` plugins to `@better-auth/oauth-provider` when feasible.\\n3. If developers cannot upgrade their applications, see workarounds below.\\n\\n### Summary\\n\\nThe legacy `oidcProvider` and `mcp` plugins exhibit two related defects in their OIDC discovery and authorize surfaces.\\n\\nThe discovery document advertises `\\\"none\\\"` in `id_token_signing_alg_values_supported` (and, for `mcp`, in `resource_signing_alg_values_supported` on the OAuth protected-resource metadata). Any relying party that performs algorithm negotiation from this metadata without pinning to a real signing algorithm may accept unsigned tokens.\\n\\nPKCE `plain` is enabled by default. The runtime gate in the authorize handler accepts `code_challenge_method=plain` under this default, and a missing `code_challenge_method` parameter is silently downgraded to `\\\"plain\\\"` before the allowlist check. Discovery advertises `code_challenge_methods_supported: [\\\"S256\\\"]`, contradicting the runtime acceptance of `plain`. RFC 9700 §2.1.1 (OAuth 2.1) explicitly forbids `plain`.\\n\\n### Details\\n\\nThe metadata builders unconditionally inject `\\\"none\\\"` into the alg list. The runtime authorize gate is structured so a buggy client that strips the `code_challenge_method` parameter still enters the plain code path because the handler rewrites the missing value to `\\\"plain\\\"` before the allowlist check fires.\\n\\n`@better-auth/oauth-provider` (the deprecation target for `oidcProvider`) is not affected by either defect. The metadata builder uses a `JWSAlgorithms` type union that structurally excludes `\\\"none\\\"`. The authorize schema is `code_challenge_method: z.literal(\\\"S256\\\").optional()`, which rejects `plain` at parse time.\\n\\n### Patches\\n\\nFixed in `better-auth@1.6.11`. The legacy `oidcProvider` and `mcp` plugins now:\\n\\n- Drop `\\\"none\\\"` from `id_token_signing_alg_values_supported` (both plugins) and from `resource_signing_alg_values_supported` (`mcp`). Discovery no longer advertises the unsigned-token option.\\n- Default `allowPlainCodeChallengeMethod` to `false`. A request that explicitly passes `code_challenge_method=plain` is rejected with `invalid_request` unless the integrator opts in.\\n- Reject a `code_challenge` without an accompanying `code_challenge_method` instead of silently rewriting the missing value to `plain`. Clients that send `code_challenge` must also send `code_challenge_method=S256`.\\n\\nDiscovery and runtime behavior align on `S256` only by default.\\n\\nIntegrators who must keep plain PKCE for legacy clients can restore the previous shape with `oidcProvider({ allowPlainCodeChallengeMethod: true })` (and likewise for `mcp`). With the opt-in set, a request that omits `code_challenge_method` is treated as `plain` again, preserving backwards compatibility while keeping the secure default for everyone else. Both legacy plugins are deprecated long-term; the recommended migration is `@better-auth/oauth-provider`, which never advertised `none` or accepted plain PKCE.\\n\\n### Workarounds\\n\\nIf developers cannot upgrade their applications immediately:\\n\\n- **Disable plain PKCE explicitly**: set `oidcProvider({ allowPlainCodeChallengeMethod: false })` (and the equivalent on `mcp`). Closes the runtime acceptance of `plain` even though the silent downgrade still rewrites missing methods.\\n- **Override the metadata** to drop `\\\"none\\\"` from `id_token_signing_alg_values_supported`. For `oidcProvider`, pass `metadata: { id_token_signing_alg_values_supported: [\\\"RS256\\\"] }`. For `mcp`, set the same on `options.oidcConfig.metadata`. Verify by curling the `.well-known` endpoint.\\n- **Migrate to `@better-auth/oauth-provider`**: the package is the deprecation target and is unaffected by both defects.\\n\\n### Impact\\n\\n- **Algorithm-negotiation downgrade**: relying parties that read the discovery document without pinning may accept unsigned (`alg: \\\"none\\\"`) tokens.\\n- **Authorization-code interception**: PKCE `plain` does not protect the authorization code if the URL leaks (Referer headers, browser history, screen capture, proxy logs). PKCE `S256` is what protects against that exposure; with `plain` the protection is absent.\\n- **OAuth 2.1 / RFC 9700 non-conformance**: deployments shipping the defaults are non-compliant with current standards.\\n\\n### Credit\\n\\nReported by @subhanUmer.\\n\\n### Resources\\n\\n- [CWE-327: Use of a Broken or Risky Cryptographic Algorithm](https://cwe.mitre.org/data/definitions/327.html)\\n- [CWE-757: Selection of Less-Secure Algorithm During Negotiation](https://cwe.mitre.org/data/definitions/757.html)\\n- [CWE-1188: Insecure Default Initialization of Resource](https://cwe.mitre.org/data/definitions/1188.html)\\n- [RFC 9700 §2.1.1: PKCE](https://datatracker.ietf.org/doc/html/rfc9700#section-2.1.1)\\n- [RFC 9700 §2.1.2: Token Replay Prevention](https://datatracker.ietf.org/doc/html/rfc9700#section-2.1.2)\\n- [RFC 8414 §2: Authorization Server Metadata](https://datatracker.ietf.org/doc/html/rfc8414#section-2)\", \"ghsa_id\": \"GHSA-9h47-pqcx-hjr4\", \"github_reviewed_at\": \"2026-07-07T20:55:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-9h47-pqcx-hjr4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9h47-pqcx-hjr4\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T20:55:41Z\", \"references\": [\"https://github.com/better-auth/better-auth/security/advisories/GHSA-9h47-pqcx-hjr4\", \"https://github.com/better-auth/better-auth/releases/tag/v1.6.11\", \"https://github.com/advisories/GHSA-9h47-pqcx-hjr4\"], \"repository_advisory_url\": \"https://api.github.com/repos/better-auth/better-auth/security-advisories/GHSA-9h47-pqcx-hjr4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/better-auth/better-auth\", \"summary\": \"Better Auth has insecure cryptographic defaults in oidcProvider: alg=none advertised and plain PKCE accepted by default\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T20:55:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-9h47-pqcx-hjr4\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.11\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"better-auth\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.6.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9h47-pqcx-hjr4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "better-auth: < 1.6.11"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "better-auth"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.735844Z",
+  "provenance": {
+    "content_sha256": "22d53914b043bc29994f4deadd04716fee10e1087c8e5bc27544263f20a4b7c3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T20:55:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9h47-pqcx-hjr4",
+  "status": "active",
+  "title": "Better Auth has insecure cryptographic defaults in oidcProvider: alg=none advertised and plain PKCE accepted by default",
+  "updated_at": "2026-07-07T20:55:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9h47-pqcx-hjr4"
+}

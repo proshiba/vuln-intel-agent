@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2707736?v=4\", \"events_url\": \"https://api.github.com/users/kkalev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kkalev/followers\", \"following_url\": \"https://api.github.com/users/kkalev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kkalev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kkalev\", \"id\": 2707736, \"login\": \"kkalev\", \"node_id\": \"MDQ6VXNlcjI3MDc3MzY=\", \"organizations_url\": \"https://api.github.com/users/kkalev/orgs\", \"received_events_url\": \"https://api.github.com/users/kkalev/received_events\", \"repos_url\": \"https://api.github.com/users/kkalev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kkalev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kkalev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kkalev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41070\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"# Summary\\n\\nWhen `openvpn-auth-oauth2` is deployed in the **experimental plugin mode** (shared library loaded by OpenVPN via the `plugin` directive), clients that do not support WebAuth/SSO (e.g., the `openvpn` CLI on Linux) are incorrectly admitted to the VPN despite being denied by the authentication logic. **The default management-interface mode is not affected** because it does not use the OpenVPN plugin return-code mechanism.\\n\\n# Impact\\n\\n**Authentication bypass — any VPN client that does not advertise WebAuth/SSO support (`IV_SSO=webauth`) is granted full network access without completing OIDC authentication.**\\n\\nThis affects only deployments running the **experimental plugin mode** in versions 1.26.3 through 1.27.2. The default and recommended deployment via the management interface is **not affected**.\\n\\nAn unauthenticated attacker can connect to the OpenVPN server using any standard OpenVPN client that does not support webauth (e.g., the Linux `openvpn` CLI). The plugin correctly issues a `client-deny` command via the management interface, but returns `OPENVPN_PLUGIN_FUNC_SUCCESS` (status=0) to OpenVPN. Because the `auth_control_file` content is only consulted when the plugin returns `FUNC_DEFERRED`, OpenVPN interprets status=0 as \\\"authentication passed\\\" and admits the client — granting full access to the internal network behind the VPN.\\n\\n\\n## Root Cause\\n\\nIn `lib/openvpn-auth-oauth2/openvpn/handle.go`, the `ClientAuthDeny` branch of `handleAuthUserPassVerify` wrote `\\\"0\\\"` (deny) to the `auth_control_file` but returned `OPENVPN_PLUGIN_FUNC_SUCCESS`. OpenVPN only reads the `auth_control_file` when the plugin returns `FUNC_DEFERRED`; a synchronous `FUNC_SUCCESS` return is treated as immediate approval regardless of file contents.\\n\\n**Before fix:**\\n```go\\ncase management.ClientAuthDeny:\\n    // ... writes \\\"0\\\" to auth_control_file ...\\n    if err := openVPNClient.WriteToAuthFile(\\\"0\\\"); err != nil {\\n        // only returned ERROR on write failure\\n        return c.OpenVPNPluginFuncError\\n    }\\n    return c.OpenVPNPluginFuncSuccess  // ← BUG: OpenVPN sees this as \\\"auth passed\\\"\\n```\\n\\n**After fix (commit [`36f69a6`](https://github.com/jkroepke/openvpn-auth-oauth2/commit/36f69a6c67c1054da7cbfa04ced3f0555127c8f2)):**\\n```go\\ncase management.ClientAuthDeny:\\n    // ... writes \\\"0\\\" to auth_control_file ...\\n    if err := openVPNClient.WriteToAuthFile(\\\"0\\\"); err != nil {\\n        logger.ErrorContext(p.ctx, \\\"write to auth file\\\", slog.Any(\\\"err\\\", err))\\n    }\\n    return c.OpenVPNPluginFuncError  // ← FIX: OpenVPN now correctly rejects the client\\n```\\n\\n# Patches\\n\\nThis vulnerability is fixed in **v1.27.3**. Users of the experimental plugin mode should upgrade immediately.\\n\\n- **Fix commit:** [`36f69a6`](https://github.com/jkroepke/openvpn-auth-oauth2/commit/36f69a6c67c1054da7cbfa04ced3f0555127c8f2)\\n- **Fix PR:** [#829](https://github.com/jkroepke/openvpn-auth-oauth2/pull/829)\\n\\n# Workarounds\\n\\n- **Switch to standalone management client mode** (the default, non-plugin deployment). This mode is not affected by the vulnerability because authentication decisions are communicated entirely through the management interface protocol, not through the plugin return code.\\n- **Restrict VPN access at the network level** to only clients known to support WebAuth/SSO (e.g., OpenVPN Connect 3+), although this is difficult to enforce reliably and is not recommended as a sole mitigation.\", \"epss\": {\"percentage\": 0.00438, \"percentile\": 0.34832}, \"ghsa_id\": \"GHSA-246w-jgmq-88fg\", \"github_reviewed_at\": \"2026-04-22T14:28:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-246w-jgmq-88fg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-246w-jgmq-88fg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41070\"}], \"nvd_published_at\": \"2026-05-08T16:16:11Z\", \"published_at\": \"2026-04-22T14:28:11Z\", \"references\": [\"https://github.com/jkroepke/openvpn-auth-oauth2/security/advisories/GHSA-246w-jgmq-88fg\", \"https://github.com/jkroepke/openvpn-auth-oauth2/pull/829\", \"https://github.com/jkroepke/openvpn-auth-oauth2/commit/36f69a6c67c1054da7cbfa04ced3f0555127c8f2\", \"https://github.com/OpenVPN/openvpn/blob/master/include/openvpn-plugin.h.in\", \"https://github.com/OpenVPN/openvpn3/blob/master/doc/webauth.md\", \"https://github.com/jkroepke/openvpn-auth-oauth2/releases/tag/v1.27.3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41070\", \"https://github.com/advisories/GHSA-246w-jgmq-88fg\"], \"repository_advisory_url\": \"https://api.github.com/repos/jkroepke/openvpn-auth-oauth2/security-advisories/GHSA-246w-jgmq-88fg\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/jkroepke/openvpn-auth-oauth2\", \"summary\": \"openvpn-auth-oauth2 returns FUNC_SUCCESS on client-deny, allowing unauthenticated VPN access\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:29:37Z\", \"url\": \"https://api.github.com/advisories/GHSA-246w-jgmq-88fg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.27.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/jkroepke/openvpn-auth-oauth2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.26.3, < 1.27.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-246w-jgmq-88fg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/jkroepke/openvpn-auth-oauth2: >= 1.26.3, < 1.27.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41070"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/jkroepke/openvpn-auth-oauth2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.867530Z",
+  "provenance": {
+    "content_sha256": "1078f7555302e8884558ec565cf349fbd972cd27e733a9f5c129d1e99020e14e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T14:28:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-246w-jgmq-88fg",
+  "status": "active",
+  "title": "openvpn-auth-oauth2 returns FUNC_SUCCESS on client-deny, allowing unauthenticated VPN access",
+  "updated_at": "2026-05-13T13:29:37Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-246w-jgmq-88fg"
+}

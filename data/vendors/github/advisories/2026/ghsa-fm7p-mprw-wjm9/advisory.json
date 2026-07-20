@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/579103?v=4\", \"events_url\": \"https://api.github.com/users/7a6163/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/7a6163/followers\", \"following_url\": \"https://api.github.com/users/7a6163/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/7a6163/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/7a6163\", \"id\": 579103, \"login\": \"7a6163\", \"node_id\": \"MDQ6VXNlcjU3OTEwMw==\", \"organizations_url\": \"https://api.github.com/users/7a6163/orgs\", \"received_events_url\": \"https://api.github.com/users/7a6163/received_events\", \"repos_url\": \"https://api.github.com/users/7a6163/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/7a6163/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/7a6163/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/7a6163\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54500\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-125\", \"name\": \"Out-of-bounds Read\"}, {\"cwe_id\": \"CWE-908\", \"name\": \"Use of Uninitialized Resource\"}], \"description\": \"### Summary\\n\\n`Oj.load` in `:object` mode reads uninitialized stack memory (and, for long\\nkeys, reads out of bounds) when parsing a JSON object whose key is 254 bytes\\nor longer. The interned bytes can surface to the caller, disclosing process\\nstack memory.\\n\\n### Details\\n\\nIn `ext/oj/intern.c`, `form_attr()` handles the long-key path by allocating a\\nheap buffer `b`, populating it with the attribute name, and then freeing it —\\nbut it passed the **uninitialized stack buffer `buf`** (not `b`) to\\n`rb_intern3()`:\\n\\n```c\\nstatic VALUE form_attr(const char *str, size_t len) {\\n    char buf[256];\\n    if (sizeof(buf) - 2 <= len) {        // long-key path (len >= 254)\\n        char *b = OJ_R_ALLOC_N(char, len + 2);\\n        // ... b is filled correctly ...\\n        id = rb_intern3(buf, len + 1, oj_utf8_encoding);   // BUG: reads `buf`\\n        OJ_R_FREE(b);\\n        return id;\\n    }\\n    // ...\\n}\\n```\\n\\n`rb_intern3` therefore reads `len + 1` bytes of uninitialized stack memory.\\nWhen the key length is >= 256, it also reads out of bounds past the 256-byte\\n`buf` (CWE-125). The resulting bytes are interned and can reach the caller via\\nthe produced Symbol or via the `EncodingError` message raised on invalid\\nUTF-8, leaking process stack contents.\\n\\nThis is the same defect previously fixed in `ext/oj/usual.c`; `intern.c` held\\na duplicated copy of `form_attr` that was missed.\\n\\n### Proof of Concept\\n\\n```ruby\\nrequire 'oj'\\nkey  = \\\"A\\\" * 300\\njson = %Q[{\\\"^o\\\":\\\"Object\\\",\\\"#{key}\\\":1}]\\nOj.load(json, mode: :object)\\n```\\n\\nOn affected versions this raises an `EncodingError` whose message contains\\n~1500 bytes of uninitialized stack memory (not the supplied \\\"A\\\"s). The leaked\\nbyte count varies between runs with the identical payload (e.g. 1491 vs 1516\\nbytes), confirming the content is uninitialized memory rather than fixed data.\\n\\n### Impact\\n\\nInformation disclosure of process stack memory to a caller that parses\\nuntrusted JSON with `Oj.load(..., mode: :object)`. For keys >= 256 bytes it is\\nalso an out-of-bounds read (CWE-125).\\n\\nSeverity is bounded by several preconditions: it requires `:object` mode\\n(which is already discouraged for untrusted input), the leaked bytes are\\nuncontrolled (the attacker cannot choose what is disclosed), and the data only\\nreaches an attacker if the application surfaces the resulting Symbol or\\n`EncodingError` back to them. Scored CVSS 5.3 (Medium) on that basis.\\n\\n### Patches\\n\\nFixed in **3.17.3**: `form_attr()` now passes `b` to `rb_intern3` (a\\none-character change mirroring the earlier `usual.c` fix). Verified on the\\nfixed build: the same payload returns cleanly with no leak across repeated\\nruns.\\n\\n### Credit\\n\\nReported by Zac Wang (@7a6163).\", \"epss\": {\"percentage\": 0.00197, \"percentile\": 0.09713}, \"ghsa_id\": \"GHSA-fm7p-mprw-wjm9\", \"github_reviewed_at\": \"2026-06-19T19:35:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-fm7p-mprw-wjm9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fm7p-mprw-wjm9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54500\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T19:35:59Z\", \"references\": [\"https://github.com/ohler55/oj/security/advisories/GHSA-fm7p-mprw-wjm9\", \"https://github.com/advisories/GHSA-fm7p-mprw-wjm9\"], \"repository_advisory_url\": \"https://api.github.com/repos/ohler55/oj/security-advisories/GHSA-fm7p-mprw-wjm9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ohler55/oj\", \"summary\": \"Oj: intern.c form_attr (uninitialized stack read)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-19T19:36:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-fm7p-mprw-wjm9\", \"vulnerabilities\": [{\"first_patched_version\": \"3.17.3\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"oj\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.17.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fm7p-mprw-wjm9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "oj: < 3.17.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54500"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "oj"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.868084Z",
+  "provenance": {
+    "content_sha256": "b75a713fc1fd491844e54d347b31b782cf056ee4852375667080a29abb38df5c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T19:35:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fm7p-mprw-wjm9",
+  "status": "active",
+  "title": "Oj: intern.c form_attr (uninitialized stack read)",
+  "updated_at": "2026-06-19T19:36:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fm7p-mprw-wjm9"
+}

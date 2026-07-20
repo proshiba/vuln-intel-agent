@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/41203013?v=4\", \"events_url\": \"https://api.github.com/users/RamiAltai/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/RamiAltai/followers\", \"following_url\": \"https://api.github.com/users/RamiAltai/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/RamiAltai/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/RamiAltai\", \"id\": 41203013, \"login\": \"RamiAltai\", \"node_id\": \"MDQ6VXNlcjQxMjAzMDEz\", \"organizations_url\": \"https://api.github.com/users/RamiAltai/orgs\", \"received_events_url\": \"https://api.github.com/users/RamiAltai/received_events\", \"repos_url\": \"https://api.github.com/users/RamiAltai/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/RamiAltai/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/RamiAltai/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/RamiAltai\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/148991397?v=4\", \"events_url\": \"https://api.github.com/users/EQSTLab/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EQSTLab/followers\", \"following_url\": \"https://api.github.com/users/EQSTLab/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EQSTLab/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EQSTLab\", \"id\": 148991397, \"login\": \"EQSTLab\", \"node_id\": \"U_kgDOCOFtpQ\", \"organizations_url\": \"https://api.github.com/users/EQSTLab/orgs\", \"received_events_url\": \"https://api.github.com/users/EQSTLab/received_events\", \"repos_url\": \"https://api.github.com/users/EQSTLab/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EQSTLab/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EQSTLab/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EQSTLab\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"### Summary\\n\\nvcrpy deserializes YAML cassette files with PyYAML's object-constructing loader (`yaml.CLoader` / `yaml.Loader`) instead of the safe loader (`yaml.CSafeLoader` / `yaml.SafeLoader`). A cassette containing a `!!python/object/apply:` (or similar) tag therefore executes arbitrary Python code the moment the cassette is loaded — including through the normal `VCR().use_cassette()` path, before any HTTP interaction is replayed.\\n\\nThis is **not** limited to environments lacking the libYAML C extension. `CLoader` uses the C parser but PyYAML's full Python *constructor*, so Python\\nobject tags execute under `CLoader` exactly as under the pure-Python `Loader`. Confirmed against vcrpy 8.1.1 + PyYAML 6.0.3 with `CLoader` active.\\n\\n### Affected component\\n\\n- `vcr/serializers/yamlserializer.py` — `deserialize()` → `yaml.load(cassette_string, Loader=Loader)` where `Loader` is `CLoader`/`Loader`. Reached on **every** cassette load.\\n- `vcr/migration.py` (~line 107) — `yaml.load(preprocess_yaml(...), Loader=Loader)`. A second sink reached when the migration tool is run on a `.yaml` file. `preprocess_yaml()` only strips three known legacy tags, so other tags still execute.\\n\\nPresent in all releases inspected, 1.0.0 through 8.1.1.\\n\\n### Proof of concept\\n\\n```python\\nimport vcr, requests\\n\\n# Attacker-supplied cassette. The payload sits in an ignored top-level key\\n# so the rest of the cassette stays valid; it fires during load.\\nopen(\\\"evil.yaml\\\", \\\"w\\\").write(\\\"\\\"\\\"interactions:\\n- request:\\n    body: null\\n    headers: {Accept: ['*/*']}\\n    method: GET\\n    uri: http://example.com/\\n  response:\\n    body: {string: ok}\\n    headers: {Content-Type: ['text/plain']}\\n    status: {code: 200, message: OK}\\n_x: !!python/object/apply:os.system ['touch /tmp/VCRPY_YAML_RCE']\\nversion: 1\\n\\\"\\\"\\\")\\n\\nwith vcr.use_cassette(\\\"evil.yaml\\\"):      # <-- /tmp/VCRPY_YAML_RCE created here\\n    requests.get(\\\"http://example.com/\\\")\\n```\\n\\nLoading the cassette creates `/tmp/VCRPY_YAML_RCE`, demonstrating arbitrary command execution. Any Python callable can be invoked this way.\\n\\n### Impact\\n\\nArbitrary code execution in the process that loads the cassette, with that process's full privileges. Realistic delivery paths:\\n\\n- A malicious cassette added in a pull request and loaded when CI runs the tests.\\n- A poisoned shared test-fixture repository or cassette artifact store.\\n- \\\"Updated recorded HTTP fixtures\\\" social-engineering.\\n\\nBecause cassettes are typically loaded by test suites in CI/CD and on developer machines, the exposed secrets are exactly the high-value ones in those environments: CI deployment credentials, cloud IAM roles, registry/publishing tokens, and source access.\\n\\n### Patch\\n\\nUse the safe loader in `vcr/serializers/yamlserializer.py`:\\n\\n```python\\ntry:\\n    from yaml import CDumper as Dumper\\n    from yaml import CSafeLoader as Loader\\nexcept ImportError:\\n    from yaml import Dumper\\n    from yaml import SafeLoader as Loader\\n\\ndef deserialize(cassette_string):\\n    return yaml.load(cassette_string, Loader=Loader)\\n```\\n\\nApply the same `SafeLoader` change in `vcr/migration.py`.\\n\\nThis is backwards compatible: vcrpy cassettes only contain standard YAML (scalars/lists/maps plus `!!binary`, all supported by `SafeLoader`/`CSafeLoader`), so existing cassettes load unchanged. vcrpy's `serialize.deserialize()` already catches `yaml.constructor.ConstructorError`, so a Python-tagged cassette now surfaces as the existing \\\"old cassette format\\\" `ValueError` instead of executing.\\n\\nRecommended hardening: add a regression test that loads a cassette containing `!!python/object/apply:os.system` and asserts a `ConstructorError`/`ValueError` and that no side effect occurs.\", \"ghsa_id\": \"GHSA-rpj2-4hq8-938g\", \"github_reviewed_at\": \"2026-06-19T21:15:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-rpj2-4hq8-938g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rpj2-4hq8-938g\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T21:15:47Z\", \"references\": [\"https://github.com/kevin1024/vcrpy/security/advisories/GHSA-rpj2-4hq8-938g\", \"https://github.com/advisories/GHSA-rpj2-4hq8-938g\"], \"repository_advisory_url\": \"https://api.github.com/repos/kevin1024/vcrpy/security-advisories/GHSA-rpj2-4hq8-938g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/kevin1024/vcrpy\", \"summary\": \"VCR.py: Arbitrary code execution via unsafe YAML deserialization of cassette files\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T02:22:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-rpj2-4hq8-938g\", \"vulnerabilities\": [{\"first_patched_version\": \"8.2.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"vcrpy\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 8.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rpj2-4hq8-938g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vcrpy: < 8.2.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vcrpy"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.336716Z",
+  "provenance": {
+    "content_sha256": "71eb6eca7b47eaa80da89307c378ca2c192aacfafda763adb4d5a1a360f0ea99",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T21:15:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rpj2-4hq8-938g",
+  "status": "active",
+  "title": "VCR.py: Arbitrary code execution via unsafe YAML deserialization of cassette files",
+  "updated_at": "2026-07-10T02:22:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rpj2-4hq8-938g"
+}

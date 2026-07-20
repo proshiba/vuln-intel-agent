@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/38741078?v=4\", \"events_url\": \"https://api.github.com/users/xuemian168/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xuemian168/followers\", \"following_url\": \"https://api.github.com/users/xuemian168/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xuemian168/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xuemian168\", \"id\": 38741078, \"login\": \"xuemian168\", \"node_id\": \"MDQ6VXNlcjM4NzQxMDc4\", \"organizations_url\": \"https://api.github.com/users/xuemian168/orgs\", \"received_events_url\": \"https://api.github.com/users/xuemian168/received_events\", \"repos_url\": \"https://api.github.com/users/xuemian168/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xuemian168/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xuemian168/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xuemian168\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47781\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.4, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"## Summary\\n\\nPDM automatically loads project-local plugin paths from `.pdm-plugins` during `Core` initialization. Because this path is added via `site.addsitedir()`, attacker-controlled `.pth` files inside the project plugin directory are processed and can execute Python code before normal CLI handling begins.\\n\\nThis allows arbitrary code execution with the privileges of the user running `pdm` from an untrusted repository checkout.\\n\\n## Affected Behavior\\n\\n- Trigger does not require `pdm install --plugins`\\n- A low-impact command such as `pdm --version` is sufficient\\n- Impact is strongest in CI, privileged shells, and automation contexts\\n\\n## Affected Code\\n\\n- `src/pdm/core.py:74-82`\\n- `src/pdm/core.py:310-333`\\n- `src/pdm/core.py:335-352`\\n\\n## Technical Details\\n\\n`Core.__init__()` calls `load_plugins()` before ordinary command execution. `load_plugins()` calls `_add_project_plugins_library()`, which derives the project-local `.pdm-plugins` library path and adds it through `site.addsitedir()`.\\n\\nOn CPython, `site.addsitedir()` processes `.pth` files found in the added directory. `.pth` lines beginning with `import ` are executed immediately. This creates a trust-boundary break: project-controlled files execute before the user explicitly opts into plugin installation or plugin loading.\\n\\n## Impact\\n\\n- Arbitrary code execution as the invoking user\\n- Potential credential theft, persistence, or workspace tampering\\n- Potential privilege escalation when `pdm` is run via `sudo`, root-owned CI jobs, or privileged service accounts\\n\\n## Reproduction\\n\\nPoC:\\n\\n```bash\\n# Replace this with a Python interpreter that can run `python -m pdm`.\\nPDM_PY=/path/to/python-with-pdm\\ntmpdir=$(mktemp -d)\\n\\ncat > \\\"$tmpdir/pyproject.toml\\\" <<'EOF'\\n[project]\\nname = \\\"plugin-autoload-demo\\\"\\nversion = \\\"0.0.1\\\"\\nEOF\\n\\npurelib=$(TMPDIR_ROOT=\\\"$tmpdir/.pdm-plugins\\\" \\\"$PDM_PY\\\" - <<'PY'\\nimport os\\nimport sys\\nimport sysconfig\\n\\nbase = os.environ[\\\"TMPDIR_ROOT\\\"]\\nscheme_names = sysconfig.get_scheme_names()\\nif (sys.platform == \\\"darwin\\\" and \\\"osx_framework_library\\\" in scheme_names) or sys.platform == \\\"linux\\\":\\n    scheme = \\\"posix_prefix\\\"\\nelif sys.version_info < (3, 10):\\n    scheme = \\\"nt\\\" if os.name == \\\"nt\\\" else \\\"posix_prefix\\\"\\nelse:\\n    scheme = sysconfig.get_default_scheme()\\nreplace_vars = {\\\"base\\\": base, \\\"platbase\\\": base}\\nprint(sysconfig.get_path(\\\"purelib\\\", scheme, replace_vars))\\nPY\\n)\\n\\nmkdir -p \\\"$purelib\\\"\\nmarker=\\\"$tmpdir/plugin-autoload-marker.txt\\\"\\nprintf '%s\\\\n' \\\"import pathlib; pathlib.Path(r'$marker').write_text('project plugin autoload executed', encoding='utf-8')\\\" > \\\"$purelib/evil.pth\\\"\\n\\n(\\n  cd \\\"$tmpdir\\\" &&\\n  \\\"$PDM_PY\\\" -m pdm --version\\n)\\n\\ncat \\\"$marker\\\"\\n```\\n\\nExpected result:\\n\\n- A temporary project is created\\n- An `evil.pth` file is placed under `.pdm-plugins`\\n- Running `pdm --version` creates a marker file before CLI exit\\n\\nObserved output from local validation:\\n\\n```text\\nPDM, version 2.26.9\\n\\n--- marker ---\\nproject plugin autoload executed\\n```\\n\\n## Severity\\n\\nHigh\\n\\n## CVSS v4.0\\n\\n- Base score: `8.4` (`High`)\\n- Vector: `CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N`\\n\\nRationale:\\n\\n- `AV:L`: exploitation occurs through local execution of `pdm` against attacker-controlled repository content\\n- `AC:L`: no special bypass or race is required\\n- `AT:N`: no external precondition beyond the vulnerable workflow is required\\n- `PR:N`: the attacker does not need privileges on the victim host\\n- `UI:A`: the victim must actively run a `pdm` command in the malicious checkout\\n- `VC:H/VI:H/VA:H`: successful exploitation yields arbitrary code execution as the invoking user\\n- `SC:N/SI:N/SA:N`: the score is kept to same-system impact only\\n\\n## Root Cause\\n\\nProject-local plugin paths are implicitly trusted and loaded too early, and `.pth` processing is inherited from `site.addsitedir()`.\\n\\n## Recommended Remediation\\n\\n- Do not auto-load project-local `.pdm-plugins` by default\\n- Avoid `site.addsitedir()` for project-controlled plugin paths\\n- If project plugins must be supported, require explicit opt-in such as `--enable-project-plugins`\\n- Explicitly prevent `.pth` execution when loading project plugin paths\\n\\n## Disclosure Notes\\n\\nThis issue is a strong standalone CVE candidate because it yields direct code execution from repository-controlled files without requiring the victim to run a project script explicitly.\", \"epss\": {\"percentage\": 0.00028, \"percentile\": 0.08507}, \"ghsa_id\": \"GHSA-qq6c-99pv-prvf\", \"github_reviewed_at\": \"2026-06-11T13:25:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-qq6c-99pv-prvf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qq6c-99pv-prvf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47781\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-11T13:25:28Z\", \"references\": [\"https://github.com/pdm-project/pdm/security/advisories/GHSA-qq6c-99pv-prvf\", \"https://github.com/pdm-project/pdm/releases/tag/2.27.0\", \"https://github.com/advisories/GHSA-qq6c-99pv-prvf\"], \"repository_advisory_url\": \"https://api.github.com/repos/pdm-project/pdm/security-advisories/GHSA-qq6c-99pv-prvf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pdm-project/pdm\", \"summary\": \"PDM: Project-Controlled `.pdm-plugins` Content Executes Before CLI Parsing\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-11T13:25:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-qq6c-99pv-prvf\", \"vulnerabilities\": [{\"first_patched_version\": \"2.27.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pdm\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.26.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qq6c-99pv-prvf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pdm: <= 2.26.9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47781"
+    ],
+    "cvss_score": 8.4,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pdm"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.258010Z",
+  "provenance": {
+    "content_sha256": "9928f93565e455f1227290e433a5e46f0a3a1afa411e70948c3cc778483507b9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-11T13:25:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qq6c-99pv-prvf",
+  "status": "active",
+  "title": "PDM: Project-Controlled `.pdm-plugins` Content Executes Before CLI Parsing",
+  "updated_at": "2026-06-11T13:25:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qq6c-99pv-prvf"
+}

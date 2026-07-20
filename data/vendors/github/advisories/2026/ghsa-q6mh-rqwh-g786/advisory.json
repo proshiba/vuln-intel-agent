@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/117736655?v=4\", \"events_url\": \"https://api.github.com/users/osageling/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/osageling/followers\", \"following_url\": \"https://api.github.com/users/osageling/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/osageling/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/osageling\", \"id\": 117736655, \"login\": \"osageling\", \"node_id\": \"U_kgDOBwSEzw\", \"organizations_url\": \"https://api.github.com/users/osageling/orgs\", \"received_events_url\": \"https://api.github.com/users/osageling/received_events\", \"repos_url\": \"https://api.github.com/users/osageling/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/osageling/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/osageling/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/osageling\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25802519?v=4\", \"events_url\": \"https://api.github.com/users/enchant97/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/enchant97/followers\", \"following_url\": \"https://api.github.com/users/enchant97/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/enchant97/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/enchant97\", \"id\": 25802519, \"login\": \"enchant97\", \"node_id\": \"MDQ6VXNlcjI1ODAyNTE5\", \"organizations_url\": \"https://api.github.com/users/enchant97/orgs\", \"received_events_url\": \"https://api.github.com/users/enchant97/received_events\", \"repos_url\": \"https://api.github.com/users/enchant97/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/enchant97/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/enchant97/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/enchant97\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44523\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-326\", \"name\": \"Inadequate Encryption Strength\"}, {\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}], \"description\": \"#### Summary\\n\\nNo minimum length or entropy is enforced on the `JWT_SECRET` configuration value. The application accepts any base64-decodable secret regardless of size, including secrets as short as 1 byte.\\n\\nHS256 secrets below 32 bytes are brute-forceable offline, allowing attackers to recover the signing key and forge valid JWTs for arbitrary users.\\n\\n---\\n\\n#### Impact\\n\\nAn attacker who captures a single valid JWT (e.g, from cookies, logs, or network traffic) can:\\n\\n\\\\> Crack the signing secret offline using brute-force or wordlist attacks\\n\\\\> Forge valid JWTs for any user ID (including administrators)\\n\\\\> Authenticate without knowing any credentials\\n\\nThis results in **full account takeover across the entire application** with no server-side detection or rate limiting possible.\\n\\n---\\n\\n#### Details\\n\\nIn `backend/config/utils.go`, the `Base64Decoded.UnmarshalText` function decodes the JWT secret but does not validate its length or entropy.\\n\\nIn `backend/core/auth.go`, JWT tokens are signed using HS256 without enforcing minimum key size requirements.\\n\\nAccording to **RFC 7518 Section 3.2**, HS256 keys must be at least 256 bits (32 bytes). Libraries such as PyJWT explicitly warn against shorter keys, but note-mark performs no such validation.\\n\\n---\\n\\n### PoC\\n\\n1- Deploy note-mark with a weak secret:\\n\\n   ```\\n   JWT_SECRET = base64(\\\"testsecret123456789012345\\\")\\n   ```\\n\\n2- Register an account and capture the `Auth-Session-Token` cookie\\n\\n3- Crack the secret offline (example using Python):\\n\\n   ```python\\n   import jwt, base64\\n   jwt.decode(TOKEN, base64.b64decode(SECRET), algorithms=[\\\"HS256\\\"])\\n   ```\\n\\n4- Forge a new token for any user UUID with extended expiry\\n\\n5- Send the forged token in requests → server returns **200 Ok** and authenticates as that user\\n\\n---\\n\\n### Reproduction Steps\\n\\n1- Deploy the application with a JWT secret shorter than 32 bytes (after base64 decoding)\\n2- Authenticate and capture a valid JWT\\n3- Perform offline brute-force or dictionary attack against the token signature\\n4- Recover the secret\\n5- Generate a forged JWT for another user\\n6- Use the forged token to access protected endpoints\\n\\n---\\n\\n### Fix Recommendation\\n\\n* Enforce a **minimum of 32 bytes (256 bits)** for JWT secrets after base64 decoding\\n* Reject weak secrets during configuration parsing (e.g., in `Base64Decoded.UnmarshalText` or config validation)\\n* Optionally log warnings or fail startup if the secret is insecure\\n\\n---\\n\\n### Resources\\n\\n* RFC 7518 Section 3.2 (JSON Web Algorithms - HMAC key size requirements)\\n* CWE-326: Inadequate Encryption Strength\\n* CWE-345: Insufficient Verification of Data Authenticity\\n\\n---\", \"epss\": {\"percentage\": 0.00124, \"percentile\": 0.025}, \"ghsa_id\": \"GHSA-q6mh-rqwh-g786\", \"github_reviewed_at\": \"2026-05-07T21:08:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-q6mh-rqwh-g786\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q6mh-rqwh-g786\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44523\"}], \"nvd_published_at\": \"2026-05-14T19:16:37Z\", \"published_at\": \"2026-05-07T21:08:10Z\", \"references\": [\"https://github.com/enchant97/note-mark/security/advisories/GHSA-q6mh-rqwh-g786\", \"https://github.com/enchant97/note-mark/commit/18b58775866776ed400c403dd0ccad68c1fa4802\", \"https://github.com/enchant97/note-mark/releases/tag/v0.19.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44523\", \"https://github.com/advisories/GHSA-q6mh-rqwh-g786\"], \"repository_advisory_url\": \"https://api.github.com/repos/enchant97/note-mark/security-advisories/GHSA-q6mh-rqwh-g786\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/enchant97/note-mark\", \"summary\": \"Note Mark has a JWT Secret Weakness that allows Full Account Takeover via Token Forgery\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:45:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-q6mh-rqwh-g786\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260501152247-18b587758667\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/enchant97/note-mark/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260501152247-18b587758667\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q6mh-rqwh-g786",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/enchant97/note-mark/backend: < 0.0.0-20260501152247-18b587758667"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44523"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/enchant97/note-mark/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.134419Z",
+  "provenance": {
+    "content_sha256": "060680e70c9dcecda45de1224778311e21cc19f448d01d95d321294c007c2944",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T21:08:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q6mh-rqwh-g786",
+  "status": "active",
+  "title": "Note Mark has a JWT Secret Weakness that allows Full Account Takeover via Token Forgery",
+  "updated_at": "2026-05-15T23:45:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q6mh-rqwh-g786"
+}

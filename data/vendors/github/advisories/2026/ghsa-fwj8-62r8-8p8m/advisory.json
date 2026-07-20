@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8091541?v=4\", \"events_url\": \"https://api.github.com/users/raefko/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/raefko/followers\", \"following_url\": \"https://api.github.com/users/raefko/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/raefko/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/raefko\", \"id\": 8091541, \"login\": \"raefko\", \"node_id\": \"MDQ6VXNlcjgwOTE1NDE=\", \"organizations_url\": \"https://api.github.com/users/raefko/orgs\", \"received_events_url\": \"https://api.github.com/users/raefko/received_events\", \"repos_url\": \"https://api.github.com/users/raefko/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/raefko/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/raefko/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/raefko\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61197119?v=4\", \"events_url\": \"https://api.github.com/users/Ectario/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Ectario/followers\", \"following_url\": \"https://api.github.com/users/Ectario/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Ectario/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Ectario\", \"id\": 61197119, \"login\": \"Ectario\", \"node_id\": \"MDQ6VXNlcjYxMTk3MTE5\", \"organizations_url\": \"https://api.github.com/users/Ectario/orgs\", \"received_events_url\": \"https://api.github.com/users/Ectario/received_events\", \"repos_url\": \"https://api.github.com/users/Ectario/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Ectario/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Ectario/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Ectario\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2230599?v=4\", \"events_url\": \"https://api.github.com/users/stgraber/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/stgraber/followers\", \"following_url\": \"https://api.github.com/users/stgraber/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/stgraber/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/stgraber\", \"id\": 2230599, \"login\": \"stgraber\", \"node_id\": \"MDQ6VXNlcjIyMzA1OTk=\", \"organizations_url\": \"https://api.github.com/users/stgraber/orgs\", \"received_events_url\": \"https://api.github.com/users/stgraber/received_events\", \"repos_url\": \"https://api.github.com/users/stgraber/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/stgraber/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/stgraber/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/stgraber\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41647\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-476\", \"name\": \"NULL Pointer Dereference\"}], \"description\": \"### Summary\\nMissing error handling could lead an authenticated Incus user to cause a daemon crash through the import of a truncated storage bucket backup file.\\n\\n### Details\\nIt was found that TransferManager.UploadAllFiles iterates over tar entries but only checks for io.EOF from tr.Next(). When tr.Next() returns a non-EOF error, such as unexpected EOF from a truncated archive, the header hdr is nil and the code continues to access hdr.Name, causing a nil-pointer dereference that panics the daemon.\\n\\nThis may allow the Incus daemon to be crashed during S3 bucket restore if a truncated or corrupted backup archive is provided. A panic can occur when a malformed archive produces a non-EOF tar read error after the first entry. Any caller of UploadAllFiles that processes attacker-controlled archive content may be affected.\\n\\nAffected File:\\n[https://github.com/lxc/incus/blob/v6.22.0/…server/storage/s3/transfer_manager.go#L127](https://github.com/lxc/incus/blob/v6.22.0/internal/server/storage/s3/transfer_manager.go#L127) \\n\\nThe tar-iteration loop only checks for EOF:\\n\\nAffected Code:\\n```\\nfor {\\n    hdr, err := tr.Next()\\n    if err == io.EOF {\\n        break // End of archive.\\n    }\\n\\n    // Skip index.yaml file\\n    if hdr.Name == \\\"backup/index.yaml\\\" {\\n```\\n\\nWhen tr.Next() returns a non-EOF error, hdr is nil. The code does not check for this case and immediately dereferences hdr.Name.\\n\\nThis was confirmed as follows:\\n\\nCommand:\\n```\\ngo test ./test/fuzz -run='FuzzS3BucketUploadTarParsing/s3_nil_deref_truncated_tar' -count=1 -v\\n```\\n\\nOutput:\\n```\\n=== RUN   FuzzS3BucketUploadTarParsing\\n=== RUN   FuzzS3BucketUploadTarParsing/s3_nil_deref_truncated_tar\\n   s3_bucket_upload_fuzz_test.go:82: UploadAllFiles panicked: runtime error: invalid memory address\\n       or nil pointer dereference\\n--- FAIL: FuzzS3BucketUploadTarParsing/s3_nil_deref_truncated_tar (0.00s)\\nFAIL\\n```\\n\\nIt is recommended to add a non-EOF error check after tr.Next().\\n\\nProposed Fix:\\n```\\nhdr, err := tr.Next()\\nif err == io.EOF {\\n    break\\n}\\n\\nif err != nil {\\n    return fmt.Errorf(\\\"Error reading backup archive: %w\\\", err)\\n}\\n```\\n\\nA patch is available at https://github.com/lxc/incus/releases/tag/v7.0.0.\\n\\n### Credits\\nThis issue was discovered and reported by the team at 7asecurity (https://7asecurity.com/)\", \"epss\": {\"percentage\": 0.00394, \"percentile\": 0.31509}, \"ghsa_id\": \"GHSA-fwj8-62r8-8p8m\", \"github_reviewed_at\": \"2026-05-04T19:38:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-fwj8-62r8-8p8m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fwj8-62r8-8p8m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41647\"}], \"nvd_published_at\": \"2026-05-07T14:16:03Z\", \"published_at\": \"2026-05-04T19:38:48Z\", \"references\": [\"https://github.com/lxc/incus/security/advisories/GHSA-fwj8-62r8-8p8m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41647\", \"https://github.com/lxc/incus/releases/tag/v7.0.0\", \"https://github.com/advisories/GHSA-fwj8-62r8-8p8m\"], \"repository_advisory_url\": \"https://api.github.com/repos/lxc/incus/security-advisories/GHSA-fwj8-62r8-8p8m\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/lxc/incus\", \"summary\": \"Incus has Nil-Pointer Dereference via S3 Bucket Import\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T21:47:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-fwj8-62r8-8p8m\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/lxc/incus/v6/cmd/incusd\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 6.23.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fwj8-62r8-8p8m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/lxc/incus/v6/cmd/incusd: <= 6.23.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41647"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/lxc/incus/v6/cmd/incusd"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.167032Z",
+  "provenance": {
+    "content_sha256": "397b06d14adb57eed8113bf277814dc34c3d02776e58cb0df79cc0cdc63767b1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T19:38:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fwj8-62r8-8p8m",
+  "status": "active",
+  "title": "Incus has Nil-Pointer Dereference via S3 Bucket Import",
+  "updated_at": "2026-05-08T21:47:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fwj8-62r8-8p8m"
+}

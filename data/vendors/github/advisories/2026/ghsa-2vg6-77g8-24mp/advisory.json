@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/204265144?v=4\", \"events_url\": \"https://api.github.com/users/iruizsalinas/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iruizsalinas/followers\", \"following_url\": \"https://api.github.com/users/iruizsalinas/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iruizsalinas/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iruizsalinas\", \"id\": 204265144, \"login\": \"iruizsalinas\", \"node_id\": \"U_kgDODCzWuA\", \"organizations_url\": \"https://api.github.com/users/iruizsalinas/orgs\", \"received_events_url\": \"https://api.github.com/users/iruizsalinas/received_events\", \"repos_url\": \"https://api.github.com/users/iruizsalinas/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iruizsalinas/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iruizsalinas/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iruizsalinas\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 3.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-459\", \"name\": \"Incomplete Cleanup\"}, {\"cwe_id\": \"CWE-613\", \"name\": \"Insufficient Session Expiration\"}, {\"cwe_id\": \"CWE-672\", \"name\": \"Operation on a Resource after Expiration or Release\"}], \"description\": \"### Am I affected?\\n\\nUsers are affected if all of the following are true:\\n\\n- They configure `secondaryStorage` on `betterAuth(...)` (Redis, KV, or any external session cache).\\n- `session.storeSessionInDatabase` is left unset or set to `false` (the default).\\n- Their application's deployment uses one or more of:\\n  - The `admin` plugin and calls `auth.api.removeUser(...)` or `authClient.admin.removeUser(...)`.\\n  - The `anonymous` plugin and exposes `/delete-anonymous-user` or relies on the after-link hook to clean up the anonymous user.\\n  - The `@better-auth/scim` plugin and exposes `DELETE /scim/v2/Users/:userId`.\\n\\nIf `storeSessionInDatabase` is `true`, sessions are also written to the database, and the database delete cascades; users are not affected.\\n\\nFix:\\n\\n1. Upgrade to `better-auth@<patched-version>` or later (and `@better-auth/scim@<patched-version>` if they use SCIM).\\n2. If they cannot upgrade, see workarounds below.\\n\\n### Summary\\n\\nWhen `secondaryStorage` is configured and `storeSessionInDatabase` is `false`, three user-deletion endpoints in `better-auth` plus one in `@better-auth/scim` call `internalAdapter.deleteUser(userId)` without first calling `internalAdapter.deleteSessions(userId)`. The deleted user's session payload (which carries a cached user object) remains in secondary storage, and `internalAdapter.findSession(token)` keeps returning it as a valid session until the session TTL elapses (default 7 days).\\n\\n### Details\\n\\nThe vulnerable call sites are:\\n\\n- `admin` plugin's `removeUser` (`packages/better-auth/src/plugins/admin/routes.ts:1463`).\\n- `anonymous` plugin's self-delete endpoint (`packages/better-auth/src/plugins/anonymous/index.ts:222`).\\n- `anonymous` plugin's after-link hook (`packages/better-auth/src/plugins/anonymous/index.ts:325`).\\n- `@better-auth/scim`'s `DELETE /scim/v2/Users/:userId` (`packages/scim/src/routes.ts:1019`).\\n\\nWorking callers that already do the right thing: the core `/delete-user` self-delete and `/delete-user/callback` (`packages/better-auth/src/api/routes/update-user.ts:551`).\\n\\nThe fix shape extends each vulnerable caller to invoke `deleteSessions(userId)` before `deleteUser(userId)`. The architectural follow-up centralizes the cleanup inside `deleteUser` itself or introduces a single `deleteUserAndSessions` orchestrator so future callers cannot regress this contract.\\n\\n### Patches\\n\\nFixed in `better-auth@<patched-version>` and `@better-auth/scim@<patched-version>`. All four user-deletion call sites now invoke `deleteSessions(userId)` before `deleteUser(userId)` so sessions are evicted from secondary storage at the same time the user row is removed.\\n\\n### Workarounds\\n\\nIf users cannot upgrade immediately:\\n\\n- **Configuration-level**: set `session.storeSessionInDatabase: true`. Subsequent user-delete writes reach the session table and the database cascade removes rows. Increases write volume for high-throughput sessions but eliminates the gap.\\n- **Code-level (admin path)**: when calling `auth.api.removeUser`, also call `auth.api.revokeUserSessions({ body: { userId } })`, which uses `deleteSessions` internally.\\n- **Code-level (SCIM path)**: wrap their SCIM provider's deprovisioning hook to call `auth.api.revokeUserSessions(...)` after the SCIM DELETE.\\n- **Code-level (anonymous path)**: in `onLinkAccount`, explicitly call `internalAdapter.deleteSessions(anonymousUser.user.id)` before allowing the new session to be issued.\\n\\n### Impact\\n\\n- **Stale session validity**: a deleted user's existing session cookie continues to authenticate against `getSessionFromCtx` until the session TTL elapses (default 7 days). Within that window, the deleted user retains their pre-existing read and write surface.\\n- **SCIM-driven deprovisioning gap**: organizations using SCIM to revoke offboarded employees' access do not, in fact, revoke active sessions. The deleted account remains usable for up to 7 days after deprovisioning.\\n\\n### Credit\\n\\nReported by @iruizsalinas.\\n\\n### Resources\\n\\n- [CWE-613: Insufficient Session Expiration](https://cwe.mitre.org/data/definitions/613.html)\\n- [CWE-672: Operation on a Resource after Expiration or Release](https://cwe.mitre.org/data/definitions/672.html)\\n- [CWE-459: Incomplete Cleanup](https://cwe.mitre.org/data/definitions/459.html)\", \"ghsa_id\": \"GHSA-2vg6-77g8-24mp\", \"github_reviewed_at\": \"2026-07-07T20:56:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-2vg6-77g8-24mp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2vg6-77g8-24mp\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T20:56:45Z\", \"references\": [\"https://github.com/better-auth/better-auth/security/advisories/GHSA-2vg6-77g8-24mp\", \"https://github.com/better-auth/better-auth/releases/tag/v1.6.11\", \"https://github.com/advisories/GHSA-2vg6-77g8-24mp\"], \"repository_advisory_url\": \"https://api.github.com/repos/better-auth/better-auth/security-advisories/GHSA-2vg6-77g8-24mp\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/better-auth/better-auth\", \"summary\": \"Better Auth: Stale sessions persist after user deletion across admin, anonymous, and SCIM flows\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T20:56:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-2vg6-77g8-24mp\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.11\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"better-auth\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.3.4, < 1.6.11\"}, {\"first_patched_version\": \"1.6.11\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@better-auth/scim\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.6.0, < 1.6.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2vg6-77g8-24mp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@better-auth/scim: >= 1.6.0, < 1.6.11",
+      "better-auth: >= 0.3.4, < 1.6.11"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 3.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@better-auth/scim",
+      "better-auth"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.733236Z",
+  "provenance": {
+    "content_sha256": "0d2482b3014e74dfca223ed03b655a9ace89a660bee773a1ad55b17a2cbbdfc2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T20:56:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2vg6-77g8-24mp",
+  "status": "active",
+  "title": "Better Auth: Stale sessions persist after user deletion across admin, anonymous, and SCIM flows",
+  "updated_at": "2026-07-07T20:56:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2vg6-77g8-24mp"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/36455663?v=4\", \"events_url\": \"https://api.github.com/users/kah-ja/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kah-ja/followers\", \"following_url\": \"https://api.github.com/users/kah-ja/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kah-ja/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kah-ja\", \"id\": 36455663, \"login\": \"kah-ja\", \"node_id\": \"MDQ6VXNlcjM2NDU1NjYz\", \"organizations_url\": \"https://api.github.com/users/kah-ja/orgs\", \"received_events_url\": \"https://api.github.com/users/kah-ja/received_events\", \"repos_url\": \"https://api.github.com/users/kah-ja/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kah-ja/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kah-ja/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kah-ja\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54070\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-184\", \"name\": \"Incomplete List of Disallowed Inputs\"}], \"description\": \"## Summary\\n\\n`renderPackageREADME` in `kernel/bazaar/readme.go` renders a Bazaar package README from Markdown to HTML with the lute engine and `SetSanitize(true)`. The lute sanitizer is an event-handler blocklist: `allowAttr` rejects only attribute names present in a fixed `eventAttrs` map copied from the w3schools legacy handler list.\\n\\nThat map omits modern event handlers. `onpointerover`, `onpointerdown`, `onauxclick`, `onbeforetoggle`, `onfocusin`, `onanimationstart`, and `ontransitionend` are not in the list, so the sanitizer passes them through verbatim on any tag.\\n\\nThe frontend assigns the rendered HTML to `mdElement.innerHTML` in `app/src/config/bazaar.ts` with no client-side DOMPurify on this path, into a normal element in the main document (no iframe, no sandbox). The kernel sends no Content-Security-Policy, X-Frame-Options, or X-Content-Type-Options header on any response, so an inline handler runs when its event fires.\\n\\nThe README is rendered when an Administrator opens a package in Settings → Marketplace, after the one-time marketplace trust consent. Install is not required.\\n\\nResult: a third-party Bazaar package author runs JavaScript in the Administrator's authenticated SiYuan origin when the Administrator views and interacts with the package listing, and gains full control of the workspace.\\n\\n## Affected\\n\\nsiyuan-note/siyuan, `<= 3.6.5` (latest release, 2026-04-21). Confirmed live-exploitable on the `b3log/siyuan:v3.6.5` image; identical code on `master` HEAD.\\nCondition: the Administrator has accepted the marketplace trust consent (`bazaar.trust`, default false) and browses community Bazaar packages. The lute dependency pin is `github.com/88250/lute v1.7.7-0.20260419134724-bb68012f231d`.\\nBoth the online browse path (`getBazaarPackageREADME`) and the installed-package path (`getInstalledPlugin`) reach the same sink.\\n\\n## Root cause\\n\\n`render/sanitizer.go:225-232` (lute): `allowAttr(name)` returns false only when `name` exists in the `eventAttrs` map, an attribute denylist rather than an allowlist.\\n`render/sanitizer.go:235-334` (lute): `eventAttrs` is the w3schools handler list and contains no pointer, beforetoggle, focusin, animation, or transition handlers.\\n`kernel/bazaar/readme.go:108-118`: `renderPackageREADME` builds the engine with `SetSanitize(true)` and returns the HTML string to the caller.\\n`kernel/bazaar/readme.go:48-88`: `GetBazaarPackageREADME` renders an untrusted remote package README; `kernel/api/bazaar.go` exposes it at `/api/bazaar/getBazaarPackageREADME` (`router.go:423`, `CheckAuth`).\\n`app/src/config/bazaar.ts:600` and `:609`: `mdElement.innerHTML = data.preferredReadme` / `= response.data.html`, no DOMPurify, target is a plain div.\\nKernel HTTP responses carry no CSP/X-Frame-Options/X-Content-Type-Options header (live-confirmed), so an inline handler is not blocked.\\n\\n## Reproduction\\n\\n`b3log/siyuan:v3.6.5` Docker, default config, access auth code set, marketplace trust accepted.\\n\\n1. Place a package whose README carries a non-blocklisted handler (an online community package produces the identical render at browse time):\\n\\n```\\nmkdir -p workspace/data/plugins/evil-plugin\\ncat > workspace/data/plugins/evil-plugin/plugin.json <<'JSON'\\n{\\\"name\\\":\\\"evil-plugin\\\",\\\"author\\\":\\\"x\\\",\\\"version\\\":\\\"1.0.0\\\",\\\"minAppVersion\\\":\\\"3.0.0\\\",\\n \\\"displayName\\\":{\\\"default\\\":\\\"Evil\\\"},\\\"description\\\":{\\\"default\\\":\\\"poc\\\"},\\n \\\"readme\\\":{\\\"default\\\":\\\"README.md\\\"},\\\"backends\\\":[\\\"all\\\"],\\\"frontends\\\":[\\\"all\\\"]}\\nJSON\\nprintf '<div onpointerover=\\\"alert(document.domain)\\\">plugin description</div>\\\\n' \\\\\\n  > workspace/data/plugins/evil-plugin/README.md\\n```\\n\\n2. Request the rendered README the way the Marketplace panel does:\\n\\n```\\ncurl -s -X POST http://127.0.0.1:6806/api/bazaar/getInstalledPlugin \\\\\\n  -H \\\"Authorization: Token <API-TOKEN>\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"frontend\\\":\\\"all\\\",\\\"keyword\\\":\\\"\\\"}'\\n```\\n\\nResponse `data.packages[].preferredReadme` contains the handler verbatim:\\n\\n```\\n<div onpointerover=\\\"alert(document.domain)\\\">plugin description</div>\\n```\\n\\nA control `<img src=x onerror=...>` in the same README is returned HTML-escaped and inert.\\n\\n3. In Settings → Marketplace, open the package and move the pointer over its README.\\n\\nLive-verified: the rendered HTML is assigned to `mdElement.innerHTML` (no CSP, no sandbox) and the `onpointerover` handler executes `alert(document.domain)` in the SiYuan origin on hover. Handlers do not auto-fire on insertion; one pointer/focus/click interaction on the listing triggers them.\\n\\n## Impact\\n\\n- JavaScript execution in the Administrator's authenticated origin on a marketplace package view plus one hover/click/focus, no install needed.\\n- Theft of the kernel API token (`conf.api.token`), which grants full Administrator API access.\\n- Pivot to `installBazaarPlugin` and kernel control; the runtime image ships a shell.\\n- A single malicious community package reaches every instance that views its listing.\\n\\n## Credit\\n\\nJan Kahmen, [turingpoint](https://turingpoint.de) (jan@turingpoint.de)\", \"epss\": {\"percentage\": 0.0018, \"percentile\": 0.07771}, \"ghsa_id\": \"GHSA-w7cg-whh7-xp28\", \"github_reviewed_at\": \"2026-07-10T19:27:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-w7cg-whh7-xp28\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w7cg-whh7-xp28\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54070\"}], \"nvd_published_at\": \"2026-06-24T22:16:48Z\", \"published_at\": \"2026-07-10T19:27:24Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-w7cg-whh7-xp28\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54070\", \"https://github.com/advisories/GHSA-w7cg-whh7-xp28\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-w7cg-whh7-xp28\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Stored XSS in Bazaar marketplace via package README event handlers\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T19:27:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-w7cg-whh7-xp28\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260628153353-2d5d72223df4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260628153353-2d5d72223df4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w7cg-whh7-xp28",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260628153353-2d5d72223df4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54070"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.247624Z",
+  "provenance": {
+    "content_sha256": "863d5295c6d6c13651d1e869bb49dc08506d012d4c5f76298a56be202a3dc444",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T19:27:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w7cg-whh7-xp28",
+  "status": "active",
+  "title": "SiYuan: Stored XSS in Bazaar marketplace via package README event handlers",
+  "updated_at": "2026-07-10T19:27:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w7cg-whh7-xp28"
+}

@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-49286\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"### Summary\\n\\n`pontedilana/php-weasyprint` guarded the output filename against the `phar://` stream wrapper with a case-sensitive blacklist:\\n\\n```php\\nif (0 === \\\\strpos($filename, 'phar://')) {\\n    throw new \\\\InvalidArgumentException('The output file cannot be a phar archive.');\\n}\\n```\\n\\nPHP stream wrappers are **case-insensitive**, so `PHAR://`, `Phar://`, etc. bypass the check and reach `fileExists()` (`file_exists()`) in `prepareOutput()`. On PHP 7 (which the library still supports — PHP 7.4+), this triggers deserialization of a crafted PHAR archive's metadata, leading to remote code execution. This is the patch-bypass of CVE-2023-28115.\\n\\nThe same issue and fix were handled upstream in KnpLabs/snappy ([GHSA-92rv-4j2h-8mjj](https://github.com/KnpLabs/snappy/security/advisories/GHSA-92rv-4j2h-8mjj)).\\n\\n### Affected versions\\n\\n`pontedilana/php-weasyprint` versions `<= 2.5.1` (the case-sensitive guard was introduced in commit `eb8accc`, \\\"Implement countermeasures for CVE-2023-28115\\\").\\n\\nPatched in: `2.6.0`.\\n\\n### Privilege required\\n\\nA caller able to control the output filename passed to `generate()` / `generateFromHtml()`, plus the ability to place a PHAR archive on the filesystem (e.g. via an upload). Exploitation of the deserialization requires the server to run PHP < 8.\\n\\n### Vulnerable code\\n\\n`src/AbstractGenerator.php`, `prepareOutput()`:\\n\\n```php\\nif (0 === \\\\strpos($filename, 'phar://')) {\\n    throw new \\\\InvalidArgumentException('The output file cannot be a phar archive.');\\n}\\n```\\n\\n`strpos($filename, 'phar://')` matches only the exact lowercase string, while the wrapper resolution is case-insensitive — `PHAR://payload.phar` is not caught.\\n\\n### Proof of concept\\n\\n```bash\\n# Craft a PHAR with a fast-destruct gadget chain\\nphpggc -f Monolog/RCE1 exec 'touch /tmp/exploit' -p phar -o exploit.phar\\n```\\n\\n```php\\n<?php\\nuse Pontedilana\\\\PhpWeasyPrint\\\\Pdf;\\n\\n$pdf = new Pdf('/usr/local/bin/weasyprint');\\n// Case-altered wrapper bypasses the lowercase 'phar://' blacklist\\n$pdf->generateFromHtml('<h1>POC</h1>', 'PHAR://exploit.phar');\\n// On PHP < 8, the PHAR metadata is deserialized -> /tmp/exploit is created\\n```\\n\\n### Impact\\n\\n- Remote code execution and filesystem access through PHAR metadata deserialization on PHP < 8, when the output filename is attacker-influenced and a PHAR can be planted.\\n\\nCVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H (8.1, High) — Critical in deployments running PHP 7 with an upload surface; adjust to your environment.\\n\\nCWE-502 (Deserialization of Untrusted Data).\\n\\n### Suggested fix\\n\\nReplace the case-sensitive blacklist with a scheme allow-list (`file` / no scheme), comparing the lowercased scheme parsed from the filename:\\n\\n```php\\nprotected const ALLOWED_PROTOCOLS = ['file'];\\n\\nprotected function isProtocolAllowed(string $filename): bool\\n{\\n    if (false === $parsed = \\\\parse_url($filename)) {\\n        throw new \\\\InvalidArgumentException('The filename is not valid.');\\n    }\\n    $protocol = isset($parsed['scheme']) ? \\\\strtolower($parsed['scheme']) : 'file';\\n    // ...special-case Windows drive letters (C:\\\\...) as 'file'...\\n    return \\\\in_array($protocol, self::ALLOWED_PROTOCOLS, true);\\n}\\n```\\n\\n`prepareOutput()` then rejects any non-`file` scheme (`phar`, `PHAR`, `php`, `http`, ...) before `file_exists()` is reached.\\n\\n### Credit\\n\\nOriginal vulnerability and patch-bypass reported upstream to KnpLabs/snappy by Rémi Matasse of Synacktiv ([GHSA-92rv-4j2h-8mjj](https://github.com/KnpLabs/snappy/security/advisories/GHSA-92rv-4j2h-8mjj)); identified as applicable to `pontedilana/php-weasyprint`, which mirrors the same code.\", \"epss\": {\"percentage\": 0.00555, \"percentile\": 0.42525}, \"ghsa_id\": \"GHSA-2fmj-p74r-3wjm\", \"github_reviewed_at\": \"2026-06-26T22:10:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-2fmj-p74r-3wjm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2fmj-p74r-3wjm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49286\"}], \"nvd_published_at\": \"2026-06-19T18:16:19Z\", \"published_at\": \"2026-06-26T22:10:00Z\", \"references\": [\"https://github.com/KnpLabs/snappy/security/advisories/GHSA-92rv-4j2h-8mjj\", \"https://github.com/pontedilana/php-weasyprint/security/advisories/GHSA-2fmj-p74r-3wjm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-49286\", \"https://github.com/pontedilana/php-weasyprint/commit/d1aa487722b5a3cab9b222b85fdb5608a5a550c3\", \"https://github.com/pontedilana/php-weasyprint/releases/tag/2.6.0\", \"https://github.com/advisories/GHSA-2fmj-p74r-3wjm\"], \"repository_advisory_url\": \"https://api.github.com/repos/pontedilana/php-weasyprint/security-advisories/GHSA-2fmj-p74r-3wjm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pontedilana/php-weasyprint\", \"summary\": \"PhpWeasyPrint vulnerable to PHAR deserialization via output filename (CVE-2023-28115 case-insensitive bypass)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T22:10:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-2fmj-p74r-3wjm\", \"vulnerabilities\": [{\"first_patched_version\": \"2.6.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pontedilana/php-weasyprint\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.5.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2fmj-p74r-3wjm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pontedilana/php-weasyprint: <= 2.5.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2023-28115",
+      "CVE-2026-49286"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pontedilana/php-weasyprint"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.937792Z",
+  "provenance": {
+    "content_sha256": "1fb9a9fc548e53101a78687e60882c11cdbae9dee60b8b057e37acb3f8b6124b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T22:10:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2fmj-p74r-3wjm",
+  "status": "active",
+  "title": "PhpWeasyPrint vulnerable to PHAR deserialization via output filename (CVE-2023-28115 case-insensitive bypass)",
+  "updated_at": "2026-06-26T22:10:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2fmj-p74r-3wjm"
+}

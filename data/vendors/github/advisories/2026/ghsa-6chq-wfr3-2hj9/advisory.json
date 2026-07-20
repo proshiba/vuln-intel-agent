@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/62886893?v=4\", \"events_url\": \"https://api.github.com/users/raulvdv/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/raulvdv/followers\", \"following_url\": \"https://api.github.com/users/raulvdv/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/raulvdv/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/raulvdv\", \"id\": 62886893, \"login\": \"raulvdv\", \"node_id\": \"MDQ6VXNlcjYyODg2ODkz\", \"organizations_url\": \"https://api.github.com/users/raulvdv/orgs\", \"received_events_url\": \"https://api.github.com/users/raulvdv/received_events\", \"repos_url\": \"https://api.github.com/users/raulvdv/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/raulvdv/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/raulvdv/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/raulvdv\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42035\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-113\", \"name\": \"Improper Neutralization of CRLF Sequences in HTTP Headers ('HTTP Request/Response Splitting')\"}, {\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"### Summary\\n\\nA prototype pollution gadget exists in the Axios HTTP adapter (lib/adapters/http.js) that allows an attacker to inject arbitrary HTTP headers into outgoing requests. The vulnerability exploits duck-type checking of the data payload, where if Object.prototype is polluted with getHeaders, append, pipe, on, once, and Symbol.toStringTag, Axios misidentifies any plain object payload as a FormData instance and calls the attacker-controlled getHeaders() function, merging the returned headers into the outgoing request.\\n\\nThe vulnerable code resides exclusively in lib/adapters/http.js. The prototype pollution source does not need to originate from Axios itself — any prototype pollution primitive in any dependency in the application's dependency tree is sufficient to trigger this gadget.\\n\\nPrerequisites:\\n\\nA prototype pollution primitive must exist somewhere in the application's dependency chain (e.g., via lodash.merge, qs, JSON5, or any deep-merge utility processing attacker-controlled input). The pollution source is not required to be in Axios.\\nThe application must use Axios to make HTTP requests with a data payload (POST, PUT, PATCH).\\n\\n### Details\\n\\nThe vulnerability is in `lib/adapters/http.js`, in the data serialization pipeline:\\n\\n```javascript\\n// lib/adapters/http.js \\n} else if (utils.isFormData(data) && utils.isFunction(data.getHeaders)) {\\n    headers.set(data.getHeaders());\\n    // ...\\n}\\n```\\n\\nAxios uses two sequential duck-type checks, both of which can be satisfied via prototype pollution:\\n\\n**1. `utils.isFormData(data)` — `lib/utils.js`**\\n```javascript\\nconst isFormData = (thing) => {\\n  let kind;\\n  return thing && (\\n    (typeof FormData === 'function' && thing instanceof FormData) || (\\n      isFunction(thing.append) && ( \\n        (kind = kindOf(thing)) === 'formdata' ||  \\n        (kind === 'object' && isFunction(thing.toString) && thing.toString() === '[object FormData]')\\n      )\\n    )\\n  )\\n}\\n```\\n\\n**2. `utils.isFunction(data.getHeaders)` — Duck-type for `form-data` npm package**\\n```javascript\\n// Returns true if Object.prototype.getHeaders is a function\\nutils.isFunction(data.getHeaders) \\n```\\n\\n### PoC\\n\\n```javascript\\n// Simulate Prototype Pollution\\nObject.prototype[Symbol.toStringTag] = 'FormData';\\nObject.prototype.append = () => {};\\nObject.prototype.getHeaders = () => {\\n    const headers = Object.create(null);\\n    (.... Introduce here all the headers you want ....)\\n    return headers;\\n};\\nObject.prototype.pipe = function(d) { if(d&&d.end)d.end(); return d; };\\nObject.prototype.on = function() { return this; };\\nObject.prototype.once = function() { return this; };\\n\\n// Legitimate application code\\nconst response = await axios.post('https://internal-api.company.com/admin/delete', \\n    { userId: 42 },\\n    { headers: { 'Authorization': 'Bearer VALID_USER_TOKEN' } }\\n);\\n```\\n\\n### Impact\\n\\n- Authentication Bypass (CVSS: C:H)\\n- Session Fixation (CVSS: I:H)\\n- Privilege Escalation (CVSS: C:H, I:H)\\n- IP Spoofing / WAF Bypass (CVSS: I:H)\\n\\n**Note on Scope**: There is an argument to promote this from **S:U to S:C** (Scope: Changed), which would raise the score to **10.0**. In some architectures, Axios is commonly used for service to service communication where downstream services trust identity headers (`Authorization`, `X-Role`, `X-User-ID`, `X-Tenant-ID`) forwarded from upstream API gateways. In this scenario, the vulnerable component (Axios in Service A) and the impacted component (Service B, which acts on the injected identity) are under different security authorities. The injected headers cross a trust boundary, meaning the impact extends beyond the security scope of the vulnerable component, the CVSS v3.1 definition of a Scope Change. We conservatively score S:U here, but maintainers should evaluate which one applies better here.\\n\\n### Recommended Fix\\n\\nAdd an explicit own-property check in `lib/adapters/http.js`:\\n\\n```diff\\n- } else if (utils.isFormData(data) && utils.isFunction(data.getHeaders)) {\\n-     headers.set(data.getHeaders());\\n+ } else if (utils.isFormData(data) && utils.isFunction(data.getHeaders) &&\\n+            Object.prototype.hasOwnProperty.call(data, 'getHeaders')) {\\n+     headers.set(data.getHeaders());\\n```\", \"epss\": {\"percentage\": 0.00394, \"percentile\": 0.31528}, \"ghsa_id\": \"GHSA-6chq-wfr3-2hj9\", \"github_reviewed_at\": \"2026-05-05T00:25:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-6chq-wfr3-2hj9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6chq-wfr3-2hj9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42035\"}], \"nvd_published_at\": \"2026-04-24T18:16:30Z\", \"published_at\": \"2026-05-05T00:25:47Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-6chq-wfr3-2hj9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42035\", \"https://github.com/advisories/GHSA-6chq-wfr3-2hj9\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-6chq-wfr3-2hj9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios: Header Injection via Prototype Pollution\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-05T00:25:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-6chq-wfr3-2hj9\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, < 1.15.1\"}, {\"first_patched_version\": \"0.31.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.31.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6chq-wfr3-2hj9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: <= 0.31.0",
+      "axios: >= 1.0.0, < 1.15.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42035"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.066779Z",
+  "provenance": {
+    "content_sha256": "520522ad3d8d3aed1c94b675efe6c5623675769cd686226a43cd6e6f68e6da14",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T00:25:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6chq-wfr3-2hj9",
+  "status": "active",
+  "title": "Axios: Header Injection via Prototype Pollution",
+  "updated_at": "2026-05-05T00:25:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6chq-wfr3-2hj9"
+}

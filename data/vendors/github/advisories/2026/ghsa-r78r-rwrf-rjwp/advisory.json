@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48814\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}], \"description\": \"## Advisory / Disclosure\\n\\n# Network-AI — CVE-2026-46701 fix is incomplete: the \\\"Empty Default Secret\\\" unauth path survives\\n\\n**Target:** Jovancoding/Network-AI (npm `network-ai`), **latest v5.7.1**\\n**Status:** the advisory (\\\"Unauthenticated Cross-Origin MCP Tool Invocation via Empty\\nDefault Secret\\\") named three flaws. The fix (5.4.5) closed the **CORS** flaw\\n(`Access-Control-Allow-Origin` is now set only for localhost origins), but left the\\n**empty-default-secret** flaw the title is about: the SSE MCP server still defaults to an\\nempty secret, `_isAuthorized()` still returns `true` when the secret is empty, and a\\nnon-loopback bind only **warns**. So the server still runs **fully unauthenticated by\\ndefault** — any non-browser caller (curl, SSRF, or a `0.0.0.0` bind) can invoke all 22 MCP\\ntools (`config_set`, `agent_spawn`, `blackboard_write`, `token_*`) with no credentials.\\n**Class:** CWE-306/CWE-862 Missing Authentication — incomplete fix.\\n**Methodology:** M1 incomplete-fix audit (anchor = the 5.4.5 fix; sibling-walk on latest v5.7.1, executed).\\n**Severity:** High (matches parent; the browser amplifier is removed, so exploitation now\\nneeds non-browser reach — SSRF or a non-loopback bind, which the fix only warns about).\\n\\n## What the fix did and didn't do (verified on latest v5.7.1)\\n| advisory flaw | latest v5.7.1 |\\n|---|---|\\n| wildcard CORS (`ACAO: *`) | **FIXED** — `lib/mcp-transport-sse.ts` sets `ACAO` only when `origin` matches `^https?://(localhost\\\\|127\\\\.0\\\\.0\\\\.1)(:\\\\d+)?$` |\\n| empty default secret | **NOT FIXED** — `bin/mcp-server.ts`: `secret: process.env['NETWORK_AI_MCP_SECRET'] ?? ''` |\\n| `_isAuthorized` open on empty secret | **NOT FIXED** — `if (!this._opts.secret) return true;` |\\n| require secret / refuse unauth bind | **NOT DONE** — `listen()` only `process.stderr.write('… WARNING …')` on non-loopback bind, then listens anyway |\\n\\nThe advisory's remediation #1 (\\\"Require a non-empty secret at startup … `process.exit(1)`\\\")\\nwas not implemented.\\n\\n## PoC (executed against the latest source, v5.7.1) — `poc/legend-networkai-empty-secret.ts`\\nInstantiates the real `McpSseServer` from the latest `lib/` with a mock bridge and the\\n**default (empty) secret**, then issues requests (run-log `poc/run-log.txt`):\\n\\n```\\nPOST /mcp  no-auth, no-origin (curl/SSRF) -> HTTP 200, dispatched=true\\n   body: {\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"executed\\\":true,\\\"tool\\\":\\\"config_set\\\"}}\\nPOST /mcp  Origin: evil.example.com        -> ACAO=undefined   (CORS half fixed)\\n```\\nThe no-auth request passes `_isAuthorized` and reaches `handleRPC` (tool dispatched) — i.e.\\nunauthenticated tool invocation persists on the latest release; only the browser-CORS read\\namplifier was removed.\\n\\nRun: from a v5.7.1 checkout, `npm i` then\\n`npx ts-node --transpile-only poc/legend-networkai-empty-secret.ts`.\\n\\n## Recommended fix\\nImplement the advisory's remediation #1: refuse to start SSE mode with an empty secret\\n(unless `--stdio`), and/or change `_isAuthorized` to fail closed (an empty configured\\nsecret should mean \\\"deny\\\", not \\\"allow\\\"). The CORS allowlist alone does not authenticate\\nnon-browser callers.\\n\\n## Precondition / honesty\\nWith CORS now localhost-only, the drive-by *browser* attack is mitigated. The residual\\nrequires a non-browser path to the port: an SSRF on the host, or the operator binding to a\\nnon-loopback address (Docker/remote), which the fix only warns about. The empty secret\\nremains the shipped default and `_isAuthorized` still authorizes it.\\n\\n## Credits\\n\\n@Kai Aizen / @SnailSploit — https://snailsploit.com\", \"epss\": {\"percentage\": 0.00297, \"percentile\": 0.21508}, \"ghsa_id\": \"GHSA-r78r-rwrf-rjwp\", \"github_reviewed_at\": \"2026-06-19T13:34:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-r78r-rwrf-rjwp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r78r-rwrf-rjwp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48814\"}], \"nvd_published_at\": \"2026-06-17T20:17:22Z\", \"published_at\": \"2026-06-19T13:34:24Z\", \"references\": [\"https://github.com/Jovancoding/Network-AI/security/advisories/GHSA-r78r-rwrf-rjwp\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48814\", \"https://github.com/Jovancoding/Network-AI/releases/tag/v5.7.2\", \"https://github.com/advisories/GHSA-j3vx-cx2r-pvg8\", \"https://github.com/advisories/GHSA-r78r-rwrf-rjwp\"], \"repository_advisory_url\": \"https://api.github.com/repos/Jovancoding/Network-AI/security-advisories/GHSA-r78r-rwrf-rjwp\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/Jovancoding/Network-AI\", \"summary\": \"Network-AI: CVE-2026-46701 fix incomplete — empty default secret still authorizes all requests\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-19T13:34:25Z\", \"url\": \"https://api.github.com/advisories/GHSA-r78r-rwrf-rjwp\", \"vulnerabilities\": [{\"first_patched_version\": \"5.7.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"network-ai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.7.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r78r-rwrf-rjwp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "network-ai: <= 5.7.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46701",
+      "CVE-2026-48814"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "network-ai"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.011134Z",
+  "provenance": {
+    "content_sha256": "e4bb02a26dde7d1599f37bfee7aa8581e26e83ae051ad628a8c15757f1f3cfc4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T13:34:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r78r-rwrf-rjwp",
+  "status": "active",
+  "title": "Network-AI: CVE-2026-46701 fix incomplete — empty default secret still authorizes all requests",
+  "updated_at": "2026-06-19T13:34:25Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r78r-rwrf-rjwp"
+}

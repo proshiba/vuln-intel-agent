@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35772301?v=4\", \"events_url\": \"https://api.github.com/users/fg0x0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/fg0x0/followers\", \"following_url\": \"https://api.github.com/users/fg0x0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/fg0x0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/fg0x0\", \"id\": 35772301, \"login\": \"fg0x0\", \"node_id\": \"MDQ6VXNlcjM1NzcyMzAx\", \"organizations_url\": \"https://api.github.com/users/fg0x0/orgs\", \"received_events_url\": \"https://api.github.com/users/fg0x0/received_events\", \"repos_url\": \"https://api.github.com/users/fg0x0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/fg0x0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/fg0x0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/fg0x0\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48148\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:N/VA:N/SC:L/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nThe VectorDB configuration endpoint in Budibase accepts a host parameter that undergoes no validation against internal IP ranges, reserved hostnames, or URL schemes. Any authenticated user with builder-level access can supply an arbitrary host value such as `169.254.169.254` or localhost, causing the server to initiate outbound TCP connections to internal network addresses or cloud metadata endpoints on their behalf.\\n\\n### Details\\n\\nThe validator responsible for VectorDB creation and updates defines the host field as `Joi.string().required()`, which enforces only that the value is a non-empty string. No allowlist of external hostnames, no blocklist of RFC 1918 or link-local ranges, and no scheme validation are applied before the value is forwarded to the database SDK for connection establishment.\\n\\nWhen a VectorDB entry is created or updated, the SDK uses the supplied host directly to open a TCP connection. Because the connection attempt originates from the Budibase server process, it traverses internal network boundaries that would otherwise be inaccessible to the attacker. Differences in connection timing and error messages between reachable and unreachable hosts allow an attacker to enumerate internal services and determine whether specific addresses are live. In cloud environments, the AWS EC2 metadata service at `169.254.169.254`, the GCP metadata server at `metadata.google.internal`, and equivalent endpoints for other providers are all reachable this way.\\n\\nBuilder access is a realistic precondition in multi-tenant or team deployments, as the builder role is intended to allow application development without granting administrative privileges over the underlying infrastructure.\\n\\n### PoC\\n\\n```python\\nimport requests\\nimport time\\n\\nBASE_URL = \\\"https://TARGET_BUDIBASE_INSTANCE\\\"\\nSESSION = requests.Session()\\n\\nlogin_resp = SESSION.post(f\\\"{BASE_URL}/api/global/auth/default/login\\\", json={\\n    \\\"username\\\": \\\"builder@example.com\\\",\\n    \\\"password\\\": \\\"builderpassword\\\"\\n})\\ntoken = login_resp.cookies.get(\\\"budibase:auth\\\") or login_resp.json().get(\\\"token\\\")\\nSESSION.headers.update({\\\"Cookie\\\": f\\\"budibase:auth={token}\\\"})\\n\\ntargets = [\\n    (\\\"169.254.169.254\\\", 80),\\n    (\\\"localhost\\\", 5432),\\n    (\\\"10.0.0.1\\\", 22),\\n]\\n\\nfor host, port in targets:\\n    start = time.time()\\n    resp = SESSION.post(f\\\"{BASE_URL}/api/ai/vectordb\\\", json={\\n        \\\"name\\\": f\\\"probe_{host.replace('.', '_')}_{port}\\\",\\n        \\\"provider\\\": \\\"pgvector\\\",\\n        \\\"host\\\": host,\\n        \\\"port\\\": port,\\n        \\\"database\\\": \\\"db\\\"\\n    })\\n    elapsed = time.time() - start\\n    print(f\\\"host={host} port={port} status={resp.status_code} time={elapsed:.2f}s body={resp.text[:200]}\\\")\\n```\\n\\n### Impact\\n\\nAn attacker with builder access can use the Budibase server as a proxy to probe internal network topology, determine which hosts and ports are reachable from the server, and potentially interact with unauthenticated internal services including cloud instance metadata endpoints. In environments where cloud metadata endpoints expose credentials or instance identity documents, successful retrieval of metadata could lead to privilege escalation or lateral movement within the cloud environment. The attack requires no interaction beyond a single authenticated API request per probe target.\", \"epss\": {\"percentage\": 0.00226, \"percentile\": 0.13099}, \"ghsa_id\": \"GHSA-cv96-5348-p5p8\", \"github_reviewed_at\": \"2026-06-12T18:27:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-cv96-5348-p5p8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cv96-5348-p5p8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48148\"}], \"nvd_published_at\": \"2026-05-27T18:16:27Z\", \"published_at\": \"2026-06-12T18:27:45Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-cv96-5348-p5p8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48148\", \"https://github.com/advisories/GHSA-cv96-5348-p5p8\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-cv96-5348-p5p8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: Unvalidated VectorDB Host Parameter Enables SSRF\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T18:27:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-cv96-5348-p5p8\", \"vulnerabilities\": [{\"first_patched_version\": \"3.35.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.35.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cv96-5348-p5p8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: < 3.35.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48148"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:N/VA:N/SC:L/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.094593Z",
+  "provenance": {
+    "content_sha256": "144ad342a118fc504bb0623c941351bd8233c0bb5cb55fbe99a93ca6eac06c2d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-12T18:27:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cv96-5348-p5p8",
+  "status": "active",
+  "title": "Budibase: Unvalidated VectorDB Host Parameter Enables SSRF",
+  "updated_at": "2026-06-12T18:27:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cv96-5348-p5p8"
+}

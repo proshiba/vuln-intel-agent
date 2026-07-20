@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8413800?v=4\", \"events_url\": \"https://api.github.com/users/manunio/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manunio/followers\", \"following_url\": \"https://api.github.com/users/manunio/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manunio/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manunio\", \"id\": 8413800, \"login\": \"manunio\", \"node_id\": \"MDQ6VXNlcjg0MTM4MDA=\", \"organizations_url\": \"https://api.github.com/users/manunio/orgs\", \"received_events_url\": \"https://api.github.com/users/manunio/received_events\", \"repos_url\": \"https://api.github.com/users/manunio/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manunio/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manunio/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manunio\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6142?v=4\", \"events_url\": \"https://api.github.com/users/nevans/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/nevans/followers\", \"following_url\": \"https://api.github.com/users/nevans/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/nevans/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/nevans\", \"id\": 6142, \"login\": \"nevans\", \"node_id\": \"MDQ6VXNlcjYxNDI=\", \"organizations_url\": \"https://api.github.com/users/nevans/orgs\", \"received_events_url\": \"https://api.github.com/users/nevans/received_events\", \"repos_url\": \"https://api.github.com/users/nevans/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/nevans/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/nevans/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/nevans\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42257\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.8, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-77\", \"name\": \"Improper Neutralization of Special Elements used in a Command ('Command Injection')\"}, {\"cwe_id\": \"CWE-93\", \"name\": \"Improper Neutralization of CRLF Sequences ('CRLF Injection')\"}], \"description\": \"### Summary\\nSeveral `Net::IMAP` commands accept a raw string argument that is sent to the server without validation or escaping.  If this string is derived from user-controlled input, it may contain contain `CRLF` sequences, which an attacker can use to inject arbitrary IMAP commands.\\n\\n### Details\\n\\n`Net::IMAP`'s generic argument handling, used by most command arguments, interprets string arguments as an IMAP `astring`.  Depending on the string contents and the connection's UTF-8 support, this encodes strings as either a `atom`, `quoted`, or `literal`.  These are safe from command or argument injection.\\n\\nBut the following commands transform specific String arguments to `Net::IMAP::RawData`, which bypasses normal argument validation and encoding and prints the string directly to the socket:\\n* `#uid_search`, `#search`, `#uid_sort`, `#sort`, `#uid_thread`, `#thread`\\n  * when `criteria` is a String, it is sent raw\\n* `#uid_fetch`, `#fetch\\n  * when `attr` is a String, it is sent raw\\n  * when `attr` is an Array, each String in `attr` is sent raw\\n* `#uid_store`, `#store`\\n  * when `attr` is a String, it is sent raw\\n* `#setquota`:\\n  * `limit` is interpolated with `#to_s` and that string is sent raw\\n\\nBecause these string arguments are sent without any neutralization, they serve as a direct vector for command splitting.  Any user controlled data interpolated into these strings can be used to break out of the intended command context.\\n\\nUsing \\\\\\\"raw data\\\\\\\" arguments for  `#uid_store`, `#store`, and `#setquota` I  both inappropriate and unnecessary.  `Net::IMAP`'s generic argument handling is sufficient to safely validate and encode their arguments.  Users of the library probably do not expect arguments to these commands to be sent raw and might not be wary of passing unvalidated input.\\n\\nThe API for search criteria and fetch attributes is intentionally low-level and \\\\\\\"close to the wire\\\\\\\".  It allows developers to use some IMAP extensions without requiring explicit support from the library and allows developers to use complex IMAP grammar without complex argument translation.  Even so, basic validation is appropriate and could neutralize command injection.\\n\\nAlthough this was explicitly documented for search `criteria`, it was insufficiently documented for fetch `attr`.  So developers may not have realized that the `attr` argument to `#fetch` and `#uid_fetch` is sent as \\\\\\\"raw data\\\\\\\".\\n\\n### Impact\\n\\nIf a developer passes an unvalidated user-controlled input for one of these method arguments, an attacker can append CRLF sequence followed by a new IMAP command (like DELETE mailbox).  Although this does not _directly_ enable data exfiltration, it could be combined with other attack vectors or knowledge of the target system's attributes, e.g.: shared mail folders or the application's installed response handlers.\\n\\nThe SEARCH, STORE, and FETCH commands, and their UID variants are some of the most commonly used features of the library.  Applications that build search queries or fetch attributes dynamically based on user input (e.g., mail clients or archival tools) may be at significant risk.\\n\\nThe SORT and THREAD commands and their UID variants also handle their search criteria argument similarly to SEARCH and are subject to the same risk.\\n\\nExpected use of `Net::IMAP#setquota` is much more limited: `SETQUOTA` is often only usable by users with special administrative privileges.  Depending on the server, quota administration might be managed through server configuration rather than via the IMAP protocol `SETQUOTA` command.  It is expected to be uncommonly used in system administration scripts or in interactive sessions, it should be completely controlled by trusted users, and should only use trusted inputs.  Calling `#setquota` with untrusted user input is expected to be a very uncommon use case.  Please note however this might be combined with other attacks, for example CSRF, which provide unauthorized access to trusted inputs, and may specifically target users or scripts with administrator privileges.\\n\\n### Mitigation\\n - Update to a patched version of `net-imap` which:\\n   - validates that `Net::IMAP::RawData` is composed of well-formed IMAP `text`, `literal`, and `literal8` values, with no unescaped `NULL`, `CR`, or `LF` bytes.\\n   - does not use `Net::IMAP::RawData` for `#store`, `#uid_store`, or `#setquota`.\\n - Prefer to send search criteria as an array of key value pairs.  Avoid sending it as an interpolated string.\\n - If an immediate upgrade is not possible:\\n   - String inputs to search criteria and fetch attributes can be validated against command injection by checking for `\\\\r` and `\\\\n` characters.\\n   - Hard-coding the store `attr` argument is often appropriate.  Alternatively, user controlled inputs can be restricted to a small enumerated list which is valid for the calling application.\\n   - Use `Kernel#Integer` to coerce and validate user controlled inputs to `#setquota` limit.\", \"epss\": {\"percentage\": 0.00429, \"percentile\": 0.34501}, \"ghsa_id\": \"GHSA-hm49-wcqc-g2xg\", \"github_reviewed_at\": \"2026-05-04T22:04:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-hm49-wcqc-g2xg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hm49-wcqc-g2xg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42257\"}], \"nvd_published_at\": \"2026-05-09T20:16:28Z\", \"published_at\": \"2026-05-04T22:04:41Z\", \"references\": [\"https://github.com/ruby/net-imap/security/advisories/GHSA-hm49-wcqc-g2xg\", \"https://github.com/ruby/net-imap/commit/0ec4fd351263e8b9a4f683713427827b7b1ad974\", \"https://github.com/ruby/net-imap/commit/47c72186d272441878ca73c9499f66013829ca2f\", \"https://github.com/ruby/net-imap/commit/6bf02aef7e0b5931010c36e377f79a71636b306b\", \"https://github.com/ruby/net-imap/commit/a4f7649c3da77dec7631f03a037a478eb4330048\", \"https://github.com/ruby/net-imap/commit/aec06996eb87a7e1bbcef1f9f8926e8add2b8c71\", \"https://github.com/ruby/net-imap/releases/tag/v0.4.24\", \"https://github.com/ruby/net-imap/releases/tag/v0.5.14\", \"https://github.com/ruby/net-imap/releases/tag/v0.6.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42257\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/net-imap/CVE-2026-42257.yml\", \"https://github.com/advisories/GHSA-hm49-wcqc-g2xg\"], \"repository_advisory_url\": \"https://api.github.com/repos/ruby/net-imap/security-advisories/GHSA-hm49-wcqc-g2xg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ruby/net-imap\", \"summary\": \"net-imap vulnerable to command Injection via \\\"raw\\\" arguments to multiple commands\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-17T19:45:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-hm49-wcqc-g2xg\", \"vulnerabilities\": [{\"first_patched_version\": \"0.6.4\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"net-imap\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.6.0, <= 0.6.3\"}, {\"first_patched_version\": \"0.5.14\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"net-imap\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.5.0, <= 0.5.13\"}, {\"first_patched_version\": \"0.4.24\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"net-imap\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0, <= 0.4.23\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hm49-wcqc-g2xg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "net-imap: >= 0, <= 0.4.23",
+      "net-imap: >= 0.5.0, <= 0.5.13",
+      "net-imap: >= 0.6.0, <= 0.6.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42257"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "net-imap"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.471439Z",
+  "provenance": {
+    "content_sha256": "f3913b6d9b99806707446ef3b4c765e22363eb2540f3606a5465868028941a81",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T22:04:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hm49-wcqc-g2xg",
+  "status": "active",
+  "title": "net-imap vulnerable to command Injection via \"raw\" arguments to multiple commands",
+  "updated_at": "2026-06-17T19:45:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hm49-wcqc-g2xg"
+}

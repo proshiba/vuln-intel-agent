@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/135195424?v=4\", \"events_url\": \"https://api.github.com/users/CE2Sec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CE2Sec/followers\", \"following_url\": \"https://api.github.com/users/CE2Sec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CE2Sec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CE2Sec\", \"id\": 135195424, \"login\": \"CE2Sec\", \"node_id\": \"U_kgDOCA7rIA\", \"organizations_url\": \"https://api.github.com/users/CE2Sec/orgs\", \"received_events_url\": \"https://api.github.com/users/CE2Sec/received_events\", \"repos_url\": \"https://api.github.com/users/CE2Sec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CE2Sec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CE2Sec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CE2Sec\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-34825\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 8.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"## Summary\\n\\nNocoBase <= 2.0.8 `plugin-workflow-sql` substitutes template variables directly into raw SQL strings via `getParsedValue()` without parameterization or escaping. Any user who triggers a workflow containing a SQL node with template variables from user-controlled data can inject arbitrary SQL.\\n\\n## Affected Versions\\n\\n- Affected: all versions through 2.0.8\\n\\n## Details\\n\\nThe `SQLInstruction` in `packages/plugins/@nocobase/plugin-workflow-sql/src/server/SQLInstruction.ts` line 28 processes SQL templates:\\n\\n```typescript\\n// SQLInstruction.ts:28\\nconst sql = processor.getParsedValue(node.config.sql || '', node.id).trim();\\n```\\n\\nThen executes the resulting string directly:\\n\\n```typescript\\n// SQLInstruction.ts:35\\nconst [result] = await collectionManager.db.sequelize.query(sql, {\\n  transaction: this.workflow.useDataSourceTransaction(dataSourceName, processor.transaction),\\n});\\n```\\n\\n`getParsedValue()` performs simple string substitution of `{{$context.data.fieldName}}` placeholders with values from the workflow trigger data. No escaping, quoting, or parameterized binding is applied.\\n\\nWhen an admin creates a SQL node with a template like:\\n```sql\\nSELECT * FROM users WHERE nickname = '{{$context.data.nickname}}'\\n```\\n\\nAny user who triggers the workflow with a crafted value can break out of the string literal and inject arbitrary SQL.\\n\\n## Proof of Concept\\n\\n1. Login as admin\\n2. Create a collection-trigger workflow on the `users` table (mode: after create)\\n3. Add a SQL node with:\\n```sql\\nSELECT id, nickname, email FROM users WHERE nickname = '{{$context.data.nickname}}'\\n```\\n4. Enable the workflow\\n5. Create a user with nickname set to: `' UNION SELECT 1,version(),current_user --`\\n6. Check execution result:\\n\\n```json\\n[\\n  {\\n    \\\"id\\\": 1,\\n    \\\"nickname\\\": \\\"PostgreSQL 16.13 (Debian 16.13-1.pgdg13+1) on x86_64-pc-linux-gnu...\\\",\\n    \\\"email\\\": \\\"nocobase\\\"\\n  }\\n]\\n```\\n\\nThe injected UNION SELECT returned the database version and current database user.\\n\\n## Impact\\n\\nFull database read/write access through SQL injection. An attacker who can trigger a workflow with a SQL node containing template variables from user-controlled data can extract credentials, modify records, or drop tables. The severity depends on the database user's privileges (full superuser access in the default Docker deployment).\\n\\n## Suggested Fix\\n\\nUse parameterized queries. Replace direct string substitution with Sequelize bind parameters:\\n\\n```diff\\n// SQLInstruction.ts\\n- const sql = processor.getParsedValue(node.config.sql || '', node.id).trim();\\n+ const { sql, bind } = processor.getParsedValueAsParams(node.config.sql || '', node.id);\\n  const [result] = await collectionManager.db.sequelize.query(sql, {\\n+   bind,\\n    transaction: ...\\n  });\\n```\", \"epss\": {\"percentage\": 0.00406, \"percentile\": 0.3251}, \"ghsa_id\": \"GHSA-vx58-fwwq-5g8j\", \"github_reviewed_at\": \"2026-04-01T23:44:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-vx58-fwwq-5g8j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vx58-fwwq-5g8j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-34825\"}], \"nvd_published_at\": \"2026-04-02T20:16:26Z\", \"published_at\": \"2026-04-01T23:44:37Z\", \"references\": [\"https://github.com/nocobase/nocobase/security/advisories/GHSA-vx58-fwwq-5g8j\", \"https://github.com/nocobase/nocobase/commit/75da3dddc4aba739c398f7072725dcf7f5487f5c\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-34825\", \"https://github.com/nocobase/nocobase/releases/tag/v2.0.30\", \"https://github.com/advisories/GHSA-vx58-fwwq-5g8j\"], \"repository_advisory_url\": \"https://api.github.com/repos/nocobase/nocobase/security-advisories/GHSA-vx58-fwwq-5g8j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nocobase/nocobase\", \"summary\": \"NocoBase Has SQL Injection via template variable substitution in workflow SQL node\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-11T05:37:28Z\", \"url\": \"https://api.github.com/advisories/GHSA-vx58-fwwq-5g8j\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.30\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@nocobase/plugin-workflow-sql\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.0.29\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vx58-fwwq-5g8j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@nocobase/plugin-workflow-sql: <= 2.0.29"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-34825"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@nocobase/plugin-workflow-sql"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.084198Z",
+  "provenance": {
+    "content_sha256": "7de4144a3ace64a9416a0ca97473d289726a8431a89ec9074f290609dc8d27fc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-01T23:44:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vx58-fwwq-5g8j",
+  "status": "active",
+  "title": "NocoBase Has SQL Injection via template variable substitution in workflow SQL node",
+  "updated_at": "2026-05-11T05:37:28Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vx58-fwwq-5g8j"
+}

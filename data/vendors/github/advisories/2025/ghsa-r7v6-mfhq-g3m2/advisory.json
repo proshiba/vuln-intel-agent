@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6568866?v=4\", \"events_url\": \"https://api.github.com/users/ajohnston9/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ajohnston9/followers\", \"following_url\": \"https://api.github.com/users/ajohnston9/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ajohnston9/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ajohnston9\", \"id\": 6568866, \"login\": \"ajohnston9\", \"node_id\": \"MDQ6VXNlcjY1Njg4NjY=\", \"organizations_url\": \"https://api.github.com/users/ajohnston9/orgs\", \"received_events_url\": \"https://api.github.com/users/ajohnston9/received_events\", \"repos_url\": \"https://api.github.com/users/ajohnston9/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ajohnston9/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ajohnston9/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ajohnston9\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/45222020?v=4\", \"events_url\": \"https://api.github.com/users/0x00nier/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0x00nier/followers\", \"following_url\": \"https://api.github.com/users/0x00nier/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0x00nier/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0x00nier\", \"id\": 45222020, \"login\": \"0x00nier\", \"node_id\": \"MDQ6VXNlcjQ1MjIyMDIw\", \"organizations_url\": \"https://api.github.com/users/0x00nier/orgs\", \"received_events_url\": \"https://api.github.com/users/0x00nier/received_events\", \"repos_url\": \"https://api.github.com/users/0x00nier/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0x00nier/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0x00nier/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0x00nier\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-67748\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-184\", \"name\": \"Incomplete List of Disallowed Inputs\"}, {\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"## Fickling Assessment\\n\\nBased on the test case provided in the original report below, this bypass was caused by `pty` missing from our block list of unsafe module imports (as previously documented in #108), rather than the unused variable heuristic. This led to unsafe pickles based on `pty.spawn()` being incorrectly flagged as `LIKELY_SAFE`, and was fixed in https://github.com/trailofbits/fickling/pull/187. \\n\\n## Original report\\n\\n### Summary\\nAn unsafe deserialization vulnerability in Fickling allows a crafted pickle file to bypass the \\\"unused variable\\\" heuristic, enabling arbitrary code execution. This bypass is achieved by adding a trivial operation to the pickle file that \\\"uses\\\" the otherwise unused variable left on the stack after a malicious operation, tricking the detection mechanism into classifying the file as safe.\\n\\n### Details\\nFickling relies on the heuristic of detecting unused variables in the VM's stack after execution. Opcodes like `REDUCE`, `OBJ`, and `INST`, which can be used for arbitrary code execution, leave a value on the stack that is often unused in malicious pickle files.\\nThis vulnerability enables a bypass by modifying the pickle file to use this leftover variable. A simple way to achieve this is to add a `BUILD` opcode that, in effect, adds a `__setstate__` to the unused variable. This makes Fickling consider the variable \\\"used,\\\" thus failing to flag the malicious file.\\n\\n### PoC\\nThe following is a disassembled view of a malicious pickle file that bypasses Fickling's \\\"unused variable\\\" detection:\\n```\\n    0: \\\\x80 PROTO      4\\n    2: \\\\x95 FRAME      26\\n   11: \\\\x8c SHORT_BINUNICODE 'pty'\\n   16: \\\\x94 MEMOIZE    (as 0)\\n   17: \\\\x8c SHORT_BINUNICODE 'spawn'\\n   24: \\\\x94 MEMOIZE    (as 1)\\n   25: \\\\x93 STACK_GLOBAL\\n   26: \\\\x94 MEMOIZE    (as 2)\\n   27: \\\\x8c SHORT_BINUNICODE 'id'\\n   31: \\\\x94 MEMOIZE    (as 3)\\n   32: \\\\x85 TUPLE1\\n   33: \\\\x94 MEMOIZE    (as 4)\\n   34: R   REDUCE\\n   35: \\\\x94 MEMOIZE    (as 5)\\n   36: \\\\x8c SHORT_BINUNICODE 'gottem'\\n   44: \\\\x94 MEMOIZE    (as 6)\\n   45: b   BUILD\\n   46: .   STOP\\n ```\\n \\nHere, the additions to the original pickle file can see on lines 35, 36, 44 and 45.\\n\\nWhen analyzing this modified file, Fickling fails to identify it as malicious and reports it as **\\\"LIKELY_SAFE\\\"** as seen here:\\n```\\n{\\n    \\\"severity\\\": \\\"LIKELY_SAFE\\\",\\n    \\\"analysis\\\": \\\"Warning: Fickling failed to detect any overtly unsafe code,but the pickle file may still be unsafe.Do not unpickle this file if it is from an untrusted source!\\\\n\\\\n\\\",\\n    \\\"detailed_results\\\": {}\\n}\\n```\\n\\n### Impact\\nThis allows an attacker to craft a malicious pickle file that can bypass fickling since it relies on the \\\"unused variable\\\" heuristic to flag pickle files as unsafe. A user who deserializes such a file, believing it to be safe, would inadvertently execute arbitrary code on their system. This impacts any user or system that uses Fickling to vet pickle files for security issues.\", \"epss\": {\"percentage\": 0.00238, \"percentile\": 0.14808}, \"ghsa_id\": \"GHSA-r7v6-mfhq-g3m2\", \"github_reviewed_at\": \"2025-12-15T23:37:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-r7v6-mfhq-g3m2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r7v6-mfhq-g3m2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-67748\"}], \"nvd_published_at\": \"2025-12-16T01:15:52Z\", \"published_at\": \"2025-12-15T23:37:28Z\", \"references\": [\"https://github.com/trailofbits/fickling/security/advisories/GHSA-r7v6-mfhq-g3m2\", \"https://github.com/trailofbits/fickling/pull/108\", \"https://github.com/trailofbits/fickling/pull/187\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-67748\", \"https://github.com/pypa/advisory-database/tree/main/vulns/fickling/PYSEC-2025-113.yaml\", \"https://github.com/advisories/GHSA-r7v6-mfhq-g3m2\"], \"repository_advisory_url\": \"https://api.github.com/repos/trailofbits/fickling/security-advisories/GHSA-r7v6-mfhq-g3m2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/trailofbits/fickling\", \"summary\": \"Fickling has Code Injection vulnerability via pty.spawn()\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-05T17:56:02Z\", \"url\": \"https://api.github.com/advisories/GHSA-r7v6-mfhq-g3m2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"fickling\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r7v6-mfhq-g3m2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fickling: < 0.1.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-67748"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fickling"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.634509Z",
+  "provenance": {
+    "content_sha256": "8dd9d9777eed462691170d0fc3784e441a9bfada05467fce41c40a720b0318fe",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-12-15T23:37:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r7v6-mfhq-g3m2",
+  "status": "active",
+  "title": "Fickling has Code Injection vulnerability via pty.spawn()",
+  "updated_at": "2026-06-05T17:56:02Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r7v6-mfhq-g3m2"
+}

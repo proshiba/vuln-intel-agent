@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/248169372?v=4\", \"events_url\": \"https://api.github.com/users/arkmarta/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arkmarta/followers\", \"following_url\": \"https://api.github.com/users/arkmarta/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arkmarta/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arkmarta\", \"id\": 248169372, \"login\": \"arkmarta\", \"node_id\": \"U_kgDODsrDnA\", \"organizations_url\": \"https://api.github.com/users/arkmarta/orgs\", \"received_events_url\": \"https://api.github.com/users/arkmarta/received_events\", \"repos_url\": \"https://api.github.com/users/arkmarta/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arkmarta/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arkmarta/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arkmarta\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50182\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"# Unauthenticated Reflected XSS via `$_GET['search']` in AVideo YouTubeAPI Gallery Pagination\\n\\n## Summary\\n\\nA reflected Cross-Site Scripting vulnerability (CWE-79) in the AVideo YouTubeAPI plugin allows any unauthenticated attacker to execute arbitrary JavaScript in a victim's browser session when the victim follows a crafted URL. The `$_GET['search']` query parameter is concatenated directly into the `href` attribute of two pagination links in `plugin/YouTubeAPI/gallerySection.php` (lines 67 and 74) with no `htmlspecialchars`, no `urlencode`, and no allow-list check. An injected `<script>` element is then extracted by the AVideo Layout plugin and concatenated into a single trailing inline script block at the bottom of the page, where the browser executes it.\\n\\n## Details\\n\\n`plugin/YouTubeAPI/gallerySection.php` renders the YouTubeAPI plugin's gallery section on the AVideo homepage (and every page that includes `plugin/Gallery/view/mainArea.php`) when the API plugin is enabled with `showGallerySection=true` (the default). The pagination block at lines 67 and 74 builds the previous-page and next-page `<a>` elements by string-interpolating `$_GET['search']` directly:\\n\\n```php\\n// plugin/YouTubeAPI/gallerySection.php:67\\n<a href=\\\"<?php echo \\\"{$global['webSiteRootURL']}page/\\\".($_GET['page']-1).\\\"?pageToken={$object->prevPageToken}&search=\\\".(@$_GET['search']); ?>\\\" ...>\\n\\n// plugin/YouTubeAPI/gallerySection.php:74\\n<a href=\\\"<?php echo \\\"{$global['webSiteRootURL']}page/\\\".($_GET['page']+1).\\\"?pageToken={$object->nextPageToken}&search=\\\".(@$_GET['search']); ?>\\\" ...>\\n```\\n\\nThe `@` operator only suppresses an undefined-index warning; it does not sanitize the value. A payload like `\\\"><script>alert(1337)</script>` closes the `href` attribute, closes the `<a>` element, and injects a fresh `<script>` tag.\\n\\nTwo preconditions gate the sink. First, the YouTube API call must return a pagination token (always true for any non-trivial result set, since the mock or real YouTube response carries `nextPageToken` for multi-page queries). Second, `plugin/Gallery/view/mainArea.php` line 53 wraps the gallery render in `if (!empty($video)) { echo AVideoPlugin::getGallerySection(); } else { /* output captured and discarded */ }`. When `$_GET['search']` is set, `Video::getVideo()` adds a MySQL fulltext `MATCH(v.title) AGAINST (<search>) IN NATURAL LANGUAGE MODE` clause; the payload tokenizes to words like `script`, `alert`, `1337`, and the gate passes whenever any video in the corpus has a title containing one of those words. Realistic deployments overwhelmingly satisfy this; the attacker can also seed the payload with a common word (`?search=video\\\"><script>...</script>`) to guarantee a fulltext hit.\\n\\nThe AVideo Layout plugin (`plugin/Layout/Layout.php:611`, enabled by default) runs `Layout::organizeHTML()` over the final HTML, extracts every inline `<script[^>]*>(.*)</script>` block via regex, and concatenates their inner contents into one trailing `<script>` block placed immediately before `</body>`. The injected `<script>alert(1337)</script>` is therefore moved out of the original `href` context and into a clean executable script block; the visible pagination markup retains only the leftover `&search=\\\">` bytes.\\n\\n**Affected product:** AVideo (WWBN), API + YouTubeAPI + Layout plugins\\n**Tested version:** master branch, commit 122b184 (snapshot dated 2026-05-22)\\n\\n## PoC\\n\\nThe AVideo deployment must have the YouTubeAPI plugin enabled with the default `showGallerySection=true`. The payload also needs to satisfy the fulltext `MATCH(v.title) AGAINST` gate that `Video::getVideo()` adds when `$_GET['search']` is set: at least one video in the corpus must have a title containing one of the payload's tokens. In the live confirmation a video titled `Tutorial about script error alerts` satisfied the gate via the words `script` and `alert`. Seeding the payload with the common word `video` guarantees a hit on any realistic AVideo deployment, since `video` appears in nearly every video title.\\n\\nOpen the following URL in any browser. No authentication, no session cookie, no prior interaction with the site is required:\\n\\n```\\nhttps://avideo.example/?search=video%22%3E%3Cscript%3Ealert(1337)%3C%2Fscript%3E&page=2\\n```\\n\\nThe browser fires an `alert(1337)` modal dialog as soon as the homepage finishes rendering. The injected `<script>` is no longer inside the `href` markup at render time; it lives inside the page's single trailing inline script block, surfaced there by the Layout plugin's HTML reorganization.\\n\\n## Impact\\n\\nThis is a Reflected XSS vulnerability (CWE-79) on the AVideo public homepage. Any unauthenticated remote attacker who induces a victim to follow a crafted URL executes arbitrary JavaScript in the victim's browser session under the AVideo origin, reading non-`HttpOnly` cookies and issuing authenticated AJAX requests as the victim. When the victim is an AVideo administrator, the injected JavaScript performs any admin action (create user, promote to admin, change configuration, install plugin) that uses cookie-based authentication without an additional CSRF token, escalating a single click on a crafted link into full administrative takeover.\", \"epss\": {\"percentage\": 0.00178, \"percentile\": 0.07481}, \"ghsa_id\": \"GHSA-hgjh-6wj8-gcgf\", \"github_reviewed_at\": \"2026-06-04T18:55:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-hgjh-6wj8-gcgf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hgjh-6wj8-gcgf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50182\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T18:55:58Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-hgjh-6wj8-gcgf\", \"https://github.com/WWBN/AVideo/commit/f50fc033b7adb36f1ffd6640e7826468bdafdec3\", \"https://github.com/advisories/GHSA-hgjh-6wj8-gcgf\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-hgjh-6wj8-gcgf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"WWBN AVideo: Unauthenticated Reflected XSS via $_GET['search'] in AVideo YouTubeAPI Gallery Pagination\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T18:56:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-hgjh-6wj8-gcgf\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"WWBN/AVideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hgjh-6wj8-gcgf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "WWBN/AVideo: <= 29.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50182"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "WWBN/AVideo"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.850721Z",
+  "provenance": {
+    "content_sha256": "f68a4719dc2ed9f9ad138614b08e9f4b6b9069e283d5436517300be39ff0d353",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T18:55:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hgjh-6wj8-gcgf",
+  "status": "active",
+  "title": "WWBN AVideo: Unauthenticated Reflected XSS via $_GET['search'] in AVideo YouTubeAPI Gallery Pagination",
+  "updated_at": "2026-06-04T18:56:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hgjh-6wj8-gcgf"
+}

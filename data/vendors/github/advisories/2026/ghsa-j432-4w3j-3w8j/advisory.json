@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41060\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe `isSSRFSafeURL()` function in `objects/functions.php` contains a same-domain shortcircuit (lines 4290-4296) that allows any URL whose hostname matches `webSiteRootURL` to bypass all SSRF protections. Because the check compares only the hostname and ignores the port, an attacker can reach arbitrary ports on the AVideo server by using the site's public hostname with a non-standard port. The response body is saved to a web-accessible path, enabling full exfiltration.\\n\\n## Details\\n\\nCommit `40872e529` fixed an extension-based SSRF bypass by making `isSSRFSafeURL()` unconditional. However, `isSSRFSafeURL()` itself contains a same-domain shortcircuit that returns `true` when the URL's hostname matches `webSiteRootURL`'s hostname, without validating the port:\\n\\n```php\\n// objects/functions.php:4290-4296\\nif (!empty($global['webSiteRootURL'])) {\\n    $siteHost = strtolower(parse_url($global['webSiteRootURL'], PHP_URL_HOST));\\n    if ($host === $siteHost) {\\n        _error_log(\\\"isSSRFSafeURL: allowing same-domain request to {$host} (matches webSiteRootURL)\\\");\\n        return true;  // Returns immediately — port, path, scheme all unchecked\\n    }\\n}\\n```\\n\\nThe attack flow through `objects/aVideoEncoder.json.php`:\\n\\n1. User-supplied `$_REQUEST['downloadURL']` is passed to `downloadVideoFromDownloadURL()` at line 166\\n2. `isSSRFSafeURL()` is called at line 368 — passes due to hostname match\\n3. `url_get_contents($downloadURL)` fetches the attacker-controlled URL at line 378\\n4. Response is written to `Video::getStoragePath() . \\\"cache/tmpFile/\\\" . basename($downloadURL)` at line 393-395\\n\\nThe `cache/tmpFile/` directory is under the web-accessible videos storage path. The attacker can retrieve the file to exfiltrate the internal service response.\\n\\nThe auth requirement is `User::canUpload()` (line 59), which is satisfied by any authenticated user with upload permission. Alternatively, a valid `video_id_hash` (a per-video token) can be used via `useVideoHashOrLogin()` at line 57.\\n\\n## PoC\\n\\nAssuming the AVideo instance is at `https://avideo.example.com/` and an internal service runs on port 9998:\\n\\n```bash\\n# Step 1: Authenticate and get cookies (any user with upload permission)\\ncurl -c cookies.txt -X POST 'https://avideo.example.com/objects/login.json.php' \\\\\\n  -d 'user=testuser&pass=testpass'\\n\\n# Step 2: Send SSRF request targeting port 9998 on the same host\\n# The hostname matches webSiteRootURL so isSSRFSafeURL() returns true\\ncurl -b cookies.txt -X POST 'https://avideo.example.com/objects/aVideoEncoder.json.php' \\\\\\n  -d 'format=mp4&downloadURL=http://avideo.example.com:9998/large-internal-endpoint.mp4&videos_id=1&first_request=1'\\n\\n# Step 3: Retrieve the exfiltrated response\\n# The file is saved to cache/tmpFile/ with the basename of the URL\\ncurl 'https://avideo.example.com/videos/cache/tmpFile/large-internal-endpoint.mp4' -o response.bin\\n```\\n\\nNote: The internal service response must be >= 20KB (or >= 5KB if the URL ends in `.mp3`) to pass the size check at line 384. For smaller responses, the attacker can target endpoints that return verbose output or append padding parameters.\\n\\nThe fix at `40872e529` specifically mentions blocking `http://127.0.0.1:9998/probe.mp4`. This bypass reaches the exact same internal service by replacing `127.0.0.1` with the site's public hostname — the DNS resolution points to the same server.\\n\\n## Impact\\n\\n- **Internal service access**: An authenticated attacker can reach any TCP port on the AVideo server that speaks HTTP, including databases with HTTP interfaces, monitoring endpoints, admin panels, cloud metadata services (if the hostname resolves to a cloud instance), and other co-hosted services.\\n- **Data exfiltration**: Response bodies are written to a web-accessible directory, allowing the attacker to retrieve internal service responses.\\n- **Scope change**: The vulnerability crosses from the AVideo application into other services on the same host, justifying S:C in CVSS scoring.\\n- **Bypass of existing fix**: This directly circumvents the SSRF protection added in commit `40872e529`.\\n\\n## Recommended Fix\\n\\nThe same-domain shortcircuit should validate that both the hostname and port match `webSiteRootURL`. Replace `objects/functions.php` lines 4290-4296:\\n\\n```php\\n// Allow same-domain requests ONLY if hostname AND port match webSiteRootURL\\nif (!empty($global['webSiteRootURL'])) {\\n    $siteHost = strtolower(parse_url($global['webSiteRootURL'], PHP_URL_HOST));\\n    $sitePort = parse_url($global['webSiteRootURL'], PHP_URL_PORT);\\n    $siteScheme = strtolower(parse_url($global['webSiteRootURL'], PHP_URL_SCHEME));\\n    // Default port based on scheme if not explicitly set\\n    if (empty($sitePort)) {\\n        $sitePort = ($siteScheme === 'https') ? 443 : 80;\\n    }\\n\\n    $urlPort = parse_url($url, PHP_URL_PORT);\\n    $urlScheme = strtolower(parse_url($url, PHP_URL_SCHEME));\\n    if (empty($urlPort)) {\\n        $urlPort = ($urlScheme === 'https') ? 443 : 80;\\n    }\\n\\n    if ($host === $siteHost && $urlPort === $sitePort) {\\n        _error_log(\\\"isSSRFSafeURL: allowing same-domain request to {$host}:{$urlPort} (matches webSiteRootURL)\\\");\\n        return true;\\n    }\\n}\\n```\\n\\nThis ensures the shortcircuit only fires for requests to the exact same origin (scheme-implied port or explicit port) as the configured site URL.\", \"epss\": {\"percentage\": 0.003, \"percentile\": 0.21575}, \"ghsa_id\": \"GHSA-j432-4w3j-3w8j\", \"github_reviewed_at\": \"2026-04-14T23:22:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-j432-4w3j-3w8j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j432-4w3j-3w8j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41060\"}], \"nvd_published_at\": \"2026-04-21T23:16:21Z\", \"published_at\": \"2026-04-14T23:22:01Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-j432-4w3j-3w8j\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41060\", \"https://github.com/WWBN/AVideo/commit/a0156a6398362086390d949190f9d52a823000ba\", \"https://github.com/advisories/GHSA-j432-4w3j-3w8j\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-j432-4w3j-3w8j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"WWBN AVideo has a SSRF via same-domain hostname with alternate port bypasses isSSRFSafeURL\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:41:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-j432-4w3j-3w8j\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"wwbn/avideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j432-4w3j-3w8j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wwbn/avideo: <= 29.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41060"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wwbn/avideo"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.807665Z",
+  "provenance": {
+    "content_sha256": "31cb6b7444d0f1574f87058779c25af30258b3fd81f9d22090897353d64b2e2b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-14T23:22:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j432-4w3j-3w8j",
+  "status": "active",
+  "title": "WWBN AVideo has a SSRF via same-domain hostname with alternate port bypasses isSSRFSafeURL",
+  "updated_at": "2026-04-24T20:41:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j432-4w3j-3w8j"
+}

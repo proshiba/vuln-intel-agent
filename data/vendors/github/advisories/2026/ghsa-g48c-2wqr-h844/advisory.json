@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-28277\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"LangGraph checkpointers can load msgpack-encoded checkpoints that reconstruct Python objects during deserialization. If an attacker can modify checkpoint data in the backing store (for example, after a database compromise or other privileged write access to the persistence layer), they can potentially supply a crafted payload that triggers unsafe object reconstruction when the checkpoint is loaded.\\n\\nThis is a **post-exploitation / defense-in-depth** issue. Exploitation requires the ability to write attacker-controlled checkpoint bytes at rest. In most deployments that prerequisite already implies a serious incident; the additional risk is turning “checkpoint-store write access” into code execution in the application runtime, which can expand blast radius (for example by exposing environment variables or cloud credentials available to the runtime).\\n\\nThere is no evidence of exploitation in the wild, and LangGraph is not aware of a practical exploitation path in existing deployments today. This change is intended to reduce the blast radius of a checkpoint-store compromise.\\n\\n## Affected users / systems\\n\\nUsers may be affected if they:\\n\\n- use a persistent checkpointer (database, remote store, shared filesystem, etc.),\\n- load/resume from checkpoints, and\\n- operate in an environment where an attacker could gain privileged write access to checkpoint data in the backing store.\\n\\nThis issue requires the attacker to be able to modify persisted checkpoint bytes (or to compromise a trusted component that writes them). It is generally not reachable by an unauthenticated remote attacker in a correctly configured deployment.\\n\\n## Impact\\n- Potential **arbitrary code execution** or other unsafe side effects during checkpoint deserialization.\\n- Escalation from “write access to checkpoint store” to “code execution in the application runtime,” which may expose runtime secrets or provide access to other systems the runtime can reach.\\n\\n## Exploitation scenario (high level)\\n1. Attacker gains privileged write access to the checkpoint store (for example, via database compromise, leaked credentials, or abuse of an administrative data path).\\n2. Attacker writes a crafted checkpoint payload containing msgpack data intended to reconstruct dangerous objects.\\n3. Application resumes and deserializes the checkpoint; unsafe reconstruction could execute attacker-controlled behavior.\\n\\n## Mitigation / remediation\\nLangGraph provides an allowlist-based hardening mechanism for msgpack checkpoint deserialization.\\n\\n### Strict mode (environment variable)\\n- **`LANGGRAPH_STRICT_MSGPACK`**\\n  - When set truthy (`1`, `true`, `yes`), the default msgpack deserialization policy becomes strict.\\n  - Concretely: `JsonPlusSerializer()` will default `allowed_msgpack_modules` to `None` (strict) instead of `True` (warn-and-allow), unless `allowed_msgpack_modules=...` is explicitly passed.\\n\\n### `allowed_msgpack_modules` (serializer/checkpointer config)\\nThis setting controls what msgpack “ext” types are allowed to be reconstructed.\\n\\n- `True` (default when strict mode is not enabled): allow all ext types, but log a warning when deserializing a type that is not explicitly registered.\\n- `None` (strict): only a built-in safe set is reconstructed; other ext types are blocked.\\n- `[(module, class_name), ...]` (strict allowlist): the built-in safe set plus exactly the listed symbols are reconstructed (exact-match).\\n\\n### Built-in safe set\\nA small set of types is always treated as safe to reconstruct (for example `datetime` types, `uuid.UUID`, `decimal.Decimal`, `set`/`frozenset`/`deque`, `ipaddress` types, `pathlib` paths, `zoneinfo.ZoneInfo`, compiled regex patterns, and selected LangGraph internal types).\\n\\n### Automatically derived allowlist (only when compiling graphs)\\nWhen `LANGGRAPH_STRICT_MSGPACK` is enabled and `StateGraph` is compiled, LangGraph derives an allowlist from the graph’s schemas and channels and applies it to the checkpointer.\\n\\n- The allowlist is built by walking the state/input/output/context schemas (plus node/branch input schemas) and channel value/update types. It includes Pydantic v1/v2 models, dataclasses, enums, TypedDict field types, and common typing constructs (containers, unions, `Annotated`).\\n- LangGraph also includes a curated set of common LangChain message classes.\\n\\nThis derived allowlist is only applied if the selected checkpointer supports `with_allowlist(...)`. If a user is constructing serializers/checkpointers manually (or using a checkpointer that does not support allowlist propagation), they will need to configure `allowed_msgpack_modules` themselves.\\n\\n### Operational guidance\\n- Treat checkpoint stores as integrity-sensitive. Restrict write access and rotate credentials if compromise is suspected.\\n- Enable strict mode (`LANGGRAPH_STRICT_MSGPACK=true`) in production if feasible, and rely on schema-driven allowlisting to reduce incompatibilities.\\n- Avoid providing custom msgpack deserialization hooks that reconstruct arbitrary types unless checkpoint data is fully trusted.\\n\\n## Limitations / important notes\\n- If a checkpointer implementation does **not** support allowlist application (i.e., does not implement `with_allowlist`), allowlist enforcement may be skipped (with a warning). In that situation, strict expectations may not hold.\\n- If an application supplies a custom msgpack unpack hook (`ext_hook`), the custom hook controls reconstruction and can bypass the default allowlist checks (intentional escape hatch, but it weakens the protection).\\n\\n## LangSmith / hosted deployments note\\nLangSmith is not aware of this issue presenting risk to existing LangSmith-hosted deployments. The described threat model requires an attacker to tamper with the checkpoint persistence layer used by the deployment; typical hosted configurations are designed to prevent such access.\\n\\nFirst reported by:  yardenporat353\", \"epss\": {\"percentage\": 0.05219, \"percentile\": 0.91503}, \"ghsa_id\": \"GHSA-g48c-2wqr-h844\", \"github_reviewed_at\": \"2026-03-05T20:19:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-g48c-2wqr-h844\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g48c-2wqr-h844\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-28277\"}], \"nvd_published_at\": \"2026-03-05T20:16:15Z\", \"published_at\": \"2026-03-05T20:19:49Z\", \"references\": [\"https://github.com/langchain-ai/langgraph/security/advisories/GHSA-g48c-2wqr-h844\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-28277\", \"https://github.com/pypa/advisory-database/tree/main/vulns/langgraph/PYSEC-2026-83.yaml\", \"https://github.com/advisories/GHSA-g48c-2wqr-h844\"], \"repository_advisory_url\": \"https://api.github.com/repos/langchain-ai/langgraph/security-advisories/GHSA-g48c-2wqr-h844\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/langchain-ai/langgraph\", \"summary\": \"LangGraph checkpoint loading has unsafe msgpack deserialization\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-06T00:47:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-g48c-2wqr-h844\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.10\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"langgraph\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g48c-2wqr-h844",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "langgraph: <= 1.0.9"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-28277"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "known_exploited": false,
+    "mitigations": [],
+    "products": [
+      "langgraph"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.513285Z",
+  "provenance": {
+    "content_sha256": "767c46a5df1e825d96b4a3c7f889347d65edc55b43fde25084f781268f268b60",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-05T20:19:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g48c-2wqr-h844",
+  "status": "active",
+  "title": "LangGraph checkpoint loading has unsafe msgpack deserialization",
+  "updated_at": "2026-06-06T00:47:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g48c-2wqr-h844"
+}

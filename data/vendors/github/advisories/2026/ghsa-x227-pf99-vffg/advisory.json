@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/288231323?v=4\", \"events_url\": \"https://api.github.com/users/sour-exploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sour-exploit/followers\", \"following_url\": \"https://api.github.com/users/sour-exploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sour-exploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sour-exploit\", \"id\": 288231323, \"login\": \"sour-exploit\", \"node_id\": \"U_kgDOES4Pmw\", \"organizations_url\": \"https://api.github.com/users/sour-exploit/orgs\", \"received_events_url\": \"https://api.github.com/users/sour-exploit/received_events\", \"repos_url\": \"https://api.github.com/users/sour-exploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sour-exploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sour-exploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sour-exploit\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-350\", \"name\": \"Reliance on Reverse DNS Resolution for a Security-Critical Action\"}, {\"cwe_id\": \"CWE-1327\", \"name\": \"Binding to an Unrestricted IP Address\"}], \"description\": \"The MCP SSE server started via ToolsMCPServer.run_sse() / launch_tools_mcp_server(transport=\\\"sse\\\")\\nbinds to 0.0.0.0 by default and builds its Starlette application with no authentication middleware\\nand no Origin-header validation. The module mcp/mcp_security.py provides exactly the needed controls\\n(origin validation, DNS-rebinding detection, auth-header enforcement, a SecurityConfig), but none of\\nthese functions are ever called by any transport — they are dead code. Any host that can reach the\\nport can list and invoke every registered tool with no credentials, and a victim's browser can drive\\nthe same calls against a localhost instance via DNS rebinding.\\n\\nAffected code: src/praisonai-agents/praisonaiagents/mcp/mcp_server.py\\n- run_sse defaults host to all interfaces (line 245) and builds the app with only `debug` and `routes`\\n  - no `middleware=` and no per-route auth/origin gate (lines ~271-289):\\n      app = Starlette(debug=self._debug, routes=[\\n          Route(sse_path, endpoint=handle_sse),                          # \\\"/sse\\\"\\n          Mount(messages_path, app=sse_transport.handle_post_message),   # \\\"/messages/\\\"\\n      ])\\n      uvicorn.run(app, host=host, port=port)\\n- launch_tools_mcp_server also defaults host=\\\"0.0.0.0\\\" (line 301).\\n\\nsrc/praisonai-agents/praisonaiagents/mcp/mcp_security.py defines but the transports never call:\\n- is_valid_origin (line 30), is_potential_dns_rebinding (line 110), validate_auth_header (line 167),\\n  SecurityConfig.is_origin_allowed (line 236). These symbols are referenced only inside mcp_security.py\\n  and the __init__ re-export. (mcp_websocket.py's auth references are CLIENT-side, not server validation.)\\n\\nImpact:\\nlaunch_tools_mcp_server(transport=\\\"sse\\\") is the documented path for exposing tools over MCP. With the\\ndefaults above it is an unauthenticated, network-reachable tool-execution endpoint. Blast radius equals\\nthe capabilities of the registered tools; with file/shell/code-exec tools this is RCE. With no Origin\\ncheck, a malicious page the victim merely visits can rebind its hostname to 127.0.0.1 and issue the\\nJSON-RPC calls cross-origin against a developer's local server.\\n\\nProof of concept:\\nStatic proof (AST analysis of unmodified source):\\n  Check 1 - run_sse(host='0.0.0.0'); launch_tools_mcp_server(host='0.0.0.0')  -> EXPOSED\\n  Check 2 - Starlette(...) kwargs: ['debug','routes']  -> NO middleware= (no auth/origin gate)\\n  Check 3 - is_valid_origin / is_potential_dns_rebinding / validate_auth_header / SecurityConfig\\n            never called by any transport  -> DEAD CODE\\nLive exploitation against a running server:\\n  curl -N http://VICTIM:8080/sse\\n  #   event: endpoint  / data: /messages/?session_id=<sid>\\n  curl -X POST \\\"http://VICTIM:8080/messages/?session_id=<sid>\\\" -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"method\\\":\\\"initialize\\\",\\\"params\\\":{\\\"protocolVersion\\\":\\\"2024-11-05\\\",\\n         \\\"capabilities\\\":{},\\\"clientInfo\\\":{\\\"name\\\":\\\"x\\\",\\\"version\\\":\\\"1\\\"}}}'\\n  curl -X POST \\\"http://VICTIM:8080/messages/?session_id=<sid>\\\" -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"<tool>\\\",\\\"arguments\\\":{...}}}'\\nNo Authorization header anywhere. Browser DNS-rebinding variant drives the same calls cross-origin.\\n\\nRemediation:\\nWire in the existing mcp_security.py controls and fix defaults:\\n- Default run_sse(host=\\\"127.0.0.1\\\"); require explicit opt-in to bind 0.0.0.0.\\n- Attach Starlette middleware calling is_valid_origin / is_potential_dns_rebinding; reject bad origins.\\n- Enforce validate_auth_header when SecurityConfig.require_auth; default require_auth=True (and\\n  allow_missing_origin=False) for any non-loopback bind.\\n\\nDistinct from prior advisories:\\nThe accepted MCP advisories are tool-handler bugs — tools/call path traversal -> .pth RCE\\n(GHSA-9mqq-jqxf-grvw) and unauthenticated file read via workflow.show/validate (GHSA-9cr9-25q5-8prj).\\nThis is a transport-layer missing-auth/exposure: the SSE server never enforces auth or Origin validation\\nand ignores the security module the codebase ships. Closest in spirit to the default-insecure pattern\\n(GHSA-8444 / 86qc) but a different server and a different root cause (unwired controls, not an unset env var).\", \"ghsa_id\": \"GHSA-x227-pf99-vffg\", \"github_reviewed_at\": \"2026-06-18T13:55:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-x227-pf99-vffg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x227-pf99-vffg\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-18T13:55:54Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-x227-pf99-vffg\", \"https://github.com/advisories/GHSA-x227-pf99-vffg\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-x227-pf99-vffg\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: MCP SSE transport binds 0.0.0.0 with no authentication and no Origin validation; bundled SecurityConfig is never wired in\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T13:55:54Z\", \"url\": \"https://api.github.com/advisories/GHSA-x227-pf99-vffg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.59\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.6.59\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x227-pf99-vffg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: < 1.6.59"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.370046Z",
+  "provenance": {
+    "content_sha256": "e6a4c81b096f826d1b943dacdc299185e2be6e7e348273ac1b251ada95563582",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-18T13:55:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x227-pf99-vffg",
+  "status": "active",
+  "title": "PraisonAI: MCP SSE transport binds 0.0.0.0 with no authentication and no Origin validation; bundled SecurityConfig is never wired in",
+  "updated_at": "2026-06-18T13:55:54Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x227-pf99-vffg"
+}

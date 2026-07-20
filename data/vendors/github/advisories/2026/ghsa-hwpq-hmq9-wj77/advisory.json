@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/254038384?v=4\", \"events_url\": \"https://api.github.com/users/MinicoAI/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MinicoAI/followers\", \"following_url\": \"https://api.github.com/users/MinicoAI/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MinicoAI/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MinicoAI\", \"id\": 254038384, \"login\": \"MinicoAI\", \"node_id\": \"U_kgDODyRRcA\", \"organizations_url\": \"https://api.github.com/users/MinicoAI/orgs\", \"received_events_url\": \"https://api.github.com/users/MinicoAI/received_events\", \"repos_url\": \"https://api.github.com/users/MinicoAI/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MinicoAI/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MinicoAI/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MinicoAI\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44512\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-476\", \"name\": \"NULL Pointer Dereference\"}], \"description\": \"### Summary\\n\\nNull pointer dereference (SIGSEGV) in `Upsample_6_7::adapt_upsample_6_7()` (`onnx/version_converter/adapters/upsample_6_7.h:31`) when `convert_version()` processes a model with an Upsample node that has zero inputs. The adapter accesses `node->inputs()[0]->sizes()` without checking input count. 107-byte PoC crashes on Release build.\\n\\nThis is the same class of bug as the Cast adapter advisory (separate report) but in a different adapter, different file, and different operator.\\n\\n### Details\\n\\nThe Upsample 6→7 adapter validates attributes but not inputs:\\n```cpp\\n// upsample_6_7.h:20-33\\nvoid adapt_upsample_6_7(..., Node* node) const {\\n    ONNX_ASSERTM(\\n        node->hasAttribute(width_scale_symbol) && node->hasAttribute(height_scale_symbol),\\n        \\\"...\\\")  // Attribute check PASSES\\n\\n    auto width_scale = node->f(width_scale_symbol);\\n    auto height_scale = node->f(height_scale_symbol);\\n\\n    auto input_shape = node->inputs()[0]->sizes();\\n    //                 ^^^^^^^^^^^^^^^^^^^^\\n    //                 OOB when inputs().size() == 0 → SIGSEGV\\n}\\n```\\n\\nThe PoC has an Upsample node at opset 6 with the required `width_scale` and `height_scale` attributes but zero inputs. The attribute assertions pass, then `node->inputs()[0]` on an empty `ArrayRef`:\\n- Release builds (`NDEBUG`): bounds-check assertion compiled out → reads garbage pointer → SIGSEGV\\n- Debug builds: `assert(Index < Length)` at `array_ref.h:159` → SIGABRT\\n\\nAn Upsample node with zero inputs passes `graphProtoToGraph()` because the import code only resolves input names present in the protobuf.\\n\\n### PoC\\n```python\\nimport base64\\nimport onnx\\nfrom onnx import version_converter\\n\\npoc_b64 = \\\"CAI6YQo8EgFZIghVcHNhbXBsZSoVCgt3aWR0aF9zY2FsZRUAAABAoAEBKhYKDGhlaWdodF9zY2FsZRUAAABAoAEBEgR0ZXN0YhsKAVkSFgoUCAESEAoCCAEKAggBCgIIBAoCCARCBAoAEAY=\\\"\\n\\nmodel = onnx.load_from_string(base64.b64decode(poc_b64))\\n\\n# CRASHES — Upsample_6_7 adapter dereferences empty inputs array\\nversion_converter.convert_version(model, 7)  # SIGSEGV\\n```\\n\\n107-byte PoC. Confirmed SIGSEGV on both onnx 1.21.0 (pip) and 1.22.0 (source build).\\n\\n### Impact\\n\\nAny application that uses `onnx.version_converter.convert_version()` on untrusted models is vulnerable. This includes model conversion pipelines and tools that auto-upgrade opset versions for compatibility. The crash is unrecoverable (SIGSEGV). \\n\\nThis vulnerability is part of a systemic pattern across multiple version converter adapters. A full audit of all ~45 adapters was performed as part of the fix; eight adapters were found with the same class of unguarded indexed access (cast_9_8, softmax_12_13, softmax_13_12, upsample_6_7, upsample_9_10, group_normalization_20_21, broadcast_forward_compatibility, upsample_9_8) and all have been fixed in PR #7813.\", \"epss\": {\"percentage\": 0.00191, \"percentile\": 0.0887}, \"ghsa_id\": \"GHSA-hwpq-hmq9-wj77\", \"github_reviewed_at\": \"2026-07-07T13:02:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-hwpq-hmq9-wj77\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hwpq-hmq9-wj77\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44512\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T13:02:10Z\", \"references\": [\"https://github.com/onnx/onnx/security/advisories/GHSA-hwpq-hmq9-wj77\", \"https://github.com/onnx/onnx/pull/7916\", \"https://github.com/onnx/onnx/releases/tag/v1.22.0\", \"https://github.com/advisories/GHSA-hwpq-hmq9-wj77\"], \"repository_advisory_url\": \"https://api.github.com/repos/onnx/onnx/security-advisories/GHSA-hwpq-hmq9-wj77\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/onnx/onnx\", \"summary\": \"ONNX has Null Pointer Dereference in Upsample Version Converter Adapter (Zero Inputs)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T13:02:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-hwpq-hmq9-wj77\", \"vulnerabilities\": [{\"first_patched_version\": \"1.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"onnx\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.9.0, < 1.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hwpq-hmq9-wj77",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "onnx: >= 1.9.0, < 1.22.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44512"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "onnx"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.789890Z",
+  "provenance": {
+    "content_sha256": "983b2bc6938eec6c939e1bb5430d5bd19dbebaf5941e8fbecd817fe883f18015",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T13:02:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hwpq-hmq9-wj77",
+  "status": "active",
+  "title": "ONNX has Null Pointer Dereference in Upsample Version Converter Adapter (Zero Inputs)",
+  "updated_at": "2026-07-07T13:02:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hwpq-hmq9-wj77"
+}

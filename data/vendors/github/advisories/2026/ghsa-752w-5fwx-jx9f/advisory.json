@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/53107595?v=4\", \"events_url\": \"https://api.github.com/users/dmbs335/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dmbs335/followers\", \"following_url\": \"https://api.github.com/users/dmbs335/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dmbs335/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dmbs335\", \"id\": 53107595, \"login\": \"dmbs335\", \"node_id\": \"MDQ6VXNlcjUzMTA3NTk1\", \"organizations_url\": \"https://api.github.com/users/dmbs335/orgs\", \"received_events_url\": \"https://api.github.com/users/dmbs335/received_events\", \"repos_url\": \"https://api.github.com/users/dmbs335/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dmbs335/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dmbs335/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dmbs335\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-32597\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nPyJWT does not validate the `crit` (Critical) Header Parameter defined in\\nRFC 7515 §4.1.11. When a JWS token contains a `crit` array listing\\nextensions that PyJWT does not understand, the library accepts the token\\ninstead of rejecting it. This violates the **MUST** requirement in the RFC.\\n\\nThis is the same class of vulnerability as CVE-2025-59420 (Authlib),\\nwhich received CVSS 7.5 (HIGH).\\n\\n---\\n\\n## RFC Requirement\\n\\nRFC 7515 §4.1.11:\\n\\n> The \\\"crit\\\" (Critical) Header Parameter indicates that extensions to this\\n> specification and/or [JWA] are being used that **MUST** be understood and\\n> processed. [...] If any of the listed extension Header Parameters are\\n> **not understood and supported** by the recipient, then the **JWS is invalid**.\\n\\n---\\n\\n## Proof of Concept\\n\\n```python\\nimport jwt  # PyJWT 2.8.0\\nimport hmac, hashlib, base64, json\\n\\n# Construct token with unknown critical extension\\nheader = {\\\"alg\\\": \\\"HS256\\\", \\\"crit\\\": [\\\"x-custom-policy\\\"], \\\"x-custom-policy\\\": \\\"require-mfa\\\"}\\npayload = {\\\"sub\\\": \\\"attacker\\\", \\\"role\\\": \\\"admin\\\"}\\n\\ndef b64url(data):\\n    return base64.urlsafe_b64encode(data).rstrip(b\\\"=\\\").decode()\\n\\nh = b64url(json.dumps(header, separators=(\\\",\\\", \\\":\\\")).encode())\\np = b64url(json.dumps(payload, separators=(\\\",\\\", \\\":\\\")).encode())\\nsig = b64url(hmac.new(b\\\"secret\\\", f\\\"{h}.{p}\\\".encode(), hashlib.sha256).digest())\\ntoken = f\\\"{h}.{p}.{sig}\\\"\\n\\n# Should REJECT — x-custom-policy is not understood by PyJWT\\ntry:\\n    result = jwt.decode(token, \\\"secret\\\", algorithms=[\\\"HS256\\\"])\\n    print(f\\\"ACCEPTED: {result}\\\")\\n    # Output: ACCEPTED: {'sub': 'attacker', 'role': 'admin'}\\nexcept Exception as e:\\n    print(f\\\"REJECTED: {e}\\\")\\n```\\n\\n**Expected:** `jwt.exceptions.InvalidTokenError: Unsupported critical extension: x-custom-policy`\\n**Actual:** Token accepted, payload returned.\\n\\n### Comparison with RFC-compliant library\\n\\n```python\\n# jwcrypto — correctly rejects\\nfrom jwcrypto import jwt as jw_jwt, jwk\\nkey = jwk.JWK(kty=\\\"oct\\\", k=b64url(b\\\"secret\\\"))\\njw_jwt.JWT(jwt=token, key=key, algs=[\\\"HS256\\\"])\\n# raises: InvalidJWSObject('Unknown critical header: \\\"x-custom-policy\\\"')\\n```\\n\\n---\\n\\n## Impact\\n\\n- **Split-brain verification** in mixed-library deployments (e.g., API\\n  gateway using jwcrypto rejects, backend using PyJWT accepts)\\n- **Security policy bypass** when `crit` carries enforcement semantics\\n  (MFA, token binding, scope restrictions)\\n- **Token binding bypass** — RFC 7800 `cnf` (Proof-of-Possession) can be\\n  silently ignored\\n- See CVE-2025-59420 for full impact analysis\\n\\n---\\n\\n## Suggested Fix\\n\\nIn `jwt/api_jwt.py`, add validation in `_validate_headers()` or\\n`decode()`:\\n\\n```python\\n_SUPPORTED_CRIT = {\\\"b64\\\"}  # Add extensions PyJWT actually supports\\n\\ndef _validate_crit(self, headers: dict) -> None:\\n    crit = headers.get(\\\"crit\\\")\\n    if crit is None:\\n        return\\n    if not isinstance(crit, list) or len(crit) == 0:\\n        raise InvalidTokenError(\\\"crit must be a non-empty array\\\")\\n    for ext in crit:\\n        if ext not in self._SUPPORTED_CRIT:\\n            raise InvalidTokenError(f\\\"Unsupported critical extension: {ext}\\\")\\n        if ext not in headers:\\n            raise InvalidTokenError(f\\\"Critical extension {ext} not in header\\\")\\n```\\n\\n---\\n\\n## CWE\\n\\n- CWE-345: Insufficient Verification of Data Authenticity\\n- CWE-863: Incorrect Authorization\\n\\n## References\\n\\n- [RFC 7515 §4.1.11](https://www.rfc-editor.org/rfc/rfc7515.html#section-4.1.11)\\n- [CVE-2025-59420 — Authlib crit bypass (CVSS 7.5)](https://osv.dev/vulnerability/GHSA-9ggr-2464-2j32)\\n- [RFC 7800 — Proof-of-Possession Key Semantics](https://www.rfc-editor.org/rfc/rfc7800)\", \"epss\": {\"percentage\": 0.00269, \"percentile\": 0.18506}, \"ghsa_id\": \"GHSA-752w-5fwx-jx9f\", \"github_reviewed_at\": \"2026-03-13T20:05:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-752w-5fwx-jx9f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-752w-5fwx-jx9f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-32597\"}], \"nvd_published_at\": \"2026-03-13T19:55:09Z\", \"published_at\": \"2026-03-13T20:05:04Z\", \"references\": [\"https://github.com/jpadilla/pyjwt/security/advisories/GHSA-752w-5fwx-jx9f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-32597\", \"https://lists.debian.org/debian-lts-announce/2026/05/msg00008.html\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyjwt/PYSEC-2026-120.yaml\", \"https://github.com/advisories/GHSA-752w-5fwx-jx9f\"], \"repository_advisory_url\": \"https://api.github.com/repos/jpadilla/pyjwt/security-advisories/GHSA-752w-5fwx-jx9f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jpadilla/pyjwt\", \"summary\": \"PyJWT accepts unknown `crit` header extensions\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T19:07:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-752w-5fwx-jx9f\", \"vulnerabilities\": [{\"first_patched_version\": \"2.12.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"PyJWT\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-752w-5fwx-jx9f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "PyJWT: <= 2.11.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-59420",
+      "CVE-2026-32597"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "PyJWT"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.413975Z",
+  "provenance": {
+    "content_sha256": "116166d94f31669342fd41fa19aa385a1369b56cb353e4baab6a755cf16b145d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-13T20:05:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-752w-5fwx-jx9f",
+  "status": "active",
+  "title": "PyJWT accepts unknown `crit` header extensions",
+  "updated_at": "2026-06-08T19:07:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-752w-5fwx-jx9f"
+}

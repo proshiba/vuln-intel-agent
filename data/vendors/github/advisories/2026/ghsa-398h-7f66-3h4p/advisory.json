@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/53905346?v=4\", \"events_url\": \"https://api.github.com/users/0xVijay/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xVijay/followers\", \"following_url\": \"https://api.github.com/users/0xVijay/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xVijay/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xVijay\", \"id\": 53905346, \"login\": \"0xVijay\", \"node_id\": \"MDQ6VXNlcjUzOTA1MzQ2\", \"organizations_url\": \"https://api.github.com/users/0xVijay/orgs\", \"received_events_url\": \"https://api.github.com/users/0xVijay/received_events\", \"repos_url\": \"https://api.github.com/users/0xVijay/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xVijay/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xVijay/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xVijay\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54495\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-668\", \"name\": \"Exposure of Resource to Wrong Sphere\"}], \"description\": \"## Summary\\n\\nA namespaced `FeatureFlagSource` or `InProcessConfiguration` resource can be referenced cross-namespace via the `openfeature.dev/featureflagsource` annotation using the documented `{NAMESPACE}/{NAME}` syntax. The operator resolves the referenced resource cluster-wide and materializes its contents (env vars, flagd sidecar arguments including `httpSyncBearerToken`, sync URIs, supporting ConfigMaps) into the referencing workload.\\n\\nOn multi-tenant clusters that treat namespaces as trust boundaries, a tenant who can deploy a controller-owned workload in their own namespace can cause the operator to read another tenant's `FeatureFlagSource` / `InProcessConfiguration` spec contents.\\n\\n## Impact\\n\\n- **Single-tenant clusters**: not impacted.\\n- **Multi-tenant clusters using namespaces as trust boundaries**: tenant-to-tenant disclosure of any data placed inline in `FeatureFlagSource` / `InProcessConfiguration` spec, including `spec.envVars` literal values, `spec.httpSyncBearerToken`, and sync URIs.\\n\\n## Behavior is documented\\n\\nThe cross-namespace `{NAMESPACE}/{NAME}` annotation syntax is intentional and documented in [`docs/annotations.md`](https://github.com/open-feature/open-feature-operator/blob/main/docs/annotations.md) and [`docs/feature_flag_source.md`](https://github.com/open-feature/open-feature-operator/blob/main/docs/feature_flag_source.md). The operator's cluster-wide RBAC scope is intentional. Namespace-as-trust-boundary is not part of the operator's current stated security model.\\n\\nThis advisory makes the tenancy assumption explicit and tracks the architectural change that will eliminate the implicit cross-namespace pattern.\\n\\n## Corrections to the original report\\n\\nTwo technical points in the original report require correction:\\n\\n1. **`secretKeyRef` / `configMapKeyRef` cross-namespace disclosure is not possible via this path.** Kubelet resolves these as `LocalObjectReference` against the pod's own namespace; the operator does not bypass that. The actual disclosure surface is `FeatureFlagSource` / `InProcessConfiguration` spec contents the operator itself materializes (inline `envVars` values, `httpSyncBearerToken`, sync URIs).\\n2. **`create featureflagsources` is not a prerequisite.** The webhook rejects pods without OwnerReferences ([`pod_webhook.go:75-77`](https://github.com/open-feature/open-feature-operator/blob/main/internal/webhook/pod_webhook.go#L75)), so the prerequisite is `create` on a workload controller (`deployments`, `statefulsets`, `daemonsets`, `jobs`, `cronjobs`, `replicasets`) in a namespace the attacker controls. `FeatureFlagSource` create in any namespace is not required.\\n\\n## Mitigations\\n\\nAs with any Kubernetes CRD, treat the spec content of `FeatureFlagSource` and `InProcessConfiguration` as readable by anyone with read access to the resource, and don't place plaintext secrets in CR spec fields. Fields most likely to bite users:\\n\\n- `spec.sources[].source`, when the URI embeds credentials (e.g. `https://user:pass@host/repo`)\\n- `spec.sources[].certPath`, if the path itself is sensitive\\n- inline `spec.envVars[].value` (use `valueFrom.secretKeyRef` instead; kubelet enforces same-namespace resolution and the secret value is not stored in the CR)\\n\\nIf developers treat namespaces as trust boundaries:\\n\\n- restrict `create` on `featureflagsources` / `inprocessconfigurations` via RBAC where feasible,\\n\\n## Roadmap\\n\\nA future release will introduce explicit cluster-scoped CRDs (`ClusterFeatureFlagSource`, `ClusterInProcessConfiguration`) and remove implicit cross-namespace resolution. This is a breaking change tracked in [#847](https://github.com/open-feature/open-feature-operator/issues/847).\\n\\n## Precedent\\n\\nThis class of issue (authenticated namespace tenant abuses an unenforced cluster-wide surface that crosses an assumed namespace boundary) has Kubernetes precedent: CVE-2020-8554 (External IPs) was accepted as documented posture and mitigated via an opt-in admission plugin.\\n\\n## Credit\\n\\nReported by @0xVijay. Thanks for the disclosure. This appears to be an example of https://cwe.mitre.org/data/definitions/668.html. In terms of how it ended up here, it's more of an unimplemented security feature than an \\\"bug\\\". It seems to deviate from reasonable expectations and conventions in the K8s ecosystem. See https://nvd.nist.gov/vuln/detail/cve-2020-8554 as an example of a comparable vulnerability.\", \"ghsa_id\": \"GHSA-398h-7f66-3h4p\", \"github_reviewed_at\": \"2026-07-15T22:44:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-398h-7f66-3h4p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-398h-7f66-3h4p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54495\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T22:44:48Z\", \"references\": [\"https://github.com/open-feature/open-feature-operator/security/advisories/GHSA-398h-7f66-3h4p\", \"https://github.com/open-feature/open-feature-operator/issues/847\", \"https://github.com/advisories/GHSA-398h-7f66-3h4p\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-feature/open-feature-operator/security-advisories/GHSA-398h-7f66-3h4p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-feature/open-feature-operator\", \"summary\": \"open-feature-operator: Cross-namespace FeatureFlagSource and InProcessConfiguration resolution exposes spec contents on multi-tenant clusters\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T22:44:49Z\", \"url\": \"https://api.github.com/advisories/GHSA-398h-7f66-3h4p\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/open-feature/open-feature-operator\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.9.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-398h-7f66-3h4p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/open-feature/open-feature-operator: <= 0.9.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2020-8554",
+      "CVE-2026-54495"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/open-feature/open-feature-operator"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.837116Z",
+  "provenance": {
+    "content_sha256": "5b26085110cea0d0560cedf4614afe83edb74f6318675d694595b5e305083db6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T22:44:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-398h-7f66-3h4p",
+  "status": "active",
+  "title": "open-feature-operator: Cross-namespace FeatureFlagSource and InProcessConfiguration resolution exposes spec contents on multi-tenant clusters",
+  "updated_at": "2026-07-15T22:44:49Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-398h-7f66-3h4p"
+}

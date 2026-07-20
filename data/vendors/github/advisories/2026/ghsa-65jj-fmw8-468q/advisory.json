@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/237784870?v=4\", \"events_url\": \"https://api.github.com/users/AnticsDecoded/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AnticsDecoded/followers\", \"following_url\": \"https://api.github.com/users/AnticsDecoded/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AnticsDecoded/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AnticsDecoded\", \"id\": 237784870, \"login\": \"AnticsDecoded\", \"node_id\": \"U_kgDODixPJg\", \"organizations_url\": \"https://api.github.com/users/AnticsDecoded/orgs\", \"received_events_url\": \"https://api.github.com/users/AnticsDecoded/received_events\", \"repos_url\": \"https://api.github.com/users/AnticsDecoded/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AnticsDecoded/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AnticsDecoded/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AnticsDecoded\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1311133?v=4\", \"events_url\": \"https://api.github.com/users/mpguerra/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mpguerra/followers\", \"following_url\": \"https://api.github.com/users/mpguerra/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mpguerra/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mpguerra\", \"id\": 1311133, \"login\": \"mpguerra\", \"node_id\": \"MDQ6VXNlcjEzMTExMzM=\", \"organizations_url\": \"https://api.github.com/users/mpguerra/orgs\", \"received_events_url\": \"https://api.github.com/users/mpguerra/received_events\", \"repos_url\": \"https://api.github.com/users/mpguerra/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mpguerra/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mpguerra/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mpguerra\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52734\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-401\", \"name\": \"Missing Release of Memory after Effective Lifetime\"}], \"description\": \"### Am I affected\\n\\nYou are affected if:\\n\\n1. You run `zebrad` up to and including `v4.4.1`.\\n2. Your node accepts inbound P2P connections (`network.listen_addr` is set, which is the default).\\n3. Your node's mempool is active (node is synced near the chain tip).\\n\\nAll default configurations are affected.\\n\\n### Summary\\n\\nThe mempool download pipeline's `cancel_handles` map retains entries for transactions whose verification times out at the outer `RATE_LIMIT_DELAY` (73-second) boundary. The `tokio::time::error::Elapsed` error carries no payload, so the transaction ID is unrecoverable and the corresponding `cancel_handles` entry (including the full `Gossip::Tx(UnminedTx)`, up to ~2 MB) is never removed. Entries accumulate monotonically with no upper bound or garbage collection, leading to eventual out-of-memory process termination.\\n\\n### Details\\n\\n`Downloads::poll_next()` at `zebrad/src/components/mempool/downloads.rs:215-228` handles three terminal states for a verification task:\\n\\n- `Ok(Ok(...))`: success. Calls `cancel_handles.remove(&tx.transaction.id)`. Correct.\\n- `Ok(Err(...))`: verification error. Calls `cancel_handles.remove(&hash)`. Correct.\\n- `Err(elapsed)`: outer timeout. Returns `Err(elapsed)` without removing anything. **Bug.**\\n\\n`tokio::time::error::Elapsed` has no payload, so the timed-out transaction's `UnminedTxId` is unrecoverable from the error. The consumer at `zebrad/src/components/mempool.rs:663-672` explicitly acknowledges this gap with a TODO comment.\\n\\nThe only cleanup paths for `cancel_handles` are `cancel(mined_ids)` (removes entries matching mined transaction IDs; attacker transactions are never mined) and `cancel_all()` (clears everything on shutdown or chain reset). No periodic GC, no time-based eviction, and no count cap exists.\\n\\nFor direct `tx` pushes (`Gossip::Tx`), the retained entry holds the full deserialized transaction, which can be up to ~9 MB in memory for a transaction near the transparent-output extreme. Per-connection leak rate at worst case: ~685 KB/s (~2.4 GB/hour).\\n\\n### Patches\\n\\nThe fix preserves the `UnminedTxId` through the timeout error path: wrap the timeout future so the spawned task's outer error carries the txid (e.g., `Err((txid, elapsed))`). In `Downloads::poll_next()`, on the timeout arm, call `cancel_handles.remove(&txid)`.\\n\\n### Workarounds\\n\\nThere is no configuration-level workaround. Restarting the node clears the accumulated entries. Operators running in memory-constrained environments (containers with cgroup limits) may see the process killed by the OOM killer before natural recovery.\\n\\n### Impact\\n\\nGradual, unbounded memory exhaustion of a Zebra node from unauthenticated P2P traffic. The leak is monotonic (entries are never freed under normal operation) but slow (~685 KB/s per connection worst case). An attacker must sustain traffic for hours to exhaust typical server memory. The node continues operating normally until memory pressure becomes critical, at which point the OS OOM killer terminates the process or the node degrades due to swap pressure. No consensus impact, no fund loss, no on-disk corruption.\\n\\n### Credit\\n\\nReported by `@AnticsDecoded` via a private GitHub Security Advisory submission. Working E2E reproduction on a live regtest node with staged parent/child transaction dependencies.\", \"ghsa_id\": \"GHSA-65jj-fmw8-468q\", \"github_reviewed_at\": \"2026-07-02T20:12:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-65jj-fmw8-468q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-65jj-fmw8-468q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52734\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T20:12:35Z\", \"references\": [\"https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-65jj-fmw8-468q\", \"https://github.com/ZcashFoundation/zebra/blob/d4cd662c716382f6397d2a730148025a1ca79fec/zebrad/src/components/mempool.rs#L663-L672\", \"https://github.com/ZcashFoundation/zebra/blob/d4cd662c716382f6397d2a730148025a1ca79fec/zebrad/src/components/mempool/downloads.rs#L215-L228\", \"https://github.com/advisories/GHSA-65jj-fmw8-468q\"], \"repository_advisory_url\": \"https://api.github.com/repos/ZcashFoundation/zebra/security-advisories/GHSA-65jj-fmw8-468q\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ZcashFoundation/zebra\", \"summary\": \"zebrad has unbounded memory leak in mempool download pipeline via timeout path cancel_handles retention\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T20:12:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-65jj-fmw8-468q\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.0\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"zebrad\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.4.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-65jj-fmw8-468q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "zebrad: <= 4.4.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-52734"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "zebrad"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.146970Z",
+  "provenance": {
+    "content_sha256": "9dcda1f1802ff8a960ac5ae1fd0a1f34df3a7a96abafd6645f3e2b41e88ed303",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T20:12:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-65jj-fmw8-468q",
+  "status": "active",
+  "title": "zebrad has unbounded memory leak in mempool download pipeline via timeout path cancel_handles retention",
+  "updated_at": "2026-07-02T20:12:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-65jj-fmw8-468q"
+}

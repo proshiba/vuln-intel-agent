@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-613\", \"name\": \"Insufficient Session Expiration\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nAuthorization for scoped (agent) MCP callers is enforced **inline, per tool**, and is applied inconsistently — several mutating tools silently omit the ancestry/workspace check that their siblings perform. Because the MCP server authenticates all outbound gRPC with the full server API key and the backend gRPC handlers perform **no caller-based authorization**, the MCP tool layer is the *sole* authorization boundary. A malicious or prompt-injected scoped agent can therefore perform cross-task and cross-session operations it should not be allowed to (an IDOR / privilege-boundary bypass).\\n\\nThis advisory bundles the audit's **Systemic Pattern A** findings: **F2, F6, F7, F12** (and the duplicate F19).\\n\\n## Affected versions\\n\\n`@grackle-ai/mcp` (with `@grackle-ai/plugin-core` / `@grackle-ai/auth`) at **0.132.1** and earlier.\\n\\n## Root cause\\n\\n- `mcp-server.ts:111-127` (`createGrpcClients`) sets `Authorization: Bearer ${apiKey}` (the full server key) on every outbound gRPC call.\\n- Backend handlers (`updateTask`, `deleteTask`, `resumeTask`, `killAgent`, `getTask` in `plugin-core`) take only the request message — no `AuthContext` — and act on whatever ID is passed.\\n- Therefore scope must be enforced in each MCP tool handler. Some call `assertCallerIsAncestor` (`task_complete`, `task_start`, `session_attach`, `session_send_input`); their destructive siblings do not. New tools that forget the check **fail open**.\\n\\n## F2 — task_update / task_delete / task_resume bypass ancestry (High)\\n\\n**Location:** `packages/mcp/src/tools/task.ts:226` (task_update), `:393` (task_delete), `:465` (task_resume).\\n\\nThese accept an arbitrary `taskId` with only a `ROOT_TASK_ID` special-case and no `assertCallerIsAncestor`. The central dispatcher hardcodes its workspace gate to `name === \\\"task_show\\\"`, and these tools' Zod schemas have no `workspaceId` field (so the blanket injection is stripped). They are not in `DEFAULT_SCOPED_MCP_TOOLS` but **are** in the shipped `ORCHESTRATOR_MCP_TOOLS` / `ADMIN_MCP_TOOLS` presets.\\n\\n**Exploit:** a scoped agent under the orchestrator persona learns a sibling/parent/cross-workspace task ID (via `task_list`/`task_search`), then `task_delete {taskId: <victim>}` (permanently destroys another agent's or the human parent's work) or `task_update` to flip a sibling to `complete`/`failed` or rewrite its dependency DAG and budgets.\\n\\n## F6 — session_kill / session_resume bypass ancestry (Medium)\\n\\n**Location:** `packages/mcp/src/tools/session.ts:95` (session_resume), `:178` (session_kill).\\n\\nCall `client.killAgent` / `client.resumeAgent` directly with no auth context, unlike `session_attach`/`session_send_input`. `session_kill` is in the orchestrator preset. **Exploit:** cross-session SIGKILL DoS against a sibling agent or the root orchestrator; foreign session resume.\\n\\n## F7 — Workspaceless scoped token fails open to all workspaces (Medium)\\n\\n**Location:** `packages/mcp/src/mcp-server.ts:565-600`.\\n\\nThe per-task cross-workspace check (`task_show` block) is gated on `authContext.workspaceId` being truthy. A task created without a workspace (a supported config) mints a scoped token with `pid: \\\"\\\"` → `workspaceId: undefined`, so the check is skipped and the injected `workspaceId` becomes `\\\"\\\"`, which the backend treats as \\\"all workspaces.\\\" **Exploit:** a malicious agent in a workspaceless session calls `task_list` (no args) → reads every task in every workspace, then `task_show {taskId}` cross-workspace (title/description/branch/review-notes). `schedule_show` (in the default scoped allowlist) resolves by ID with no workspace check. Read-only cross-workspace disclosure.\\n\\n## F12 — Scoped-token revocation is dead code (Low)\\n\\n**Location:** `packages/auth/src/scoped-token.ts:23,142-149`.\\n\\nThe consuming check is wired (`auth-middleware.ts:90-92`), but `revokeTask()` is **never called outside tests** — no task-abort/stop flow invokes it — and the backing `revokedTasks` Map is in-memory only (lost on restart). A compromised agent that exfiltrated its scoped token keeps authenticating for the full 24h TTL regardless of task lifecycle.\\n\\n## Remediation\\n\\n- **Systemic fix:** enforce scope **centrally** in the `CallToolRequest` dispatcher (`mcp-server.ts`) via a per-tool `targetTaskIdArg` / `targetSessionIdArg` descriptor so any tool that targets a task/session **fails closed** unless the caller is an ancestor (or self).\\n- Immediately, add `assertCallerIsAncestor` (or self-or-ancestor) to `task_update`, `task_delete`, `task_resume`, `session_kill`, `session_resume`, mirroring `task_complete`/`task_start`.\\n- F7: do **not** fail open on empty `workspaceId` — treat a scoped non-root caller with no workspace as having access to *no* workspace; apply the `task_show` membership check whenever the caller is scoped and not `ROOT_TASK_ID`; add a per-id membership check to `schedule_show`.\\n- F12: wire `revokeTask()` into task-abort/stop flows with SQLite-backed persistence (like channel-grant revocation), or remove the dead API and document the 24h window.\\n- Add regression tests mirroring the existing `task_complete` ancestor tests for each mutator.\\n\\n## CWEs\\n\\nCWE-862 (Missing Authorization), CWE-639 (Authorization Bypass Through User-Controlled Key / IDOR), CWE-613 (Insufficient Session Expiration).\", \"ghsa_id\": \"GHSA-f9ff-5x35-7gfw\", \"github_reviewed_at\": \"2026-07-02T19:35:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-f9ff-5x35-7gfw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f9ff-5x35-7gfw\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T19:35:03Z\", \"references\": [\"https://github.com/nick-pape/grackle/security/advisories/GHSA-f9ff-5x35-7gfw\", \"https://github.com/advisories/GHSA-f9ff-5x35-7gfw\"], \"repository_advisory_url\": \"https://api.github.com/repos/nick-pape/grackle/security-advisories/GHSA-f9ff-5x35-7gfw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nick-pape/grackle\", \"summary\": \"Grackle: Fail-open authorization in the MCP tool layer lets scoped agents perform cross-task and cross-session mutations (IDOR)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T19:35:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-f9ff-5x35-7gfw\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@grackle-ai/mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.132.1\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@grackle-ai/plugin-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.132.1\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@grackle-ai/auth\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.132.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f9ff-5x35-7gfw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@grackle-ai/auth: <= 0.132.1",
+      "@grackle-ai/mcp: <= 0.132.1",
+      "@grackle-ai/plugin-core: <= 0.132.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@grackle-ai/auth",
+      "@grackle-ai/mcp",
+      "@grackle-ai/plugin-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.185577Z",
+  "provenance": {
+    "content_sha256": "24796e974e4aa18119ffe2d2c024b13f92d89d7675cc576aebf19a6b420a88a8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T19:35:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f9ff-5x35-7gfw",
+  "status": "active",
+  "title": "Grackle: Fail-open authorization in the MCP tool layer lets scoped agents perform cross-task and cross-session mutations (IDOR)",
+  "updated_at": "2026-07-02T19:35:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f9ff-5x35-7gfw"
+}

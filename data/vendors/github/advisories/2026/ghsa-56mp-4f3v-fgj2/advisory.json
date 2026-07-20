@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/235860593?v=4\", \"events_url\": \"https://api.github.com/users/Yunkaiwjs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yunkaiwjs/followers\", \"following_url\": \"https://api.github.com/users/Yunkaiwjs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yunkaiwjs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yunkaiwjs\", \"id\": 235860593, \"login\": \"Yunkaiwjs\", \"node_id\": \"U_kgDODg7ycQ\", \"organizations_url\": \"https://api.github.com/users/Yunkaiwjs/orgs\", \"received_events_url\": \"https://api.github.com/users/Yunkaiwjs/received_events\", \"repos_url\": \"https://api.github.com/users/Yunkaiwjs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yunkaiwjs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yunkaiwjs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yunkaiwjs\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50551\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"SiYuan v3.6.5 and earlier versions contain a stored cross-site scripting (XSS) vulnerability in the Attribute View (database) asset cell renderer that escalates to remote code execution (RCE) in the Electron desktop client. This is a neighbor-bug of CVE-2026-44588: the fix for -44588 used `escapeAriaLabel()` (double-escapes `<`), but the AV asset renderers were left using the weaker `escapeAttr()` (escapes only quotes) or no escaping at all.\\n\\n  ## Vulnerability Details\\n\\n  The Electron renderer is configured with `nodeIntegration: true` and `contextIsolation: false` (app/electron/main.js:307), allowing any JavaScript executing in the renderer to directly access Node.js APIs including `require('child_process')`.\\n\\n  Two XSS sinks exist.\\n\\n  ### Sink 1 (Direct Stored XSS - triggers on page load)\\n\\n  `app/src/protyle/render/av/cell.ts:1008`:\\n\\n      text += `<span class=\\\"b3-chip av__celltext--url ariaLabel\\\" aria-label=\\\"${escapeAttr(item.content)}\\\" data-name=\\\"${escapeAttr(item.name)}\\\"\\n  data-url=\\\"${escapeAttr(item.content)}\\\">${item.name || item.content}</span>`;\\n\\n  The `>${item.name || item.content}</span>` portion is raw user input with zero escaping.\\n\\n  `app/src/protyle/render/av/blockAttr.ts:93` (even worse - completely unescaped):\\n\\n      html += `<img loading=\\\"lazy\\\" class=\\\"av__cellassetimg ariaLabel\\\" aria-label=\\\"${item.content}\\\" src=\\\"${getCompressURL(item.content)}\\\">`;\\n\\n  Rendered via `action.ts:860`: `cellElement.innerHTML = renderCell(...)` results in immediate XSS on page load.\\n\\n  ### Sink 2 (Hover-triggered XSS via aria-label round-trip)\\n\\n  - Same lines emit `aria-label=\\\"${escapeAttr(item.content)}\\\"` on `.ariaLabel` elements.\\n  - `escapeAttr()` (util/escape.ts:14) escapes only `\\\"` and `'` — NOT `<` or `>`.\\n  - `popover.ts:33` global mouseover handler reads `aria-label` via `getAttribute` (which attribute-decodes entities).\\n  - Line 144: `showTooltip(decodeURIComponent(tip), ...)` then `tooltip.ts:41`: `messageElement.innerHTML = message` results in XSS on hover.\\n\\n  ### Source\\n\\n  - `app/src/protyle/render/av/asset.ts:405`: `addAssetLink()` reads user input from a free-form `<textarea>` with no sanitization.\\n  - Kernel stores `MAsset.Content` raw (kernel/av/value.go:53), no server-side sanitization.\\n\\n  ## Attack Vector\\n\\n  1. Attacker creates a malicious note containing an Attribute View (database).\\n  2. Attacker adds an asset cell with link content: `<img src=x onerror=require('child_process').exec('calc')>`\\n  3. Victim opens the note for immediate RCE (Sink 1), or hovers over the cell for RCE (Sink 2).\\n  4. In a sync/collaboration scenario, the malicious note propagates to all users.\\n\\n  ## Proof of Concept\\n\\n  Payload (Direct XSS) — in an AV asset cell link field, enter:\\n\\n      <img src=x onerror=alert(document.domain)>\\n\\n  For RCE in Electron desktop:\\n\\n      <img src=x onerror=require('child_process').exec('calc')>\\n\\n  ### Steps to Reproduce\\n\\n  1. Open SiYuan desktop app (v3.6.5).\\n  2. Create a new document.\\n  3. Insert an Attribute View (database): `/` then select \\\"Table\\\".\\n  4. Add a column of type \\\"Asset\\\".\\n  5. Click the asset cell, then \\\"Add Link\\\".\\n  6. In the \\\"Link\\\" textarea, paste: `<img src=x onerror=alert(1)>`\\n  7. Leave \\\"Title\\\" empty or fill with benign text.\\n  8. Click outside the dialog to save.\\n  9. Observe: Alert fires immediately (Sink 1). Hovering over the cell also triggers (Sink 2).\\n\\n  ## Impact\\n\\n  - Remote Code Execution on victim's system via malicious note sync/import.\\n  - Data exfiltration: attacker can read all notes, access filesystem, steal credentials.\\n  - Persistence: malicious payload stored in `.sy` files, executes on every open.\\n\\n  ## Suggested Fix\\n\\n  1. Replace `escapeAttr()` with `escapeAriaLabel()` for all `aria-label` attributes in AV cell renderers.\\n  2. Escape `item.name` and `item.content` with `escapeHtml()` before concatenating into element text content.\\n\\n  Affected files: `app/src/protyle/render/av/cell.ts`, `app/src/protyle/render/av/blockAttr.ts`, `app/src/protyle/render/av/asset.ts`.\\n\\n  ## Additional Context\\n\\n  This vulnerability is a neighbor-bug of CVE-2026-44588. The fix for -44588 correctly used `escapeAriaLabel()` (which double-escapes `<` to survive the attribute -> `getAttribute` -> `innerHTML` round-trip), but the AV asset cell renderers were left using the weaker `escapeAttr()` or no escaping. This is part of a pattern of incomplete fixes in SiYuan (see also CVE-2026-33066, CVE-2026-29183). The long-term fix should set Electron`contextIsolation: true` and `nodeIntegration: false`.\\n\\n  ## Report\\n Reporter (GitHub: Yunkaiwjs).\", \"epss\": {\"percentage\": 0.0044, \"percentile\": 0.35513}, \"ghsa_id\": \"GHSA-56mp-4f3v-fgj2\", \"github_reviewed_at\": \"2026-07-10T20:37:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-56mp-4f3v-fgj2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-56mp-4f3v-fgj2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50551\"}], \"nvd_published_at\": \"2026-06-24T22:16:47Z\", \"published_at\": \"2026-07-10T20:37:04Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-56mp-4f3v-fgj2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50551\", \"https://github.com/advisories/GHSA-56mp-4f3v-fgj2\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-56mp-4f3v-fgj2\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Stored XSS to RCE via Unsanitized Attribute View Asset Cell Content\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T20:37:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-56mp-4f3v-fgj2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260628153353-2d5d72223df4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260628153353-2d5d72223df4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-56mp-4f3v-fgj2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260628153353-2d5d72223df4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-29183",
+      "CVE-2026-33066",
+      "CVE-2026-44588",
+      "CVE-2026-50551"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.212038Z",
+  "provenance": {
+    "content_sha256": "b10d5a65fc75c083b92d578161c4c09eafd7b091fac7ed34296fa2b29b051ef5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T20:37:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-56mp-4f3v-fgj2",
+  "status": "active",
+  "title": "SiYuan: Stored XSS to RCE via Unsanitized Attribute View Asset Cell Content",
+  "updated_at": "2026-07-10T20:37:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-56mp-4f3v-fgj2"
+}

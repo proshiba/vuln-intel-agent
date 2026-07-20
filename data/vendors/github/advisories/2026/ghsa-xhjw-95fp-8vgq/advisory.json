@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/47030113?v=4\", \"events_url\": \"https://api.github.com/users/tamemghq/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tamemghq/followers\", \"following_url\": \"https://api.github.com/users/tamemghq/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tamemghq/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tamemghq\", \"id\": 47030113, \"login\": \"tamemghq\", \"node_id\": \"MDQ6VXNlcjQ3MDMwMTEz\", \"organizations_url\": \"https://api.github.com/users/tamemghq/orgs\", \"received_events_url\": \"https://api.github.com/users/tamemghq/received_events\", \"repos_url\": \"https://api.github.com/users/tamemghq/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tamemghq/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tamemghq/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tamemghq\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41174\", \"cvss\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 4.8, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-653\", \"name\": \"Improper Isolation or Compartmentalization\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nThere is a vulnerability in Traefik's Kubernetes CRD provider cross-namespace isolation enforcement.\\n\\nWhen `providers.kubernetesCRD.allowCrossNamespace=false`, Traefik correctly rejects direct cross-namespace middleware references from `IngressRoute` objects, but fails to apply the same restriction to middleware references nested inside a `Chain` middleware's `spec.chain.middlewares[]`. An actor with permission to create or update Traefik CRDs in their own namespace can exploit this to cause Traefik to resolve and apply middleware objects from another namespace, bypassing the documented isolation boundary.\\n\\n## Patches\\n\\n- https://github.com/traefik/traefik/releases/tag/v2.11.43\\n- https://github.com/traefik/traefik/releases/tag/v3.6.14\\n- https://github.com/traefik/traefik/releases/tag/v3.7.0-rc.2\\n\\n## For more information\\n\\nIf there are any questions or comments about this advisory, please [open an issue](https://github.com/traefik/traefik/issues).\\n\\n<details>\\n<summary>Original Description</summary>\\n\\n### Summary\\nWhen `providers.kubernetesCRD.allowCrossNamespace=false`, Traefik still allows a namespace-local `Middleware` of type `Chain` to reference middleware objects from another namespace via `spec.chain.middlewares[].namespace`.\\n\\nThis bypasses the documented cross-namespace restriction and allows an actor with permission to create or update Traefik CRDs in namespace A to bind middleware defined in namespace B to routes in namespace A.\\n\\n### Details\\nTraefik documents `allowCrossNamespace` as the control that governs whether `IngressRoute` objects may reference resources in other namespaces.\\n\\nDirect middleware references from `IngressRoute.routes[].middlewares[]` are validated in `pkg/provider/kubernetes/crd/kubernetes_http.go` by `makeMiddlewareKeys(...)`, which rejects cross-namespace references when `allowCrossNamespace` is disabled.\\n\\nHowever, nested middleware references inside `Middleware.spec.chain.middlewares[]` follow a different code path. `createChainMiddleware(...)` in `pkg/provider/kubernetes/crd/kubernetes.go` does not receive or enforce `allowCrossNamespace`; it resolves `mi.Namespace` (or defaults to the current namespace) and appends `makeID(ns, mi.Name)` unconditionally.\\n\\nAt runtime, `pkg/server/middleware/middlewares.go` qualifies and builds `config.Chain.Middlewares`, so the cross-namespace middleware is actually loaded and used.\\n\\nThis was verified on the current `master` at commit `786f7192e11878dfaa634f8263bf79bb730a71cb`.\\n\\nThis appears related to earlier cross-namespace hardening work, but the surviving issue is a distinct nested `Chain` middleware code path rather than the already-guarded direct reference path.\\n\\n### Expected behavior\\nWhen `providers.kubernetesCRD.allowCrossNamespace=false`, any middleware reference that resolves to an object in another namespace should be rejected, whether referenced directly from an `IngressRoute` or indirectly through a local `Chain` middleware.\\n\\n### Actual behavior\\nA namespace-local `Chain` middleware can reference `spec.chain.middlewares[].namespace` in another namespace, and Traefik resolves and applies that middleware even when cross-namespace references are disabled.\\n\\n### Attacker prerequisites\\nThe attacker must have permission to create or update Traefik CRDs in a namespace they control, but does not need permission to modify resources in the target namespace.\\n\\n### PoC\\n1. Run Traefik with the Kubernetes CRD provider and set `allowCrossNamespace: false`.\\n\\n2. Create two namespaces, for example `default` and `cross-ns`.\\n\\n3. Apply a middleware in `cross-ns`:\\n\\n```yaml\\napiVersion: traefik.io/v1alpha1\\nkind: Middleware\\nmetadata:\\n  name: victim-strip\\n  namespace: cross-ns\\nspec:\\n  stripPrefix:\\n    prefixes:\\n      - /secret\\n```\\n\\n4. Apply a chain middleware in `default` that references the middleware above:\\n\\n```yaml\\napiVersion: traefik.io/v1alpha1\\nkind: Middleware\\nmetadata:\\n  name: mychain\\n  namespace: default\\nspec:\\n  chain:\\n    middlewares:\\n      - name: victim-strip\\n        namespace: cross-ns\\n```\\n\\n5. Apply an `IngressRoute` in `default` that references only the local `mychain` middleware:\\n\\n```yaml\\napiVersion: traefik.io/v1alpha1\\nkind: IngressRoute\\nmetadata:\\n  name: demo\\n  namespace: default\\nspec:\\n  entryPoints:\\n    - web\\n  routes:\\n    - match: Host(`example.test`) && PathPrefix(`/demo`)\\n      kind: Rule\\n      middlewares:\\n        - name: mychain\\n      services:\\n        - name: whoami\\n          port: 80\\n```\\n\\n6. Observe that Traefik accepts the configuration and resolves the resulting chain to the middleware from `cross-ns` even though `allowCrossNamespace` is disabled.\\n\\n7. As a control, replace the local chain reference in the `IngressRoute` with a direct cross-namespace middleware reference. That direct reference is rejected when `allowCrossNamespace=false`, which indicates the bypass is specific to nested `Chain` middleware resolution.\\n\\n### Impact\\n\\nThis is an authorization / trust-boundary bypass in Traefik's Kubernetes CRD provider.\\n\\nClusters that rely on providers.kubernetesCRD.allowCrossNamespace=false for namespace isolation are affected. An actor who is allowed to create or update Traefik CRDs in their own namespace can still cause Traefik to apply middleware from another namespace by referencing it indirectly through a local Chain middleware.\\n\\nThe practical impact depends on which middleware objects exist in the other namespace, but this can allow unauthorized reuse of security-sensitive or policy-bearing middleware across namespace boundaries. Examples include request modification, header manipulation, authentication or forward-auth related behavior, and other traffic-handling policies that were intended to remain namespace-scoped.\\n\\nTesters have not verified unauthenticated remote compromise, code execution, or universal cross-tenant data exposure. The core issue is that a documented isolation control can be bypassed through the nested Chain middleware reference path.\\n\\n</details>\", \"epss\": {\"percentage\": 0.00254, \"percentile\": 0.16582}, \"ghsa_id\": \"GHSA-xhjw-95fp-8vgq\", \"github_reviewed_at\": \"2026-04-24T20:12:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-xhjw-95fp-8vgq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xhjw-95fp-8vgq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41174\"}], \"nvd_published_at\": \"2026-04-30T21:16:33Z\", \"published_at\": \"2026-04-24T20:12:10Z\", \"references\": [\"https://github.com/traefik/traefik/security/advisories/GHSA-xhjw-95fp-8vgq\", \"https://github.com/traefik/traefik/commit/df00d82fc7f12e07199551832b54de6d0e55414d\", \"https://github.com/traefik/traefik/releases/tag/v2.11.43\", \"https://github.com/traefik/traefik/releases/tag/v3.6.14\", \"https://github.com/traefik/traefik/releases/tag/v3.7.0-rc.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41174\", \"https://github.com/advisories/GHSA-xhjw-95fp-8vgq\"], \"repository_advisory_url\": \"https://api.github.com/repos/traefik/traefik/security-advisories/GHSA-xhjw-95fp-8vgq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/traefik/traefik\", \"summary\": \"Traefik Kubernetes CRD allows unauthorized cross-namespace middleware binding\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T21:24:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-xhjw-95fp-8vgq\", \"vulnerabilities\": [{\"first_patched_version\": \"3.7.0-rc.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/traefik/traefik/v3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.7.0-ea.1, < 3.7.0-rc.2\"}, {\"first_patched_version\": \"3.6.14\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/traefik/traefik/v3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0-beta1, < 3.6.14\"}, {\"first_patched_version\": \"2.11.43\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/traefik/traefik/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.11.43\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/traefik/traefik\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.7.34\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xhjw-95fp-8vgq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/traefik/traefik/v2: < 2.11.43",
+      "github.com/traefik/traefik/v3: >= 3.0.0-beta1, < 3.6.14",
+      "github.com/traefik/traefik/v3: >= 3.7.0-ea.1, < 3.7.0-rc.2",
+      "github.com/traefik/traefik: <= 1.7.34"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41174"
+    ],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/traefik/traefik",
+      "github.com/traefik/traefik/v2",
+      "github.com/traefik/traefik/v3"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.712838Z",
+  "provenance": {
+    "content_sha256": "dfcecd5a46b86cda7aa594bcc28fb5df3a7cc8e45fc880521578b53b4043d0ec",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-24T20:12:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xhjw-95fp-8vgq",
+  "status": "active",
+  "title": "Traefik Kubernetes CRD allows unauthorized cross-namespace middleware binding",
+  "updated_at": "2026-05-06T21:24:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xhjw-95fp-8vgq"
+}

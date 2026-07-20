@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/452625?v=4\", \"events_url\": \"https://api.github.com/users/mbarbero/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mbarbero/followers\", \"following_url\": \"https://api.github.com/users/mbarbero/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mbarbero/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mbarbero\", \"id\": 452625, \"login\": \"mbarbero\", \"node_id\": \"MDQ6VXNlcjQ1MjYyNQ==\", \"organizations_url\": \"https://api.github.com/users/mbarbero/orgs\", \"received_events_url\": \"https://api.github.com/users/mbarbero/received_events\", \"repos_url\": \"https://api.github.com/users/mbarbero/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mbarbero/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mbarbero/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mbarbero\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/168188?v=4\", \"events_url\": \"https://api.github.com/users/yaleman/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yaleman/followers\", \"following_url\": \"https://api.github.com/users/yaleman/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yaleman/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yaleman\", \"id\": 168188, \"login\": \"yaleman\", \"node_id\": \"MDQ6VXNlcjE2ODE4OA==\", \"organizations_url\": \"https://api.github.com/users/yaleman/orgs\", \"received_events_url\": \"https://api.github.com/users/yaleman/received_events\", \"repos_url\": \"https://api.github.com/users/yaleman/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yaleman/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yaleman/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yaleman\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46689\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}, {\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}], \"description\": \"### Summary\\n\\nA single unauthenticated `GET` to any `/scim/v1/...` endpoint with a `?filter=` query string of a few thousand nested parentheses (≈ 4–12 KB) drives the recursive-descent PEG parser past the worker thread's stack guard page. Rust responds to stack overflow with `std::process::abort()` — the entire `kanidmd` process exits. The parse runs inside axum's `Query<ScimEntryGetQuery>` extractor, before any handler body and therefore before any ACL check.\\n\\n### Details\\n\\nThe SCIM filter grammar recurses on `(` and `not (` with no depth bound.\\n\\n**`proto/src/scim_v1/mod.rs:263-433`** — `peg::parser! { grammar scimfilter() ... }`:\\n\\n```rust\\n// line 281\\n\\\"not\\\" separator()+ \\\"(\\\" e:parse() \\\")\\\" { ScimFilter::Not(Box::new(e)) }\\n// line 293\\n\\\"(\\\" e:parse() \\\")\\\" { e }\\n```\\n\\nBoth rules re-enter `parse()` without a depth counter.\\n\\n**`proto/src/scim_v1/mod.rs:442-447`** — `impl FromStr for ScimFilter` calls `scimfilter::parse(input)` directly on the raw string with no length or depth pre-check.\\n\\n**`proto/src/scim_v1/mod.rs:80-81`** — `ScimEntryGetQuery.filter` is `#[serde_as(as = \\\"Option<DisplayFromStr>\\\")]`, so deserialising the query struct invokes `ScimFilter::from_str` on attacker bytes.\\n\\n**Unauthenticated reachability** — nine handlers in `server/core/src/https/v1_scim.rs` (route table at lines 865-1029) take `Query<ScimEntryGetQuery>` as an argument: `/scim/v1/Entry`, `/scim/v1/Entry/{id}`, `/scim/v1/Person/{id}`, `/scim/v1/Application`, `/scim/v1/Application/{id}`, `/scim/v1/Class`, `/scim/v1/Attribute`, `/scim/v1/Message`, `/scim/v1/Message/{id}`. The SCIM router is merged unconditionally for every server role (`server/core/src/https/mod.rs:312`).\\n\\nAxum extracts handler arguments before the handler body runs. The preceding `VerifiedClientInformation` extractor (`server/core/src/https/extractors/mod.rs:16-91`) always returns `Ok` (line 89) regardless of credentials; authorization is deferred to the handler body, which is never reached.\\n\\nThe existing semantic depth limit (`DEFAULT_LIMIT_FILTER_DEPTH_MAX = 12`, `server/lib/src/constants/mod.rs:212`) is enforced in `Filter::from_scim_ro` (`server/lib/src/filter.rs:786`) **after** the PEG parse has already produced an AST, so it cannot prevent the parser itself from blowing the stack.\\n\\nThe production daemon (`server/daemon/src/main.rs:735-744`) uses `new_multi_thread()` with default 2 MiB worker stacks; hyper's `max_buf_size` (~400 KiB) is not lowered (`server/core/src/https/mod.rs:708-727`), so a 12 KB URI is accepted.\\n\\nAn identical unbounded grammar exists in `libs/scim_proto/src/filter.rs:112-276` (not network-reachable, but should be fixed in the same patch).\\n\\n### PoC\\n\\n```sh\\ncurl -sk \\\"https://idm.example.com/scim/v1/Application?filter=$(python3 -c 'print(\\\"(\\\"*3000+\\\"a+pr\\\"+\\\")\\\"*3000)')\\\"\\n# → curl: (52) Empty reply from server\\n# → server journal: \\\"fatal runtime error: stack overflow, aborting\\\", SIGABRT\\n```\\n\\nRelease-build threshold measured at ~2 000 nesting levels / ~4 KB:\\n\\n```\\n$ cargo test --release -p kanidm_proto --test scim_filter_depth -- --nocapture\\nparens depth=1500 len=3004\\n  -> survived\\nparens depth=2000 len=4004\\n\\nthread 'audit_scim_filter_nested_parens' has overflowed its stack\\nfatal runtime error: stack overflow, aborting\\n  (signal: 6, SIGABRT: process abort signal)\\n```\\n\\nEnd-to-end against an in-process server via `kanidmd_testkit` (no authentication performed):\\n\\n```\\nTestkit server setup complete - http://localhost:18080/\\naudit_scim_dos: sending unauthenticated GET, url len = 12056\\n\\nthread '...' has overflowed its stack\\nfatal runtime error: stack overflow, aborting\\n  (signal: 6, SIGABRT: process abort signal)\\n```\\n\\n### Impact\\n\\nProcess-wide availability loss; no confidentiality or integrity impact.\\n\\n- **Unauthenticated**, default install, no feature flag required.\\n- **Process abort, not task panic.** Stack overflow triggers libstd's guard-page handler, which calls `std::process::abort()`. tokio's per-task `catch_unwind` isolation does not apply to aborts. All in-flight HTTP requests, OAuth2/OIDC sessions, LDAP binds, and the web UI are terminated.\\n- **Repeatable.** One ~12 KB GET per crash; a `while true; do curl ...; done` loop holds the service down indefinitely across supervisor restarts.\\n- The 6 011-byte variant (`depth=3000`) fits under the nginx default `large_client_header_buffers` limit of 8 KB, so a typical reverse proxy does not mitigate.\\n\\n**Affected**: v1.7.0 through `master` @ edf50b9da.\", \"epss\": {\"percentage\": 0.00317, \"percentile\": 0.23505}, \"ghsa_id\": \"GHSA-r5fr-9gmv-jggh\", \"github_reviewed_at\": \"2026-05-06T23:38:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-r5fr-9gmv-jggh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r5fr-9gmv-jggh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46689\"}], \"nvd_published_at\": \"2026-06-10T22:17:00Z\", \"published_at\": \"2026-05-06T23:38:49Z\", \"references\": [\"https://github.com/kanidm/kanidm/security/advisories/GHSA-r5fr-9gmv-jggh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46689\", \"https://github.com/kanidm/kanidm/releases/tag/v1.9.3\", \"https://github.com/advisories/GHSA-r5fr-9gmv-jggh\"], \"repository_advisory_url\": \"https://api.github.com/repos/kanidm/kanidm/security-advisories/GHSA-r5fr-9gmv-jggh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/kanidm/kanidm\", \"summary\": \"scim_proto and kanidm_proto have an authenticated process abort via SCIM filter stack exhaustion\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-29T15:30:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-r5fr-9gmv-jggh\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.3\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"scim_proto\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.2\"}, {\"first_patched_version\": \"1.9.3\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"kanidm_proto\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r5fr-9gmv-jggh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "kanidm_proto: <= 1.9.2",
+      "scim_proto: <= 1.9.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46689"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "kanidm_proto",
+      "scim_proto"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.802793Z",
+  "provenance": {
+    "content_sha256": "8da5118d50981da648ed4fcc4f518bb044c87acf6c799672ad9b905ba5294a61",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T23:38:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r5fr-9gmv-jggh",
+  "status": "active",
+  "title": "scim_proto and kanidm_proto have an authenticated process abort via SCIM filter stack exhaustion",
+  "updated_at": "2026-06-29T15:30:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r5fr-9gmv-jggh"
+}

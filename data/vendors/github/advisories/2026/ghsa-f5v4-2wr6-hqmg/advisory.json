@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/18317330?v=4\", \"events_url\": \"https://api.github.com/users/coreyleavitt/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/coreyleavitt/followers\", \"following_url\": \"https://api.github.com/users/coreyleavitt/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/coreyleavitt/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/coreyleavitt\", \"id\": 18317330, \"login\": \"coreyleavitt\", \"node_id\": \"MDQ6VXNlcjE4MzE3MzMw\", \"organizations_url\": \"https://api.github.com/users/coreyleavitt/orgs\", \"received_events_url\": \"https://api.github.com/users/coreyleavitt/received_events\", \"repos_url\": \"https://api.github.com/users/coreyleavitt/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/coreyleavitt/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/coreyleavitt/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/coreyleavitt\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42189\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}, {\"cwe_id\": \"CWE-789\", \"name\": \"Memory Allocation with Excessive Size Value\"}], \"description\": \"## Summary\\n\\nA pre-authentication denial-of-service vulnerability exists in the server's keyboard-interactive authentication handler. A malicious client can crash any russh-based server that implements keyboard-interactive auth (e.g., for 2FA/TOTP) with a single malformed packet, requiring no credentials.\\n\\n## Vulnerability Details\\n\\nIn `russh/src/server/encrypted.rs`, the function `read_userauth_info_response` decodes a `u32` count from the client's `SSH_MSG_USERAUTH_INFO_RESPONSE` and passes it directly to `Vec::with_capacity()`:\\n\\n```rust\\nlet n = map_err!(u32::decode(r))?;\\n\\n// Bound both allocation and iteration by remaining packet data to\\n// prevent a malicious client from causing a multi-GB allocation or\\n// billions of loop iterations with a crafted count.\\n// Each response needs at least 4 bytes (length prefix).\\nlet max_responses = r.remaining_len().saturating_add(3) / 4;\\nlet n = (n as usize).min(max_responses);\\nlet mut responses = Vec::with_capacity(n);\\nfor _ in 0..n {\\n    responses.push(Bytes::decode(r).ok())\\n}\\n```\\n\\nAn attacker can send `n = 0x10000000` (268M) or larger in a minimal packet (~50 bytes after encryption). The server attempts to allocate `n * ~24 bytes` (size of `Option<Bytes>`) = ~6.4GB, causing an OOM crash.\\n\\n## Attack Flow\\n\\n1. Attacker connects via TCP, completes key exchange (no credentials needed -- this is the anonymous DH handshake, not authentication)\\n2. Sends `USERAUTH_REQUEST` with method `keyboard-interactive`\\n3. Server handler returns `Auth::Partial` with prompts (standard for 2FA/TOTP)\\n4. Attacker sends `USERAUTH_INFO_RESPONSE` with `n = 0x10000000` and no response data\\n5. Server calls `Vec::with_capacity(268_435_456)`, OOM killed\\n\\nNo authentication is required. The allocation occurs before the handler validates any credentials. The attack is repeatable faster than the server can restart.\\n\\n## Affected Configurations\\n\\nAny russh-based server where the `Handler::auth_keyboard_interactive` implementation returns `Auth::Partial` (i.e., sends prompts to the client). The default handler returns `Auth::reject()` and is not affected.\\n\\nSource code review suggests that downstream projects using keyboard-interactive for multi-step auth (e.g., TOTP/2FA) follow the affected pattern, since returning `Auth::Partial` before credential verification is the intended API usage for prompting.\\n\\n## Confirmed End-to-End PoC\\n\\nThere is a complete Docker-contained PoC confirming the OOM kill:\\n- Minimal russh server returning `Auth::Partial` for keyboard-interactive\\n- Python client (paramiko for key exchange) sends malformed `USERAUTH_INFO_RESPONSE`\\n- Container with 512MB memory limit; server is OOM-killed (exit code 137)\\n\\nAvailable on request.\\n\\n## Proposed Fix\\n\\nCap the `Vec::with_capacity` allocation to what the remaining packet data can actually contain. Each response requires at least 4 bytes (length prefix), so:\\n\\n```rust\\nlet n = map_err!(u32::decode(r))?;\\n\\n// Bound both allocation and iteration by remaining packet data to\\n// prevent a malicious client from causing a multi-GB allocation or\\n// billions of loop iterations with a crafted count.\\n// Each response needs at least 4 bytes (length prefix).\\nlet max_responses = r.remaining_len().saturating_add(3) / 4;\\nlet n = (n as usize).min(max_responses);\\nlet mut responses = Vec::with_capacity(n);\\nfor _ in 0..n {\\n    responses.push(Bytes::decode(r).ok())\\n}\\n```\\n\\nThis bounds the allocation to at most the packet size (~256KB), while preserving the existing behavior for well-formed packets. This fix has been implemented, tested, and contributed via the temporary private fork.\\n\\n## Severity\\n\\nPre-auth, remote, no credentials required, crashes the server process affecting all active sessions.\", \"epss\": {\"percentage\": 0.00481, \"percentile\": 0.37682}, \"ghsa_id\": \"GHSA-f5v4-2wr6-hqmg\", \"github_reviewed_at\": \"2026-04-24T15:39:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-f5v4-2wr6-hqmg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f5v4-2wr6-hqmg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42189\"}], \"nvd_published_at\": \"2026-05-08T20:16:31Z\", \"published_at\": \"2026-04-24T15:39:37Z\", \"references\": [\"https://github.com/Eugeny/russh/security/advisories/GHSA-f5v4-2wr6-hqmg\", \"https://github.com/Eugeny/russh/commit/6c3c80a9b6d60763d6227d60fa8310e57172a4d1\", \"https://github.com/Eugeny/russh/releases/tag/v0.60.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42189\", \"https://github.com/advisories/GHSA-f5v4-2wr6-hqmg\"], \"repository_advisory_url\": \"https://api.github.com/repos/Eugeny/russh/security-advisories/GHSA-f5v4-2wr6-hqmg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Eugeny/russh\", \"summary\": \"russh has pre-auth DoS via unbounded allocation in its keyboard-interactive auth handler\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:34:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-f5v4-2wr6-hqmg\", \"vulnerabilities\": [{\"first_patched_version\": \"0.60.1\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"russh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.60.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f5v4-2wr6-hqmg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "russh: < 0.60.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42189"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "russh"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.832723Z",
+  "provenance": {
+    "content_sha256": "6c16618934fdaa36bc9c54da8c4c5b6b94f83bfd206f6122df266cb9ebe5fae6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-24T15:39:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f5v4-2wr6-hqmg",
+  "status": "active",
+  "title": "russh has pre-auth DoS via unbounded allocation in its keyboard-interactive auth handler",
+  "updated_at": "2026-05-13T13:34:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f5v4-2wr6-hqmg"
+}

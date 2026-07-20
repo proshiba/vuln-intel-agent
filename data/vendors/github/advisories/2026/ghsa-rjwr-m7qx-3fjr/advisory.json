@@ -1,0 +1,54 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/251948304?v=4\", \"events_url\": \"https://api.github.com/users/quart27219/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/quart27219/followers\", \"following_url\": \"https://api.github.com/users/quart27219/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/quart27219/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/quart27219\", \"id\": 251948304, \"login\": \"quart27219\", \"node_id\": \"U_kgDODwRtEA\", \"organizations_url\": \"https://api.github.com/users/quart27219/orgs\", \"received_events_url\": \"https://api.github.com/users/quart27219/received_events\", \"repos_url\": \"https://api.github.com/users/quart27219/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/quart27219/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/quart27219/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/quart27219\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/68895169?v=4\", \"events_url\": \"https://api.github.com/users/kimdu0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kimdu0/followers\", \"following_url\": \"https://api.github.com/users/kimdu0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kimdu0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kimdu0\", \"id\": 68895169, \"login\": \"kimdu0\", \"node_id\": \"MDQ6VXNlcjY4ODk1MTY5\", \"organizations_url\": \"https://api.github.com/users/kimdu0/orgs\", \"received_events_url\": \"https://api.github.com/users/kimdu0/received_events\", \"repos_url\": \"https://api.github.com/users/kimdu0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kimdu0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kimdu0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kimdu0\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-74\", \"name\": \"Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')\"}], \"description\": \"## Summary\\n\\nThe vulnerability in oapi-codegen seems to be similar with CVE-2026-22785,  which is a generated-code injection issue where untrusted OpenAPI `summary` text is embedded into generated TypeScript MCP server source without proper escaping. `oapi-codegen` has a similar vulnerability in its server URL generator: untrusted OpenAPI `servers[].description` text is inserted into a generated Go line comment without normalizing embedded newlines. A crafted description can break out of the comment, add imports through `goimports`, and emit executable Go declarations into the generated package.\\n\\n> [!NOTE]\\n> A vulnerability like this requires that it is missed in code review **and** that you then call the malicious method.\\n> \\n> Using an `init()` function could be enough to not require a direct call to the code, and instead rely on you importing the package, but either way, code review should be performed before any `oapi-codegen` generated code is executed.\\n> \\n> We **strongly recommend** all users to be reviewing changes to their generated code before they execute anything within it, to protect against supply chain attacks or malicious injected code.\\n>\\n> This is also why we recommend `oapi-codegen` generated code is committed to source control.\\n\\n## Details\\nThe vulnerable sink is in `pkg/codegen/templates/server-urls.tmpl`.\\n\\n```gotemplate\\n// {{ .GoName }} defines the Server URL for {{ if len .OAPISchema.Description }}{{ .OAPISchema.Description }}{{ else }}{{ .OAPISchema.URL }}{{ end }}\\nconst {{ .GoName}} = \\\"{{ .OAPISchema.URL }}\\\"\\n```\\n\\nThis template assumes the OpenAPI server description remains inside a single Go line comment. However, OpenAPI descriptions are attacker-controlled strings and may contain newlines. Once a newline is present, the next line is no longer part of the comment.\\n\\nThe same raw description is also used in the function form of server URL generation:\\n\\n```gotemplate\\n// New{{ .GoName }} constructs the Server URL for {{ .OAPISchema.Description }}, with the provided variables.\\nfunc New{{ .GoName }}({{ .NewServerFunctionParams }}) (string, error) {\\n```\\n\\nIdentifier generation does not protect this sink. In `pkg/codegen/server_urls.go`, the description is normalized only for the generated Go identifier:\\n\\n```go\\nsuffix := server.Description\\nif suffix == \\\"\\\" {\\n\\tsuffix = nameNormalizer(server.URL)\\n}\\nname = serverURLPrefix + UppercaseFirstCharacter(suffix)\\nname = nameNormalizer(name)\\n```\\n\\nThe identifier is sanitized, but the raw `server.Description` is still rendered in the comment template. This leaves the code-generation context vulnerable.\\n\\nThe generated file is then formatted with `goimports` in `pkg/codegen/codegen.go`:\\n\\n```go\\ngoCode := SanitizeCode(buf.String())\\n\\noutBytes, err := imports.Process(opts.PackageName+\\\".go\\\", []byte(goCode), nil)\\n```\\n\\n`SanitizeCode` only removes byte-order marks:\\n\\n```go\\nfunc SanitizeCode(goCode string) string {\\n\\treturn strings.ReplaceAll(goCode, \\\"\\\\uFEFF\\\", \\\"\\\")\\n}\\n```\\n\\nIt does not escape comments, replace newlines, or otherwise serialize untrusted text for a Go source-code context. As a result, attacker-controlled source can be preserved and formatted as valid Go.\\n\\n### How to Reproduce\\nThe attacker-controlled input is an OpenAPI document whose `servers[].description` contains a newline followed by Go declarations:\\n\\n```yaml\\nopenapi: \\\"3.0.0\\\"\\ninfo:\\n  title: oapi-codegen server URL description injection\\n  version: \\\"1.0.0\\\"\\nservers:\\n  - url: https://api.example.com\\n    description: |\\n      benign\\n      var _ = func() int {\\n          panic(\\\"oapi-codegen generated-code execution\\\")\\n          return 0\\n      }()\\n      //\\npaths: {}\\n```\\n\\nGenerate Go source with server URL generation enabled. No special local path or helper file is required for the vulnerability; the malicious description is copied into the generated source-code context.\\n\\nThe generated source contains attacker-controlled executable code:\\n\\n```go\\n// ServerUrlBenignvarFuncIntPanicOapiCodegenGeneratedCodeExecutionReturn0 defines the Server URL for benign\\nvar _ = func() int {\\n\\tpanic(\\\"oapi-codegen generated-code execution\\\")\\n\\treturn 0\\n}()\\n\\n//\\n\\nconst ServerUrlBenignvarFuncIntPanicOapiCodegenGeneratedCodeExecutionReturn0 = \\\"https://api.example.com\\\"\\n```\\n\\n## Impact\\n\\nAn attacker who can supply or influence an OpenAPI document consumed by `oapi-codegen` can inject arbitrary Go source into the generated package. In common API-client/server generation workflows, this can lead to build-time or runtime code execution in developer machines, CI systems, or downstream applications that trust generated code.\", \"ghsa_id\": \"GHSA-rjwr-m7qx-3fjr\", \"github_reviewed_at\": \"2026-07-17T18:50:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-rjwr-m7qx-3fjr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rjwr-m7qx-3fjr\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-17T18:50:17Z\", \"references\": [\"https://github.com/oapi-codegen/oapi-codegen/security/advisories/GHSA-rjwr-m7qx-3fjr\", \"https://github.com/oapi-codegen/oapi-codegen/commit/19c6282e9a6fb84b51aa92b12fad1f0b7e5f5ef6\", \"https://github.com/oapi-codegen/oapi-codegen/releases/tag/v2.7.1\", \"https://github.com/advisories/GHSA-rjwr-m7qx-3fjr\"], \"repository_advisory_url\": \"https://api.github.com/repos/oapi-codegen/oapi-codegen/security-advisories/GHSA-rjwr-m7qx-3fjr\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/oapi-codegen/oapi-codegen\", \"summary\": \"oapi-codegen: OpenAPI Server Description Escapes Generated Go Comment and Injects Executable Code\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-17T18:50:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-rjwr-m7qx-3fjr\", \"vulnerabilities\": [{\"first_patched_version\": \"2.7.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/oapi-codegen/oapi-codegen/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.7.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rjwr-m7qx-3fjr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/oapi-codegen/oapi-codegen/v2: <= 2.7.0"
+    ],
+    "cves": [
+      "CVE-2026-22785"
+    ],
+    "cvss_score": 0.0,
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/oapi-codegen/oapi-codegen/v2"
+    ],
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.600857Z",
+  "provenance": {
+    "content_sha256": "40085762ac89ce43a9a633cfcaf2ef292ce915f01d1b0510435dd749f70708a7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-17T18:50:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rjwr-m7qx-3fjr",
+  "status": "active",
+  "title": "oapi-codegen: OpenAPI Server Description Escapes Generated Go Comment and Injects Executable Code",
+  "updated_at": "2026-07-17T18:50:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rjwr-m7qx-3fjr"
+}

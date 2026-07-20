@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/263803677?v=4\", \"events_url\": \"https://api.github.com/users/HiyokoSauna37/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/HiyokoSauna37/followers\", \"following_url\": \"https://api.github.com/users/HiyokoSauna37/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/HiyokoSauna37/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/HiyokoSauna37\", \"id\": 263803677, \"login\": \"HiyokoSauna37\", \"node_id\": \"U_kgDOD7lTHQ\", \"organizations_url\": \"https://api.github.com/users/HiyokoSauna37/orgs\", \"received_events_url\": \"https://api.github.com/users/HiyokoSauna37/received_events\", \"repos_url\": \"https://api.github.com/users/HiyokoSauna37/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/HiyokoSauna37/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/HiyokoSauna37/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/HiyokoSauna37\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1511975?v=4\", \"events_url\": \"https://api.github.com/users/sanketsudake/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sanketsudake/followers\", \"following_url\": \"https://api.github.com/users/sanketsudake/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sanketsudake/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sanketsudake\", \"id\": 1511975, \"login\": \"sanketsudake\", \"node_id\": \"MDQ6VXNlcjE1MTE5NzU=\", \"organizations_url\": \"https://api.github.com/users/sanketsudake/orgs\", \"received_events_url\": \"https://api.github.com/users/sanketsudake/received_events\", \"repos_url\": \"https://api.github.com/users/sanketsudake/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sanketsudake/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sanketsudake/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sanketsudake\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50566\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-250\", \"name\": \"Execution with Unnecessary Privileges\"}, {\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}], \"description\": \"### Summary\\n\\nA follow-up bypass of the round-4 PodSpec hardening (GHSA-gx55-f84r-v3r7, GHSA-wmgg-3p4h-48x7, GHSA-v455-mv2v-5g92). Those advisories validate and sanitize the `PodSpec` (`spec.runtime.podSpec` / `spec.builder.podSpec` /\\n`function.spec.podSpec`), but the Environment CRD also exposes `spec.runtime.container` and `spec.builder.container` — a standalone `Container` merged into the runtime/builder pod whose `SecurityContext` bypassed both layers.\\n\\n### Details\\n\\n**Admission-layer gap.** `Environment.Validate()` calls `ValidatePodSpecSafety()` on `Runtime.PodSpec` and `Builder.PodSpec` only. That function takes a `*PodSpec`, so it never inspects the standalone `Runtime.Container.SecurityContext`\\nor `Builder.Container.SecurityContext`.\\n\\n**Merge-layer gap.** `sanitizeContainerSecurityContext()` ran only inside `MergePodSpec()`. The container field is merged via `MergeContainer()`, which did not sanitize. With only `Runtime.Container` set and `Runtime.PodSpec` nil,\\n`MergePodSpec` is never invoked, so the sanitizer never ran.\\n\\nAffected merge sites: poolmgr (`gp_deployment.go`), newdeploy (`newdeploy.go`), and buildermgr (`envwatcher.go`).\\n\\n#### Proof of concept\\n\\n```yaml\\napiVersion: fission.io/v1\\nkind: Environment\\nmetadata:\\n  name: priv-escape-test\\n  namespace: default\\nspec:\\n  version: 3\\n  runtime:\\n    image: \\\"ghcr.io/fission/python-env:latest\\\"\\n    container:\\n      name: priv-escape-test\\n      securityContext:\\n        privileged: true\\n  poolsize: 1\\n```\\n\\nThe admission webhook accepts this Environment and the resulting pool pod runs with `privileged: true`. Equivalent bypasses: `allowPrivilegeEscalation: true`, `capabilities.add: [\\\"SYS_ADMIN\\\"]`, `capabilities.add:\\n[\\\"NET_ADMIN\\\",\\\"SYS_PTRACE\\\"]`. The same attack applies to `Builder.Container`.\\n\\n### Impact\\n\\nA tenant with `environments.fission.io` create/update RBAC can run `privileged` / `allowPrivilegeEscalation` / dangerous-capability containers in the Fission function or builder namespace, scheduled under the executor's high-privilege\\nservice account — enabling container-sandbox escape, host filesystem and network access, and potential node- and cluster-level compromise. Identical blast radius to GHSA-gx55-f84r-v3r7.\\n\\n### Fix\\n\\nFixed in [#3406](https://github.com/fission/fission/pull/3406) and released in [v1.24.0](https://github.com/fission/fission/releases/tag/v1.24.0).\\n\\n- **Admission layer (primary defence):** a new `ValidateContainerSafety` in `pkg/apis/core/v1/podspec_safety.go` applies the per-container SecurityContext denylist (`privileged`, `allowPrivilegeEscalation`, dangerous capabilities) to a\\nstandalone container, and is called from `Environment.Validate()` for `Runtime.Container` and `Builder.Container`.\\n- **Merge layer (defence in depth):** `sanitizeContainerSecurityContext()` is now invoked inside `MergeContainer()` itself, covering all three executor/builder call sites.\\n\\n### Workarounds\\n\\n- Restrict Environment create/update RBAC to trusted administrators.\\n- Deploy a Kyverno / OPA Gatekeeper policy rejecting dangerous Container SecurityContext on Environment CRDs.\\n- Label the function/builder namespaces with `pod-security.kubernetes.io/enforce: restricted`.\\n\\n### References\\n\\n- GHSA-gx55-f84r-v3r7, GHSA-wmgg-3p4h-48x7, GHSA-v455-mv2v-5g92 — the round-4 PodSpec fixes this advisory bypasses ([#3391](https://github.com/fission/fission/pull/3391), `e484df84`).\", \"epss\": {\"percentage\": 0.0029, \"percentile\": 0.20501}, \"ghsa_id\": \"GHSA-m63v-2g9w-2w6v\", \"github_reviewed_at\": \"2026-06-30T18:20:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-m63v-2g9w-2w6v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m63v-2g9w-2w6v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50566\"}], \"nvd_published_at\": \"2026-06-10T18:17:13Z\", \"published_at\": \"2026-06-30T18:20:39Z\", \"references\": [\"https://github.com/fission/fission/security/advisories/GHSA-m63v-2g9w-2w6v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50566\", \"https://github.com/fission/fission/pull/3406\", \"https://github.com/fission/fission/commit/695d3e97e3a20463ab7c8c081843e69e65e952e5\", \"https://github.com/fission/fission/releases/tag/v1.24.0\", \"https://github.com/advisories/GHSA-m63v-2g9w-2w6v\"], \"repository_advisory_url\": \"https://api.github.com/repos/fission/fission/security-advisories/GHSA-m63v-2g9w-2w6v\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/fission/fission\", \"summary\": \"Fission: Environment Runtime.Container and Builder.Container SecurityContext bypass allows privileged pod creation\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-30T18:20:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-m63v-2g9w-2w6v\", \"vulnerabilities\": [{\"first_patched_version\": \"1.24.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/fission/fission\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.23.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m63v-2g9w-2w6v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/fission/fission: <= 1.23.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-50566"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/fission/fission"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.673274Z",
+  "provenance": {
+    "content_sha256": "003d1d8eaf31fa4d7b2ea5c515dcdc9a0c3e50c4c332e3af72d2d676d8f92ba1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-30T18:20:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m63v-2g9w-2w6v",
+  "status": "active",
+  "title": "Fission: Environment Runtime.Container and Builder.Container SecurityContext bypass allows privileged pod creation",
+  "updated_at": "2026-06-30T18:20:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m63v-2g9w-2w6v"
+}

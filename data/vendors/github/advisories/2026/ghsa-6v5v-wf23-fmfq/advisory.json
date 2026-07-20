@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/70098543?v=4\", \"events_url\": \"https://api.github.com/users/tndud042713/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tndud042713/followers\", \"following_url\": \"https://api.github.com/users/tndud042713/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tndud042713/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tndud042713\", \"id\": 70098543, \"login\": \"tndud042713\", \"node_id\": \"MDQ6VXNlcjcwMDk4NTQz\", \"organizations_url\": \"https://api.github.com/users/tndud042713/orgs\", \"received_events_url\": \"https://api.github.com/users/tndud042713/received_events\", \"repos_url\": \"https://api.github.com/users/tndud042713/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tndud042713/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tndud042713/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tndud042713\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48988\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\n\\nA quadratic time complexity vulnerability exists in markdown-it's smartquotes rule (enabled via the `typographer: true` option). An attacker can craft a markdown input consisting of consecutive quotation marks that causes the parser to consume excessive CPU time, leading to denial of service.\\n\\n### Details\\n\\nThe vulnerability is in the `replaceAt()` helper function used by the smartquotes rule in `lib/rules_core/smartquotes.mjs`:\\n\\n```javascript\\nfunction replaceAt (str, index, ch) {\\n  return str.slice(0, index) + ch + str.slice(index + 1)\\n}\\n```\\n\\nWhen markdown-it processes a text token containing many quotation marks (either `\\\"` or `'`) with `typographer: true`, the smartquotes rule iterates through each quote character and calls `replaceAt()` to substitute it with a typographic (curly) quote. Each call to `replaceAt()` creates three new string slices and concatenates them, which is an O(n) operation where n is the length of the string.\\n\\nSince this is called once per quote character in the token, and there are n quote characters, the total time complexity becomes O(n^2).\\n\\nThe root cause is that the smartquotes rule modifies `token.content` in place using string slicing rather than building the result incrementally. The `process_inlines()` function (line 14) processes each quote in the text token, and for matching quote pairs, calls `replaceAt()` on both the opening and closing token's content (lines 151-152). When the entire input is a single text token of quote characters, this results in quadratic behavior.\\n\\n### PoC\\n\\n```javascript\\nconst md = require('markdown-it');\\nconst instance = md({ typographer: true });\\n\\n// 160,000 consecutive double-quote characters\\nconst payload = '\\\"'.repeat(160000);\\n\\nconsole.time('render');\\ninstance.render(payload);\\nconsole.timeEnd('render');\\n// Output: render: ~21000ms (21 seconds)\\n\\n// Compare with typographer disabled:\\nconst safe = md({ typographer: false });\\nconsole.time('render-safe');\\nsafe.render(payload);\\nconsole.timeEnd('render-safe');\\n// Output: render-safe: ~8ms\\n```\\n\\nMeasured timing on a modern system:\\n- 10,000 quotes: ~19ms\\n- 20,000 quotes: ~51ms\\n- 40,000 quotes: ~212ms\\n- 80,000 quotes: ~5,430ms\\n- 160,000 quotes: ~21,198ms\\n\\nThe scaling is clearly superlinear (quadratic), with the 80K->160K step showing a ~3.9x increase for a 2x input increase, consistent with O(n^2).\\n\\n### Impact\\n\\nApplications that render user-supplied markdown with `typographer: true` are vulnerable to denial of service. An attacker can submit a relatively small payload (160KB of quote characters) that causes the server to spend over 21 seconds processing a single request. Repeated submissions can exhaust server CPU resources and prevent legitimate users from being served.\\n\\nThe impact is mitigated by the fact that the `typographer` option defaults to `false` and must be explicitly enabled. However, the typographer feature is commonly enabled in production applications that want smart typography, and the markdown-it documentation prominently suggests enabling it.\\n\\nA suggested fix would be to replace the `replaceAt()` approach with an array-based or StringBuilder-style approach that collects all replacements and applies them in a single pass, reducing the time complexity to O(n).\", \"epss\": {\"percentage\": 0.00306, \"percentile\": 0.22514}, \"ghsa_id\": \"GHSA-6v5v-wf23-fmfq\", \"github_reviewed_at\": \"2026-06-15T20:41:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-6v5v-wf23-fmfq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6v5v-wf23-fmfq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48988\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-15T20:41:06Z\", \"references\": [\"https://github.com/markdown-it/markdown-it/security/advisories/GHSA-6v5v-wf23-fmfq\", \"https://github.com/advisories/GHSA-6v5v-wf23-fmfq\"], \"repository_advisory_url\": \"https://api.github.com/repos/markdown-it/markdown-it/security-advisories/GHSA-6v5v-wf23-fmfq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/markdown-it/markdown-it\", \"summary\": \"markdown-it: Quadratic complexity DoS in smartquotes rule via replaceAt string operations\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-15T20:41:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-6v5v-wf23-fmfq\", \"vulnerabilities\": [{\"first_patched_version\": \"14.2.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"markdown-it\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 14.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6v5v-wf23-fmfq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "markdown-it: <= 14.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48988"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "markdown-it"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.733222Z",
+  "provenance": {
+    "content_sha256": "fc20049f9ea58264f152958f94ae7fcf29069eda2fa6cb99d56df662bb6d2fa3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T20:41:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6v5v-wf23-fmfq",
+  "status": "active",
+  "title": "markdown-it: Quadratic complexity DoS in smartquotes rule via replaceAt string operations",
+  "updated_at": "2026-06-15T20:41:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6v5v-wf23-fmfq"
+}

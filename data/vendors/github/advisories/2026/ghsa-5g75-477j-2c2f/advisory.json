@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/140894141?v=4\", \"events_url\": \"https://api.github.com/users/getclaude/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/getclaude/followers\", \"following_url\": \"https://api.github.com/users/getclaude/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/getclaude/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/getclaude\", \"id\": 140894141, \"login\": \"getclaude\", \"node_id\": \"U_kgDOCGXfvQ\", \"organizations_url\": \"https://api.github.com/users/getclaude/orgs\", \"received_events_url\": \"https://api.github.com/users/getclaude/received_events\", \"repos_url\": \"https://api.github.com/users/getclaude/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/getclaude/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/getclaude/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/getclaude\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54617\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-522\", \"name\": \"Insufficiently Protected Credentials\"}], \"description\": \"### Summary\\nAn unauthenticated path traversal in the LaunchServer HTTP file server (`FileServerHandler`) lets any remote actor read **any file** readable by the LaunchServer process (e.g. `../../../../etc/passwd`). This is a generic arbitrary-file-read primitive, so the fix must address the traversal itself, not any specific file.\\n\\nThe readable files include the server's own secrets, which turns this from information disclosure into full compromise: the ECDSA private key that signs access JWTs (`.keys/ecdsa_id`), the refresh-token salt (`.keys/legacySalt`), and `LaunchServer.json` (database credentials). With the signing key an attacker mints a valid access token for any account, including admins. That is a full authentication bypass. Pre-auth, default config, port 9274.\\n\\n**Affected:** GravitLauncher LaunchServer ≤ 5.7.11 (the LaunchServer application; the published `pro.gravit.launcher:*-api` Maven artifacts do not contain the vulnerable code).\\n\\n### Details\\nIn `FileServerHandler.channelRead0`:\\n\\n```java\\npath = Paths.get(IOHelper.getPathFromUrlFragment(uri)).normalize().toString().substring(1); // line 194\\nFile file = base.resolve(path).toFile();                                                     // line 200 - no second normalize()\\n```\\n\\n`substring(1)` blindly strips a leading slash, assuming the request-target always starts with `/`. Netty's `HttpServerCodec` accepts a request-target **without** a leading slash verbatim (`decoderResult().isSuccess() == true`). For such a target, `normalize()` cannot collapse the leading `..`, `substring(1)` turns `../` into `./` (leaving the remaining `..`), and `base.resolve(path)`, which is not re-normalized, resolves **outside** `updatesDir`.\\n\\n`file.isHidden()` (line 201) is checked only on the final path component, so targets that don't start with a dot (`ecdsa_id`, `rsa_id`, `legacySalt`, `LaunchServer.json`) are served even with `showHiddenFiles=false`.\\n\\nThe file server is enabled by default (`netty.fileServerEnabled=true`) and bound to `0.0.0.0:9274`. No auth handler precedes `FileServerHandler`; `WebSocketServerProtocolHandler(\\\"/api\\\")` forwards non-WebSocket / non-`/api` requests down to it, so the attack is a plain HTTP GET (no WebSocket).\\n\\n### PoC\\nReproduced on a from-source build of v5.7.11 (Netty 4.2.12).\\n**Must use a raw socket.** curl/browsers/HTTP libraries normalize the path and prepend `/`, hitting the safe branch (false \\\"not reproducible\\\").\\n\\n```\\nprintf 'GET ../../.keys/ecdsa_id HTTP/1.1\\\\r\\\\nHost: x\\\\r\\\\n\\\\r\\\\n' | nc <host> 9274\\n```\\n\\nReturns the raw ECDSA private-key bytes. Same for `../../.keys/rsa_id`, `../../.keys/legacySalt`, `../../LaunchServer.json`. `%2e%2e/...` (no leading slash) also works. Depth-robust arbitrary read: `../../../../../../etc/passwd`.\\nControl (confirms the root cause): `GET /../../.keys/ecdsa_id` (WITH leading slash) → 404. Only the no-leading-slash form escapes.\\n\\n### Impact\\nUnauthenticated remote read of any file the process can access. What that exposes:\\n- `.keys/ecdsa_id`: the key that signs access JWTs. With it, an attacker mints a valid token for any account, including admins, so this is a full authentication bypass.\\n- `.keys/legacySalt`: lets an attacker forge refresh tokens.\\n- `LaunchServer.json`: database credentials.\\n- Any other file readable by the process (config, logs, system files).\\n\\nDeployment note: a normalizing L7 reverse proxy (stock nginx `location / { proxy_pass ...; }`) rejects the no-leading-slash request (400) and collapses leading-slash traversal, blocking the primary vector. But the default bind is `0.0.0.0:9274`, so protection relies on firewalling the backend port; L4/TCP proxies (HAProxy TCP, nginx `stream`, CF Spectrum) and direct exposure remain exploitable.\\n\\n### Suggested fix\\n1. Re-`normalize()` after `base.resolve(path)` and verify `resolved.startsWith(base)`.\\n2. Reject request-targets that don't start with `/` (400).\\n3. Default-bind to `127.0.0.1`; store `.keys` outside `updatesDir`.\", \"ghsa_id\": \"GHSA-5g75-477j-2c2f\", \"github_reviewed_at\": \"2026-07-02T20:49:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-5g75-477j-2c2f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5g75-477j-2c2f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54617\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T20:49:18Z\", \"references\": [\"https://github.com/GravitLauncher/Launcher/security/advisories/GHSA-5g75-477j-2c2f\", \"https://github.com/advisories/GHSA-5g75-477j-2c2f\"], \"repository_advisory_url\": \"https://api.github.com/repos/GravitLauncher/Launcher/security-advisories/GHSA-5g75-477j-2c2f\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/GravitLauncher/Launcher\", \"summary\": \"LaunchServer FileServerHandler has an unauthenticated path traversal issue\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T20:49:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-5g75-477j-2c2f\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"pro.gravit.launcher:launchserver-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.7.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5g75-477j-2c2f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pro.gravit.launcher:launchserver-api: <= 5.7.11"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54617"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pro.gravit.launcher:launchserver-api"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.089164Z",
+  "provenance": {
+    "content_sha256": "421a543c173bfc74d41eea0d5d748ea39efa97d21a5eb2604387c63d4871ab6f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T20:49:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5g75-477j-2c2f",
+  "status": "active",
+  "title": "LaunchServer FileServerHandler has an unauthenticated path traversal issue",
+  "updated_at": "2026-07-02T20:49:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5g75-477j-2c2f"
+}

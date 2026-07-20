@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/37509456?v=4\", \"events_url\": \"https://api.github.com/users/hoangperry/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hoangperry/followers\", \"following_url\": \"https://api.github.com/users/hoangperry/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hoangperry/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hoangperry\", \"id\": 37509456, \"login\": \"hoangperry\", \"node_id\": \"MDQ6VXNlcjM3NTA5NDU2\", \"organizations_url\": \"https://api.github.com/users/hoangperry/orgs\", \"received_events_url\": \"https://api.github.com/users/hoangperry/received_events\", \"repos_url\": \"https://api.github.com/users/hoangperry/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hoangperry/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hoangperry/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hoangperry\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-27783\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThree Gitea API endpoints — `GET /repos/{owner}/{repo}/issue_templates`,\\n`GET /repos/{owner}/{repo}/issue_config` and `GET /repos/{owner}/{repo}/issue_config/validate`\\n— read files from the repository's **Code** default branch (`.gitea/ISSUE_TEMPLATE/*`\\nand `issue_config.yaml`) and return their contents, but are registered **without**\\nthe `reqRepoReader(unit.TypeCode)` authorization middleware that every sibling\\nCode-tree endpoint in the same route group carries.\\n\\nA user who has access to a private repository through *any single repository unit*\\n(for example an organization team granted only the **Issues** unit, with no Code\\naccess) can therefore read the issue-template and issue-config files of that\\nrepository's Code tree, which their permission set should not expose.\\n\\n---\\n\\n## Root cause\\n\\n### The three endpoints lack the unit guard\\n\\n`routers/api/v1/api.go:1433-1437`:\\n\\n    m.Get(\\\"/issue_templates\\\", context.ReferencesGitRepo(), repo.GetIssueTemplates)\\n    m.Get(\\\"/issue_config\\\", context.ReferencesGitRepo(), repo.GetIssueConfig)\\n    m.Get(\\\"/issue_config/validate\\\", context.ReferencesGitRepo(), repo.ValidateIssueConfig)\\n    m.Get(\\\"/languages\\\", reqRepoReader(unit.TypeCode), repo.GetLanguages)\\n    m.Get(\\\"/licenses\\\", reqRepoReader(unit.TypeCode), repo.GetLicenses)\\n\\n`context.ReferencesGitRepo()` only opens the git repository — it performs no\\npermission check. Every other endpoint in this group that reads Code-tree content\\nis guarded with `reqRepoReader(unit.TypeCode)`: `/languages`, `/licenses`,\\n`/contents/*`, `/file-contents`, and `/{ball_type:tarball|zipball|bundle}/*`\\n(api.go:1418-1445). The three issue-template endpoints are the only Code-tree\\nreaders in the group missing that guard.\\n\\nThe enclosing group runs `repoAssignment()` (api.go:1446), whose access check is\\nsatisfied by `HasAnyUnitAccessOrPublicAccess` — i.e. access to **any** unit of the\\nrepository is sufficient to pass. Without a per-unit `reqRepoReader`, the handlers\\nrun for a caller who has no Code permission.\\n\\n### The handlers return Code-tree file contents\\n\\n`routers/api/v1/repo/repo.go`:\\n\\n    func GetIssueTemplates(ctx *context.APIContext) {                       // :1179\\n        ret := issue.ParseTemplatesFromDefaultBranch(ctx.Repo.Repository, ctx.Repo.GitRepo)\\n        ...\\n        ctx.JSON(http.StatusOK, ret.IssueTemplates)\\n    }\\n\\n    func GetIssueConfig(ctx *context.APIContext) {                          // :1209\\n        issueConfig, _ := issue.GetTemplateConfigFromDefaultBranch(ctx.Repo.Repository, ctx.Repo.GitRepo)\\n        ctx.JSON(http.StatusOK, issueConfig)\\n    }\\n\\n`ParseTemplatesFromDefaultBranch` / `GetTemplateConfigFromDefaultBranch` read\\n`.gitea/ISSUE_TEMPLATE/*` and `issue_config.yaml` from the default (Code) branch\\nand return them in the JSON response.\\n\\n---\\n\\n## Proof of Concept\\n\\n`victim-org/private-repo` is a private repository. The attacker is a member of an\\norganization team granted access to that repository through a non-Code unit only\\n(e.g. the Issues unit) — a supported Gitea permission configuration.\\n\\n    GET /api/v1/repos/victim-org/private-repo/issue_templates HTTP/1.1\\n    Host: TARGET\\n    Authorization: token <attacker token>\\n\\nThe response is `200 OK` with the parsed contents of the repository's\\n`.gitea/ISSUE_TEMPLATE/*` files. The same applies to `/issue_config`. Because the\\ncaller lacks the Code unit, every other Code-tree endpoint\\n(`/contents`, `/languages`, …) correctly returns `404`/`403` for the same token —\\nonly these three return data.\\n\\n---\\n\\n## Impact\\n\\nA repository collaborator whose granted permissions exclude the Code unit can read\\nthe issue-template and issue-config files from the Code default branch of a private\\nrepository. The exposure is limited to those specific configuration files (not\\narbitrary Code-tree content), which is why this is rated low impact. It is\\nnonetheless a unit-level authorization bypass: the endpoints disclose Code-unit\\ncontent to callers the permission model is meant to exclude.\\n\\n---\\n\\n## Suggested fix\\n\\nAdd the same unit guard the sibling endpoints use, in `routers/api/v1/api.go`:\\n\\n    m.Get(\\\"/issue_templates\\\", reqRepoReader(unit.TypeCode), context.ReferencesGitRepo(), repo.GetIssueTemplates)\\n    m.Get(\\\"/issue_config\\\", reqRepoReader(unit.TypeCode), context.ReferencesGitRepo(), repo.GetIssueConfig)\\n    m.Get(\\\"/issue_config/validate\\\", reqRepoReader(unit.TypeCode), context.ReferencesGitRepo(), repo.ValidateIssueConfig)\\n\\n(If issue templates are intended to be visible to Issues-unit users for issue\\ncreation, `reqRepoReader(unit.TypeIssues)` is the appropriate guard — but the\\ncurrent absence of any unit guard is the bug.)\\n\\n---\\n\\n## References\\n\\n- CWE-862 Missing Authorization\\n- CWE-284 Improper Access Control\\n- OWASP A01:2021 Broken Access Control\", \"epss\": {\"percentage\": 0.00283, \"percentile\": 0.20151}, \"ghsa_id\": \"GHSA-3fwp-p5rj-2pxf\", \"github_reviewed_at\": \"2026-06-16T23:41:42Z\", \"html_url\": \"https://github.com/advisories/GHSA-3fwp-p5rj-2pxf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3fwp-p5rj-2pxf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-27783\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-16T23:41:42Z\", \"references\": [\"https://github.com/go-gitea/gitea/security/advisories/GHSA-3fwp-p5rj-2pxf\", \"https://github.com/advisories/GHSA-3fwp-p5rj-2pxf\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-3fwp-p5rj-2pxf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-gitea/gitea\", \"summary\": \"Gitea: Missing repository-unit authorization on issue-template API endpoints\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-16T23:41:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-3fwp-p5rj-2pxf\", \"vulnerabilities\": [{\"first_patched_version\": \"1.26.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3fwp-p5rj-2pxf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-27783"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.601061Z",
+  "provenance": {
+    "content_sha256": "607dacacc09520879ddfb535e7b08868d409f6117c0cc543636eeabbe401ffd1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-16T23:41:42Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3fwp-p5rj-2pxf",
+  "status": "active",
+  "title": "Gitea: Missing repository-unit authorization on issue-template API endpoints",
+  "updated_at": "2026-06-16T23:41:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3fwp-p5rj-2pxf"
+}

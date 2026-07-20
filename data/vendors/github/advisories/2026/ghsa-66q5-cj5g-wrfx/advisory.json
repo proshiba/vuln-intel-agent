@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/248169372?v=4\", \"events_url\": \"https://api.github.com/users/arkmarta/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arkmarta/followers\", \"following_url\": \"https://api.github.com/users/arkmarta/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arkmarta/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arkmarta\", \"id\": 248169372, \"login\": \"arkmarta\", \"node_id\": \"U_kgDODsrDnA\", \"organizations_url\": \"https://api.github.com/users/arkmarta/orgs\", \"received_events_url\": \"https://api.github.com/users/arkmarta/received_events\", \"repos_url\": \"https://api.github.com/users/arkmarta/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arkmarta/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arkmarta/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arkmarta\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50183\", \"cvss\": {\"score\": 4.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"# Stored XSS via Hostile YouTube Video Title in AVideo YouTubeAPI Gallery Section\\n\\n## Summary\\n\\nA stored Cross-Site Scripting vulnerability (CWE-79; chained CWE-829, Inclusion of Functionality from Untrusted Control Sphere) in the AVideo YouTubeAPI plugin renders the `snippet.title` field returned by the YouTube Data API into the homepage gallery markup with no HTML encoding. The title is set by the YouTube video uploader (anyone in the world) and is treated by AVideo as trusted content. A YouTube uploader who controls a video matching the operator's configured query injects HTML into the AVideo homepage by setting their video's title to a JavaScript-bearing string; the payload then executes in the browser of every visitor who loads any page that renders the gallery.\\n\\n## Details\\n\\n`plugin/YouTubeAPI/YouTubeAPI.php::listVideos()` fetches search results from the YouTube Data API and stores the `snippet.title` field unchanged inside a `YPTvideoObject`:\\n\\n```php\\n// plugin/YouTubeAPI/YouTubeAPI.php (listVideos excerpt)\\n$searchResponse = $youtube->search->listSearch(\\n    'snippet,contentDetails,statistics', $options\\n);\\nforeach ($searchResponse['items'] as $searchResult) {\\n    $vid = new YPTvideoObject(\\n        $searchResult[\\\"id\\\"][\\\"videoId\\\"],\\n        $searchResult['snippet'][\\\"title\\\"],          // uploader-controlled\\n        $searchResult['snippet'][\\\"description\\\"],\\n        $searchResult['snippet'][\\\"thumbnails\\\"][\\\"high\\\"][\\\"url\\\"],\\n        $searchResult['snippet'][\\\"channelTitle\\\"],\\n        \\\"https://www.youtube.com/embed/{$searchResult['id']['videoId']}\\\"\\n    );\\n    $object->videos[] = $vid;\\n}\\n```\\n\\n`plugin/YouTubeAPI/gallerySection.php` then renders the title into three HTML contexts inside each gallery card. Four reflection sites total, three of them completely unprotected:\\n\\n```php\\n// plugin/YouTubeAPI/gallerySection.php (foreach body)\\n$youtubeTitle = $video->title;\\n...\\n<a class=\\\"evideo\\\" href=\\\"<?php echo $youtubeEmbedLink; ?>\\\" title=\\\"<?php echo $youtubeTitle; ?>\\\">          <!-- (i) attribute -->\\n    <img src=\\\"<?php echo $youtubeThumbs; ?>\\\" alt=\\\"<?php echo str_replace('\\\"', '', $youtubeTitle); ?>\\\" ... />  <!-- (ii) attribute, partial -->\\n</a>\\n<a class=\\\"h6 evideo\\\" href=\\\"<?php echo $youtubeEmbedLink; ?>\\\" title=\\\"<?php echo $youtubeTitle; ?>\\\">       <!-- (iii) attribute -->\\n    <h2><?php echo $youtubeTitle; ?></h2>                                                              <!-- (iv) element body -->\\n</a>\\n```\\n\\nSites (i), (iii), and (iv) call no encoder. Site (ii) applies `str_replace('\\\"', '', $youtubeTitle)` which strips quotes from one attribute and leaves the other three reflections untouched. The strongest sink is (iv) at line 60: a title containing `<script>alert(2222)</script>` produces `<h2><script>alert(2222)</script></h2>` in the rendered DOM, which the browser parses as a live script element and executes synchronously. The single half-mitigation at line 57 is the maintainer's evidence of awareness of the attribute-injection risk; the same developer left the other three sinks unprotected.\\n\\nAVideo additionally caches the YouTube response for `cacheTimeout` seconds (default 3600), so even after the title is changed on YouTube or the video is removed, the AVideo gallery continues to serve the malicious title until the cache expires or is manually flushed.\\n\\n**Affected product:** AVideo (WWBN), YouTubeAPI plugin\\n**Tested version:** master branch, commit 122b184 (snapshot dated 2026-05-22)\\n\\n## PoC\\n\\nThe AVideo operator must have the YouTubeAPI plugin enabled (the default after configuring a YouTube Data API key) with `showGallerySection=true` (the default). The attacker controls a YouTube video (uploaded under any free YouTube account) whose title is set to:\\n\\n```\\n<script>alert(2222)</script>\\n```\\n\\nThe attacker arranges for the AVideo operator's configured YouTube search query (the `keyword` plugin setting, typically a channel name or topical phrase) to match the hostile video. The matching condition is the same as a normal YouTube search: a unique phrase in the video's description, a channel name the operator follows, or any query the operator has configured.\\n\\nAfter AVideo's `cacheTimeout` window elapses (default 3600 seconds) and a fresh `listVideos()` call fetches the malicious title, any visitor opening the AVideo homepage triggers an `alert(2222)` modal dialog as the gallery card renders.\\n\\nFor deterministic test reproduction, deploy a mock YouTube Data API service that impersonates `www.googleapis.com` and `youtube.googleapis.com` on the AVideo Docker network and returns the malicious title directly. The PoC then reduces to:\\n\\n```\\nhttps://avideo.example/\\n```\\n\\nConfigure the YouTubeAPI plugin in the admin panel (`/plugins`) with any non-empty `developer_key` and any `keyword` value, then load the homepage. The browser fires `alert(2222)` as the gallery section finishes rendering.\\n\\n## Impact\\n\\nThis is a Stored XSS vulnerability (CWE-79) in a publicly-rendered HTML context, with the data source under attacker control (CWE-829). Every visitor who loads any AVideo page rendering the YouTubeAPI gallery section is impacted: the injected JavaScript runs in the visitor's session under the AVideo origin, reads non-`HttpOnly` cookies, and issues authenticated requests as the visitor. When the visitor is an AVideo administrator, the injected JavaScript performs any admin action (create user, promote to admin, change configuration, install plugin) that uses cookie-based authentication without an additional CSRF token, escalating the bug into full administrative takeover. The payload persists for the duration of `cacheTimeout` (default 3600 seconds) after the malicious title is set on YouTube and survives YouTube removing the hostile video for the same window.\", \"epss\": {\"percentage\": 0.00162, \"percentile\": 0.05779}, \"ghsa_id\": \"GHSA-66q5-cj5g-wrfx\", \"github_reviewed_at\": \"2026-06-04T18:56:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-66q5-cj5g-wrfx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-66q5-cj5g-wrfx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50183\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T18:56:53Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-66q5-cj5g-wrfx\", \"https://github.com/WWBN/AVideo/commit/7292129eaee5f609beae103b5cb387d55f17b877\", \"https://github.com/advisories/GHSA-66q5-cj5g-wrfx\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-66q5-cj5g-wrfx\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"WWBN AVideo: Stored XSS via Hostile YouTube Video Title in AVideo YouTubeAPI Gallery Section\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T18:56:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-66q5-cj5g-wrfx\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"WWBN/AVideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-66q5-cj5g-wrfx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "WWBN/AVideo: <= 29.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50183"
+    ],
+    "cvss_score": 4.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "WWBN/AVideo"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.848155Z",
+  "provenance": {
+    "content_sha256": "102634a287fc15793ffa4a4216b698263192e7e99767446e6c47b0f83f83d552",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T18:56:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-66q5-cj5g-wrfx",
+  "status": "active",
+  "title": "WWBN AVideo: Stored XSS via Hostile YouTube Video Title in AVideo YouTubeAPI Gallery Section",
+  "updated_at": "2026-06-04T18:56:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-66q5-cj5g-wrfx"
+}

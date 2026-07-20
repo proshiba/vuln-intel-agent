@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/98734964?v=4\", \"events_url\": \"https://api.github.com/users/0xEr3n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xEr3n/followers\", \"following_url\": \"https://api.github.com/users/0xEr3n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xEr3n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xEr3n\", \"id\": 98734964, \"login\": \"0xEr3n\", \"node_id\": \"U_kgDOBeKTdA\", \"organizations_url\": \"https://api.github.com/users/0xEr3n/orgs\", \"received_events_url\": \"https://api.github.com/users/0xEr3n/received_events\", \"repos_url\": \"https://api.github.com/users/0xEr3n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xEr3n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xEr3n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xEr3n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47412\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\n**Type:** Authorization bypass enabling destructive action. The `DELETE /workspaces/{workspace_id}` endpoint is gated only by `require_workspace_member(workspace_id)` (default `min_role=\\\"member\\\"`). Any member of the workspace can issue a single DELETE to wipe the entire workspace, including every project, issue, comment, agent, label, and member record (cascading via the foreign-key relationships). There is no owner-role gate, no confirmation token, no soft-delete window, no recovery path.\\n**File:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 77-86; `services/workspace_service.py`'s `delete()` method.\\n**Root cause:** the route uses `Depends(require_workspace_member)` which defaults to `min_role=\\\"member\\\"` and is never overridden. The service method `WorkspaceService.delete(workspace_id)` performs the destructive operation without any caller-permission verification. The role hierarchy (`MemberService.has_role`, member_service.py:80-96) is implemented but unused for this endpoint.\\n\\n## Affected Code\\n\\n**File:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 77-86.\\n\\n```python\\n@router.delete(\\\"/{workspace_id}\\\", status_code=status.HTTP_204_NO_CONTENT)\\nasync def delete_workspace(\\n    workspace_id: str,\\n    user: AuthIdentity = Depends(require_workspace_member),         # <-- BUG: defaults to min_role=\\\"member\\\"\\n    session: AsyncSession = Depends(get_db),\\n):\\n    ws_svc = WorkspaceService(session)\\n    deleted = await ws_svc.delete(workspace_id)                     # <-- destructive, no role check\\n    if not deleted:\\n        raise HTTPException(status_code=404, detail=\\\"Workspace not found\\\")\\n```\\n\\n**Why it's wrong:** workspace deletion is the most destructive single action in this product — it wipes every member, project, issue, comment, agent, and label belonging to the tenant. The standard convention is to gate this on owner role, ideally with a confirmation parameter (typed workspace name) and a recovery window. This endpoint does none of that. The `require_workspace_member(min_role)` parameter exists precisely for this kind of tightening but is never invoked with anything other than the default.\\n\\n## Exploit Chain\\n\\n1. Attacker is a member of workspace `W` (joined via invite, signup default, or any other route into membership). State: attacker holds JWT with `Member(workspace_id=W, user_id=attacker, role=\\\"member\\\")`.\\n2. Attacker sends `DELETE /workspaces/W` with `Authorization: Bearer <attacker_jwt>`. State: control flow enters `delete_workspace`.\\n3. `require_workspace_member(W, attacker)` passes (attacker is a member, default min_role=\\\"member\\\" satisfied). `WorkspaceService.delete(W)` removes the workspace row; SQLAlchemy cascade rules drop every related row (members, projects, issues, comments, agents, labels). State: workspace `W` no longer exists.\\n4. Final state: a low-privilege member has wiped the workspace. The legitimate owner has no recovery: no soft-delete, no audit-trail event for the deletion (the `Activity` log row would have been deleted too as part of the cascade). The same primitive at scale (script that DELETEs every workspace_id the attacker can enumerate) becomes a multi-tenant griefing tool.\\n\\n## Security Impact\\n\\n**Severity:** sec-high. CVSS 8.1: network attack, low complexity, low privileges, no user interaction, scope unchanged, no confidentiality (just destruction), high integrity (every workspace child row wiped), high availability (workspace gone for legitimate owner).\\n**Attacker capability:** with one workspace-member token plus one DELETE request, the attacker irreversibly deletes the workspace and every child resource. The deletion is silent and immediate.\\n**Preconditions:** `praisonai-platform` is deployed multi-tenant; the attacker has any membership token in the target workspace.\\n**Differential:** source-inspection-verified. The asymmetry between `require_workspace_member`'s clearly-tunable `min_role` parameter and this endpoint's use of the default value confirms the gap. With the suggested fix below, member-tier tokens fail the gate at the dependency, the destructive action never reaches the service layer, and the endpoint returns 403 instead of 204.\\n\\n## Suggested Fix\\n\\n```diff\\n--- a/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n+++ b/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n@@ -75,11 +75,15 @@\\n+def _require_workspace_owner(workspace_id: str, user, session):\\n+    return require_workspace_member(workspace_id, user, session, min_role=\\\"owner\\\")\\n+\\n @router.delete(\\\"/{workspace_id}\\\", status_code=status.HTTP_204_NO_CONTENT)\\n async def delete_workspace(\\n     workspace_id: str,\\n-    user: AuthIdentity = Depends(require_workspace_member),\\n+    user: AuthIdentity = Depends(_require_workspace_owner),\\n     session: AsyncSession = Depends(get_db),\\n ):\\n     ws_svc = WorkspaceService(session)\\n     deleted = await ws_svc.delete(workspace_id)\\n     if not deleted:\\n         raise HTTPException(status_code=404, detail=\\\"Workspace not found\\\")\\n```\\n\\nDefence-in-depth: require a typed-confirmation parameter (e.g. body `{\\\"confirm_name\\\": \\\"<workspace_name>\\\"}`) and implement a 30-day soft-delete with restore. The four companion workspace-mutation endpoints (`update_workspace`, `add_member`, `update_member_role`, `remove_member`) exhibit the same default-min-role gap and are filed as their own advisories.\", \"epss\": {\"percentage\": 0.00041, \"percentile\": 0.12845}, \"ghsa_id\": \"GHSA-g8rr-7rj2-f627\", \"github_reviewed_at\": \"2026-06-01T14:24:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-g8rr-7rj2-f627\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g8rr-7rj2-f627\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47412\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-01T14:24:39Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-g8rr-7rj2-f627\", \"https://github.com/advisories/GHSA-g8rr-7rj2-f627\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-g8rr-7rj2-f627\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"praisonai-platform: Any workspace member can delete the entire workspace via DELETE /workspaces/{id}\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-01T14:24:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-g8rr-7rj2-f627\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai-platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.1.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g8rr-7rj2-f627",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai-platform: < 0.1.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47412"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai-platform"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.992033Z",
+  "provenance": {
+    "content_sha256": "d9fe0f422d09d6a9b3abd9ba15850dc7d2092594cd2f824ab2df75e7aa8fc6a3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-01T14:24:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g8rr-7rj2-f627",
+  "status": "active",
+  "title": "praisonai-platform: Any workspace member can delete the entire workspace via DELETE /workspaces/{id}",
+  "updated_at": "2026-06-01T14:24:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g8rr-7rj2-f627"
+}

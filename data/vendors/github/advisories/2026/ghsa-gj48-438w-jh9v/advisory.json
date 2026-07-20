@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/112618598?v=4\", \"events_url\": \"https://api.github.com/users/BangbBros/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/BangbBros/followers\", \"following_url\": \"https://api.github.com/users/BangbBros/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/BangbBros/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/BangbBros\", \"id\": 112618598, \"login\": \"BangbBros\", \"node_id\": \"U_kgDOBrZsZg\", \"organizations_url\": \"https://api.github.com/users/BangbBros/orgs\", \"received_events_url\": \"https://api.github.com/users/BangbBros/received_events\", \"repos_url\": \"https://api.github.com/users/BangbBros/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/BangbBros/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/BangbBros/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/BangbBros\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\n\\nBleach `clean()` / `Cleaner()` fails to sanitize dangerous URI schemes in allowed `formaction` attributes.\\n\\nBleach applies URI protocol sanitization only to attributes listed in `attr_val_is_uri`. While URI-bearing attributes such as `action`, `href`, `src`, and `poster` are included in that set, `formaction` is not. As a result, if a downstream application explicitly allows `formaction` on submit-capable controls in untrusted HTML, Bleach preserves dangerous values such as `javascript:alert(1)` instead of stripping them.\\n\\nThis can lead to **submit-triggered JavaScript execution** in applications that rely on Bleach to sanitize untrusted HTML and allow the relevant tag/attribute combination.\\n\\n---\\n\\n### Details\\n\\nThe issue appears to be a URI-sanitization coverage gap in Bleach’s sanitizer logic.\\n\\nRelevant code paths:\\n\\n* `bleach/sanitizer.py` — `BleachSanitizerFilter.allow_token` (around line 553)\\n* `bleach/_vendor/html5lib/filters/sanitizer.py` — `attr_val_is_uri` (around line 525)\\n\\nIn `BleachSanitizerFilter.allow_token`, URI protocol sanitization is only applied when:\\n\\n```python id=\\\"pft79m\\\"\\nif namespaced_name in self.attr_val_is_uri:\\n```\\n\\nHowever, `(None, 'formaction')` is currently missing from `attr_val_is_uri`.\\n\\nThis creates an inconsistency where `action` is protocol-sanitized, but `formaction` is not.\\n\\nAs a result, if a downstream application allows:\\n\\n* tags such as `<button>` or `<input>`\\n* the `formaction` attribute\\n\\nthen Bleach preserves dangerous URI schemes such as `javascript:` in `formaction`.\\n\\nExamples of affected submit-capable controls include:\\n\\n* `<button>` (default submit behavior unless `type=\\\"button\\\"` is set)\\n* `<input type=\\\"submit\\\">`\\n* `<input type=\\\"image\\\">`\\n\\nThis appears to be a real library-side sanitizer gap rather than only an application misuse issue, because Bleach already treats similar URI-bearing attributes (such as `action`) as protocol-sensitive and sanitizes them.\\n\\nSuggested minimal fix:\\n\\nAdd:\\n\\n```python id=\\\"4v4fkn\\\"\\n(None, 'formaction')\\n```\\n\\nto `attr_val_is_uri` in:\\n\\n* `bleach/_vendor/html5lib/filters/sanitizer.py`\\n\\nI also prepared a minimal patch and focused regression tests if helpful.\\n\\n---\\n\\n### PoC\\n\\nBelow are minimal reproductions using `bleach.clean()`.\\n\\n#### 1) `<button>`\\n\\n```python id=\\\"d3g0v7\\\"\\nfrom bleach import clean\\n\\nprint(clean(\\n    '<form><button formaction=\\\"javascript:alert(1)\\\">go</button></form>',\\n    tags={'form', 'button'},\\n    attributes={'button': ['formaction']},\\n))\\n```\\n\\n**Actual output:**\\n\\n```html id=\\\"i4nd7s\\\"\\n<form><button formaction=\\\"javascript:alert(1)\\\">go</button></form>\\n```\\n\\n**Expected output:**\\n\\n```html id=\\\"g4d2r1\\\"\\n<form><button>go</button></form>\\n```\\n\\n---\\n\\n#### 2) `<input type=\\\"submit\\\">`\\n\\n```python id=\\\"l4dy0j\\\"\\nprint(clean(\\n    '<form><input type=\\\"submit\\\" formaction=\\\"javascript:alert(1)\\\" value=\\\"go\\\"></form>',\\n    tags={'form', 'input'},\\n    attributes={'input': ['type', 'formaction', 'value']},\\n))\\n```\\n\\n**Actual output:**\\n\\n```html id=\\\"h8lgbt\\\"\\n<form><input type=\\\"submit\\\" formaction=\\\"javascript:alert(1)\\\" value=\\\"go\\\"></form>\\n```\\n\\n**Expected output:**\\n\\n```html id=\\\"6y8mws\\\"\\n<form><input type=\\\"submit\\\" value=\\\"go\\\"></form>\\n```\\n\\n---\\n\\n#### 3) `<input type=\\\"image\\\">`\\n\\n```python id=\\\"g8q0x8\\\"\\nprint(clean(\\n    '<form><input type=\\\"image\\\" formaction=\\\"javascript:alert(1)\\\" src=\\\"/foo.png\\\"></form>',\\n    tags={'form', 'input'},\\n    attributes={'input': ['type', 'formaction', 'src']},\\n))\\n```\\n\\n**Actual output:**\\n\\n```html id=\\\"fd22kg\\\"\\n<form><input type=\\\"image\\\" formaction=\\\"javascript:alert(1)\\\" src=\\\"/foo.png\\\"></form>\\n```\\n\\n**Expected output:**\\n\\n```html id=\\\"z6t6je\\\"\\n<form><input type=\\\"image\\\" src=\\\"/foo.png\\\"></form>\\n```\\n\\n---\\n\\n### Impact\\n\\nThis is a **client-side HTML sanitization bypass / dangerous URI preservation issue**.\\n\\nIf an application relies on Bleach to sanitize untrusted HTML and explicitly allows:\\n\\n* `formaction`\\n* and submit-capable controls such as `<button>` or `<input>`\\n\\nthen Bleach can emit sanitized output that still contains a dangerous `javascript:` URI in `formaction`.\\n\\nThat can lead to **submit-triggered JavaScript execution** when the user activates the control.\\n\\nImpact is limited to configurations that explicitly allow the relevant tag/attribute combination, but the issue is still security-relevant because:\\n\\n* `formaction` is a real browser sink\\n* Bleach already protocol-sanitizes similar URI-bearing attributes like `action`\\n* the omission creates inconsistent sanitizer coverage for dangerous URI schemes\\n\\nI would currently assess this as **Medium severity**.\\n\\nIf useful, I also have:\\n\\n* a minimal patch\\n* focused regression tests for:\\n\\n  * `<button formaction=\\\"javascript:...\\\">`\\n  * `<input type=\\\"submit\\\" formaction=\\\"javascript:...\\\">`\\n  * `<input type=\\\"image\\\" formaction=\\\"javascript:...\\\">`\\n  * a safe control case where `formaction=\\\"/submit\\\"` is preserved\", \"ghsa_id\": \"GHSA-gj48-438w-jh9v\", \"github_reviewed_at\": \"2026-06-16T14:07:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-gj48-438w-jh9v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gj48-438w-jh9v\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-16T14:07:49Z\", \"references\": [\"https://github.com/mozilla/bleach/security/advisories/GHSA-gj48-438w-jh9v\", \"https://github.com/mozilla/bleach/releases/tag/v6.4.0\", \"https://github.com/advisories/GHSA-gj48-438w-jh9v\"], \"repository_advisory_url\": \"https://api.github.com/repos/mozilla/bleach/security-advisories/GHSA-gj48-438w-jh9v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/mozilla/bleach\", \"summary\": \"Bleach clean() / Cleaner() fails to sanitize dangerous URI schemes in allowed formaction attributes\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-16T14:07:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-gj48-438w-jh9v\", \"vulnerabilities\": [{\"first_patched_version\": \"6.4.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"bleach\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 6.4.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gj48-438w-jh9v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "bleach: < 6.4.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "bleach"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.693727Z",
+  "provenance": {
+    "content_sha256": "66d3e00165767ddd5acc0cc0cfe590bb7c320beb81011aea213ec72a0ceb3ed9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-16T14:07:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gj48-438w-jh9v",
+  "status": "active",
+  "title": "Bleach clean() / Cleaner() fails to sanitize dangerous URI schemes in allowed formaction attributes",
+  "updated_at": "2026-06-16T14:07:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gj48-438w-jh9v"
+}

@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/288231323?v=4\", \"events_url\": \"https://api.github.com/users/sour-exploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sour-exploit/followers\", \"following_url\": \"https://api.github.com/users/sour-exploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sour-exploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sour-exploit\", \"id\": 288231323, \"login\": \"sour-exploit\", \"node_id\": \"U_kgDOES4Pmw\", \"organizations_url\": \"https://api.github.com/users/sour-exploit/orgs\", \"received_events_url\": \"https://api.github.com/users/sour-exploit/received_events\", \"repos_url\": \"https://api.github.com/users/sour-exploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sour-exploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sour-exploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sour-exploit\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}, {\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}], \"description\": \"The WhatsApp and Linear bot adapters verify the inbound webhook HMAC signature only\\nwhen a secret is configured. When the secret environment variable is unset — the\\ndefault on a fresh install and common in development — verification is skipped entirely\\nand the webhook body is parsed and dispatched as a genuine, trusted event. A remote,\\nunauthenticated attacker who can reach the bot's webhook endpoint can inject arbitrary\\nplatform events.\\n\\nAffected code:\\n\\nWhatsApp - src/praisonai/praisonai/bots/whatsapp.py\\n- __init__ (line 108): self._app_secret = app_secret or os.environ.get(\\\"WHATSAPP_APP_SECRET\\\", \\\"\\\")  -> defaults to \\\"\\\"\\n- route (line 246): app.router.add_post(self._webhook_path, self._handle_webhook)  -> default path \\\"/webhook\\\"\\n- _handle_webhook (lines 585-595): `if self._app_secret:` gates the ENTIRE check; when falsy the body is\\n  json.loads()'d and dispatched to _process_webhook_data() with no verification.\\n\\nLinear - src/praisonai/praisonai/bots/linear.py\\n- __init__ (line 86): self._signing_secret = signing_secret or os.environ.get(\\\"LINEAR_WEBHOOK_SECRET\\\", \\\"\\\")  -> \\\"\\\"\\n- _handle_webhook (lines 244-248): same `if self._signing_secret:` fail-open guard.\\n- start() (lines 169-170): only logs a warning; does not fail closed.\\n\\nThe _verify_signature implementations themselves are correct (constant-time HMAC-SHA256);\\nthe defect is that verification is bypassed when the secret is absent.\\n\\nImpact:\\n- WhatsApp: attacker POSTs a crafted Meta Cloud API payload spoofing any sender and message\\n  text; injected into agent sessions and processed as a real user message (prompt injection,\\n  unauthorized agent/command invocation, contact impersonation).\\n- Linear: attacker POSTs forged AgentSession / Comment events, causing the agent to act on and\\n  comment on issues no legitimate event referenced.\\nThe webhook routes require no other authentication, so exploitation needs only network\\nreachability.\\n\\nProof of concept (bot started without the secret - the default):\\n\\n  curl -X POST http://VICTIM:PORT/webhook \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"object\\\":\\\"whatsapp_business_account\\\",\\\"entry\\\":[{\\\"changes\\\":[{\\\"value\\\":\\n         {\\\"messages\\\":[{\\\"from\\\":\\\"15551234567\\\",\\\"id\\\":\\\"wamid.x\\\",\\\"type\\\":\\\"text\\\",\\n         \\\"text\\\":{\\\"body\\\":\\\"attacker-injected message\\\"}}]}}]}]}'\\n  # No X-Hub-Signature-256 header; bot returns 200 and processes the message.\\n  # Linear: omit LINEAR_WEBHOOK_SECRET and POST without a Linear-Signature header.\\n\\nA self-contained PoC that executes the real _handle_webhook / _verify_signature source\\nextracted from the repo confirms: secret unset -> status 200, payload dispatched (VULNERABLE);\\nsecret set + no signature -> status 403, nothing dispatched (control).\\n\\nRemediation:\\nFail closed. When no secret is configured, reject all webhooks (HTTP 403) and refuse to start\\nthe adapter unless a secret is set (or an explicit, clearly-named insecure-dev override is given):\\n\\n  if not self._app_secret:\\n      return web.Response(status=403, text=\\\"Webhook secret not configured\\\")\\n  signature = request.headers.get(\\\"X-Hub-Signature-256\\\", \\\"\\\")\\n  if not self._verify_signature(body, signature):\\n      return web.Response(status=403, text=\\\"Invalid signature\\\")\\n\\nDistinct from prior advisories:\\nThe accepted default-insecure advisories cover a different surface/mechanism — CALL_SERVER_TOKEN\\nunset (GHSA-86qc-r5v2-v6x6) and the JWT key default \\\"dev-secret-change-me\\\" (GHSA-3qg8-5g3r-79v5).\\nThis is in the bot webhook adapters and the mechanism is skipping signature verification entirely\\nwhen the secret is absent, not a weak default key.\", \"ghsa_id\": \"GHSA-x92v-rpx6-p6cw\", \"github_reviewed_at\": \"2026-06-18T13:58:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-x92v-rpx6-p6cw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x92v-rpx6-p6cw\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-18T13:58:08Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-x92v-rpx6-p6cw\", \"https://github.com/advisories/GHSA-x92v-rpx6-p6cw\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-x92v-rpx6-p6cw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: Webhook signature verification skipped (fail-open) when secret unset, allowing forged inbound webhooks (WhatsApp & Linear bots)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T13:58:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-x92v-rpx6-p6cw\", \"vulnerabilities\": [{\"first_patched_version\": \"4.6.59\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.6.52\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x92v-rpx6-p6cw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai: <= 4.6.52"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.330356Z",
+  "provenance": {
+    "content_sha256": "f3948590168aca92984d64a5eb0fe9ddc676a1f6868ab1f8c3518349a5b73bd8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-18T13:58:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x92v-rpx6-p6cw",
+  "status": "active",
+  "title": "PraisonAI: Webhook signature verification skipped (fail-open) when secret unset, allowing forged inbound webhooks (WhatsApp & Linear bots)",
+  "updated_at": "2026-06-18T13:58:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x92v-rpx6-p6cw"
+}

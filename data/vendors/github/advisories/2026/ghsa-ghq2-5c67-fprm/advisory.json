@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/38741078?v=4\", \"events_url\": \"https://api.github.com/users/xuemian168/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xuemian168/followers\", \"following_url\": \"https://api.github.com/users/xuemian168/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xuemian168/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xuemian168\", \"id\": 38741078, \"login\": \"xuemian168\", \"node_id\": \"MDQ6VXNlcjM4NzQxMDc4\", \"organizations_url\": \"https://api.github.com/users/xuemian168/orgs\", \"received_events_url\": \"https://api.github.com/users/xuemian168/received_events\", \"repos_url\": \"https://api.github.com/users/xuemian168/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xuemian168/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xuemian168/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xuemian168\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/142770712?v=4\", \"events_url\": \"https://api.github.com/users/ZejiHui/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ZejiHui/followers\", \"following_url\": \"https://api.github.com/users/ZejiHui/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ZejiHui/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ZejiHui\", \"id\": 142770712, \"login\": \"ZejiHui\", \"node_id\": \"U_kgDOCIKCGA\", \"organizations_url\": \"https://api.github.com/users/ZejiHui/orgs\", \"received_events_url\": \"https://api.github.com/users/ZejiHui/received_events\", \"repos_url\": \"https://api.github.com/users/ZejiHui/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ZejiHui/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ZejiHui/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ZejiHui\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47763\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.8, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-61\", \"name\": \"UNIX Symbolic Link (Symlink) Following\"}], \"description\": \"## Summary\\n\\nPDM writes several project-local state or configuration files without symlink protection. If a malicious repository places those files as symlinks, local PDM operations can overwrite the symlink targets.\\n\\nThis creates an arbitrary file clobber primitive relative to the privileges of the invoking user.\\n\\n## Affected Behavior\\n\\n- Project-local config writes can affect files outside the repository\\n- The most stable demonstrated sink is `pdm.toml`\\n- Related sinks include `.pdm-python` and `.python-version`\\n\\n## Affected Code\\n\\n- `src/pdm/project/config.py:303-350`\\n- `src/pdm/project/core.py:209-217`\\n- `src/pdm/cli/commands/use.py:187-189`\\n\\n## Technical Details\\n\\n`Config.__init__()` resolves the project-local `pdm.toml` path and `_save_config()` writes to the resolved target. If `PROJECT_ROOT/pdm.toml` is a symlink to another file, `pdm config -l ...` updates the target file instead of refusing the write.\\n\\nThe same general problem exists for other project-local persistence paths that are written directly with no `lstat` / `O_NOFOLLOW` protection.\\n\\nFor the `pdm.toml` PoC specifically, the target file must already contain parseable TOML. Otherwise the load step fails before the write path is reached. That parser constraint does not apply to the `.pdm-python` or `.python-version` sinks.\\n\\n## Impact\\n\\n- Arbitrary file clobber as the invoking user\\n- Destructive modification of local files outside the repository root\\n- Useful primitive for privilege abuse when `pdm` is run in elevated contexts\\n\\n## Reproduction\\n\\nPoC:\\n\\n```bash\\n# Replace this with a Python interpreter that can run `python -m pdm`.\\nPDM_PY=/path/to/python-with-pdm\\ntmpdir=$(mktemp -d)\\ntarget=\\\"$tmpdir/clobbered-target.toml\\\"\\n\\ncat > \\\"$target\\\" <<'EOF'\\n[seed]\\nvalue = 1\\nEOF\\n\\nln -s \\\"$target\\\" \\\"$tmpdir/pdm.toml\\\"\\n\\ncat > \\\"$tmpdir/pyproject.toml\\\" <<'EOF'\\n[project]\\nname = \\\"symlink-clobber-demo\\\"\\nversion = \\\"0.0.1\\\"\\nEOF\\n\\n(\\n  cd \\\"$tmpdir\\\" &&\\n  \\\"$PDM_PY\\\" -m pdm config -l venv.in_project false\\n)\\n\\ncat \\\"$target\\\"\\n```\\n\\nExpected result:\\n\\n- A temporary project is created\\n- `pdm.toml` is a symlink to another TOML file\\n- Running `pdm config -l venv.in_project false` modifies the symlink target\\n\\nObserved output from local validation:\\n\\n```text\\n--- target ---\\n[seed]\\nvalue = 1\\n\\n[venv]\\nin_project = false\\n```\\n\\n## Severity\\n\\nMedium\\n\\n## CVSS v4.0\\n\\n- Base score: `6.8` (`Medium`)\\n- Vector: `CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N`\\n\\nRationale:\\n\\n- `AV:L`: exploitation requires local execution of `pdm` against an attacker-prepared checkout\\n- `AC:L`: there is no complex constraint once the symlink sink exists\\n- `AT:N`: no extra prerequisite beyond the victim running the relevant command is required\\n- `PR:N`: the attacker does not need prior privileges on the victim system\\n- `UI:A`: the victim must actively run a command that writes project-local state or config\\n- `VC:N`: the demonstrated issue is a write primitive, not a direct read primitive\\n- `VI:H`: the attacker can cause unauthorized modification of files outside the repository root\\n- `VA:L`: file clobber can disrupt local operation, but direct same-step availability impact is lower than a full RCE\\n- `SC:N/SI:N/SA:N`: the base score is limited to the directly affected system\\n\\n## Root Cause\\n\\nProject-local file sinks are treated as trusted regular files and are written without symlink checks or guarded atomic replacement.\\n\\n## Recommended Remediation\\n\\n- Refuse to write project-local config/state files when the destination is a symlink\\n- Use `lstat` and `O_NOFOLLOW` where available\\n- Avoid resolving attacker-controlled project-local paths before writing\\n- Use atomic temp-file replacement only after confirming the destination is a regular file\\n\\n## Disclosure Notes\\n\\nThis issue is independent from the code-execution issues above. It is best tracked as a separate CVE candidate because the root cause and remediation are different.\", \"epss\": {\"percentage\": 0.00024, \"percentile\": 0.07171}, \"ghsa_id\": \"GHSA-ghq2-5c67-fprm\", \"github_reviewed_at\": \"2026-06-10T20:32:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-ghq2-5c67-fprm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ghq2-5c67-fprm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47763\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-10T20:32:56Z\", \"references\": [\"https://github.com/pdm-project/pdm/security/advisories/GHSA-ghq2-5c67-fprm\", \"https://github.com/pdm-project/pdm/releases/tag/2.27.0\", \"https://github.com/advisories/GHSA-ghq2-5c67-fprm\"], \"repository_advisory_url\": \"https://api.github.com/repos/pdm-project/pdm/security-advisories/GHSA-ghq2-5c67-fprm\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pdm-project/pdm\", \"summary\": \"PDM: Project-Local State and Config Writes Follow Symlinks\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-10T20:32:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-ghq2-5c67-fprm\", \"vulnerabilities\": [{\"first_patched_version\": \"2.27.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pdm\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.27.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ghq2-5c67-fprm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pdm: < 2.27.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47763"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pdm"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.284725Z",
+  "provenance": {
+    "content_sha256": "d119bc0c91fd606a8e8b7facba4cf026613cd84b74f8e36d15d40cf32e3be8a6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-10T20:32:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ghq2-5c67-fprm",
+  "status": "active",
+  "title": "PDM: Project-Local State and Config Writes Follow Symlinks",
+  "updated_at": "2026-06-10T20:32:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ghq2-5c67-fprm"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91620858?v=4\", \"events_url\": \"https://api.github.com/users/Rootingg/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Rootingg/followers\", \"following_url\": \"https://api.github.com/users/Rootingg/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Rootingg/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Rootingg\", \"id\": 91620858, \"login\": \"Rootingg\", \"node_id\": \"U_kgDOBXYF-g\", \"organizations_url\": \"https://api.github.com/users/Rootingg/orgs\", \"received_events_url\": \"https://api.github.com/users/Rootingg/received_events\", \"repos_url\": \"https://api.github.com/users/Rootingg/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Rootingg/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Rootingg/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Rootingg\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42550\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"### Summary\\n`SimplePdo::insert()`, `SimplePdo::update()`, and `SimplePdo::delete()` build SQL statements by concatenating the `$table` argument and the **keys** of the `$data` array directly into the query, with no identifier quoting and no validation. When an application forwards user-controlled data shapes to these helpers — a common and documented pattern, e.g. `$db->insert('users', $request->data->getData())` — an attacker can inject arbitrary SQL by crafting malicious array keys.\\n\\n### Affected code\\n`flight/database/SimplePdo.php`:\\n\\n```php\\n// insert (≈ 320-373)\\n$sql = sprintf(\\n    \\\"INSERT INTO %s (%s) VALUES (%s)\\\",\\n    $table,                            // raw concat\\n    implode(', ', $columns),           // raw array_keys($data)\\n    implode(', ', $placeholders)\\n);\\n\\n// update (≈ 397-409)\\n$sets[] = \\\"$column = ?\\\";               // $column = user-controlled key\\n$sql = sprintf(\\n    \\\"UPDATE %s SET %s WHERE %s\\\",\\n    $table,                            // raw\\n    implode(', ', $sets),\\n    $where\\n);\\n\\n// delete (≈ 427-429)\\n$sql = \\\"DELETE FROM $table WHERE $where\\\";\\n```\\n\\nNo identifier-quoting helper exists; neither `$table` nor the data keys are validated against a safe-identifier pattern.\\n\\n### Proof of concept\\nA controller does:\\n```php\\n$db->insert('users', $request->data->getData());\\n```\\n\\nThe attacker sends the JSON body:\\n```json\\n{\\\"name, is_admin) VALUES (?, 1);-- \\\": \\\"attacker_injected\\\"}\\n```\\n\\nGenerated SQL:\\n```sql\\nINSERT INTO users (name, is_admin) VALUES (?, 1);-- ) VALUES (?)\\n```\\n\\nAfter the `--` comment, the effective statement `INSERT INTO users (name, is_admin) VALUES (?, 1)` binds the single placeholder `'attacker_injected'`, yielding a row with `is_admin = 1`.\\n\\nReproduced live on an in-memory sqlite database (`testproj/sqli_live2.php`):\\n\\n```\\nid=1  name=alice              is_admin=0\\nid=2  name=attacker_injected  is_admin=1   <-- injected insert\\n```\\n\\n`UPDATE` injection via the `$where` parameter was also reproduced: `$db->update('users', ['is_admin' => 1], \\\"id = 1 OR 1=1\\\")` flips admin on every row.\\n\\n### Impact\\n- **Privilege escalation** on any signup / register endpoint that forwards request data to `insert()` (attacker creates an administrative account in a single request).\\n- Arbitrary column write through `update()` keys.\\n- Data destruction and exfiltration through the `$where` parameter (`DELETE FROM users WHERE 1=1`, UNION-based exfil, etc.).\\n\\n### Patch (fixed in `3.18.1`, commit `b8dd23a`)\\nA new `requireSafeIdentifier()` helper validates table names and column names against `^[A-Za-z_][A-Za-z0-9_]*$` before they are interpolated into the SQL string. The `$where` parameter remains raw SQL as documented — parameterized values passed alongside it continue to be bound safely.\\n\\n### Credit\\nDiscovered by **@Rootingg**.\", \"epss\": {\"percentage\": 0.00396, \"percentile\": 0.31552}, \"ghsa_id\": \"GHSA-xwqr-rcqg-22mr\", \"github_reviewed_at\": \"2026-05-06T21:35:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-xwqr-rcqg-22mr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xwqr-rcqg-22mr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42550\"}], \"nvd_published_at\": \"2026-05-13T20:16:22Z\", \"published_at\": \"2026-05-06T21:35:55Z\", \"references\": [\"https://github.com/flightphp/core/security/advisories/GHSA-xwqr-rcqg-22mr\", \"https://github.com/flightphp/core/commit/b8dd23aaa828cb289fa3c84e75b2a3717cab50b0\", \"https://github.com/flightphp/core/releases/tag/v3.18.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42550\", \"https://github.com/advisories/GHSA-xwqr-rcqg-22mr\"], \"repository_advisory_url\": \"https://api.github.com/repos/flightphp/core/security-advisories/GHSA-xwqr-rcqg-22mr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/flightphp/core\", \"summary\": \"Flight vulnerable to SQL Injection via unvalidated identifiers in SimplePdo::insert / update / delete\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:40:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-xwqr-rcqg-22mr\", \"vulnerabilities\": [{\"first_patched_version\": \"3.18.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"flightphp/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.18.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xwqr-rcqg-22mr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flightphp/core: < 3.18.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42550"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flightphp/core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.308139Z",
+  "provenance": {
+    "content_sha256": "ac91284181a93896d96d0f882a1108012dd6211ee9fe8421408fd748f549f46e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T21:35:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xwqr-rcqg-22mr",
+  "status": "active",
+  "title": "Flight vulnerable to SQL Injection via unvalidated identifiers in SimplePdo::insert / update / delete",
+  "updated_at": "2026-05-14T20:40:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xwqr-rcqg-22mr"
+}

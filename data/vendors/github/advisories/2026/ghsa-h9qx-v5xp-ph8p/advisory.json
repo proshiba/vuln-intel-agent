@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/65031256?v=4\", \"events_url\": \"https://api.github.com/users/realalphaman/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/realalphaman/followers\", \"following_url\": \"https://api.github.com/users/realalphaman/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/realalphaman/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/realalphaman\", \"id\": 65031256, \"login\": \"realalphaman\", \"node_id\": \"MDQ6VXNlcjY1MDMxMjU2\", \"organizations_url\": \"https://api.github.com/users/realalphaman/orgs\", \"received_events_url\": \"https://api.github.com/users/realalphaman/received_events\", \"repos_url\": \"https://api.github.com/users/realalphaman/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/realalphaman/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/realalphaman/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/realalphaman\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-27823\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\nA critical vulnerability has been identified in EGroupware that may lead to Remote Code Execution (RCE).\\nThe issue allows an authenticated attacker to execute arbitrary commands on the server. If user self-registration is enabled, the vulnerability may be exploitable without prior authentication.\\n\\nThe vulnerability stems from improper authorization checks combined with a file write primitive and an arbitrary file read vulnerability, which together enable full system compromise.\\n\\n## Details\\n### 1. Improper Authorization in SmallPartMediaRecorder::ajax_upload()\\n\\nThe vulnerability originates in:\\n\\n`EGroupware\\\\SmallParT\\\\Widgets\\\\SmallPartMediaRecorder::ajax_upload()`\\n\\nThe function attempts to verify whether the current user is a teacher of the specified course ID before allowing a file upload.\\n\\nThe critical authorization check ensures that the course access control list (ACL) contains:\\n\\n`$required_acl (self::ROLE_TEACHER, i.e., 3)`\\n\\nHowever, the `course_acl `value is derived from user-controlled request data.\\n\\n**_Bypass Technique_**\\n\\nA crafted request can manipulate the `participant_role `value inside the request body:\\n\\n```json\\n{\\n  \\\"video\\\": {\\n    \\\"course_id\\\": {\\n      \\\"participants\\\": [\\n        {\\n          \\\"account_id\\\": \\\"7\\\",\\n          \\\"name\\\": \\\"Test\\\",\\n          \\\"joined_at\\\": \\\"2026-01-10\\\",\\n          \\\"participant_role\\\": 3\\n        }\\n      ],\\n      \\\"account_id\\\": \\\"7\\\",\\n      \\\"course_id\\\": \\\"1\\\"\\n    },\\n    \\\"video_hash\\\": \\\".\\\",\\n    \\\"video_type\\\": \\\"file_here\\\"\\n  }\\n}\\n```\\n\\nBecause the course ACL is taken from `participant_role`, setting it to 3 allows bypassing the `isTeacher `check.\\n\\n### 2. Arbitrary File Write\\n\\nAfter bypassing authorization, the function uploads the provided file into a controllable file path.\\n\\nThe file path is derived from the `video_type `(or video_path) value, enabling path traversal.\\n\\nDue to file permission restrictions (server running as www-data), writable targets are limited. One viable target is `./header.inc.php`\\n\\n### 3. Constraints\\n\\nWriting a simple PHP webshell may not immediately execute due to OPcache.\\n\\nAn invalid `header.inc.php` file will break the system and prevent the server from running.\\n\\nTherefore, a valid file structure must be preserved.\\n\\n### 4. Arbitrary File Read\\n\\nA second vulnerability allows arbitrary file read via:\\n\\n`/egroupware/index.php?menuaction=importexport.importexport_export_ui.download&_filename=../../../usr/share/egroupware/header.inc.php&_suffix=txt&_type=text/plain&filename=leak`\\n\\nThe issue resides in:\\n\\n`importexport_export_ui::download`\\n\\nThe `_filename `parameter is user-controlled and used to read arbitrary files.\\n\\nThis allows retrieving the original `header.inc.php` content.\\n\\n### 5. Achieving Remote Code Execution\\n\\nBy combining: Arbitrary file read (to retrieve valid header.inc.php); Arbitrary file write (to overwrite it with modified content), an attacker can inject controlled PHP code while preserving file validity.\\n\\nThis results in Remote Code Execution after server restart, or OPcache expiration. An alternative impact includes modifying the admin setup password to gain full system control.\\n\\n## Impact\\nRemote Code Execution\\nFull system compromise\\nArbitrary file read\\nArbitrary file write\\nPotential complete takeover of EGroupware instance\\n\\n## Reported by\\nThis finding was discovered by Huong Kieu of Cenobe Security (https://cenobe.com/)\", \"ghsa_id\": \"GHSA-h9qx-v5xp-ph8p\", \"github_reviewed_at\": \"2026-07-07T13:01:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-h9qx-v5xp-ph8p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h9qx-v5xp-ph8p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-27823\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T13:01:01Z\", \"references\": [\"https://github.com/EGroupware/egroupware/security/advisories/GHSA-h9qx-v5xp-ph8p\", \"https://github.com/advisories/GHSA-h9qx-v5xp-ph8p\"], \"repository_advisory_url\": \"https://api.github.com/repos/EGroupware/egroupware/security-advisories/GHSA-h9qx-v5xp-ph8p\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/EGroupware/egroupware\", \"summary\": \"EGroupware has a Remote Code Execution Vulnerability\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T13:01:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-h9qx-v5xp-ph8p\", \"vulnerabilities\": [{\"first_patched_version\": \"26.2.20260224\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"egroupware/egroupware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 26.0.20251208, < 26.2.20260224\"}, {\"first_patched_version\": \"23.1.20260224\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"egroupware/egroupware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 23.1.20260224\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h9qx-v5xp-ph8p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "egroupware/egroupware: < 23.1.20260224",
+      "egroupware/egroupware: >= 26.0.20251208, < 26.2.20260224"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-27823"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "egroupware/egroupware"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.799305Z",
+  "provenance": {
+    "content_sha256": "9f149bdd971f61f500b57ab8af05ea86edbc0fc54512ae3448f413d543ca6f73",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T13:01:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h9qx-v5xp-ph8p",
+  "status": "active",
+  "title": "EGroupware has a Remote Code Execution Vulnerability",
+  "updated_at": "2026-07-07T13:01:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h9qx-v5xp-ph8p"
+}

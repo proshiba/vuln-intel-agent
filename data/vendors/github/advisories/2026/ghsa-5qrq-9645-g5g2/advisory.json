@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/83430497?v=4\", \"events_url\": \"https://api.github.com/users/daveqnet/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/daveqnet/followers\", \"following_url\": \"https://api.github.com/users/daveqnet/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/daveqnet/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/daveqnet\", \"id\": 83430497, \"login\": \"daveqnet\", \"node_id\": \"MDQ6VXNlcjgzNDMwNDk3\", \"organizations_url\": \"https://api.github.com/users/daveqnet/orgs\", \"received_events_url\": \"https://api.github.com/users/daveqnet/received_events\", \"repos_url\": \"https://api.github.com/users/daveqnet/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/daveqnet/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/daveqnet/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/daveqnet\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44541\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\n\\n`fides.js` is the script that renders Fides's consent banner on customer websites. It lets the embedding page override the banner's description text at runtime via a URL query parameter, a JavaScript global, or a cookie. On sites that have opted into HTML-formatted descriptions, the overridden value is rendered as live HTML without passing through the server-side sanitiser the rendering path was designed to trust.\\n\\nThe result is a DOM-based XSS that any visitor can trigger with a crafted link, no authentication required. The cookie source lets the payload persist, so a single click can plant a payload that fires on every subsequent banner render across all subdomains until cookies are cleared.\\n\\n### Am I affected?\\n\\nThis vulnerability affects Fides Enterprise deployments that use `fides.js` for consent management, a.k.a. \\\"Janus\\\", and have HTML-formatted banner descriptions enabled (the `FIDES_PRIVACY_CENTER__ALLOW_HTML_DESCRIPTION` Privacy Center container env var set to `true` ). Deployments that do not load `fides.js`, or that leave HTML descriptions off (the default), are not affected. The vulnerable code lives in the open-source `ethyca-fides` PyPI package, which is why this is published as a GHSA and CVE against Fides OSS, but only Fides Enterprise consent management platform deployments exercise the affected path.\\n\\nTo self-test, visit any page where your site loads the consent banner, replacing `<your-site>`:\\n\\n```\\nhttps://<your-site>/?fides_override_language=en&fides_description=<img src=x onerror=\\\"alert(`DOM XSS in fides_description. Origin: ${document.domain}`)\\\">\\n```\\n\\nIf a browser `alert()` appears showing the embedding origin when the banner renders, the deployment is affected. If the banner does not auto-open, click the manage privacy preferences link to display it.\\n\\n<img width=\\\"1392\\\" height=\\\"1031\\\" alt=\\\"dom-xss-localhost\\\" src=\\\"https://github.com/user-attachments/assets/548bcf44-e4ab-4070-ab31-89c6cff79be1\\\" />\\n\\nIf no alert appears, the deployment is not affected via this path.\\n\\nThe `fides_override_language=en` parameter is required because experience-translation overrides only apply when the override language matches the active locale. Adjust to match the active locale on the target site if `en` is not it.\\n\\n### Details\\n\\nThe vulnerability is a trust gap between two features that are safe in isolation but unsafe together.\\n\\nThe first feature is the override mechanism. `fides.js` lets the embedding page replace certain banner fields at runtime by reading them from the URL, a JavaScript global, or a cookie on the page origin. The description text is one of the overrideable fields.\\n\\nThe second feature is HTML-formatted descriptions. When the `allowHTMLDescription` server-controlled flag is on, the rendering path writes the description into the DOM as live HTML rather than plain text. This mode relies on a server-side sanitiser (`nh3`) to clean any HTML before it reaches the client, so the rendering sink can trust its input.\\n\\nCombining the two breaks the assumption. The override mechanism feeds the description directly from a client-controlled source, never reaching the server, so the sanitiser the rendering path was designed to trust never runs. On a deployment that has both features active, an attacker-supplied value travels straight from URL or cookie to the HTML sink and executes as script.\\n\\nThe cookie source compounds the impact. Cookies set by JavaScript on the apex domain are visible to every subdomain on subsequent loads, so a payload delivered via URL can write a `fides_description` cookie that fires on every later banner render across the entire site, until the cookie is cleared.\\n\\n### Impact\\n\\nA successful exploit gives the attacker arbitrary JavaScript execution in the embedding site's origin, with the same authority as the site's own scripts. The payload can read and modify any data the page can access, issue requests on behalf of the visitor, and render content that appears to come from the site itself. The actual consequences on a given deployment depend on what the embedding origin holds and what other defences (CSP, cookie flags, origin isolation) are in place.\\n\\nThe cookie-based persistence variant raises the impact ceiling, since a single click can convert into a payload that fires on every subsequent banner render across the apex and all subdomains until the visitor clears their cookies.\\n\\n### Patches\\n\\nThis vulnerability has been patched in Fides OSS version `2.84.5`, specifically `ethyca/fides-privacy-center:2.84.5` Users are advised to upgrade to this version or later to secure their systems against these threats.\\n\\nFides Enterprise (fidesplus) version `2.84.6` contains the same patch.\\n\\n### Workarounds\\n\\nSet `FIDES_PRIVACY_CENTER__ALLOW_HTML_DESCRIPTION=false` on the Privacy Center container(s) and redeploy. The XSS sink relies on the flag being on, so turning it off makes `fides.js` strip HTML from the description before rendering, regardless of which source the value came from.\\n\\n### Severity\\n\\nThis vulnerability has been assigned a severity of HIGH with a CVSS v4 vector of `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N` (7.0, High).\\n\\nThe score reflects the worst realistic exploitation path: an attacker who can plant a `fides_description` cookie on the target origin gets persistent script execution that fires on every visitor's banner render, with no further interaction required. Cookie-write capability is not always available to a remote attacker, and the score accounts for that as a precondition, but when it is available the impact is script execution in the embedding site's origin every time the banner or modal renders.\\n\\nThe more common delivery path (a crafted link the victim clicks) scores 6.3, Medium, with a vector of `CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N`. Per the FIRST [CVSS 4.0 User Guide](https://www.first.org/cvss/v4.0/user-guide), library-level vulnerabilities should be scored against the \\\"reasonable worst-case scenario\\\", since the analyst cannot anticipate every deployment context. We publish the higher score on that basis.\\n\\nThe published score is the base severity of the vulnerability itself. Real-world impact on a given deployment can be higher or lower depending on the embedding site's own defences. Sites with `HttpOnly` session cookies, strict Content-Security-Policy, and authentication flows isolated from the consent experience origin reduce the surface a payload can reach. Sites with permissive CSP, JavaScript-readable session tokens, or same-origin OIDC/social-login flows expose more. Operators should assess the score against their own environment.\", \"epss\": {\"percentage\": 0.00297, \"percentile\": 0.21505}, \"ghsa_id\": \"GHSA-5qrq-9645-g5g2\", \"github_reviewed_at\": \"2026-05-14T19:04:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-5qrq-9645-g5g2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5qrq-9645-g5g2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44541\"}], \"nvd_published_at\": \"2026-06-08T21:16:45Z\", \"published_at\": \"2026-05-14T19:04:14Z\", \"references\": [\"https://github.com/ethyca/fides/security/advisories/GHSA-5qrq-9645-g5g2\", \"https://github.com/ethyca/fides/commit/67e43b10b1096c7f84d5c0eeba08ee3b7846b7cd\", \"https://github.com/ethyca/fides/releases/tag/2.84.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44541\", \"https://github.com/advisories/GHSA-5qrq-9645-g5g2\"], \"repository_advisory_url\": \"https://api.github.com/repos/ethyca/fides/security-advisories/GHSA-5qrq-9645-g5g2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/ethyca/fides\", \"summary\": \"ethyca-fides has a DOM-based XSS vulnerability in fides.js via fides_description override\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T13:12:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-5qrq-9645-g5g2\", \"vulnerabilities\": [{\"first_patched_version\": \"2.84.5\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"ethyca-fides\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.33.0, < 2.84.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5qrq-9645-g5g2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ethyca-fides: >= 2.33.0, < 2.84.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44541"
+    ],
+    "cvss_score": 7.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ethyca-fides"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.447788Z",
+  "provenance": {
+    "content_sha256": "5de4dad8acc2ff979f84e2cfff126d82c4ce33047dd44e8f434ecd0de4a23d92",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T19:04:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5qrq-9645-g5g2",
+  "status": "active",
+  "title": "ethyca-fides has a DOM-based XSS vulnerability in fides.js via fides_description override",
+  "updated_at": "2026-06-09T13:12:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5qrq-9645-g5g2"
+}

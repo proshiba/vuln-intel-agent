@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/197543882?v=4\", \"events_url\": \"https://api.github.com/users/0xmrma/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xmrma/followers\", \"following_url\": \"https://api.github.com/users/0xmrma/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xmrma/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xmrma\", \"id\": 197543882, \"login\": \"0xmrma\", \"node_id\": \"U_kgDOC8ZHyg\", \"organizations_url\": \"https://api.github.com/users/0xmrma/orgs\", \"received_events_url\": \"https://api.github.com/users/0xmrma/received_events\", \"repos_url\": \"https://api.github.com/users/0xmrma/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xmrma/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xmrma/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xmrma\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}, {\"cwe_id\": \"CWE-807\", \"name\": \"Reliance on Untrusted Inputs in a Security Decision\"}], \"description\": \"### Summary\\nA configuration-dependent origin validation bypass was identified in Appsmith’s password reset and email verification flows on current `release`.\\n\\nBoth flows derive the email-link base URL from the request `Origin` header. The current validation only enforces a trusted base URL when `APPSMITH_BASE_URL` is configured. If that setting is unset, the application accepts the caller-supplied origin and uses it to generate token-bearing reset and verification links.\\n\\nOn deployments with email delivery enabled and `APPSMITH_BASE_URL` unset, this can cause Appsmith to send security-sensitive links whose clickable host is attacker-controlled, which can plausibly lead to account takeover after victim interaction.\\n\\n### Details\\nThe current `release` head at commit `e77639eca4974469c1e676904851ffdaedd38111` was reviewed.\\n\\nThe relevant routes are publicly reachable in `SecurityConfig.java`:\\n\\n- `POST /forgotPassword` is permitted without authentication at line `209`\\n- `POST /resendEmailVerification` is permitted without authentication at line `228`\\n\\nIn `UserControllerCE.java`, both flows copy the request `Origin` header into the DTO field used as the email-link base URL:\\n\\n- `forgotPasswordRequest(...)` at lines `91-94`\\n- `resendEmailVerification(...)` at lines `189-193`\\n\\nIn `UserServiceCEImpl.java`, base URL validation is conditional:\\n\\n- `@Value(\\\"${APPSMITH_BASE_URL:}\\\")` at line `113`\\n- `resolveSecureBaseUrl(...)` at lines `132-145`\\n\\nThat method explicitly documents and implements this behavior:\\n\\n- if `APPSMITH_BASE_URL` is configured, the provided URL must match it\\n- if `APPSMITH_BASE_URL` is unset, the provided URL is accepted for backward compatibility\\n\\nThe resulting base URL is then used to construct token-bearing links:\\n\\n- `FORGOT_PASSWORD_CLIENT_URL_FORMAT` at line `149`\\n- reset URL generation at lines `282-289`\\n- `EMAIL_VERIFICATION_CLIENT_URL_FORMAT` at line `152`\\n- verification URL generation at lines `931-940`\\n\\nThis means the base URL is not only used for branding or display purposes. It directly controls the clickable host of security-sensitive reset and verification links.\\n\\nNote that the admin UI describes APPSMITH_BASE_URL as required for password reset and email verification links in:\\n\\n- `app/client/src/ce/pages/AdminSettings/config/configuration.tsx` at lines `41-49`\\n\\nThe reviewed self-host material indicates this protection is not fail-closed by default, which makes the vulnerable condition realistic on existing deployments where operators have not set `APPSMITH_BASE_URL`.\\n\\n\\n### PoC\\nThese steps were designed for validation on an Appsmith deployment that I own or am explicitly authorized to test.\\n\\n1. Deploy a non-production Appsmith instance from current `release`, or any build containing the affected code.\\n2. Enable outbound email delivery.\\n3. Leave `APPSMITH_BASE_URL` unset or blank.\\n4. Use a test mailbox account you control, for example `victim@example.test`.\\n5. Send a password reset request with a forged `Origin` header:\\n\\n```bash\\ncurl -i -X POST 'https://YOUR-INSTANCE/api/v1/users/forgotPassword' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -H 'Origin: https://attacker.example' \\\\\\n  --data '{\\\"email\\\":\\\"victim@example.test\\\"}'\\n```\\n\\n6. Inspect the delivered email. If affected, the clickable reset link is generated under `https://attacker.example/...` instead of the legitimate Appsmith host.\\n7. Repeat the same validation for resend email verification using an unverified test account:\\n```bash\\ncurl -i -X POST 'https://YOUR-INSTANCE/api/v1/users/resendEmailVerification' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -H 'Origin: https://attacker.example' \\\\\\n  --data '{\\\"email\\\":\\\"victim@example.test\\\"}'\\n```\\n\\n8. Inspect the delivered verification email. If affected, the clickable verification link is generated under `https://attacker.example/....`\\n9. Set `APPSMITH_BASE_URL=https://YOUR-INSTANCE`, restart the server, and repeat the same requests.\\n10. The expected secure behavior is that mismatched `Origin`  is rejected, or the generated links no longer follow the forged request header.\\n\\nLive tokens, third-party data, or unsafe exploitation material was not included in this report. The attached archive contains source excerpts, data-flow proof, safe validation notes, and supporting evidence collected from the reviewed current branch.\\n\\n### Impact\\nThis is a trust-boundary failure in token-bearing email authentication flows.\\n\\nAffected deployments are those where:\\n\\n- `APPSMITH_BASE_URL` is unset or blank\\n- outbound email is enabled\\n- password reset and/or email verification flows are enabled\\n\\nAttacker requirements are low:\\n\\n- no prior authentication is required to reach the relevant endpoints\\n- the attacker only needs to trigger an email flow toward a target account\\n\\nSecurity impact:\\n\\n- Appsmith can generate password reset or verification emails whose clickable host is attacker-controlled\\n- victim interaction can expose security-sensitive token material\\n- this can plausibly result in account takeover\\n- at minimum, it enables trusted-email abuse and phishing through the application itself\\n \\n### mitigation\\n1. Remove the fallback behavior in `resolveSecureBaseUrl(...)` that accepts caller-supplied origin data when `APPSMITH_BASE_URL` is unset.\\n2. Fail closed for all token-bearing email flows when no trusted base URL is configured.\\n3. Use a single trusted-base-url helper across:\\n   - password reset\\n   - resend email verification\\n   - invite flows\\n   - instance admin invite flows\\n4. Add regression tests for the unset-configuration case.\\n5. Add startup or admin-level validation so security-sensitive email flows cannot operate until a trusted base URL is configured.\\n\\n### Attachment\\n[appsmith-email-link-origin-validation-bypass-20260321.zip](https://github.com/user-attachments/files/26153718/appsmith-email-link-origin-validation-bypass-20260321.zip)\", \"ghsa_id\": \"GHSA-j9gf-vw2f-9hrw\", \"github_reviewed_at\": \"2026-06-12T18:28:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-j9gf-vw2f-9hrw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j9gf-vw2f-9hrw\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-12T18:28:52Z\", \"references\": [\"https://github.com/appsmithorg/appsmith/security/advisories/GHSA-j9gf-vw2f-9hrw\", \"https://github.com/appsmithorg/appsmith/releases/tag/v2.0\", \"https://github.com/advisories/GHSA-j9gf-vw2f-9hrw\"], \"repository_advisory_url\": \"https://api.github.com/repos/appsmithorg/appsmith/security-advisories/GHSA-j9gf-vw2f-9hrw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/appsmithorg/appsmith\", \"summary\": \"Appsmith: Configuration-dependent origin validation bypass in password reset and email verification link generation\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T18:28:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-j9gf-vw2f-9hrw\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"com.appsmith:server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j9gf-vw2f-9hrw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "com.appsmith:server: < 2.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "com.appsmith:server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.081132Z",
+  "provenance": {
+    "content_sha256": "55816f18ab954432416798b9f1a98e08fac03ef0fb361f4b79275216498fab68",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-12T18:28:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j9gf-vw2f-9hrw",
+  "status": "active",
+  "title": "Appsmith: Configuration-dependent origin validation bypass in password reset and email verification link generation",
+  "updated_at": "2026-06-12T18:28:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j9gf-vw2f-9hrw"
+}

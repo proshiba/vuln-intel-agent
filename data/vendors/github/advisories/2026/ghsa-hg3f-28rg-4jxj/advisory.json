@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/189560306?v=4\", \"events_url\": \"https://api.github.com/users/rmtsixq/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/rmtsixq/followers\", \"following_url\": \"https://api.github.com/users/rmtsixq/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/rmtsixq/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/rmtsixq\", \"id\": 189560306, \"login\": \"rmtsixq\", \"node_id\": \"U_kgDOC0x18g\", \"organizations_url\": \"https://api.github.com/users/rmtsixq/orgs\", \"received_events_url\": \"https://api.github.com/users/rmtsixq/received_events\", \"repos_url\": \"https://api.github.com/users/rmtsixq/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/rmtsixq/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/rmtsixq/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/rmtsixq\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47200\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-288\", \"name\": \"Authentication Bypass Using an Alternate Path or Channel\"}], \"description\": \"### Summary\\n\\nWhen `experimental.componentIslands` is enabled (default in Nuxt 4), any `.server.vue` file under `pages/` is automatically registered as a server island under the key `page_<routeName>` and exposed via the `/__nuxt_island/:name` endpoint. Until this fix, requests through that endpoint rendered the page component directly via the SSR renderer without instantiating Vue Router, which meant route middleware declared on the page (including `definePageMeta({ middleware })`) did not run.\\n\\nFor Nuxt applications that gate a `.server.vue` *page* behind route middleware as their sole auth check, an unauthenticated attacker could bypass that check by requesting `/__nuxt_island/page_<routeName>_<anyhash>` directly and receiving the server-rendered HTML.\\n\\n### Affected configurations\\n\\nAll three conditions must hold for an application to be vulnerable:\\n\\n1. `experimental.componentIslands` is enabled (the default in Nuxt 4; opt-in in Nuxt 3).\\n2. The application defines one or more `.server.vue` files under `pages/`, registering them as routed pages.\\n3. Authentication / authorization for at least one such page is enforced solely via route middleware (`middleware/*.ts` referenced from `definePageMeta`), without a server-side check inside the page or its data layer.\\n\\nApplications that enforce auth inside the island's own data layer (server-only API routes, `useRequestEvent` + manual session checks, etc.) were not affected. The general \\\"route middleware does not run for non-page island *components*\\\" behaviour is documented and unchanged; this advisory concerns the `.server.vue` *page* case specifically, where running middleware is the user's clear expectation.\\n\\n### Details\\n\\n- Build (`packages/nuxt/src/components/templates.ts`): `.server.vue` pages are registered as island components with `page_` prefix, making them addressable through `/__nuxt_island/page_<routeName>_<hashId>`.\\n- Runtime (`packages/nitro-server/src/runtime/handlers/island.ts`): the handler resolves the requested island component and renders it via `renderer.renderToString(ssrContext)`. The Vue Router plugin previously short-circuited middleware execution whenever `ssrContext.islandContext` was set.\\n- The two paths interact so that route middleware declared on the source page never runs.\\n\\n### Proof of concept\\n\\nGiven a page `app/pages/secret.server.vue`:\\n\\n```vue\\n<script setup lang=\\\"ts\\\">\\ndefinePageMeta({ middleware: 'auth' })\\n</script>\\n\\n<template>\\n<h1>SECRET DATA</h1>\\n</template>\\n```\\n\\nwith `middleware/auth.ts` blocking unauthenticated access:\\n\\n```bash\\n# Direct page request: blocked by middleware\\ncurl -i http://localhost:3000/secret\\n# -> 403 / redirect, depending on the middleware\\n\\n# Island request: middleware did not run before this fix\\ncurl -i 'http://localhost:3000/__nuxt_island/page_secret_anyhash'\\n# -> 200 OK, body includes <h1>SECRET DATA</h1>\\n```\\n\\n### Patches\\n\\nPatched in `nuxt@4.4.6` and `nuxt@3.21.6` by [#35092](https://github.com/nuxt/nuxt/pull/35092). The Vue Router plugin now runs middleware and redirect handling for `page_*` islands (i.e. islands that originate from `.server.vue` files in `pages/`). The island handler propagates middleware-issued responses (`~renderResponse`), and a new `beforeResolve` guard returns HTTP 400 when the requested `page_<name>` does not match the route component the URL resolves to.\\n\\nNon-page island components are unaffected - they continue to render without route middleware, by design.\\n\\n### Workarounds\\n\\nIf you cannot upgrade immediately:\\n\\n- Enforce authentication inside the `.server.vue` page itself, not via route middleware. Read the session from `useRequestEvent()` and `throw createError({ statusCode: 401 })` (or redirect) before returning data. This is the recommended pattern for islands regardless of this advisory.\\n- Disable `experimental.componentIslands` if your app does not use the feature.\\n- If your app must keep route-middleware-only auth, gate the `/__nuxt_island/page_*` URL prefix at your reverse proxy or in a server middleware.\", \"epss\": {\"percentage\": 0.0023, \"percentile\": 0.13529}, \"ghsa_id\": \"GHSA-hg3f-28rg-4jxj\", \"github_reviewed_at\": \"2026-05-29T17:15:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-hg3f-28rg-4jxj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hg3f-28rg-4jxj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47200\"}], \"nvd_published_at\": \"2026-06-12T14:16:32Z\", \"published_at\": \"2026-05-29T17:15:11Z\", \"references\": [\"https://github.com/nuxt/nuxt/security/advisories/GHSA-hg3f-28rg-4jxj\", \"https://github.com/nuxt/nuxt/issues/19772\", \"https://github.com/nuxt/nuxt/pull/35092\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47200\", \"https://github.com/advisories/GHSA-hg3f-28rg-4jxj\"], \"repository_advisory_url\": \"https://api.github.com/repos/nuxt/nuxt/security-advisories/GHSA-hg3f-28rg-4jxj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nuxt/nuxt\", \"summary\": \"Nuxt's route middleware is not enforced when rendering `.server.vue` pages via `/__nuxt_island/page_*`\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-08T17:35:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-hg3f-28rg-4jxj\", \"vulnerabilities\": [{\"first_patched_version\": \"3.21.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.11.0, <= 3.21.5\"}, {\"first_patched_version\": \"3.21.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@nuxt/nitro-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.20.0, <= 3.21.5\"}, {\"first_patched_version\": \"4.4.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@nuxt/nitro-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.2.0, <= 4.4.5\"}, {\"first_patched_version\": \"4.4.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0-alpha.1, <= 4.4.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hg3f-28rg-4jxj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@nuxt/nitro-server: >= 3.20.0, <= 3.21.5",
+      "@nuxt/nitro-server: >= 4.2.0, <= 4.4.5",
+      "nuxt: >= 3.11.0, <= 3.21.5",
+      "nuxt: >= 4.0.0-alpha.1, <= 4.4.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47200"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@nuxt/nitro-server",
+      "nuxt"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.642773Z",
+  "provenance": {
+    "content_sha256": "5d1a9f10329400de392956f30a3171f6666a4110e74ba516283b223a3cb5c169",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T17:15:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hg3f-28rg-4jxj",
+  "status": "active",
+  "title": "Nuxt's route middleware is not enforced when rendering `.server.vue` pages via `/__nuxt_island/page_*`",
+  "updated_at": "2026-07-08T17:35:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hg3f-28rg-4jxj"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8254233?v=4\", \"events_url\": \"https://api.github.com/users/WesR/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/WesR/followers\", \"following_url\": \"https://api.github.com/users/WesR/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/WesR/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/WesR\", \"id\": 8254233, \"login\": \"WesR\", \"node_id\": \"MDQ6VXNlcjgyNTQyMzM=\", \"organizations_url\": \"https://api.github.com/users/WesR/orgs\", \"received_events_url\": \"https://api.github.com/users/WesR/received_events\", \"repos_url\": \"https://api.github.com/users/WesR/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/WesR/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/WesR/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/WesR\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-35201\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-125\", \"name\": \"Out-of-bounds Read\"}], \"description\": \"### Summary\\n\\nA signed length truncation bug causes an out-of-bounds read in the default Markdown parse path. Inputs larger than `INT_MAX` are truncated to a signed `int` before entering the native parser, allowing the parser to read past the end of the supplied buffer and crash the process\\n\\n### Details\\n\\nIn both public entry points:\\n\\n- `ext/rdiscount.c:97`\\n- `ext/rdiscount.c:136`\\n\\n`RSTRING_LEN(text)` is passed directly into `mkd_string()`:\\n\\n```c\\nMMIOT *doc = mkd_string(RSTRING_PTR(text), RSTRING_LEN(text), flags);\\n```\\n\\n`mkd_string()` accepts `int len`:\\n\\n- `ext/mkdio.c:174`\\n\\n```c\\nDocument * mkd_string(const char *buf, int len, mkd_flag_t flags)\\n{\\n    struct string_stream about;\\n\\n    about.data = buf;\\n    about.size = len;\\n\\n    return populate((getc_func)__mkd_io_strget, &about, flags & INPUT_MASK);\\n}\\n```\\n\\nThe parser stores the remaining input length in a signed `int`:\\n\\n- `ext/markdown.h:205`\\n\\n```c\\nstruct string_stream {\\n    const char *data;\\n    int   size;\\n};\\n```\\n\\nThe read loop stops only when `size == 0`:\\n\\n- `ext/mkdio.c:161`\\n\\n```c\\nint __mkd_io_strget(struct string_stream *in)\\n{\\n    if ( !in->size ) return EOF;\\n\\n    --(in->size);\\n\\n    return *(in->data)++;\\n}\\n```\\n\\nIf the Ruby string length exceeds `INT_MAX`, the value can truncate to a negative `int`. In that state, the parser continues incrementing `data` and reading past the end of the original Ruby string, causing an out-of-bounds read and native crash.\\n\\nAffected APIs:\\n\\n- `RDiscount.new(input).to_html`\\n- `RDiscount.new(input).toc_content`\\n\\n### PoC\\n\\nCrash via `to_html`:\\n\\n```sh\\nRUBYLIB=lib:ext ruby -e 'require \\\"rdiscount\\\"; n=2_200_000_000; s = \\\"a\\\" * n; warn \\\"built=#{s.bytesize}\\\"; RDiscount.new(s).to_html\\\"'\\n```\\nresult:\\n\\n- `built=2200000000`\\n- Ruby terminates with `[BUG] Segmentation fault`\\n- top control frame: `CFUNC :to_html`\\n\\nsame result with `toc_content`\\n\\n### Impact\\n\\nThis is an out-of-bounds read with the main issue being reliable denial-of-service. Impacted is limited to deployments parses attacker-controlled Markdown and permits multi-GB inputs.\\n\\n### Fix\\n\\njust add a checked length guard before the `mkd_string()` call in both public entry points:\\n\\n- `ext/rdiscount.c:97`\\n- `ext/rdiscount.c:136`\\nex: \\n```c\\nVALUE text = rb_funcall(self, rb_intern(\\\"text\\\"), 0);\\nlong text_len = RSTRING_LEN(text);\\nVALUE buf = rb_str_buf_new(1024);\\nCheck_Type(text, T_STRING);\\n\\nif (text_len > INT_MAX) {\\n    rb_raise(rb_eArgError, \\\"markdown input too large\\\");\\n}\\n\\nMMIOT *doc = mkd_string(RSTRING_PTR(text), (int)text_len, flags);\\n```\\n\\nThe same guard should be applied in `rb_rdiscount_toc_content()` before its `mkd_string()` call.\", \"epss\": {\"percentage\": 0.00275, \"percentile\": 0.18999}, \"ghsa_id\": \"GHSA-6r34-94wq-jhrc\", \"github_reviewed_at\": \"2026-04-06T17:53:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-6r34-94wq-jhrc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6r34-94wq-jhrc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-35201\"}], \"nvd_published_at\": \"2026-04-06T20:16:27Z\", \"published_at\": \"2026-04-06T17:53:59Z\", \"references\": [\"https://github.com/davidfstr/rdiscount/security/advisories/GHSA-6r34-94wq-jhrc\", \"https://github.com/davidfstr/rdiscount/commit/b1a16445e92e0d12c07594dedcdc56f80b317761\", \"http://github.com/davidfstr/rdiscount/releases/tag/2.2.7.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-35201\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/rdiscount/CVE-2026-35201.yml\", \"https://github.com/advisories/GHSA-6r34-94wq-jhrc\"], \"repository_advisory_url\": \"https://api.github.com/repos/davidfstr/rdiscount/security-advisories/GHSA-6r34-94wq-jhrc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/davidfstr/rdiscount\", \"summary\": \"rdiscount has an Out-of-bounds Read\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T16:20:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-6r34-94wq-jhrc\", \"vulnerabilities\": [{\"first_patched_version\": \"2.2.7.4\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"rdiscount\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.3.1.1, < 2.2.7.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6r34-94wq-jhrc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "rdiscount: >= 1.3.1.1, < 2.2.7.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-35201"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "rdiscount"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.568279Z",
+  "provenance": {
+    "content_sha256": "102cbbac640be8c9e6f10ec12cc137b71d942ec79c54927c638e038c8c85de62",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-06T17:53:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6r34-94wq-jhrc",
+  "status": "active",
+  "title": "rdiscount has an Out-of-bounds Read",
+  "updated_at": "2026-05-13T16:20:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6r34-94wq-jhrc"
+}

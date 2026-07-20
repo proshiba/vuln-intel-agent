@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.4, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:L/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-272\", \"name\": \"Least Privilege Violation\"}, {\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}, {\"cwe_id\": \"CWE-1188\", \"name\": \"Initialization of a Resource with an Insecure Default\"}], \"description\": \"Kozou compiles a PostgreSQL schema into an Admin UI, a REST API, and an MCP server. Several hardening gaps in the bundled HTTP surfaces and the scaffolded dev stack are fixed in **1.8.1**.\\n\\n## Issues\\n\\n1. **MCP HTTP server lacked DNS-rebinding protection.** The Streamable HTTP transport is unauthenticated and loopback by default. Without `Host`/`Origin` validation, a malicious web page in the operator's browser could rebind a hostname it controls to the loopback address and drive the MCP endpoint — reading schema metadata, or (when the opt-in `call` execution tool is enabled) executing exposed functions as the execution role.\\n\\n2. **Unbounded request-body buffering (DoS).** Both the MCP HTTP server and the in-house REST server read the entire request body into memory with no size limit, so a reachable client could drive the process toward memory exhaustion.\\n\\n3. **Read requests ran in a read/write transaction.** The shared role-transaction envelope opened every request with a plain `BEGIN`, so a `GET` ran read/write. A `SELECT` that reaches a volatile function or a writable / `INSTEAD`-triggered view could perform a write that then commits — the \\\"a GET only reads\\\" contract was left to the serving role's grants rather than enforced.\\n\\n4. **No-auth dev surfaces published on all interfaces by default.** The scaffolded `docker-compose.yml` (and the quickstart) published the unauthenticated Admin UI and MCP HTTP server — and the default-credential demo database — on every host interface, and the config defaulted those binds to `0.0.0.0`.\\n\\n## What changed in 1.8.1\\n\\n- **DNS-rebinding guard (MCP HTTP):** the server validates the `Host` header (and a present `Origin`) against an allowlist before handling any request, on every route. Matching is on the hostname; loopback names are always accepted and an operator can add hosts via configuration. A browser cannot forge `Host`/`Origin`, so this closes the rebinding vector. (This is a browser-rebinding defence; network reachability of an unauthenticated server must still be constrained by the network — see workarounds.)\\n- **Request-body size cap:** both HTTP servers reject an over-large declared `Content-Length` (413) and enforce the limit while streaming, so a chunked / `Content-Length`-less body cannot grow unbounded. A non-JSON `Content-Type` on a body is rejected with 415. The cap is configurable.\\n- **Read-only read transactions:** read methods (`GET`) now run in a `READ ONLY` transaction, so the database refuses any write for the duration of the request regardless of the role's grants.\\n- **Loopback-by-default network posture:** the Admin UI and MCP HTTP server now bind loopback by default; the bundled compose files publish every host port (Admin UI, MCP, database) on `127.0.0.1` only, while the container binds all interfaces internally so the loopback mapping still works. Operators opt into a broader bind explicitly.\\n\\n## Impact\\n\\nThe MCP HTTP server's exposure is greatest when the opt-in `call` execution tool is enabled and/or the server is reachable beyond loopback. The read/write-transaction issue has effect only when the schema exposes a read path that can write (a volatile-function-backed column or a writable/`INSTEAD`-triggered view) and the serving role holds write grants. The all-interface publish affected anyone who ran the scaffolded `docker compose up` on a host reachable from an untrusted network. Requests run under `SET LOCAL ROLE`, so PostgreSQL still enforces grants/RLS at runtime; these are defense-in-depth and read-contract hardening.\\n\\n## Affected / patched\\n\\n- npm packages `kozou`, `@kozou/api`, `@kozou/mcp`, `@kozou/core` (and the lockstep-versioned siblings): affected `<= 1.8.0`, patched **1.8.1**.\\n- Container image `ghcr.io/kozou-dev/kozou`: patched at tag `v1.8.1`.\\n\\n## Workarounds (if you cannot upgrade immediately)\\n\\n- Bind the Admin UI and MCP HTTP server to loopback and publish their host ports on `127.0.0.1` only; do not expose them to untrusted networks.\\n- Do not enable the MCP `call` execution tool on a non-loopback / unauthenticated deployment.\\n- Put an authenticating reverse proxy (with `Host`/`Origin` validation and a request-body limit) in front of any non-loopback deployment.\\n- Change the demo database's default credentials and restrict its port.\\n\\n## Patches\\n\\nUpgrade to **Kozou 1.8.1** (all npm packages and the `ghcr.io/kozou-dev/kozou` image).\", \"ghsa_id\": \"GHSA-v52w-28xh-v562\", \"github_reviewed_at\": \"2026-06-19T20:47:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-v52w-28xh-v562\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v52w-28xh-v562\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T20:47:19Z\", \"references\": [\"https://github.com/kozou-dev/kozou/security/advisories/GHSA-v52w-28xh-v562\", \"https://github.com/advisories/GHSA-v52w-28xh-v562\"], \"repository_advisory_url\": \"https://api.github.com/repos/kozou-dev/kozou/security-advisories/GHSA-v52w-28xh-v562\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/kozou-dev/kozou\", \"summary\": \"Kozou: Unauthenticated MCP HTTP server and bundled dev-stack hardening (DNS-rebinding, request-body limits, read-only reads, default network exposure)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-19T20:47:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-v52w-28xh-v562\", \"vulnerabilities\": [{\"first_patched_version\": \"1.8.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"kozou\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.0\"}, {\"first_patched_version\": \"1.8.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@kozou/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.0\"}, {\"first_patched_version\": \"1.8.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@kozou/mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.0\"}, {\"first_patched_version\": \"1.8.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@kozou/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v52w-28xh-v562",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@kozou/api: <= 1.8.0",
+      "@kozou/core: <= 1.8.0",
+      "@kozou/mcp: <= 1.8.0",
+      "kozou: <= 1.8.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.4,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:L/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@kozou/api",
+      "@kozou/core",
+      "@kozou/mcp",
+      "kozou"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.831968Z",
+  "provenance": {
+    "content_sha256": "b2b5cdde8925dfc7af0cccf6d90fde119e060c6f49edcbc99583d05e97ae2eb7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T20:47:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v52w-28xh-v562",
+  "status": "active",
+  "title": "Kozou: Unauthenticated MCP HTTP server and bundled dev-stack hardening (DNS-rebinding, request-body limits, read-only reads, default network exposure)",
+  "updated_at": "2026-06-19T20:47:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v52w-28xh-v562"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-49357\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.8, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# Streamable HTTP mode exposes LINE Desktop read/send tools without MCP authentication\\n\\n## Summary\\n\\n`line-desktop-mcp` supports a `--http-mode` Streamable HTTP transport for use with clients such as n8n. In this mode the server binds to `0.0.0.0` and exposes the MCP `/mcp` endpoint without an MCP-layer authentication check. Any network client that can reach the port can initialize a session, list tools, and call tools that read LINE Desktop chat history or send LINE messages through the already logged-in desktop application.\\n\\nThis is High for deployments where the HTTP port is reachable beyond the local host, because the server acts with the user authority of the logged-in LINE Desktop session. It is lower if the listener is strictly firewalled to trusted local clients.\\n\\n## Affected version\\n\\nRepository: `dtwang/line-desktop-mcp`\\n\\nCurrent source checked: `fbed0d2d3048e63f48a356a1267ed8ec5e78f3ae` on `main`, committed 2026-05-14.\\n\\nPublished npm package checked: `line-desktop-mcp@1.1.1`.\\n\\n## Source evidence\\n\\n`README.md` documents Streamable HTTP mode:\\n\\n```text\\nnpx line-desktop-mcp@latest --http-mode --port 3000\\n```\\n\\nThe same README documents MCP endpoints at `/mcp` and explains that this mode is intended for clients such as n8n.\\n\\n`src/server.js` registers LINE Desktop tools including:\\n\\n- `get_line_chatroom_history_default`\\n- `get_line_chatroom_history_long`\\n- `get_line_chatroom_history_short`\\n- `send_message_manual`\\n- `send_message_auto`\\n\\nThose tool handlers call into the desktop automation layer: `getChatHistory(...)` and `sendChatMessage(...)`.\\n\\nIn HTTP mode, `src/server.js` creates an Express app and Streamable HTTP transport, accepts POSTs to `/mcp`, creates sessions, connects the transport to the MCP server, and calls `transport.handleRequest(...)`. I did not find an authentication or bearer-token check before session creation or tool invocation.\\n\\nThe listener is explicitly network-bound:\\n\\n```js\\napp.listen(port, 0.0.0.0, () => {\\n  console.error(`LINE Desktop MCP Server running on Streamable HTTP mode`);\\n  console.error(`  Local:   http://127.0.0.1:${port}${endpoint}`);\\n  console.error(`  Network: http://0.0.0.0:${port}${endpoint}`);\\n});\\n```\\n\\n## Vulnerability chain\\n\\n1. A user starts the server with `--http-mode --port 3000`.\\n2. The server binds on `0.0.0.0:3000`, not only loopback.\\n3. A network client reaches `/mcp` and sends the normal MCP initialize request.\\n4. The server creates a Streamable HTTP session without authenticating the caller.\\n5. The caller can list and invoke LINE Desktop tools.\\n6. Tool calls execute through the logged-in LINE Desktop application on the user workstation.\\n\\n## Impact\\n\\nAn unauthenticated network client can read LINE chat history through the MCP history tools and can send LINE messages through the send-message tools, including `send_message_auto` when the tool call requests immediate sending. The attacker does not need LINE credentials or a LINE API token; they only need network reachability to the MCP HTTP port.\\n\\nThe practical impact is disclosure of private LINE conversations and unauthorized messages sent as the logged-in desktop user.\\n\\n## Suggested fix\\n\\nRequire authentication before accepting Streamable HTTP MCP sessions or tool calls. For example:\\n\\n- require a bearer token or local secret when `--http-mode` is used;\\n- bind HTTP mode to `127.0.0.1` by default unless the operator explicitly opts into network exposure;\\n- refuse to start `0.0.0.0` HTTP mode without authentication;\\n- document that `host.docker.internal` / n8n setups must still authenticate to the MCP server.\\n\\nA defense-in-depth improvement would also keep `send_message_auto` disabled unless explicitly enabled by a server-side flag, because it converts MCP tool access into immediate message sending as the desktop user.\", \"epss\": {\"percentage\": 0.00323, \"percentile\": 0.23844}, \"ghsa_id\": \"GHSA-4hf8-5mjm-rfgq\", \"github_reviewed_at\": \"2026-06-26T21:50:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-4hf8-5mjm-rfgq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4hf8-5mjm-rfgq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49357\"}], \"nvd_published_at\": \"2026-06-19T14:16:23Z\", \"published_at\": \"2026-06-26T21:50:49Z\", \"references\": [\"https://github.com/dtwang/line-desktop-mcp/security/advisories/GHSA-4hf8-5mjm-rfgq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-49357\", \"https://github.com/dtwang/line-desktop-mcp/commit/680617894981ea93f8f6ceb51ecde7519754d501\", \"https://github.com/advisories/GHSA-4hf8-5mjm-rfgq\"], \"repository_advisory_url\": \"https://api.github.com/repos/dtwang/line-desktop-mcp/security-advisories/GHSA-4hf8-5mjm-rfgq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/dtwang/line-desktop-mcp\", \"summary\": \"Streamable HTTP mode exposes LINE Desktop read/send tools without MCP authentication\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T21:50:51Z\", \"url\": \"https://api.github.com/advisories/GHSA-4hf8-5mjm-rfgq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"line-desktop-mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4hf8-5mjm-rfgq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "line-desktop-mcp: <= 1.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-49357"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "line-desktop-mcp"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.958204Z",
+  "provenance": {
+    "content_sha256": "7faac681211a9790e364bccc33972e101953131206b63a211d0b0c0ff4f8a427",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T21:50:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4hf8-5mjm-rfgq",
+  "status": "active",
+  "title": "Streamable HTTP mode exposes LINE Desktop read/send tools without MCP authentication",
+  "updated_at": "2026-06-26T21:50:51Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4hf8-5mjm-rfgq"
+}

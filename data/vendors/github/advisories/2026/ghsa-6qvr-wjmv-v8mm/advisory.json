@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/289640798?v=4\", \"events_url\": \"https://api.github.com/users/kiffa-australis256/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kiffa-australis256/followers\", \"following_url\": \"https://api.github.com/users/kiffa-australis256/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kiffa-australis256/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kiffa-australis256\", \"id\": 289640798, \"login\": \"kiffa-australis256\", \"node_id\": \"U_kgDOEUORXg\", \"organizations_url\": \"https://api.github.com/users/kiffa-australis256/orgs\", \"received_events_url\": \"https://api.github.com/users/kiffa-australis256/received_events\", \"repos_url\": \"https://api.github.com/users/kiffa-australis256/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kiffa-australis256/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kiffa-australis256/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kiffa-australis256\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54491\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nThe fix for **CVE-2026-47260** (v9.3.5) added an **initial** `isSafeUrl()` check to several fetchers (`synchronizeEpisodes`, `getStreamableUrl`, `AddRadioStation`, `EpisodePlayable`), but the **redirect-target validation** — the per-hop Guzzle `on_redirect` callback added in follow-up commit `be1e867` — was applied to **only one** path, `EpisodePlayable`. Every other server-side fetcher therefore has **only the initial check, which an HTTP 302 redirect to an internal address bypasses**, or no check at all. **DNS rebinding** (validation and connection resolve DNS separately, with no IP pinning) bypasses the initial check on every path.\\n\\nAn **authenticated, non-admin** user can thus cause the Koel server to issue requests to arbitrary internal / cloud-metadata endpoints (SSRF) by supplying a URL on an attacker-controlled host that 302-redirects to an internal address.\\n\\n> Note: commit `be1e867` shows the redirect-based SSRF vector was recognised, but the redirect defense was applied to a single call site rather than generalised — so the class survives in the sibling paths below.\\n\\n### Details — Root cause\\n\\n`App\\\\Helpers\\\\Network::isPublicHost()` / `isSafeUrl()` perform a **point-in-time host check** with no pinning of the resolved IP, and **per-redirect-hop** re-validation exists **only** in `App\\\\Values\\\\Podcast\\\\EpisodePlayable` (the `on_redirect` callback from commit `be1e867`). Consequently every other fetcher is exposed to (1) **redirect SSRF** — initial URL passes `isSafeUrl`, then the HTTP client follows a cross-host 302 to an internal target without re-validating the hop; and (2) **DNS rebinding (TOCTOU)** — `isPublicHost` resolves DNS at validation, the HTTP client resolves again at connect time.\\n\\n### Affected paths (all reachable by any authenticated user)\\n\\n| # | Location | Issue |\\n|---|----------|-------|\\n| 1 | `PhanAn\\\\Poddle\\\\Poddle::fromUrl()` → `Http::timeout()->get($url)` (used by `PodcastService::addPodcast`/`refreshPodcast`) | Plain `Http::get`, follows redirects, no per-hop validation; `refreshPodcast` does not re-run `isSafeUrl` at all |\\n| 2 | `PodcastService::getStreamableUrl()` (`PodcastService.php:244`/`251`) | Has the initial `isSafeUrl()` (line 244) but the request uses `ALLOW_REDIRECTS => ['track_redirects' => true]` with **no `on_redirect`** → 302 to internal is followed. Called at episode stream time via `PodcastStreamerAdapter`. Also DNS-rebinding-exposed |\\n| 3 | `PodcastService::isPodcastObsolete()` (`:221`) `Http::head($podcast->url)` | No `isSafeUrl`, no redirect validation |\\n| 4 | `App\\\\Rules\\\\HasAudioContentType` (`:45`/`:54`) `Http::head`/`Http::get` | Self-documented \\\"use after SafeUrl\\\"; ordering-dependent, no own validation, no per-hop check. Extends the surface to the **internet-radio** feature (`RadioStationStore/UpdateRequest`) |\\n| 5 | `App\\\\Rules\\\\SafeUrl` validator (`:52`/`:56`) | Follows redirects, validates only the **final** effective host — intermediate-hop requests still fire |\\n\\nReachable via the native API (`apiResource podcasts`, `radio/stations`; `PodcastController::store` has **no authorization check**, only `#[DisabledInDemo]`) and the Subsonic API (`createPodcastChannel`, `createInternetRadioStation`, `refreshPodcasts`).\\n\\n### PoC\\n\\nA mechanism PoC that runs the exact Guzzle/Laravel-Http call shapes Koel uses (attacker-redirect server + internal-target listener on loopback), verified on PHP 8.2 + Guzzle 7:\\n\\n```\\nisPublicHost('127.0.0.1') = false        # a per-hop check WOULD block this\\nCase1 Poddle::fromUrl        -> [VULNERABLE]  leaked INTERNAL-SECRET-TOKEN\\nCase2 getStreamableUrl       -> [VULNERABLE]  leaked INTERNAL-SECRET-TOKEN\\nCase3 EpisodePlayable        -> [BLOCKED]     UnsafeUrl on redirect\\ninternal_hits.log: 2 hits    # internal service actually reached by Case1 + Case2\\n```\\n\\nCase1/Case2 reaching the internal target while Case3 (the fixed path) blocks under identical conditions demonstrates the incomplete remediation. The full PoC kit (poc.php, attacker_router.php, internal_router.php) is available on request.\\n\\nEnd-to-end on a real instance: an authenticated user `POST /api/podcasts` (or Subsonic `createPodcastChannel`) with a feed URL on an attacker host that returns `302 Location: http://169.254.169.254/latest/meta-data/...` (or `http://127.0.0.1:<port>/`); the server follows it. The response is reflected back via parsed podcast fields / `getStreamableUrl` when the internal endpoint returns `Access-Control-Allow-Origin: *`; otherwise blind SSRF via status/timing.\\n\\n### Impact\\n\\nAuthenticated (any user) SSRF: access to cloud instance metadata (IAM credentials on IMDSv1), internal-only admin panels, and internal network service probing — from the Koel server's network position. Same threat model as CVE-2026-47260.\\n\\n**Attack scenario (fully remote, no user interaction):** the only precondition is a single low-privilege account. On AWS/GCP/Azure-hosted instances, redirecting to the metadata IP and reflecting the body discloses temporary IAM credentials → cloud-account pivot. (AWS IMDSv2's token-via-PUT is not reachable through a simple GET-redirect SSRF; IMDSv1 instances are fully exposed.) \\\"Koel only runs on an internal/trusted network\\\" does not reduce the risk — the bug makes the Koel server itself the attacker's pivot **into** that trusted network and cloud control plane.\\n\\nSuggested severity: CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N (7.1); lower where exploitation is blind.\\n\\n### Remediation\\n\\nDo not fix per-call-site. Centralize: route **all** outbound HTTP through a shared Guzzle handler/middleware that, on **every** connection and **every redirect hop**, resolves the target and rejects private/reserved IPs, and **pins** the validated IP for the actual connection (defeats DNS rebinding). Apply to `EpisodePlayable`, `getStreamableUrl`, `Poddle::fromUrl` usage, `isPodcastObsolete`, `HasAudioContentType`, and the `SafeUrl` rule.\", \"ghsa_id\": \"GHSA-6qvr-wjmv-v8mm\", \"github_reviewed_at\": \"2026-07-15T17:59:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-6qvr-wjmv-v8mm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6qvr-wjmv-v8mm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54491\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T17:59:30Z\", \"references\": [\"https://github.com/koel/koel/security/advisories/GHSA-6qvr-wjmv-v8mm\", \"https://github.com/koel/koel/pull/2546\", \"https://github.com/koel/koel/pull/2549\", \"https://github.com/koel/koel/commit/5f6ce2cefd08f437a269236b677ad971517ccbb6\", \"https://github.com/koel/koel/commit/c264a3d52513a83b21e1cc3a20e895caea97fc4a\", \"https://github.com/koel/koel/releases/tag/v9.7.1\", \"https://github.com/advisories/GHSA-6qvr-wjmv-v8mm\"], \"repository_advisory_url\": \"https://api.github.com/repos/koel/koel/security-advisories/GHSA-6qvr-wjmv-v8mm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/koel/koel\", \"summary\": \"Koel: Incomplete fix for CVE-2026-47260 — systemic SSRF in podcast & radio fetch paths\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T17:59:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-6qvr-wjmv-v8mm\", \"vulnerabilities\": [{\"first_patched_version\": \"9.7.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phanan/koel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.7.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6qvr-wjmv-v8mm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phanan/koel: <= 9.7.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47260",
+      "CVE-2026-54491"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phanan/koel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.982614Z",
+  "provenance": {
+    "content_sha256": "fe950b3989a66f00f8cdfbb02f0ba14b999647f96ebc15966b3604690d92798b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T17:59:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6qvr-wjmv-v8mm",
+  "status": "active",
+  "title": "Koel: Incomplete fix for CVE-2026-47260 — systemic SSRF in podcast & radio fetch paths",
+  "updated_at": "2026-07-15T17:59:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6qvr-wjmv-v8mm"
+}

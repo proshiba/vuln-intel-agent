@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53487\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nAuthenticated Kite users with any role can request `/api/v1/overview` for a cluster that their roles do not permit by selecting that cluster with `x-cluster-name`. The overview route is registered before `middleware.RBACMiddleware()` and `GetOverview` only checks `len(user.Roles) > 0`, so it returns aggregate Kubernetes inventory and capacity data from unauthorized clusters.\\n\\nThe issue is present on current main commit `38c9bb9d4b746c0d2a8252f3c35cdfa07ab01c21` and latest release `v0.12.2` at commit `0aae35abb2d6a8adf623fe60349261aa48753ccc`.\\n\\n## Impact\\n\\nA low-privileged user who only has access to one cluster can set `x-cluster-name` to another configured cluster and retrieve aggregate inventory and resource sizing data for that cluster. The response includes total node, pod, namespace, service, CPU, and memory values. This bypasses the cluster membership boundary used elsewhere in Kite.\\n\\nThe validated impact is confidentiality only. I did not prove Kubernetes mutation, pod names, secret values, kubeconfig contents, or bearer token exposure through this endpoint.\\n\\n## Technical details\\n\\n`routes.go` registers `/api/v1/overview` before the global RBAC middleware is applied:\\n\\n- `routes.go:131-133`: `/api/v1` gets `RequireAuth()` and `ClusterMiddleware(cm)`.\\n- `routes.go:135`: `/api/v1/overview` is registered.\\n- `routes.go:171`: `api.Use(middleware.RBACMiddleware())` is applied only after overview and several other routes are registered.\\n\\n`pkg/middleware/cluster.go:21-40` accepts the target cluster name from `x-cluster-name`, query, or cookie and injects the matching `ClientSet` without checking whether the user can access that cluster.\\n\\n`pkg/system/handler.go:47-52` retrieves the selected cluster and user, but only rejects users with zero roles:\\n\\n```go\\ncs := c.MustGet(\\\"cluster\\\").(*cluster.ClientSet)\\nuser := c.MustGet(\\\"user\\\").(model.User)\\nif len(user.Roles) == 0 {\\n    c.JSON(http.StatusForbidden, gin.H{\\\"error\\\": \\\"Access denied\\\"})\\n    return\\n}\\n```\\n\\nIt then lists nodes, pods, namespaces, and services for the selected cluster at `pkg/system/handler.go:63-137` and returns aggregate data at `pkg/system/handler.go:147-169`.\\n\\nThe intended cluster boundary exists elsewhere. `pkg/cluster/cluster_handler.go:19-47` filters `/api/v1/clusters` with `rbac.CanAccessCluster(user, name)`, and `pkg/rbac/rbac.go:32-40` implements that cluster check. The vulnerable overview path skips the same check.\\n\\n## Reproduction\\n\\n1. Configure Kite with at least two clusters, for example `dev-cluster` and `prod-cluster`.\\n2. Create a user with a role that allows only `dev-cluster` and does not match `prod-cluster`.\\n3. Authenticate as that user.\\n4. Send `GET /api/v1/overview` with header `x-cluster-name: prod-cluster`.\\n5. Observe that the response includes aggregate inventory and capacity data for `prod-cluster` instead of returning 403.\\n\\nI also validated this locally with a Go proof test. The test constructs a fake `prod-cluster` containing one node, namespace, service, and pod. The user has a role limited to `dev-cluster` and `dev-ns` only. Before calling the handler, both controls return false:\\n\\n- `rbac.CanAccess(user, \\\"pods\\\", \\\"get\\\", \\\"prod-cluster\\\", \\\"_all\\\")`\\n- `rbac.CanAccessCluster(user, \\\"prod-cluster\\\")`\\n\\nThe direct handler call then succeeds and returns the unauthorized production cluster aggregate data.\\n\\nCommand run:\\n\\n```bash\\ncd /home/unkn0wn/security_audit/kite\\ngo test ./pkg/system -run TestOverviewAllowsUserWithoutTargetClusterRBAC -v\\n```\\n\\nKey output:\\n\\n```text\\n=== RUN   TestOverviewAllowsUserWithoutTargetClusterRBAC\\n    overview_rbac_poc_test.go:74: unauthorized overview response: {\\\"totalNodes\\\":1,\\\"readyNodes\\\":0,\\\"totalPods\\\":1,\\\"runningPods\\\":0,\\\"totalNamespaces\\\":1,\\\"totalServices\\\":1,\\\"prometheusEnabled\\\":false,\\\"resource\\\":{\\\"cpu\\\":{\\\"allocatable\\\":0,\\\"requested\\\":0,\\\"limited\\\":0},\\\"memory\\\":{\\\"allocatable\\\":0,\\\"requested\\\":0,\\\"limited\\\":0}}}\\n--- PASS: TestOverviewAllowsUserWithoutTargetClusterRBAC (0.49s)\\nPASS\\nok  \\tgithub.com/zxh326/kite/pkg/system\\t0.711s\\n```\\n\\n## Suggested remediation\\n\\nAdd an explicit cluster and resource authorization check before any overview data is queried. At minimum, reject users without `rbac.CanAccessCluster(user, cs.Name)`. A stricter fix should require the same resource permissions used by the AI `get_cluster_overview` tool:\\n\\n- `get nodes` at cluster scope\\n- `get pods` across all namespaces\\n- `get namespaces` at cluster scope\\n- `get services` across all namespaces\\n\\nAlso consider moving every route that lacks its own complete authorization below `api.Use(middleware.RBACMiddleware())`, or adding per-handler authorization tests for all pre-RBAC routes.\", \"ghsa_id\": \"GHSA-gvhc-wv3v-7pf8\", \"github_reviewed_at\": \"2026-07-07T23:40:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-gvhc-wv3v-7pf8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gvhc-wv3v-7pf8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53487\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T23:40:35Z\", \"references\": [\"https://github.com/kite-org/kite/security/advisories/GHSA-gvhc-wv3v-7pf8\", \"https://github.com/advisories/GHSA-gvhc-wv3v-7pf8\"], \"repository_advisory_url\": \"https://api.github.com/repos/kite-org/kite/security-advisories/GHSA-gvhc-wv3v-7pf8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kite-org/kite\", \"summary\": \"Kite has an authenticated cluster RBAC bypass in /api/v1/overview\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T23:40:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-gvhc-wv3v-7pf8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.12.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/zxh326/kite\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.12.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gvhc-wv3v-7pf8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/zxh326/kite: <= 0.12.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53487"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/zxh326/kite"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.701806Z",
+  "provenance": {
+    "content_sha256": "ca06dd4631597bcf8d3086910de73eb6883f130712513296633ffa6cc6aa21ea",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T23:40:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gvhc-wv3v-7pf8",
+  "status": "active",
+  "title": "Kite has an authenticated cluster RBAC bypass in /api/v1/overview",
+  "updated_at": "2026-07-07T23:40:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gvhc-wv3v-7pf8"
+}

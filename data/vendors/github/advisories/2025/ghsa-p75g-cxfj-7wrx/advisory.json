@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2025-1686\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 7.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:N/VI:H/VA:H/SC:L/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"### Summary\\n\\nIf untrusted user input is used to dynamically create a `PebbleTemplate` with the method `PebbleEngine#getLiteralTemplate`, then an attacker can include arbitrary local files from the file system into the generated template, leaking potentially sensitive information into the output of `PebbleTemplate#evaluate`. This is done via the `include` macro.\\n\\n### Details\\n\\nThe `include` macro calls `PebbleTempateImpl#resolveRelativePath` with the `relativePath` argument passed within the template:\\n\\nExample template:\\n```\\n{% include [relativePath] %}\\n```\\nWhen `resolveRelativePath` is called, the `relativePath`  is resolved against the `PebbleTemplateImpl.name` variable.\\n\\n```java\\n  /**\\n   * This method resolves the given relative path based on this template file path.\\n   *\\n   * @param relativePath the path which should be resolved.\\n   * @return the resolved path.\\n   */\\n  public String resolveRelativePath(String relativePath) {\\n    String resolved = this.engine.getLoader().resolveRelativePath(relativePath, this.name);\\n    if (resolved == null) {\\n      return relativePath;\\n    } else {\\n      return resolved;\\n    }\\n  }\\n```\\nhttps://github.com/PebbleTemplates/pebble/blob/82ad7fcf9e9eaa45ee82ae3335a1409d19c10263/pebble/src/main/java/io/pebbletemplates/pebble/template/PebbleTemplateImpl.java#L380\\n\\nUnfortunately, when the template is created from a string, as is the case when `PebbleEngine#getLiteralTemplate` is used, the `PebbleTemplateImpl.name` variable is actually the entirety of the contents of the template, not a filename as the logic expects. The net result is that the `relativePath` is resolved against the system root directory. As a result, files accessible from the root directory of the filesystem can be included into a template. \\n\\n### PoC\\n\\nThe following test demonstrates the vulnerability:\\n\\n```java\\nPebbleEngine e = new PebbleEngine.Builder().build();\\n\\nString templateString = \\\"\\\"\\\"\\n        {% include '/etc/passwd' %}\\n        \\\"\\\"\\\";\\nPebbleTemplate template = e.getLiteralTemplate(templateString);\\n\\ntry (final Writer writer = new StringWriter()) {\\n    template.evaluate(writer, new HashMap<>());\\n    System.out.println(writer);\\n}\\n```\\n\\nAs an attacker, the following malicious template demonstrates the vulnerability:\\n\\n```\\n{% include '/etc/passwd' %}\\n```\\n\\n### Impact\\n\\nThis is an arbitrary  Local File Inclusion (LFI) vulnerability. It can allow attackers to exfiltrate the contents of the local filesystem, including sensitive files into `PebbleTemplate` output. This can also be used to access the `/proc` filesystem which can give an attacker access to environment variables.\\n\\n### Fix\\n\\nThere exists no published fix for this vulnerability. The best way to mitigate this vulnerability is to disable the `include` macro in Pebble Templates.\\n\\nThe following can safeguard your application from this vulnerability:\\n\\n```java\\nnew PebbleEngine.Builder()\\n            .registerExtensionCustomizer(new DisallowExtensionCustomizerBuilder()\\n                    .disallowedTokenParserTags(List.of(\\\"include\\\"))\\n                    .build())\\n            .build();\\n```\\n\\n### Report Timeline\\n\\nVulnerability was reported under the Open Source Security Foundation (OpenSSF) [Model Outbound Vulnerability Disclosure Policy: Version 0.1](https://openssf.org/about/vulnerability-disclosure-policy/).\\n\\n - [Jul 15, 2024](https://github.com/PebbleTemplates/pebble/issues/680#issue-2409727829) Maintainer Contacted to enable private vulnerability reporting\\n - [Jul 18, 2024](https://github.com/PebbleTemplates/pebble/issues/680#issuecomment-2236970984) I opened a GHSA \\n to report this vulnerability to the maintainer https://github.com/PebbleTemplates/pebble/security/advisories/GHSA-7c6h-hmf9-7wj7 (private link)\\n - Jul 29, 2024 GHSA updated to ping maintainer about vulnerability, no response\\n - Oct 1, 2024 GHSA updated to ping maintainer about vulnerability, no response\\n - Nov 15, 2024 GHSA updated to inform maintainer that disclosure timeline had lapsed, no response.\\n - Feb 19, 2025 GHSA updated to inform maintainer that disclosure would occur imminently, no response.\\n - Feb 24, 2025 this GHSA was created to disclose this vulnerability **without a patch available**.\\n\\nFor further discussion, see this issue: https://github.com/PebbleTemplates/pebble/issues/688\\n\\n### Credit\\n\\nThis vulnerability was discovered by @JLLeitschuh while at [Chainguard Labs](https://www.chainguard.dev). Jonathan is currently independent.\", \"epss\": {\"percentage\": 0.00782, \"percentile\": 0.51513}, \"ghsa_id\": \"GHSA-p75g-cxfj-7wrx\", \"github_reviewed_at\": \"2025-02-28T19:45:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-p75g-cxfj-7wrx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p75g-cxfj-7wrx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-1686\"}], \"nvd_published_at\": \"2025-02-27T05:15:14Z\", \"published_at\": \"2025-02-28T19:45:03Z\", \"references\": [\"https://github.com/JLLeitschuh/security-research/security/advisories/GHSA-p75g-cxfj-7wrx\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-1686\", \"https://github.com/PebbleTemplates/pebble/issues/680\", \"https://github.com/PebbleTemplates/pebble/issues/688\", \"https://pebbletemplates.io/wiki/tag/include\", \"https://security.snyk.io/vuln/SNYK-JAVA-IOPEBBLETEMPLATES-8745594\", \"https://github.com/PebbleTemplates/pebble/pull/715\", \"https://github.com/PebbleTemplates/pebble/commit/b3451c8f305a1a248fbcc2363fd307d0baaee329\", \"https://github.com/advisories/GHSA-p75g-cxfj-7wrx\"], \"repository_advisory_url\": \"https://api.github.com/repos/JLLeitschuh/security-research/security-advisories/GHSA-p75g-cxfj-7wrx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/PebbleTemplates/pebble\", \"summary\": \"Pebble has Arbitrary Local File Inclusion (LFI) Vulnerability via `include` macro\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:55:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-p75g-cxfj-7wrx\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.pebbletemplates:pebble\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.2.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p75g-cxfj-7wrx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "io.pebbletemplates:pebble: <= 3.2.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2025-1686"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "io.pebbletemplates:pebble"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.654044Z",
+  "provenance": {
+    "content_sha256": "0cbe1d8749bdd8f36aac705fcaeeba03d6394a7ec06079b23f313124825849b1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-02-28T19:45:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p75g-cxfj-7wrx",
+  "status": "active",
+  "title": "Pebble has Arbitrary Local File Inclusion (LFI) Vulnerability via `include` macro",
+  "updated_at": "2026-04-24T20:55:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p75g-cxfj-7wrx"
+}

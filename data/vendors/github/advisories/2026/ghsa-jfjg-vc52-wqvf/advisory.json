@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/250391218?v=4\", \"events_url\": \"https://api.github.com/users/golang-not-rust/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/golang-not-rust/followers\", \"following_url\": \"https://api.github.com/users/golang-not-rust/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/golang-not-rust/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/golang-not-rust\", \"id\": 250391218, \"login\": \"golang-not-rust\", \"node_id\": \"U_kgDODuyqsg\", \"organizations_url\": \"https://api.github.com/users/golang-not-rust/orgs\", \"received_events_url\": \"https://api.github.com/users/golang-not-rust/received_events\", \"repos_url\": \"https://api.github.com/users/golang-not-rust/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/golang-not-rust/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/golang-not-rust/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/golang-not-rust\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-33744\", \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"## Summary\\n\\nThe `docker.system_packages` field in `bentofile.yaml` accepts arbitrary strings that are interpolated directly into Dockerfile `RUN` commands without sanitization. Since `system_packages` is semantically a list of OS package names (data), users do not expect values to be interpreted as shell commands. A malicious `bentofile.yaml` achieves arbitrary command execution during `bentoml containerize` / `docker build`.\\n\\n## Affected Component\\n\\n- `src/_bentoml_sdk/images.py:85-89` — `.format(packages=\\\" \\\".join(packages))` into shell command\\n- `src/bentoml/_internal/container/frontend/dockerfile/templates/base_debian.j2:13` — `{{ __options__system_packages | join(' ') }}`\\n- `src/bentoml/_internal/bento/build_config.py:174` — No validation on `system_packages`\\n- All distro install commands in `src/bentoml/_internal/container/frontend/dockerfile/__init__.py`\\n\\n## Affected Versions\\n\\nAll versions supporting `docker.system_packages` in `bentofile.yaml`, confirmed on 1.4.36.\\n\\n## Steps to Reproduce\\n\\n1. Create a project directory with:\\n\\n**service.py:**\\n```python\\nimport bentoml\\n\\n@bentoml.service\\nclass MyService:\\n    @bentoml.api\\n    def predict(self) -> str:\\n        return \\\"hello\\\"\\n```\\n\\n**bentofile.yaml:**\\n```yaml\\nservice: \\\"service:MyService\\\"\\ndocker:\\n  system_packages:\\n    - \\\"curl && id > /tmp/bentoml-pwned #\\\"\\n```\\n\\n2. Run:\\n```bash\\nbentoml build\\n```\\n\\n3. Examine the generated Dockerfile at `~/bentoml/bentos/my_service/<tag>/env/docker/Dockerfile`. Line 41 will contain:\\n```dockerfile\\nRUN apt-get install -q -y -o Dpkg::Options::=--force-confdef curl && id > /tmp/bentoml-pwned #\\n```\\n\\n4. Running `bentoml containerize my_service:<tag>` will execute `id > /tmp/bentoml-pwned` as root during the Docker build.\\n\\n## Root Cause\\n\\nThe `system_packages` field values are treated as package names (data) by the user but are string-formatted directly into shell commands in the Dockerfile:\\n\\n```python\\n# images.py:85-89\\nself.commands.append(\\n    CONTAINER_METADATA[self.distro][\\\"install_command\\\"].format(\\n        packages=\\\" \\\".join(packages)  # No escaping\\n    )\\n)\\n```\\n\\nWhere `install_command` is `\\\"apt-get install -q -y -o Dpkg::Options::=--force-confdef {packages}\\\"`.\\n\\nA `bash_quote` filter (wrapping `shlex.quote`) exists in the codebase and is registered in both Jinja2 environments, but it is only applied to environment variable values, never to `system_packages`.\\n\\n## Impact\\n\\n1. **Malicious repositories**: An attacker publishes an ML project with a crafted `bentofile.yaml`. Anyone who clones and builds it gets arbitrary code execution during `docker build`.\\n2. **CI/CD compromise**: Automated pipelines running `bentoml containerize` on PRs that modify `bentofile.yaml` are vulnerable.\\n3. **BentoCloud**: If BentoCloud builds images from user-supplied `bentofile.yaml`, this could achieve RCE on cloud infrastructure.\\n4. **Supply chain**: Shared bentos or model repos in the BentoML ecosystem can contain malicious configs.\\n\\n## Suggested Fix\\n\\n### Option 1: Input validation (recommended)\\n\\nAdd a regex validator to `system_packages` in `build_config.py`:\\n\\n```python\\nimport re\\n\\nVALID_PACKAGE_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9.+\\\\-_:]*$')\\n\\ndef _validate_system_packages(instance, attribute, value):\\n    if value is None:\\n        return\\n    for pkg in value:\\n        if not VALID_PACKAGE_NAME.match(pkg):\\n            raise BentoMLException(\\n                f\\\"Invalid system package name: {pkg!r}. \\\"\\n                \\\"Package names may only contain alphanumeric characters, \\\"\\n                \\\"dots, plus signs, hyphens, underscores, and colons.\\\"\\n            )\\n\\nsystem_packages: t.Optional[t.List[str]] = attr.field(\\n    default=None, validator=_validate_system_packages\\n)\\n```\\n\\n### Option 2: Output escaping\\n\\nApply `shlex.quote()` to each package name before interpolation in `images.py:system_packages()` and apply the `bash_quote` Jinja2 filter in `base_debian.j2`.\", \"epss\": {\"percentage\": 0.00257, \"percentile\": 0.16781}, \"ghsa_id\": \"GHSA-jfjg-vc52-wqvf\", \"github_reviewed_at\": \"2026-03-26T07:32:44Z\", \"html_url\": \"https://github.com/advisories/GHSA-jfjg-vc52-wqvf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jfjg-vc52-wqvf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-33744\"}], \"nvd_published_at\": \"2026-03-27T01:16:21Z\", \"published_at\": \"2026-03-26T07:32:44Z\", \"references\": [\"https://github.com/bentoml/BentoML/security/advisories/GHSA-jfjg-vc52-wqvf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-33744\", \"https://github.com/pypa/advisory-database/tree/main/vulns/bentoml/PYSEC-2026-157.yaml\", \"https://github.com/advisories/GHSA-jfjg-vc52-wqvf\"], \"repository_advisory_url\": \"https://api.github.com/repos/bentoml/BentoML/security-advisories/GHSA-jfjg-vc52-wqvf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/bentoml/BentoML\", \"summary\": \"BentoML has Dockerfile Command Injection via system_packages in bentofile.yaml\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T20:04:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-jfjg-vc52-wqvf\", \"vulnerabilities\": [{\"first_patched_version\": \"1.4.37\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"bentoml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.36\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jfjg-vc52-wqvf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "bentoml: <= 1.4.36"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-33744"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "bentoml"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.334625Z",
+  "provenance": {
+    "content_sha256": "b6b585564b544598e6e0497b85a36e77c5ffcd9ecd29c722e5e3cd99c24a4c42",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-26T07:32:44Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jfjg-vc52-wqvf",
+  "status": "active",
+  "title": "BentoML has Dockerfile Command Injection via system_packages in bentofile.yaml",
+  "updated_at": "2026-06-08T20:04:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jfjg-vc52-wqvf"
+}

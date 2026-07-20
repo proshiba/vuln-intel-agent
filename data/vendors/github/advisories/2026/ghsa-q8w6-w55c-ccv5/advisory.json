@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-6420\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-294\", \"name\": \"Authentication Bypass by Capture-replay\"}, {\"cwe_id\": \"CWE-329\", \"name\": \"Generation of Predictable IV with CBC Mode\"}, {\"cwe_id\": \"CWE-547\", \"name\": \"Use of Hard-coded, Security-relevant Constants\"}, {\"cwe_id\": \"CWE-1241\", \"name\": \"Use of Predictable Algorithm in Random Number Generator\"}], \"description\": \"## CVE-2026-6420: Hardcoded attestation challenge nonce allows replay attacks\\n\\n### Impact\\n\\nThe `CertificationParameters.generate_challenge()` method in the push attestation protocol uses a hardcoded challenge nonce instead of generating a cryptographically random value. This removes the nonce-based replay protection from TPM quote attestation.\\n\\nAn attacker with root access on a monitored agent node can exploit this by stockpiling valid TPM quotes (using `tpm2_quote` with the known nonce) before compromising the system, then replaying them to evade detection by the verifier. The push attestation timeout (~10s) constrains the generation window, but TPM throughput allows stockpiling ~50-200 quotes, enabling approximately 8-33 minutes of undetected compromise with default settings.\\n\\nThe attack is limited to a single agent node (AK signature binding prevents cross-agent replay). The pull-mode (legacy) attestation path is not affected.\\n\\n**Affected versions:** >= 7.14.0, <= 7.14.1\\n\\n**CVSS:** 6.3 Medium (`CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L`)\\n\\n| Metric | Value | Rationale |\\n|---|---|---|\\n| AV | Local | Exploitation requires local access to the agent machine (stop agent, access TPM, run replacement). The network transmission of quotes to the verifier is normal protocol operation. |\\n| AC | Low | Deterministic attack: publicly visible nonce, standard `tpm2-tools`, no race conditions. |\\n| PR | High | Root on a legitimate enrolled node is required. The vulnerability does not help gain access -- it only helps evade detection after root is obtained. No value against a machine the attacker already controls. |\\n| UI | None | Fully automated after initial setup. |\\n| S | Unchanged | AK signature binding confines impact to the single compromised agent. |\\n| C | High | Compromised node continues receiving bootstrap keys, payloads, and secrets intended for trusted nodes. |\\n| I | High | Verifier cannot distinguish a healthy system from a fully compromised one during the evasion window. |\\n| A | Low | Only the compromised agent's revocation and incident response are suppressed; the system as a whole remains operational. |\\n\\nThe base score does not fully capture the operational severity: Keylime exists to detect machine compromise, so 8-33 minutes of undetected compromise is operationally critical. The fix is a one-line change and should be applied immediately regardless of the base score.\\n\\n### Patches\\n\\nThe fix restores the original random nonce generation (one-line change in `keylime/models/verifier/evidence.py`):\\n\\n```python\\n# Before (vulnerable):\\ndef generate_challenge(self, bit_length):\\n    # self.challenge = Nonce.generate(bit_length)\\n    self.challenge = bytes.fromhex(\\\"49beed365aac777dae23564f5ad0ec\\\")\\n\\n# After (fixed):\\ndef generate_challenge(self, bit_length):\\n    self.challenge = Nonce.generate(bit_length)\\n```\\n\\nUsers should upgrade to the version containing this fix (7.14.2).\\n\\n### Workarounds\\n\\nThere is no complete workaround. The following existing mechanisms provide partial mitigation and are already active by default (no configuration needed):\\n\\n1. **TPM clock monotonicity check** limits each distinct stockpiled quote to a single use, bounding the total evasion time.\\n2. **Push attestation timeout** (default 10s) prevents the attacker from going silent and constrains the quote generation window.\\n\\nReducing `quote_interval` increases the attestation frequency but does not prevent the stockpiling attack.\\n\\n### References\\n\\n- CWE-329: Generation of Predictable IV/Nonce (primary -- hardcoded nonce in cryptographic attestation protocol)\\n- CWE-547: Use of Hard-Coded, Security-relevant Constants (hardcoded constant left in production code)\\n- CWE-294: Authentication Bypass by Capture-replay (consequence -- enables replay attacks)\\n- CWE-1241: Use of Predictable Algorithm in Random Number Generator\\n- Introducing commit: [`2bf91197`](https://github.com/keylime/keylime/commit/2bf91197) via [PR #1814](https://github.com/keylime/keylime/pull/1814)\\n- TCG TPM 2.0 Library Specification, Part 1, Section 18.4 (TPM2_Quote)\\n- IETF RATS Architecture (RFC 9334), Section 8 (Freshness)\", \"epss\": {\"percentage\": 0.00121, \"percentile\": 0.02216}, \"ghsa_id\": \"GHSA-q8w6-w55c-ccv5\", \"github_reviewed_at\": \"2026-05-11T14:42:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-q8w6-w55c-ccv5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q8w6-w55c-ccv5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-6420\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-11T14:42:46Z\", \"references\": [\"https://github.com/keylime/keylime/security/advisories/GHSA-q8w6-w55c-ccv5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-6420\", \"https://access.redhat.com/security/cve/CVE-2026-6420\", \"https://bugzilla.redhat.com/show_bug.cgi?id=2458889\", \"https://github.com/advisories/GHSA-q8w6-w55c-ccv5\"], \"repository_advisory_url\": \"https://api.github.com/repos/keylime/keylime/security-advisories/GHSA-q8w6-w55c-ccv5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/keylime/keylime\", \"summary\": \"Keylime has a hardcoded attestation challenge nonce that allows replay attacks\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-11T14:42:47Z\", \"url\": \"https://api.github.com/advisories/GHSA-q8w6-w55c-ccv5\", \"vulnerabilities\": [{\"first_patched_version\": \"7.14.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"keylime\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 7.14.0, <= 7.14.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q8w6-w55c-ccv5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "keylime: >= 7.14.0, <= 7.14.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-6420"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "keylime"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.019044Z",
+  "provenance": {
+    "content_sha256": "f5ec82721b9fa83ffa9d4744823abd550cf3be6f10d25e2b67b73e3e7edec123",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-11T14:42:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q8w6-w55c-ccv5",
+  "status": "active",
+  "title": "Keylime has a hardcoded attestation challenge nonce that allows replay attacks",
+  "updated_at": "2026-05-11T14:42:47Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q8w6-w55c-ccv5"
+}

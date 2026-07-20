@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2105609?v=4\", \"events_url\": \"https://api.github.com/users/svenclaesson/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/svenclaesson/followers\", \"following_url\": \"https://api.github.com/users/svenclaesson/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/svenclaesson/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/svenclaesson\", \"id\": 2105609, \"login\": \"svenclaesson\", \"node_id\": \"MDQ6VXNlcjIxMDU2MDk=\", \"organizations_url\": \"https://api.github.com/users/svenclaesson/orgs\", \"received_events_url\": \"https://api.github.com/users/svenclaesson/received_events\", \"repos_url\": \"https://api.github.com/users/svenclaesson/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/svenclaesson/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/svenclaesson/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/svenclaesson\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44788\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nA path traversal vulnerability in `IArchive.WriteToDirectory()` allows a malicious archive to create directories outside the intended extraction root. For TAR archives, this can be escalated to arbitrary file writes by chaining with a symlink entry, giving a full write primitive on the target filesystem subject to the permissions of the running process.\\n\\n### Details\\n\\nThe vulnerable code is in the directory-entry branch of `WriteToDirectoryInternal` (sync, `IArchiveExtensions.cs:48–61`) and `WriteToDirectoryAsyncInternal` (async, `IAsyncArchiveExtensions.cs:70–84`):\\n\\n```csharp\\nvar dirPath = Path.Combine(destinationDirectory, entry.Key);\\nDirectory.CreateDirectory(Path.GetDirectoryName(dirPath + \\\"/\\\"));\\n```\\n\\nNo `Path.GetFullPath()` normalisation and no bounds check are applied before the `Directory.CreateDirectory` call. Two .NET `Path.Combine` behaviours make this exploitable:\\n\\n- **Relative traversal**: `Path.Combine(\\\"/safe/extract\\\", \\\"../../evil\\\")` → the OS resolves `..` segments on the raw path, placing the directory outside the extraction root.\\n- **Absolute path override**: `Path.Combine(\\\"/safe/extract\\\", \\\"/tmp/evil\\\")` → returns `\\\"/tmp/evil\\\"` — the base is discarded entirely for rooted paths.\\n\\nFile entries are **not** directly affected — they route through `ExtractionMethods.WriteEntryToDirectory` which applies the correct guard (`GetFullPath` + `StartsWith`, see `ExtractionMethods.cs:54–65`). The directory-entry branch is a separate fast-path that was added without that guard.\\n\\nAffected archive formats: ZIP and TAR (non-solid). Solid archives and 7-Zip use the reader path which calls the secure method.\\n\\n#### Escalation to arbitrary file writes (TAR only)\\n\\n`Path.GetFullPath` on .NET does not resolve symlinks — it only normalises `.` and `..` segments. This means the file-entry guard in `ExtractionMethods.WriteEntryToDirectory` can be bypassed via symlink chaining in TAR archives when the caller supplies a `SymbolicLinkHandler`:\\n\\n```csharp\\narchive.WriteToDirectory(\\\"/safe/extract\\\", new ExtractionOptions\\n{\\n    ExtractFullPath = true,\\n    SymbolicLinkHandler = (linkPath, linkTarget) =>\\n        File.CreateSymbolicLink(linkPath, linkTarget)  // naive — no validation of linkTarget\\n});\\n```\\n\\nAttack sequence in a single TAR archive:\\n\\n1. **Symlink entry** — `link` → `../evil_outside/`\\n   The `SymbolicLinkHandler` creates `/safe/extract/link` pointing outside the extraction root.\\n\\n2. **File entry** — `link/secret.txt`\\n   `ExtractionMethods.WriteEntryToDirectory` computes:\\n   - `destdir = Path.GetFullPath(\\\"/safe/extract/link\\\")` → `\\\"/safe/extract/link\\\"` — textually inside root, check passes ✓\\n   - `File.Open(\\\"/safe/extract/link/secret.txt\\\")` — OS follows symlink, file is written to `/evil_outside/secret.txt`\\n\\nThe library does not validate `linkTarget` before passing it to the caller's handler, and the XML docs do not warn that it may be a traversal path. The idiomatic handler implementation above is therefore silently exploitable.\\n\\nZIP does not support symlinks in SharpCompress (`ZipEntry.LinkTarget` always returns `null`), so this escalation is TAR-only.\\n\\n| Attack | ZIP | TAR |\\n|--------|-----|-----|\\n| Directory traversal (escape extraction root) | Yes | Yes |\\n| Escalate to arbitrary file writes via symlink chain | No | Yes (if caller provides `SymbolicLinkHandler`) |\\n\\n**Recommended fix** — apply the same pattern from `ExtractionMethods.WriteEntryToDirectory` to both affected files:\\n\\n```csharp\\nvar fullDestDir = Path.GetFullPath(destinationDirectory);\\nif (!fullDestDir.EndsWith(Path.DirectorySeparatorChar))\\n    fullDestDir += Path.DirectorySeparatorChar;\\n\\nvar dirPath = Path.GetFullPath(Path.Combine(fullDestDir, entry.Key));\\nif (!dirPath.StartsWith(fullDestDir, PathComparison))\\n    throw new ExtractionException(\\n        \\\"Entry is trying to create a directory outside of the destination directory.\\\");\\n\\nDirectory.CreateDirectory(dirPath);\\n```\\n\\nAdditionally, the library should validate `LinkTarget` before invoking the caller's `SymbolicLinkHandler`, or document clearly that callers must validate it themselves.\\n\\n### PoC\\n\\nA self-contained .NET console app is available at:\\n`https://github.com/svenclaesson/poc-sharpcompress-traversal`\\n\\n```\\ngit clone https://github.com/svenclaesson/poc-sharpcompress-traversal\\ncd poc-sharpcompress-traversal\\ndotnet run\\n```\\n\\nThe PoC crafts a ZIP with three directory entries (`../../escaped_relative/`, `/tmp/escaped_absolute/`, `safe_subdir/`) using `System.IO.Compression` (stdlib), then extracts with SharpCompress. Output shows `[ESCAPED]` for the two malicious entries and `[ok]` for the legitimate one, on both sync and async APIs.\\n\\nTested against SharpCompress 0.47.4 (latest NuGet).\\n\\n### Impact\\n\\nThis is a path traversal / zip slip vulnerability (CWE-22). Any application that calls `archive.WriteToDirectory()` on an untrusted archive is affected — which covers the primary documented extraction API.\\n\\nFor ZIP archives the impact is limited to arbitrary directory creation, which can be used to stage privilege escalation (e.g. cron drop-ins, XDG config paths, service spool directories) or shadow expected paths to alter application behaviour.\\n\\nFor TAR archives, callers that implement a `SymbolicLinkHandler` — which is the only way to faithfully restore a TAR — are exposed to a full arbitrary file write primitive via the symlink chaining described above.\", \"epss\": {\"percentage\": 0.00313, \"percentile\": 0.22829}, \"ghsa_id\": \"GHSA-6c8g-7p36-r338\", \"github_reviewed_at\": \"2026-05-08T23:50:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-6c8g-7p36-r338\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6c8g-7p36-r338\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44788\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-08T23:50:40Z\", \"references\": [\"https://github.com/adamhathcock/sharpcompress/security/advisories/GHSA-6c8g-7p36-r338\", \"https://github.com/advisories/GHSA-6c8g-7p36-r338\"], \"repository_advisory_url\": \"https://api.github.com/repos/adamhathcock/sharpcompress/security-advisories/GHSA-6c8g-7p36-r338\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/adamhathcock/sharpcompress\", \"summary\": \"SharpCompress has directory traversal via directory entries in WriteToDirectory (zip slip variant)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T23:50:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-6c8g-7p36-r338\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"nuget\", \"name\": \"SharpCompress\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.47.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6c8g-7p36-r338",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "SharpCompress: <= 0.47.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44788"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "SharpCompress"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.113367Z",
+  "provenance": {
+    "content_sha256": "012d814fb8d563c143a9f3d0947cafb7597264fac4ed0b57823a8499a0c600af",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T23:50:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6c8g-7p36-r338",
+  "status": "active",
+  "title": "SharpCompress has directory traversal via directory entries in WriteToDirectory (zip slip variant)",
+  "updated_at": "2026-05-08T23:50:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6c8g-7p36-r338"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49291\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe HTTP MCP JSON-RPC endpoint at `/mcp` requires only OAuth `read` scope for all requests, then dispatches `tools/call` directly to handlers that include mutating tools. A read-only OAuth client can call `store_memory` and `delete_memory` through MCP even though the corresponding REST endpoints require `write` scope.\\n\\n## Technical Details\\n\\n`src/mcp_memory_service/web/api/mcp.py` declares `mcp_endpoint` with `user: AuthenticationResult = Depends(require_read_access)`. For `tools/call`, it extracts the requested tool name and arguments, then calls `handle_tool_call(storage, tool_name, arguments)` without passing the authenticated user or checking a per-tool required scope.\\n\\nThe MCP tool registry includes both read tools and write tools. In the same handler file, `store_memory` creates a `Memory` object and calls `storage.store(...)`, while `delete_memory` calls `storage.delete(content_hash)`. These operations are reachable with only the `read` scope.\\n\\nThe REST endpoint demonstrates the intended boundary: `POST /api/memories` uses `Depends(require_write_access)` and rejects a read-only token with 403 `insufficient_scope`.\\n\\n## Reproduction\\n\\n1. Enable OAuth and disable anonymous access.\\n2. Generate a valid OAuth JWT with only `scope: read`.\\n3. Confirm the REST write endpoint rejects it:\\n\\n```http\\nPOST /api/memories\\nAuthorization: Bearer <read-only-token>\\nContent-Type: application/json\\n\\n{\\\"content\\\":\\\"rest denied control\\\"}\\n```\\n\\nExpected and observed: HTTP 403 with `Required scope 'write' not granted`.\\n\\n4. Send the same read-only token to the MCP endpoint:\\n\\n```http\\nPOST /mcp\\nAuthorization: Bearer <read-only-token>\\nContent-Type: application/json\\n\\n{\\n  \\\"jsonrpc\\\": \\\"2.0\\\",\\n  \\\"id\\\": 1,\\n  \\\"method\\\": \\\"tools/call\\\",\\n  \\\"params\\\": {\\n    \\\"name\\\": \\\"store_memory\\\",\\n    \\\"arguments\\\": {\\n      \\\"content\\\": \\\"mcp read scope stored this\\\",\\n      \\\"tags\\\": [\\\"poc\\\"]\\n    }\\n  }\\n}\\n```\\n\\nObserved: HTTP 200 JSON-RPC success and the storage `store` sink is reached.\\n\\n5. A read-only token can also call `delete_memory` through MCP if it knows a content hash:\\n\\n```http\\nPOST /mcp\\nAuthorization: Bearer <read-only-token>\\nContent-Type: application/json\\n\\n{\\n  \\\"jsonrpc\\\": \\\"2.0\\\",\\n  \\\"id\\\": 2,\\n  \\\"method\\\": \\\"tools/call\\\",\\n  \\\"params\\\": {\\n    \\\"name\\\": \\\"delete_memory\\\",\\n    \\\"arguments\\\": {\\\"content_hash\\\": \\\"<known_hash>\\\"}\\n  }\\n}\\n```\\n\\nObserved: HTTP 200 JSON-RPC success and the storage `delete` sink is reached.\\n\\n## Impact\\n\\nA client intended to be read-only can inject or delete memories through the MCP API. This can corrupt the memory database, influence future agent context, and destroy stored user memories without the OAuth `write` scope required by the REST API.\\n\\n## Affected Versions\\n\\nConfirmed present on current main commit `c99a922477df41f75a44db11182ae48a57311910` and latest release tag `v10.65.0` (`4eb4a62665589f9dd9f8c393afa32de434b4098a`).\\n\\n## Suggested Fix\\n\\nEnforce authorization per MCP tool at `tools/call` time. Require `write` for `store_memory` and `delete_memory`, keep `read` only for read-only tools, and add regression tests proving direct `tools/call` to mutating tools is rejected before the handler reaches storage when the caller has only `read` scope.\", \"epss\": {\"percentage\": 0.00264, \"percentile\": 0.17586}, \"ghsa_id\": \"GHSA-2r68-g678-7qr3\", \"github_reviewed_at\": \"2026-06-26T21:04:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-2r68-g678-7qr3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2r68-g678-7qr3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49291\"}], \"nvd_published_at\": \"2026-06-19T19:16:36Z\", \"published_at\": \"2026-06-26T21:04:38Z\", \"references\": [\"https://github.com/doobidoo/mcp-memory-service/security/advisories/GHSA-2r68-g678-7qr3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-49291\", \"https://pypi.org/project/mcp-memory-service/10.65.3\", \"https://web.archive.org/web/20260508112116/https://github.com/doobidoo/mcp-memory-service\", \"https://github.com/advisories/GHSA-2r68-g678-7qr3\"], \"repository_advisory_url\": \"https://api.github.com/repos/doobidoo/mcp-memory-service/security-advisories/GHSA-2r68-g678-7qr3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/doobidoo/mcp-memory-service\", \"summary\": \"mcp-memory-service: OAuth read-only clients can write and delete memories through MCP tools/call\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T21:04:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-2r68-g678-7qr3\", \"vulnerabilities\": [{\"first_patched_version\": \"10.65.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-memory-service\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 10.65.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2r68-g678-7qr3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-memory-service: <= 10.65.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-49291"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-memory-service"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.015896Z",
+  "provenance": {
+    "content_sha256": "24f649a7b51f56d10ce4c7f1569d49337124c5249924771c856478cfff4b12dd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T21:04:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2r68-g678-7qr3",
+  "status": "active",
+  "title": "mcp-memory-service: OAuth read-only clients can write and delete memories through MCP tools/call",
+  "updated_at": "2026-06-26T21:04:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2r68-g678-7qr3"
+}

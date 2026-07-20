@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4237280?v=4\", \"events_url\": \"https://api.github.com/users/yordis/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yordis/followers\", \"following_url\": \"https://api.github.com/users/yordis/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yordis/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yordis\", \"id\": 4237280, \"login\": \"yordis\", \"node_id\": \"MDQ6VXNlcjQyMzcyODA=\", \"organizations_url\": \"https://api.github.com/users/yordis/orgs\", \"received_events_url\": \"https://api.github.com/users/yordis/received_events\", \"repos_url\": \"https://api.github.com/users/yordis/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yordis/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yordis/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yordis\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48594\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-409\", \"name\": \"Improper Handling of Highly Compressed Data (Data Amplification)\"}], \"description\": \"### Summary\\n\\nAny Tesla client pipeline that includes `Tesla.Middleware.DecompressResponse` or `Tesla.Middleware.Compression` eagerly decompresses HTTP response bodies with no size limit. A server under attacker control (or reached via a redirect) can return a tiny gzip-encoded payload that expands into gigabytes of BEAM heap, crashing or freezing the calling process. Stacking multiple `content-encoding` tokens multiplies the amplification exponentially.\\n\\n### Details\\n\\n`decompress_body/2` in `lib/tesla/middleware/compression.ex` passes the full response body to `:zlib.gunzip/1` or `:zlib.unzip/1` with no cap on output size. The list of codec tokens comes from splitting the `content-encoding` header on commas, and `decompress_body/2` recurses once per token. A response advertising `content-encoding: gzip, gzip, gzip, gzip` triggers four recursive decompression passes. Each gzip layer can expand its input roughly 1000x, so a 284-byte wire payload with four layers inflates to approximately 1 GB at the innermost pass, all materialised as a single binary in the caller's heap.\\n\\n### PoC\\n\\n1. Serve an HTTP response with `content-encoding: gzip, gzip, gzip, gzip` where the body is a 1 GB block of zeros compressed through four successive gzip passes.\\n2. Send that response to a Tesla client whose pipeline includes `Tesla.Middleware.DecompressResponse`.\\n3. `decompress_body/2` recurses four times without any size check, materialising ~1 GB in the calling process's heap.\\n4. Repeated or sufficiently large requests exhaust available memory and crash or freeze the node.\\n\\n### Impact\\n\\nHigh severity (CVSS v4.0: 8.2). Any application using `tesla` 0.6.0 through 1.18.2 with `Tesla.Middleware.DecompressResponse` or `Tesla.Middleware.Compression` in its pipeline is vulnerable. The attacker only needs to control a server the client contacts, including via redirects. Fixed in tesla 1.18.3.\\n\\n### Configurations\\n\\nThe application must include `Tesla.Middleware.DecompressResponse` or `Tesla.Middleware.Compression` in its Tesla middleware pipeline.\\n\\n### Resources\\n\\n* Introduction commit: https://github.com/elixir-tesla/tesla/commit/5bd90bb5cf0d15e375edc2a66fa322292940fce2\\n* Patch commit: https://github.com/elixir-tesla/tesla/commit/340f75b5d191dc747ef7ac6365bd002d1cd55a9d\", \"epss\": {\"percentage\": 0.00329, \"percentile\": 0.24536}, \"ghsa_id\": \"GHSA-mc85-72gr-vm9f\", \"github_reviewed_at\": \"2026-07-10T00:03:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-mc85-72gr-vm9f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mc85-72gr-vm9f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48594\"}], \"nvd_published_at\": \"2026-06-02T20:16:38Z\", \"published_at\": \"2026-07-10T00:03:23Z\", \"references\": [\"https://github.com/elixir-tesla/tesla/security/advisories/GHSA-mc85-72gr-vm9f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48594\", \"https://github.com/elixir-tesla/tesla/commit/340f75b5d191dc747ef7ac6365bd002d1cd55a9d\", \"https://cna.erlef.org/cves/CVE-2026-48594.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-48594\", \"https://github.com/advisories/GHSA-mc85-72gr-vm9f\"], \"repository_advisory_url\": \"https://api.github.com/repos/elixir-tesla/tesla/security-advisories/GHSA-mc85-72gr-vm9f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/elixir-tesla/tesla\", \"summary\": \"Tesla has decompression bomb on response body\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T00:03:24Z\", \"url\": \"https://api.github.com/advisories/GHSA-mc85-72gr-vm9f\", \"vulnerabilities\": [{\"first_patched_version\": \"1.18.3\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"tesla\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.6.0, < 1.18.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mc85-72gr-vm9f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "tesla: >= 0.6.0, < 1.18.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48594"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "tesla"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.347624Z",
+  "provenance": {
+    "content_sha256": "f30812b91ff77af3d5516404b1ce48c0bd3a755ebcc2f796531df4c44627ec14",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T00:03:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mc85-72gr-vm9f",
+  "status": "active",
+  "title": "Tesla has decompression bomb on response body",
+  "updated_at": "2026-07-10T00:03:24Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mc85-72gr-vm9f"
+}

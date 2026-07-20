@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/85026744?v=4\", \"events_url\": \"https://api.github.com/users/kuranikaran/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kuranikaran/followers\", \"following_url\": \"https://api.github.com/users/kuranikaran/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kuranikaran/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kuranikaran\", \"id\": 85026744, \"login\": \"kuranikaran\", \"node_id\": \"MDQ6VXNlcjg1MDI2NzQ0\", \"organizations_url\": \"https://api.github.com/users/kuranikaran/orgs\", \"received_events_url\": \"https://api.github.com/users/kuranikaran/received_events\", \"repos_url\": \"https://api.github.com/users/kuranikaran/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kuranikaran/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kuranikaran/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kuranikaran\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44305\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-295\", \"name\": \"Improper Certificate Validation\"}], \"description\": \"## Description\\n\\n### Overview\\n\\nWhen LDAP TLS is enabled (`LDAP_USE_TLS = True`), Lemur's LDAP authentication module unconditionally disables TLS certificate verification at the **global** `ldap` module level. This allows a man-in-the-middle attacker positioned between Lemur and the LDAP server to intercept all authentication credentials.\\n\\n### Vulnerable Code\\n\\n**Location:** `lemur/auth/ldap.py`, `_bind()` method, line ~172\\n\\n```python\\nif self.ldap_use_tls:\\n    ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)\\n```\\n\\nKey issues:\\n\\n1. `ldap.set_option()` is a **global** call (as opposed to `self.ldap_client.set_option()`), meaning it disables TLS verification for the entire Python process, not just this connection\\n2. `OPT_X_TLS_NEVER` means no certificate validation is performed whatsoever — self-signed, expired, wrong hostname, and revoked certificates are all silently accepted\\n3. There is no configuration option to override this behavior — TLS verification is always disabled when TLS is enabled\\n\\n### Impact\\n\\nA network-positioned attacker (man-in-the-middle) between Lemur and the LDAP server can:\\n\\n- **Intercept all LDAP credentials** (usernames and plaintext passwords) for every user who authenticates\\n- **Modify LDAP responses** to inject arbitrary group memberships, granting admin access\\n- **Compromise the entire PKI infrastructure** managed by Lemur, since authentication controls access to certificates and private keys\\n\\nThis is particularly severe because Lemur is a certificate management system — the tool designed to manage TLS security is itself vulnerable to a TLS attack.\\n\\n### Steps to Reproduce\\n\\n1. Deploy Lemur with LDAP TLS enabled:\\n   ```python\\n   LDAP_AUTH = True\\n   LDAP_USE_TLS = True\\n   LDAP_BIND_URI = \\\"ldaps://dc.corp.example.com\\\"\\n   ```\\n\\n2. Intercept the LDAP connection using a TLS proxy (e.g., `mitmproxy` or `stunnel`):\\n   ```bash\\n   # Generate a self-signed certificate\\n   openssl req -x509 -newkey rsa:2048 -keyout mitm.key -out mitm.crt -days 1 -nodes -subj \\\"/CN=mitm\\\"\\n\\n   # Proxy LDAP traffic\\n   stunnel -d 0.0.0.0:636 -r real-ldap-server:636 -p mitm.pem\\n   ```\\n\\n3. Point Lemur's `LDAP_BIND_URI` at the proxy (or perform ARP spoofing/DNS hijacking)\\n\\n4. Observe that Lemur connects without any certificate verification error\\n\\n5. All credentials are visible in the proxy's TLS session\\n\\n### Remediation\\n\\nRemove the global TLS verification bypass and default to strict verification:\\n\\n```python\\nif self.ldap_use_tls:\\n    # Use instance-level option, not global\\n    self.ldap_client.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_DEMAND)\\n    self.ldap_client.set_option(ldap.OPT_PROTOCOL_VERSION, 3)\\n    if self.ldap_cacert_file:\\n        self.ldap_client.set_option(ldap.OPT_X_TLS_CACERTFILE, self.ldap_cacert_file)\\n```\\n\\nIf backward compatibility is needed, make it configurable with a secure default:\\n\\n```python\\ntls_require_cert = current_app.config.get(\\\"LDAP_TLS_REQUIRE_CERT\\\", ldap.OPT_X_TLS_DEMAND)\\nself.ldap_client.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, tls_require_cert)\\n```\\n\\n### Resources\\n\\n- CWE-295: https://cwe.mitre.org/data/definitions/295.html\\n- python-ldap TLS documentation: https://www.python-ldap.org/en/python-ldap-3.4.0/reference/ldap.html#tls-options\", \"epss\": {\"percentage\": 0.00094, \"percentile\": 0.00801}, \"ghsa_id\": \"GHSA-vr7c-r5gj-j3w5\", \"github_reviewed_at\": \"2026-05-06T18:48:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-vr7c-r5gj-j3w5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vr7c-r5gj-j3w5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44305\"}], \"nvd_published_at\": \"2026-05-12T22:16:37Z\", \"published_at\": \"2026-05-06T18:48:12Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-vr7c-r5gj-j3w5\", \"https://github.com/Netflix/lemur/releases/tag/v1.9.0\", \"https://www.python-ldap.org/en/python-ldap-3.4.0/reference/ldap.html#tls-options\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44305\", \"https://github.com/advisories/GHSA-vr7c-r5gj-j3w5\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-vr7c-r5gj-j3w5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur: LDAP Authentication Globally Disables TLS Certificate Verification When LDAP_USE_TLS Is Enabled\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T16:41:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-vr7c-r5gj-j3w5\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vr7c-r5gj-j3w5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: < 1.9.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44305"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.470397Z",
+  "provenance": {
+    "content_sha256": "2a5fd069ceaf38a54c5a9397a7e5be37f7294ccd26dde907975a4e830f38f9bd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T18:48:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vr7c-r5gj-j3w5",
+  "status": "active",
+  "title": "Lemur: LDAP Authentication Globally Disables TLS Certificate Verification When LDAP_USE_TLS Is Enabled",
+  "updated_at": "2026-05-13T16:41:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vr7c-r5gj-j3w5"
+}

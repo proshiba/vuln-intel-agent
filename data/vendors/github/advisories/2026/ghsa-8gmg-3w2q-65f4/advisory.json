@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5543599?v=4\", \"events_url\": \"https://api.github.com/users/MrAlias/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrAlias/followers\", \"following_url\": \"https://api.github.com/users/MrAlias/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrAlias/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrAlias\", \"id\": 5543599, \"login\": \"MrAlias\", \"node_id\": \"MDQ6VXNlcjU1NDM1OTk=\", \"organizations_url\": \"https://api.github.com/users/MrAlias/orgs\", \"received_events_url\": \"https://api.github.com/users/MrAlias/received_events\", \"repos_url\": \"https://api.github.com/users/MrAlias/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrAlias/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrAlias/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrAlias\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7052238?v=4\", \"events_url\": \"https://api.github.com/users/arminru/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arminru/followers\", \"following_url\": \"https://api.github.com/users/arminru/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arminru/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arminru\", \"id\": 7052238, \"login\": \"arminru\", \"node_id\": \"MDQ6VXNlcjcwNTIyMzg=\", \"organizations_url\": \"https://api.github.com/users/arminru/orgs\", \"received_events_url\": \"https://api.github.com/users/arminru/received_events\", \"repos_url\": \"https://api.github.com/users/arminru/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arminru/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arminru/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arminru\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41433\", \"cvss\": {\"score\": 8.4, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.4, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\n\\nA flaw in the Java agent injection path allows a local attacker controlling a Java workload to overwrite arbitrary host files when Java injection is enabled and OBI is running with elevated privileges. The injector trusted `TMPDIR` from the target process and used unsafe file creation semantics, enabling both filesystem boundary escape and symlink-based file clobbering.\\n\\n### Remediation\\n\\nUpgrade to https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/tag/v0.8.0.\\n\\n### Details\\n\\nThe issue is in the Java agent staging logic in `pkg/internal/java/java_inject.go`.\\n\\nThe injector reads `TMPDIR` from the target process environment in `findTempDir(...)` and validates it with `dirOK(...)`. In the vulnerable implementation, `dirOK(...)` used `filepath.Join(root, dir)`, where `root` is `/proc/<pid>/root`. If `dir` is an absolute path, `filepath.Join` discards `root`, so values such as `/etc` or `/proc/1/root/etc` are resolved on the host instead of within the target process root.\\n\\nThat validated value is later reused in `copyAgent(...)` to build the destination path for the Java agent JAR. As a result, a malicious process can influence the privileged injector to write outside the intended `/proc/<pid>/root` boundary.\\n\\nThe file creation step further increases impact. The vulnerable code created the destination with `os.OpenFile(..., os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)`. Because this does not use exclusive creation or symlink protections, an attacker can pre-create a symlink at the chosen destination, for example in a writable temp directory, and cause the injector to truncate or overwrite another file writable by the privileged OBI process.\\n\\nRelevant code paths:\\n\\n- `pkg/internal/java/java_inject.go`: `findTempDir(...)`\\n- `pkg/internal/java/java_inject.go`: `dirOK(...)`\\n- `pkg/internal/java/java_inject.go`: `copyAgent(...)`\\n\\nIn short, the vulnerability is caused by two issues acting together:\\n\\n1. Untrusted `TMPDIR` from the target process can escape the intended target root.\\n2. The destination JAR is written with unsafe open semantics that allow clobbering via symlink or attacker-controlled destination selection.\\n\\n### PoC\\n\\nPrerequisites:\\n\\n- OBI is running with elevated privileges on the host.\\n- Java injection is enabled.\\n- The attacker can run or control a Java process on the same host.\\n\\nReproduction outline for the path escape case:\\n\\n1. Start a Java process with a controlled environment variable such as:\\n   - `TMPDIR=/etc`\\n   - or `TMPDIR=/proc/1/root/etc`\\n2. Ensure the process is discovered by OBI and selected for Java agent injection.\\n3. Wait for the injector to stage the agent JAR.\\n4. Observe that the injector attempts to write `obi-java-agent.jar` outside `/proc/<pid>/root`, under the attacker-controlled host path.\\n\\nReproduction outline for the symlink clobber case:\\n\\n1. Start a Java process with `TMPDIR=/tmp` or another writable temp directory.\\n2. Before injection occurs, create a symlink at the expected destination:\\n   - `/tmp/obi-java-agent.jar -> /path/to/target/file`\\n3. Trigger Java agent injection for that process.\\n4. Observe that the privileged injector opens the symlink target with truncate semantics and overwrites the linked file contents.\\n\\nCode evidence:\\n\\n- `findTempDir(...)` reads `ie.FileInfo.Service.EnvVars[\\\"TMPDIR\\\"]`\\n- `dirOK(...)` validates using `filepath.Join(root, dir)`\\n- `copyAgent(...)` writes the JAR into the selected temp directory\\n- the vulnerable write uses `os.OpenFile(..., os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)`\\n\\n### Impact\\n\\nThis is an arbitrary file overwrite / file clobber vulnerability in a privileged host component.\\n\\nAffected users are deployments where:\\n\\n- Java injection is enabled\\n- OBI runs with elevated privileges\\n- untrusted local workloads can run Java processes on the same host\\n\\nAn attacker who can control a local Java process may be able to overwrite host files writable by OBI, which can lead to:\\n\\n- host integrity compromise\\n- service disruption or denial of service\\n- possible local privilege escalation depending on deployment details and overwritten targets\\n\\nThe issue is local rather than remote, but the impact is high because the vulnerable component operates with elevated privileges on the host.\", \"epss\": {\"percentage\": 0.00194, \"percentile\": 0.09193}, \"ghsa_id\": \"GHSA-8gmg-3w2q-65f4\", \"github_reviewed_at\": \"2026-04-17T22:21:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-8gmg-3w2q-65f4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8gmg-3w2q-65f4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41433\"}], \"nvd_published_at\": \"2026-04-24T20:16:27Z\", \"published_at\": \"2026-04-17T22:21:41Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/security/advisories/GHSA-8gmg-3w2q-65f4\", \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/tag/v0.8.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41433\", \"https://github.com/advisories/GHSA-8gmg-3w2q-65f4\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-ebpf-instrumentation/security-advisories/GHSA-8gmg-3w2q-65f4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation\", \"summary\": \"OpenTelemetry eBPF Instrumentation: Privileged Java agent injection allows arbitrary host file overwrite via untrusted TMPDIR\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T16:19:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-8gmg-3w2q-65f4\", \"vulnerabilities\": [{\"first_patched_version\": \"0.8.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/obi\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.4.0, < 0.8.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8gmg-3w2q-65f4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.opentelemetry.io/obi: >= 0.4.0, < 0.8.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41433"
+    ],
+    "cvss_score": 8.4,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.opentelemetry.io/obi"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.441009Z",
+  "provenance": {
+    "content_sha256": "1b82c6835c93d80e826e2ef6d817a8958acc12a05f316ce28302d8b6b7848b78",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-17T22:21:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8gmg-3w2q-65f4",
+  "status": "active",
+  "title": "OpenTelemetry eBPF Instrumentation: Privileged Java agent injection allows arbitrary host file overwrite via untrusted TMPDIR",
+  "updated_at": "2026-04-27T16:19:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8gmg-3w2q-65f4"
+}

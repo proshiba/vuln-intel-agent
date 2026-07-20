@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/268084991?v=4\", \"events_url\": \"https://api.github.com/users/AgenticWizard/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AgenticWizard/followers\", \"following_url\": \"https://api.github.com/users/AgenticWizard/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AgenticWizard/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AgenticWizard\", \"id\": 268084991, \"login\": \"AgenticWizard\", \"node_id\": \"U_kgDOD_qm_w\", \"organizations_url\": \"https://api.github.com/users/AgenticWizard/orgs\", \"received_events_url\": \"https://api.github.com/users/AgenticWizard/received_events\", \"repos_url\": \"https://api.github.com/users/AgenticWizard/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AgenticWizard/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AgenticWizard/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AgenticWizard\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\nThe Local REST API's `/vault/{path}` endpoints (GET/PUT/PATCH/POST/DELETE) percent-decode the request path *inside the handler — after* Express has already routed and normalized it, then hand it to the Obsidian vault adapter with no confinement check. A literal `../` is resolved/rejected at the routing layer (→ 404), but `%2F` is not a separator there, so `..%2F..%2F` survives routing and is only turned into a real `/` by the handler's `decodeURIComponent`, reconstituting a `../` traversal that walks out of the vault. An **authenticated** client can read, write, or delete **arbitrary files on the host** with the Obsidian process's privileges.\\n\\n### Details\\n**Framework:** Express (`import express from \\\"express\\\"`; routes registered via `this.api.route(\\\"/vault/*\\\")…`).\\n\\n**The vulnerable line** — in `src/requestHandler.ts`, every vault handler (`vaultGet`, `vaultPut`, `vaultPatch`, `vaultPost`, `vaultDelete`) derives the path like this:\\n  ```ts\\n  const rawPath = decodeURIComponent(\\n    req.path.slice(req.path.indexOf(\\\"/\\\", 1) + 1),\\n  );\\n  ```\\nThe path is `decodeURIComponent`'d **after** Express routing. A literal `../` is collapsed/rejected at the routing layer, but `%2F` isn't a separator there — so `..%2F..%2F` reaches the handler intact and this `decodeURIComponent` turns it into a real `../../`. **The string routing saw (`…%2F…`) is not the string the handler uses (`…/…`)**, and `%2e%2e` behaves the same way.\\n\\n**No confinement on the decoded path.** The handlers pass `rawPath` straight to the vault adapter — e.g. `this.app.vault.adapter.readBinary(filePath)` / `this.app.vault.getAbstractFileByPath(filePath)` — with no `path.resolve` + vault-root prefix check, so the reconstituted `../../` escapes.\\n\\n**The fix already exists in your code — for MOVE only.** `vaultMove` confines correctly:\\n  ```ts\\n  const syntheticRoot = \\\"/vault\\\";\\n  const resolved = posix.resolve(syntheticRoot, normalized);\\n  if (resolved !== syntheticRoot && !resolved.startsWith(syntheticRoot + \\\"/\\\")) {\\n    this.returnCannedResponse(res, { errorCode: ErrorCode.PathTraversalNotAllowed });\\n    return;\\n  }\\n  ```\\nGET/PUT/PATCH/POST/DELETE lack this guard. **Apply the same `posix.resolve(syntheticRoot, …)` + `startsWith` check to the decoded path in every vault handler**, and reject any segment that decodes to `..`.\\n\\n### PoC\\nPrereq: a running Obsidian with the Local REST API plugin enabled and its configured API key (`$API_KEY`). Targets below are Unix; adjust per OS (e.g. `..%2F..%2FWindows%2Fwin.ini` on Windows).\\n\\n  ```bash\\n  # READ outside the vault (returns 200 + the target file's real bytes):\\n  curl --path-as-is -k -H \\\"Authorization: Bearer $API_KEY\\\" \\\\\\n    \\\"https://127.0.0.1:27124/vault/..%2F..%2F..%2F..%2Fetc%2Fpasswd\\\"\\n\\n  # WRITE outside the vault (creates a file on disk outside the vault root):\\n  curl --path-as-is -k -X PUT -H \\\"Authorization: Bearer $API_KEY\\\" --data \\\"pwned\\\" \\\\\\n    \\\"https://127.0.0.1:27124/vault/..%2F..%2F..%2Ftmp%2Fcanary.txt\\\"\\n  ```\\n\\n`--path-as-is` stops curl from collapsing `..` client-side. A plain `../` (unencoded) request returns 404 — only the `%2F`/`%2e%2e` encoded form bypasses, confirming the decode-after-routing gap.\\n\\n### Impact\\nAuthenticated arbitrary file **read / write / delete** outside the Obsidian vault, with the OS privileges of the Obsidian process — typically the user's home directory (SSH keys, browser profiles, dotfiles, credentials). Amplified in MCP/LLM-agent deployments: this API is widely used as an MCP server, so a prompt-injection in vault content (or a malicious MCP client) can make an agent emit a `%2F` path — turning \\\"the agent can edit my notes\\\" into \\\"the agent can read/write any file on the host,\\\" with no user intent to grant filesystem access beyond the vault.\\n\\nThis vulnerability was reported by Caleb Brisbin through responsible disclosure.\", \"ghsa_id\": \"GHSA-62gx-5q78-wrvx\", \"github_reviewed_at\": \"2026-07-15T21:56:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-62gx-5q78-wrvx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-62gx-5q78-wrvx\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T21:56:45Z\", \"references\": [\"https://github.com/coddingtonbear/obsidian-local-rest-api/security/advisories/GHSA-62gx-5q78-wrvx\", \"https://github.com/coddingtonbear/obsidian-local-rest-api/releases/tag/4.1.3\", \"https://github.com/advisories/GHSA-62gx-5q78-wrvx\"], \"repository_advisory_url\": \"https://api.github.com/repos/coddingtonbear/obsidian-local-rest-api/security-advisories/GHSA-62gx-5q78-wrvx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/coddingtonbear/obsidian-local-rest-api\", \"summary\": \"obsidian-local-rest-api: Authenticated path traversal via URL-encoded %2F in /vault/{path} — arbitrary host file read/write/delete\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T21:56:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-62gx-5q78-wrvx\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"obsidian-local-rest-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.1.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-62gx-5q78-wrvx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "obsidian-local-rest-api: < 4.1.3"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "obsidian-local-rest-api"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.921637Z",
+  "provenance": {
+    "content_sha256": "519f9287d6b7d3c305cb1f1cb2a8b7dc3d68003d2b0c50ec59a96d358d155c71",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T21:56:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-62gx-5q78-wrvx",
+  "status": "active",
+  "title": "obsidian-local-rest-api: Authenticated path traversal via URL-encoded %2F in /vault/{path} — arbitrary host file read/write/delete",
+  "updated_at": "2026-07-15T21:56:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-62gx-5q78-wrvx"
+}

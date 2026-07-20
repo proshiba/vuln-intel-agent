@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/90000267?v=4\", \"events_url\": \"https://api.github.com/users/larlarua/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/larlarua/followers\", \"following_url\": \"https://api.github.com/users/larlarua/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/larlarua/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/larlarua\", \"id\": 90000267, \"login\": \"larlarua\", \"node_id\": \"MDQ6VXNlcjkwMDAwMjY3\", \"organizations_url\": \"https://api.github.com/users/larlarua/orgs\", \"received_events_url\": \"https://api.github.com/users/larlarua/received_events\", \"repos_url\": \"https://api.github.com/users/larlarua/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/larlarua/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/larlarua/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/larlarua\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42180\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nLemmy allows an authenticated low-privileged user to create a link post through `POST /api/v3/post`. When a post is created in a public community, the backend asynchronously sends a Webmention to the attacker-controlled link target.\\n\\nThe submitted URL is checked for syntax and scheme, but the audited code path does not reject loopback, private, or link-local destinations before the Webmention request is issued. This lets a normal user trigger server-side HTTP requests toward internal services.\\n\\n### Details\\nThe entry point is the normal post creation API. The user-controlled `url` field is accepted, normalized with `diesel_url_create()`, and only validated with `is_valid_url()`. That validation allows `http` and `https` but does not implement internal address rejection.\\n\\nThe post creation flow then schedules Webmention delivery for public communities. This creates a direct source-to-sink path from an externally supplied post URL to a server-side outbound HTTP request.\\n\\nCore vulnerable code path:\\n\\n```rust\\n// crates/api_crud/src/post/create.rs\\nlet url = diesel_url_create(data.url.as_deref())?;\\nif let Some(url) = &url {\\n  is_url_blocked(url, &url_blocklist)?;\\n  is_valid_url(url)?;\\n}\\n```\\n\\n```rust\\n// crates/utils/src/utils/validation.rs\\npub fn is_valid_url(url: &Url) -> LemmyResult<()> {\\n  let is_valid = [\\\"http\\\", \\\"https\\\", \\\"magnet\\\"].contains(&url.scheme());\\n  if !is_valid {\\n    Err(LemmyErrorType::InvalidUrl)?\\n  }\\n  Ok(())\\n}\\n```\\n\\n```rust\\n// crates/api_crud/src/post/create.rs\\nif community.visibility == CommunityVisibility::Public {\\n  let post = inserted_post.clone();\\n  let url = url.clone();\\n  spawn_try_task(async move {\\n    if let Some(url) = url {\\n      Webmention::new(post.ap_id.clone().into(), url.into()).send().await?;\\n    }\\n    Ok(())\\n  });\\n}\\n```\\n\\nThese snippets matter because they show that the attacker controls `CreatePost.url`, the only validation is scheme-level, and the resulting URL is later used for server-side Webmention delivery.\\n\\n### PoC\\n_Complete instructions, including specific configuration details, to reproduce the vulnerability._Prerequisites:\\n\\n- The attacker has a valid low-privileged account.\\n- The attacker can post to a public community.\\n\\nPractical reproduction flow:\\n\\n1. Run an HTTP listener on an internal or loopback-reachable address from the Lemmy server's perspective, such as `127.0.0.1:8081`.\\n2. Authenticate as a normal user.\\n3. Submit a post to a public community with `url` set to the internal target.\\n4. Observe the Lemmy API return a normal post creation response.\\n5. Observe the internal HTTP listener receive a request from the Lemmy server shortly afterwards.\\n\\nComplete PoC:\\n\\n```http\\nPOST /api/v3/post HTTP/1.1\\nHost: victim.example\\nAuthorization: Bearer <low-priv-jwt>\\nContent-Type: application/json\\n\\n{\\n  \\\"name\\\": \\\"wm-ssrf\\\",\\n  \\\"community_id\\\": 1,\\n  \\\"url\\\": \\\"http://127.0.0.1:8081/\\\",\\n  \\\"body\\\": null,\\n  \\\"alt_text\\\": null,\\n  \\\"honeypot\\\": null,\\n  \\\"nsfw\\\": false,\\n  \\\"language_id\\\": null,\\n  \\\"custom_thumbnail\\\": null\\n}\\n```\\n\\nOutcome:\\n\\n- The API returns a successful `post_view` response.\\n- The Lemmy server later issues an outbound request toward `http://127.0.0.1:8081/` as part of Webmention processing.\\n### Impact\\nAn authenticated user can use the application server as a blind SSRF primitive against internal HTTP services. This can expose internal network reachability, trigger internal webhooks or administrative endpoints, and expand the attack surface beyond the public deployment boundary.\\n\\nBecause the sink is reached after ordinary user content submission, the issue is practical to exploit in real deployments where normal users can post to public communities.\", \"epss\": {\"percentage\": 0.00184, \"percentile\": 0.08046}, \"ghsa_id\": \"GHSA-3jvj-v6w2-h948\", \"github_reviewed_at\": \"2026-04-24T15:22:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-3jvj-v6w2-h948\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3jvj-v6w2-h948\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42180\"}], \"nvd_published_at\": \"2026-05-08T20:16:31Z\", \"published_at\": \"2026-04-24T15:22:49Z\", \"references\": [\"https://github.com/LemmyNet/lemmy/security/advisories/GHSA-3jvj-v6w2-h948\", \"https://github.com/LemmyNet/lemmy/commit/1f06693b708020c5c3a3752bd2f1c6006a75e9bc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42180\", \"https://github.com/LemmyNet/lemmy/releases/tag/0.19.18\", \"https://github.com/advisories/GHSA-3jvj-v6w2-h948\"], \"repository_advisory_url\": \"https://api.github.com/repos/LemmyNet/lemmy/security-advisories/GHSA-3jvj-v6w2-h948\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/LemmyNet/lemmy\", \"summary\": \"Lemmy has SSRF in /api/v3/post via Webmention dispatch\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-27T06:11:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-3jvj-v6w2-h948\", \"vulnerabilities\": [{\"first_patched_version\": \"0.19.18\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"lemmy_api_common\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.19.18\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3jvj-v6w2-h948",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemmy_api_common: < 0.19.18"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42180"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemmy_api_common"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.373202Z",
+  "provenance": {
+    "content_sha256": "a466a2b001624300157d9f56db483c778d6681713164368233dbe2875c0a4a9f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-24T15:22:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3jvj-v6w2-h948",
+  "status": "active",
+  "title": "Lemmy has SSRF in /api/v3/post via Webmention dispatch",
+  "updated_at": "2026-05-27T06:11:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3jvj-v6w2-h948"
+}

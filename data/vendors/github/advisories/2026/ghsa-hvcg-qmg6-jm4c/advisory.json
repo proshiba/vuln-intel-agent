@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7993?v=4\", \"events_url\": \"https://api.github.com/users/chrisvest/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/chrisvest/followers\", \"following_url\": \"https://api.github.com/users/chrisvest/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/chrisvest/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/chrisvest\", \"id\": 7993, \"login\": \"chrisvest\", \"node_id\": \"MDQ6VXNlcjc5OTM=\", \"organizations_url\": \"https://api.github.com/users/chrisvest/orgs\", \"received_events_url\": \"https://api.github.com/users/chrisvest/received_events\", \"repos_url\": \"https://api.github.com/users/chrisvest/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/chrisvest/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/chrisvest/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/chrisvest\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50020\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-444\", \"name\": \"Inconsistent Interpretation of HTTP Requests ('HTTP Request/Response Smuggling')\"}], \"description\": \"## Summary\\n\\nBefore reading the first request-line, `HttpObjectDecoder` skips every byte for which\\n`Character.isISOControl(b)` is `true` (0x00–0x1F and 0x7F) as well as all whitespace.\\nRFC 9112 §2.2 only asks servers to ignore **empty CRLF lines** preceding the request-line —\\na carefully scoped robustness allowance intended to handle HTTP/1.0 POST workarounds.\\nSilently absorbing NUL bytes, SOH, STX, and other non-CRLF control characters goes\\nsignificantly beyond this, and can be exploited for request-boundary confusion in pipelined\\nor multiplexed transports where a front-end component treats those bytes differently.\\n\\n## Affected Code\\n\\n| File | Lines | Role |\\n|------|-------|------|\\n| `codec-http/src/main/java/io/netty/handler/codec/http/HttpObjectDecoder.java` | 1298–1313 | `ISO_CONTROL_OR_WHITESPACE` static initialiser — marks all ISO control chars |\\n| `codec-http/src/main/java/io/netty/handler/codec/http/HttpObjectDecoder.java` | 1307–1313 | `SKIP_CONTROL_CHARS_BYTES` `ByteProcessor` — skips the entire set |\\n| `codec-http/src/main/java/io/netty/handler/codec/http/HttpObjectDecoder.java` | 1275–1289 | `LineParser.skipControlChars` — advances `readerIndex` past all matching bytes |\\n\\n## Specification Analysis\\n\\n### RFC 9112 §2.2 — Message Parsing\\n\\n> In the interest of robustness, a server that is expecting to receive and parse a\\n> request-line **SHOULD ignore at least one empty line (CRLF)** received prior to the\\n> request-line.\\n\\n> An HTTP/1.1 user agent **MUST NOT** preface or follow a request with an extra CRLF.\\n\\n### Deviation\\n\\nThe RFC names a single permitted exception: an **empty line** (bare CRLF, i.e. the two-byte\\nsequence `\\\\r\\\\n`).  The `ISO_CONTROL_OR_WHITESPACE` table is initialised as:\\n\\n```java\\nfor (byte b = Byte.MIN_VALUE; b < Byte.MAX_VALUE; b++) {\\n    ISO_CONTROL_OR_WHITESPACE[128 + b] =\\n        Character.isISOControl(b) || isWhitespace(b);\\n}\\n```\\n\\n`Character.isISOControl` returns `true` for `0x00`–`0x1F` and `0x7F`.  This includes NUL\\n(`0x00`), SOH (`0x01`), STX (`0x02`), BEL (`0x07`), DEL (`0x7F`), and every other non-CRLF\\ncontrol character.  The `SKIP_CONTROL_CHARS` state runs this scan unconditionally before the\\nfirst `READ_INITIAL`, meaning any sequence of such bytes prepended to a request is silently\\nconsumed.\\n\\nA load balancer or TLS terminator that does not perform the same scan sees a different\\nmessage boundary than Netty does, which is the basis of a request-desync / smuggling attack.\\n\\n## Suggested Unit Test\\n\\nAdd to `HttpRequestDecoderTest.java`.\\n\\n```java\\n@Test\\npublic void testNonCrlfControlBytesPrecedingRequestLineAreRejected() {\\n    // RFC 9112 §2.2: servers SHOULD ignore \\\"at least one empty line (CRLF)\\\" before the\\n    // request-line.  Non-CRLF control bytes are not part of this robustness allowance\\n    // and must not be silently swallowed.\\n    EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());\\n\\n    ByteBuf buf = Unpooled.buffer();\\n    buf.writeByte(0x00);   // NUL  — not an empty CRLF line\\n    buf.writeByte(0x01);   // SOH  — not an empty CRLF line\\n    buf.writeCharSequence(\\n            \\\"GET / HTTP/1.1\\\\r\\\\nHost: example.com\\\\r\\\\n\\\\r\\\\n\\\",\\n            CharsetUtil.US_ASCII);\\n\\n    channel.writeInbound(buf);\\n    HttpRequest req = channel.readInbound();\\n\\n    // Current behaviour: NUL and SOH are in ISO_CONTROL_OR_WHITESPACE, so they are\\n    // silently skipped; the request decodes successfully and isFailure() == false.\\n    //\\n    // RFC-correct behaviour: only empty CRLF lines should be ignored; NUL/SOH must\\n    // cause a parse error — isFailure() == true.\\n    assertTrue(\\n            req.decoderResult().isFailure(),\\n            \\\"Non-CRLF control bytes before the request-line must not be silently skipped \\\" +\\n            \\\"(RFC 9112 §2.2 allows only empty CRLF lines)\\\");\\n\\n    assertFalse(channel.finish());\\n}\\n```\\n\\n**Current behaviour (unfixed):** `skipControlChars` advances past `0x00` and `0x01` because\\nboth are in `ISO_CONTROL_OR_WHITESPACE`; the request parses normally, `isFailure()` is\\n`false` → test **fails**.\\n\\n**Expected behaviour after fix:** only CRLF empty lines are tolerated; non-CRLF control\\nbytes produce an error, `isFailure()` is `true` → test **passes**.\", \"epss\": {\"percentage\": 0.00232, \"percentile\": 0.13862}, \"ghsa_id\": \"GHSA-hvcg-qmg6-jm4c\", \"github_reviewed_at\": \"2026-06-15T20:46:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-hvcg-qmg6-jm4c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hvcg-qmg6-jm4c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50020\"}], \"nvd_published_at\": \"2026-06-12T16:16:31Z\", \"published_at\": \"2026-06-15T20:46:36Z\", \"references\": [\"https://github.com/netty/netty/security/advisories/GHSA-hvcg-qmg6-jm4c\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50020\", \"https://github.com/netty/netty/releases/tag/netty-4.1.135.Final\", \"https://github.com/netty/netty/releases/tag/netty-4.2.15.Final\", \"https://github.com/advisories/GHSA-hvcg-qmg6-jm4c\"], \"repository_advisory_url\": \"https://api.github.com/repos/netty/netty/security-advisories/GHSA-hvcg-qmg6-jm4c\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/netty/netty\", \"summary\": \"Netty: HttpObjectDecoder skips arbitrary initial control characters when only initial CRLF characters are permitted\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-15T20:46:37Z\", \"url\": \"https://api.github.com/advisories/GHSA-hvcg-qmg6-jm4c\", \"vulnerabilities\": [{\"first_patched_version\": \"4.2.15.Final\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.netty:netty-codec-http\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.2.0.Final, <= 4.2.14.Final\"}, {\"first_patched_version\": \"4.1.135.Final\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.netty:netty-codec-http\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.134.Final\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hvcg-qmg6-jm4c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "io.netty:netty-codec-http: <= 4.1.134.Final",
+      "io.netty:netty-codec-http: >= 4.2.0.Final, <= 4.2.14.Final"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50020"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "io.netty:netty-codec-http"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.724841Z",
+  "provenance": {
+    "content_sha256": "a56e897959af86bb9c2e72e9e91443f1a784136973488a32b0c726ad3f49df76",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T20:46:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hvcg-qmg6-jm4c",
+  "status": "active",
+  "title": "Netty: HttpObjectDecoder skips arbitrary initial control characters when only initial CRLF characters are permitted",
+  "updated_at": "2026-06-15T20:46:37Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hvcg-qmg6-jm4c"
+}

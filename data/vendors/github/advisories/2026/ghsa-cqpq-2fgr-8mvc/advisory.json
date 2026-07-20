@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/53675658?v=4\", \"events_url\": \"https://api.github.com/users/duddnr0615k/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/duddnr0615k/followers\", \"following_url\": \"https://api.github.com/users/duddnr0615k/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/duddnr0615k/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/duddnr0615k\", \"id\": 53675658, \"login\": \"duddnr0615k\", \"node_id\": \"MDQ6VXNlcjUzNjc1NjU4\", \"organizations_url\": \"https://api.github.com/users/duddnr0615k/orgs\", \"received_events_url\": \"https://api.github.com/users/duddnr0615k/received_events\", \"repos_url\": \"https://api.github.com/users/duddnr0615k/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/duddnr0615k/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/duddnr0615k/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/duddnr0615k\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44884\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 6.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\nA missing authorization vulnerability in the Custom Template file endpoint (`GET /api/custom_templates/{id}/file`) allows any authenticated user to read the file content of any custom template by enumerating sequential integer IDs, bypassing Resource Control access restrictions. Template files may contain environment-specific values such as connection strings, API tokens, or registry credentials that administrators would not expect standard users to read.\\n\\n## Severity\\n\\n**Medium**\\n\\n**CWE-862** — Missing Authorization\\n\\nExploitation requires an authenticated user account and at least one custom template to exist. Template files are returned verbatim and may contain embedded credentials.\\n\\n## Affected Versions\\n\\nThe vulnerability exists in every Portainer release since custom templates were introduced — the `customTemplateFile` handler has never performed an authorization check.\\n\\nFixes are included in the following releases:\\n\\n| Branch              | First vulnerable | Fixed in   |\\n|---------------------|------------------|------------|\\n| 2.33.x (LTS)        | 2.33.0           | **2.33.8** |\\n| 2.39.x (LTS)        | 2.39.0           | **2.39.1** |\\n\\nPortainer 2.40.0 and later are not affected — the fix was already on `develop` when the 2.40.x STS line branched. Portainer LTS branches receive fixes for 6 months plus a 3-month overlap after the next LTS ships. All releases **prior to 2.33.0 are end-of-life** and will not receive a fix; users on EOL versions should upgrade to a supported release.\\n\\n## Workarounds\\n\\nThere is no runtime configuration that blocks the vulnerable endpoint directly. Administrators who cannot immediately upgrade can reduce exposure by:\\n\\n- **Avoiding storing secrets in custom templates** until the patched release is deployed. Move sensitive configuration values to Portainer environment variables or an external secret store.\\n- **Reviewing existing custom templates** for embedded secrets. Assume any secret previously stored in a custom template on an unpatched instance has been exposed to every authenticated user and rotate accordingly.\\n\\nNeither replaces the fix.\\n\\n## Affected Code\\nThe `customTemplateFile` handler in `api/http/handler/customtemplates/customtemplate_file.go` (lines 30-53) retrieves a custom template by its numeric ID and returns the file content without performing any authorization check.\\n\\nAll other custom template endpoints properly verify access:\\n\\n| Endpoint | Method | Authorization Check |\\n|----------|--------|-------------------|\\n| `/api/custom_templates/{id}` | GET (inspect) | `userCanEditTemplate()` + `UserCanAccessResource()` |\\n| `/api/custom_templates/{id}` | PUT (update) | `userCanEditTemplate()` |\\n| `/api/custom_templates/{id}` | DELETE | `userCanEditTemplate()` |\\n| `/api/custom_templates` | GET (list) | `FilterAuthorizedCustomTemplates()` |\\n| **`/api/custom_templates/{id}/file`** | **GET** | **None** |\\n\\n**Vulnerable code** (`customtemplate_file.go:30-53`):\\n```go\\nfunc (handler *Handler) customTemplateFile(w http.ResponseWriter, r *http.Request) *httperror.HandlerError {\\n    customTemplateID, _ := request.RetrieveNumericRouteVariableValue(r, \\\"id\\\")\\n    customTemplate, _ := handler.DataStore.CustomTemplate().Read(portainer.CustomTemplateID(customTemplateID))\\n    // NO AUTHORIZATION CHECK\\n    fileContent, _ := handler.FileService.GetFileContent(customTemplate.ProjectPath, entryPath)\\n    return response.JSON(w, &fileResponse{FileContent: string(fileContent)})\\n}\\n```\\n\\n**Secure reference** (`customtemplate_inspect.go:50-75`):\\n```go\\ncanEdit := userCanEditTemplate(customTemplate, securityContext)\\nhasAccess := authorization.UserCanAccessResource(securityContext.UserID, teamIDs, resourceControl)\\nif !canEdit && !hasAccess {\\n    return httperror.Forbidden(\\\"Access denied to resource\\\", httperrors.ErrResourceAccessDenied)\\n}\\n```\\n\\n## Impact\\nAny authenticated user (including the lowest-privilege standard user) can read the file content of every custom template in the instance. Custom templates commonly contain Docker Compose configuration, which may include environment-specific secrets such as database connection strings, API tokens, or registry credentials.\\n\\n## Timeline\\n\\n- 2026-02-11: Reported via GitHub Security Advisory by **duddnr0615k**.\\n- 2026-03-04: Fix merged to `develop` and cherry-picked to `release/2.39`.\\n- 2026-03-19: 2.39.1 released with fix.\\n- 2026-03-25: 2.40.0 released with fix already present from branch cut.\\n- 2026-05-07: 2.33.8 released.\\n\\n## Credit\\n\\n- **duddnr0615k** — identified and reported the missing authorization check on the custom template file endpoint.\", \"epss\": {\"percentage\": 0.00257, \"percentile\": 0.16849}, \"ghsa_id\": \"GHSA-cqpq-2fgr-8mvc\", \"github_reviewed_at\": \"2026-05-14T16:34:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-cqpq-2fgr-8mvc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cqpq-2fgr-8mvc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44884\"}], \"nvd_published_at\": \"2026-05-28T22:16:59Z\", \"published_at\": \"2026-05-14T16:34:02Z\", \"references\": [\"https://github.com/portainer/portainer/security/advisories/GHSA-cqpq-2fgr-8mvc\", \"https://github.com/portainer/portainer/releases/tag/2.33.8\", \"https://github.com/portainer/portainer/releases/tag/2.39.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44884\", \"https://github.com/advisories/GHSA-cqpq-2fgr-8mvc\"], \"repository_advisory_url\": \"https://api.github.com/repos/portainer/portainer/security-advisories/GHSA-cqpq-2fgr-8mvc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/portainer/portainer\", \"summary\": \"Portainer missing authorization on custom template file endpoint, which exposes template content\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T10:25:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-cqpq-2fgr-8mvc\", \"vulnerabilities\": [{\"first_patched_version\": \"2.33.8\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/portainer/portainer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.33.0, < 2.33.8\"}, {\"first_patched_version\": \"2.39.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/portainer/portainer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.39.0, < 2.39.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cqpq-2fgr-8mvc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/portainer/portainer: >= 2.33.0, < 2.33.8",
+      "github.com/portainer/portainer: >= 2.39.0, < 2.39.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44884"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/portainer/portainer"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.759314Z",
+  "provenance": {
+    "content_sha256": "57e9e7a9145070979691cfeafb13d92cda52b28eaf2723557f0fc46388e34870",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T16:34:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cqpq-2fgr-8mvc",
+  "status": "active",
+  "title": "Portainer missing authorization on custom template file endpoint, which exposes template content",
+  "updated_at": "2026-06-09T10:25:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cqpq-2fgr-8mvc"
+}

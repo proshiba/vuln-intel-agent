@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1977?v=4\", \"events_url\": \"https://api.github.com/users/mjc/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mjc/followers\", \"following_url\": \"https://api.github.com/users/mjc/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mjc/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mjc\", \"id\": 1977, \"login\": \"mjc\", \"node_id\": \"MDQ6VXNlcjE5Nzc=\", \"organizations_url\": \"https://api.github.com/users/mjc/orgs\", \"received_events_url\": \"https://api.github.com/users/mjc/received_events\", \"repos_url\": \"https://api.github.com/users/mjc/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mjc/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mjc/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mjc\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46705\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\nThe `russh` server authentication path keeps internal userauth state across `SSH_MSG_USERAUTH_REQUEST` messages without separating that state when the request principal changes.\\n\\nRFC 4252 allows the `user name` and `service name` fields to change between authentication requests. The issue is not that such changes are invalid. The issue is that russh-owned authentication state, such as remaining methods, partial-success state, and in-progress method state, can remain associated with the connection and then influence a later request for a different `(user, service)`.\\n\\nThis is an internal library state mismatch. Applications are responsible for any authentication state they keep in their own handlers, but russh must reset or separate state that russh itself owns.\\n\\n### Details\\nThe relevant server-side auth logic is in:\\n\\n- `russh/src/server/encrypted.rs`\\n- `russh/src/auth.rs`\\n\\nRFC 4252 section 5 says the `user name` and `service name` fields are repeated in every `SSH_MSG_USERAUTH_REQUEST` and may change. It also says the server implementation must check those fields in every message and flush accumulated authentication state if they change; if it cannot flush that state, it must disconnect.\\n\\nIn vulnerable `russh` code, the username and service are decoded from each `SSH_MSG_USERAUTH_REQUEST`, while the `AuthRequest` state remains connection-scoped. That state includes:\\n\\n- `methods`, which is later encoded as the `SSH_MSG_USERAUTH_FAILURE` remaining-methods list.\\n- `partial_success`, which is later encoded in `SSH_MSG_USERAUTH_FAILURE`.\\n- `current`, which tracks in-progress method state such as public-key offer or keyboard-interactive challenge state.\\n- `rejection_count`.\\n\\nIf one request narrows russh's internal `methods` set, a later request for a different user can observe that narrowed set unless the internal state is reset at the principal boundary.\\n\\n### PoC\\nThe PoC demonstrates only russh-owned state. The handler does not store any cross-request state. Alice's request narrows russh's remaining methods to `password`; Bob's later plain reject should not reuse that internal state.\\n\\n```rust\\nstruct RemainingMethodsUserSwitchServer;\\n\\nimpl server::Handler for RemainingMethodsUserSwitchServer {\\n    type Error = russh::Error;\\n\\n    async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {\\n        if user == \\\"alice\\\" {\\n            Ok(server::Auth::Reject {\\n                proceed_with_methods: Some(MethodSet::from(&[MethodKind::Password][..])),\\n                partial_success: true,\\n            })\\n        } else {\\n            Ok(server::Auth::reject())\\n        }\\n    }\\n}\\n\\n#[tokio::test]\\nasync fn auth_does_not_carry_remaining_methods_across_username_change() {\\n    let alice = session.authenticate_none(\\\"alice\\\").await.unwrap();\\n\\n    assert!(matches!(\\n        alice,\\n        client::AuthResult::Failure {\\n            ref remaining_methods,\\n            ..\\n        } if *remaining_methods == MethodSet::from(&[MethodKind::Password][..])\\n    ));\\n\\n    let bob = session.authenticate_none(\\\"bob\\\").await.unwrap();\\n\\n    if let client::AuthResult::Failure {\\n        remaining_methods, ..\\n    } = bob {\\n        assert!(\\n            remaining_methods.contains(&MethodKind::PublicKey),\\n            \\\"server reused Alice's narrowed remaining methods for Bob: {remaining_methods:?}\\\"\\n        );\\n    }\\n}\\n```\\n\\nOn `upstream/main`, this fails with:\\n\\n```text\\nserver reused Alice's narrowed remaining methods for Bob: MethodSet([Password])\\n```\\n\\nThat failure is produced by russh's retained `AuthRequest.methods`; it does not depend on handler-owned MFA/session state.\\n\\n### Impact\\nSuggested provisional CVSS v3.1:\\n\\n- `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N`\\n- Score: `5.3`\\n\\nReasoning:\\n\\n- `AV:N`: reachable by a remote SSH client during authentication.\\n- `AC:L`: the attack is a normal sequence of SSH user-auth packets.\\n- `PR:N`: the attacker does not need an already-authenticated SSH session.\\n- `UI:N`: no user interaction is required on the server side.\\n- `S:U`: the impact is within the vulnerable SSH server implementation.\\n- `C:N`: the narrow PoC does not disclose confidential data.\\n- `I:L`: russh-owned authentication state for one principal can affect the authentication flow for a different principal.\\n- `A:N`: the narrow PoC does not demonstrate an availability impact.\\n\\nThis report does not claim that username changes are inherently invalid, nor does it rely on application-owned authentication state being mishandled by the embedding server.\\n\\n### Fix / Patch Direction\\nThe fix should update russh's internal userauth state handling so that accumulated russh-owned state is flushed or separated when `(user, service)` changes between `SSH_MSG_USERAUTH_REQUEST` messages.\\n\\nThe fix stores the last seen `(user, service)` on `AuthRequest`. When a new auth request arrives for a different principal, russh resets its internal auth state before dispatching the new request. This keeps username changes protocol-valid while preventing prior russh-owned auth state from carrying into the new principal.\", \"epss\": {\"percentage\": 0.00218, \"percentile\": 0.12062}, \"ghsa_id\": \"GHSA-hpv4-5h6f-wqr3\", \"github_reviewed_at\": \"2026-05-29T19:39:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-hpv4-5h6f-wqr3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hpv4-5h6f-wqr3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46705\"}], \"nvd_published_at\": \"2026-06-10T22:17:00Z\", \"published_at\": \"2026-05-29T19:39:41Z\", \"references\": [\"https://github.com/Eugeny/russh/security/advisories/GHSA-hpv4-5h6f-wqr3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46705\", \"https://github.com/advisories/GHSA-hpv4-5h6f-wqr3\"], \"repository_advisory_url\": \"https://api.github.com/repos/Eugeny/russh/security-advisories/GHSA-hpv4-5h6f-wqr3\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Eugeny/russh\", \"summary\": \"russh server userauth state is not reset when authentication principal changes\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-11T14:06:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-hpv4-5h6f-wqr3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.61.0\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"russh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.34.0-beta.1, < 0.61.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hpv4-5h6f-wqr3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "russh: >= 0.34.0-beta.1, < 0.61.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46705"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "russh"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.182250Z",
+  "provenance": {
+    "content_sha256": "8f887cf16487a2cc5dd14d3d2ed201614aa38595adb747886140cf3812ce13c1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T19:39:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hpv4-5h6f-wqr3",
+  "status": "active",
+  "title": "russh server userauth state is not reset when authentication principal changes",
+  "updated_at": "2026-06-11T14:06:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hpv4-5h6f-wqr3"
+}

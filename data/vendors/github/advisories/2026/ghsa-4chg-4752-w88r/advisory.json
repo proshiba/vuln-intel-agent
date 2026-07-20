@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/130943529?v=4\", \"events_url\": \"https://api.github.com/users/g03m0n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/g03m0n/followers\", \"following_url\": \"https://api.github.com/users/g03m0n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/g03m0n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/g03m0n\", \"id\": 130943529, \"login\": \"g03m0n\", \"node_id\": \"U_kgDOB84KKQ\", \"organizations_url\": \"https://api.github.com/users/g03m0n/orgs\", \"received_events_url\": \"https://api.github.com/users/g03m0n/received_events\", \"repos_url\": \"https://api.github.com/users/g03m0n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/g03m0n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/g03m0n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/g03m0n\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2421714?v=4\", \"events_url\": \"https://api.github.com/users/hoaquynhtim99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hoaquynhtim99/followers\", \"following_url\": \"https://api.github.com/users/hoaquynhtim99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hoaquynhtim99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hoaquynhtim99\", \"id\": 2421714, \"login\": \"hoaquynhtim99\", \"node_id\": \"MDQ6VXNlcjI0MjE3MTQ=\", \"organizations_url\": \"https://api.github.com/users/hoaquynhtim99/orgs\", \"received_events_url\": \"https://api.github.com/users/hoaquynhtim99/received_events\", \"repos_url\": \"https://api.github.com/users/hoaquynhtim99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hoaquynhtim99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hoaquynhtim99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hoaquynhtim99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55372\", \"cvss\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nAn unauthenticated attacker can coerce the server into issuing HTTP requests to an attacker-chosen host by spoofing the `X Forwarded-Host` (and `X-Forwarded-Proto`) request headers. The forwarded host is used, without validation, to build the URL that `server_info_update()` fetches with cURL, resulting in a Server-Side Request Forgery (SSRF) that requires no authentication.\\n\\n## Affected component\\n\\n- File: `includes/ini.php` — function `server_info_update()` (cURL sink)\\n- File: `vendor/vinades/nukeviet/Core/Server.php` — `standardizeHost()` and the forwarded-header handling in the constructor (source of the tainted host)\\n- Trigger: `POST` request containing the field `__serverInfoUpdate=1`, handled early in `includes/ini.php` before any authentication.\\n\\n## Details\\n\\n`NukeViet\\\\Core\\\\Server` derives `original_host` / `original_protocol` from the `X-Forwarded-Host` / `X-Forwarded-Proto` headers and exposes them via `getOriginalHost()` / `getOriginalProtocol()`. These values are attacker-controlled and were not validated against the site's configured domains (`my_domains`).\\n\\nIn `server_info_update()` the tainted host and scheme are concatenated directly into a cURL URL:\\n\\n```php\\n$proto = $nv_Server->getOriginalProtocol();   // from X-Forwarded-Proto\\n$host  = $nv_Server->getOriginalHost();        // from X-Forwarded-Host\\n$ch = curl_init($proto . '://' . $host . NV_BASE_SITEURL . 'index.php?response_headers_detect=1');\\ncurl_exec($ch);\\n```\\n\\nTwo factors made this reliably reachable:\\n\\n1. The `__serverInfoUpdate` handler runs very early in `includes/ini.php`, before authentication, so the sink is reachable pre-auth.\\n2. The host sanitiser `standardizeHost()` stripped a trailing port only with the regex `(\\\\:[0-9]+)$`, which is bypassed by appending a slash (e.g. `127.0.0.1:8081/`): the string no longer ends in `:digits`, so the port survives and an arbitrary `host:port` reaches the cURL call.\\n\\n## Proof of Concept\\n\\n```http\\nPOST /index.php HTTP/1.1\\nHost: <victim>\\nX-Forwarded-Proto: http\\nX-Forwarded-Host: <attacker-controlled-host>:<port>/\\nContent-Type: application/x-www-form-urlencoded\\nContent-Length: 20\\n\\n__serverInfoUpdate=1\\n```\\n\\nThe server then issues a request to the attacker-supplied host, confirmed via an out-of-band interaction (DNS + HTTP) on a collaborator endpoint.\\n\\n## Impact\\n\\nThe SSRF is **blind**, **HEAD-only**, and uses a **fixed request path** (`…/index.php?response_headers_detect=1`):\\n\\n- The fetched response is stored server-side in the `config_ini` cache and is **not reflected** to the attacker, so internal data cannot be exfiltrated directly.\\n- Because the path is fixed and not attacker-controlled, cloud metadata endpoints (e.g. `169.254.169.254/latest/meta-data/...`) cannot be reached, and `gopher://` / `dict://` request smuggling cannot inject arbitrary payloads.\\n\\nWhat an attacker **can** do: unauthenticated internal host/port discovery (connection success/timing, with the port reachable through the regex bypass), and poisoning of the cached `server_headers` (the SSRF target's response headers are stored and applied to the site).\\n\\n## Severity\\n\\nRated **High** rather than Critical, because the blind + fixed-path + HEAD design of the sink prevents data exfiltration, cloud credential theft, and internal RCE.\\n\\n- CVSS v3.1 Base Score: **7.2 (High)**\\n- Vector: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N`\\n\\n## Weakness\\n\\n- Primary: **CWE-918: Server-Side Request Forgery (SSRF)**\\n- Contributing: CWE-20 (Improper Input Validation), CWE-644 (Improper Neutralization of HTTP Headers used by downstream components / trusting `X-Forwarded-*`).\\n\\n## Remediation\\n\\nFixed by validating and normalising the forwarded values at the source and gating the request before the sink:\\n\\n- `standardizeHost()` now extracts the host with `parse_url()` (defeats the `:port/` bypass) and lower-cases it.\\n- `X-Forwarded-Proto` is restricted to a `{http, https}` allow-list and falls back to the real server protocol otherwise.\\n- `X-Forwarded-Port` is validated as numeric and within range.\\n- The incoming host is checked against `my_domains` before `includes/ini.php` is reached; non-matching hosts are rejected/redirected, and `server_info_update()` additionally re-validates its target host against `my_domains` (defense in depth).\\n\\n## Workaround\\n\\nConfigure the reverse proxy / web server to strip or override client-supplied `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-Port` headers, and ensure `my_domains` is configured with the site's canonical domain(s).\", \"ghsa_id\": \"GHSA-4chg-4752-w88r\", \"github_reviewed_at\": \"2026-07-13T17:58:44Z\", \"html_url\": \"https://github.com/advisories/GHSA-4chg-4752-w88r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4chg-4752-w88r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55372\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-13T17:58:44Z\", \"references\": [\"https://github.com/nukeviet/nukeviet/security/advisories/GHSA-4chg-4752-w88r\", \"https://github.com/advisories/GHSA-4chg-4752-w88r\"], \"repository_advisory_url\": \"https://api.github.com/repos/nukeviet/nukeviet/security-advisories/GHSA-4chg-4752-w88r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nukeviet/nukeviet\", \"summary\": \"NukeViet: Pre-authentication SSRF via X-Forwarded-Host\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-13T17:58:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-4chg-4752-w88r\", \"vulnerabilities\": [{\"first_patched_version\": \"4.6.00\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"nukeviet/nukeviet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.6.00\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4chg-4752-w88r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nukeviet/nukeviet: < 4.6.00"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55372"
+    ],
+    "cvss_score": 7.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nukeviet/nukeviet"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.154638Z",
+  "provenance": {
+    "content_sha256": "ee80cac887629c526f96d5b6603116309c2fbb4516a02758c763164ced6971f7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:58:44Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4chg-4752-w88r",
+  "status": "active",
+  "title": "NukeViet: Pre-authentication SSRF via X-Forwarded-Host",
+  "updated_at": "2026-07-13T17:58:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4chg-4752-w88r"
+}

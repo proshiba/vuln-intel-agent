@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/143268500?v=4\", \"events_url\": \"https://api.github.com/users/KC1zs4/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/KC1zs4/followers\", \"following_url\": \"https://api.github.com/users/KC1zs4/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/KC1zs4/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/KC1zs4\", \"id\": 143268500, \"login\": \"KC1zs4\", \"node_id\": \"U_kgDOCIoalA\", \"organizations_url\": \"https://api.github.com/users/KC1zs4/orgs\", \"received_events_url\": \"https://api.github.com/users/KC1zs4/received_events\", \"repos_url\": \"https://api.github.com/users/KC1zs4/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/KC1zs4/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/KC1zs4/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/KC1zs4\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42612\", \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\nA stored Cross-Site Scripting (XSS) vulnerability in `getgrav/grav` allows publisher-level accounts to execute arbitrary JavaScript. The issue arises from a blacklist bypass in the `detectXss()` function when handling unquoted HTML event attributes.\\n\\n### Details\\nThe `detectXss()` function relies on a blacklist pattern to filter malicious attributes. The specific regex pattern used to match `on*` events is flawed:\\n```php\\n'on_events' => '#(<[^>]+[a-z\\\\x00-\\\\x20\\\\\\\"\\\\'\\\\/])(on[a-z]+|xmlns)\\\\s*=[\\\\s|\\\\'\\\\\\\"].*[\\\\s|\\\\'\\\\\\\"]>#iUu'\\n```\\nThis pattern fails to properly identify `on*` event handlers that are constructed without quotation marks. This allows an attacker to completely bypass the filter. *Note: It is highly recommended to replace this blacklist approach with a robust, established HTML sanitization library.*\\n\\n### PoC\\nAn attacker with publisher-level access can reproduce this by injecting the following payload into any vulnerable content field:\\n```html\\n<img src=x onerror=eval(atob(/YWxlcnQoZG9jdW1lbnQuY29va2llKQ/.source))>\\n```\\n<img width=\\\"1889\\\" height=\\\"482\\\" alt=\\\"image1\\\" src=\\\"https://github.com/user-attachments/assets/0f1a339b-25a8-4b6e-91af-8c59e6a39297\\\" />\\n<img width=\\\"3055\\\" height=\\\"920\\\" alt=\\\"image2\\\" src=\\\"https://github.com/user-attachments/assets/12680058-bbb3-4446-b58e-515533bb4e90\\\" />\\n<img width=\\\"2909\\\" height=\\\"1339\\\" alt=\\\"image3\\\" src=\\\"https://github.com/user-attachments/assets/c7ed7e61-8dcf-402d-8589-98d18978c71a\\\" />\\n\\n\\n**Execution Details:**\\nThe `onerror` event is written without quotes to bypass the regex. Because unquoted attributes are restricted in their character usage (e.g., the `=` symbol cannot be used easily), the payload leverages `atob()` and regex `.source` to decode the base64 string `YWxlcnQoZG9jdW1lbnQuY29va2llKQ` (which translates to `alert(document.cookie)`). The `atob()` function conveniently auto-completes the necessary `=` padding for the base64 string.\\n\\n### Impact\\n- **Vulnerability Type:** Stored Cross-Site Scripting (XSS)\\n- **Impacted Parties:** Any user (including administrators) who views the compromised content published by the attacker.\\n- **Consequences:** Attackers can execute malicious scripts in a victim's browser, leading to session hijacking (cookie theft), unauthorized actions.\\n\\n\\n---\\n\\n## Maintainer note — fix applied (2026-04-24)\\n\\nFixed in Grav core on the `2.0` branch: commit [`5a12f9be8`](https://github.com/getgrav/grav/commit/5a12f9be8) — will ship in **2.0.0-beta.2**.\\n\\n**What changed:** the `on_events` regex in `Security::detectXss()` no longer requires quotes or whitespace around `=`. The previous form:\\n\\n```\\n'on_events' => '#(<[^>]+[\\\\s\\\\x00-\\\\x20\\\\\\\"\\\\'\\\\/])(on\\\\s*[a-z]+|xmlns)\\\\s*=[\\\\s|\\\\'\\\\\\\"].*[\\\\s|\\\\'\\\\\\\"]>#iUu'\\n```\\n\\nrequired `[\\\\s|'\\\"]` immediately after the `=`, so `<img src=x onerror=alert(1)>` slid past. The new regex drops the value-matching tail entirely and just flags the presence of an `on*=` attribute anywhere inside a tag:\\n\\n```\\n'on_events' => '#<[^>]*?[\\\\s\\\\x00-\\\\x20\\\\\\\"\\\\'\\\\/](on\\\\s*[a-z]+|xmlns)\\\\s*=#iu'\\n```\\n\\nDetecting the attribute name + `=` is enough for a tripwire — the trade-off is occasional false positives on legitimate attribute *values* containing `on*=` substrings, which the maintainer can hand-approve.\\n\\nThis same regex bypass was the detection-layer half of GHSA-c2q3-p4jr-c55f and GHSA-w8cg-7jcj-4vv2; the fix here knocks both down.\\n\\n**Files:**\\n- [`system/src/Grav/Common/Security.php`](https://github.com/getgrav/grav/blob/2.0/system/src/Grav/Common/Security.php).\\n- [`tests/unit/Grav/Common/Security/DetectXssTest.php`](https://github.com/getgrav/grav/blob/2.0/tests/unit/Grav/Common/Security/DetectXssTest.php) — 18 cases: unquoted PoCs, quoted-form regression, safe-content negatives.\", \"epss\": {\"percentage\": 0.00238, \"percentile\": 0.1455}, \"ghsa_id\": \"GHSA-9695-8fr9-hw5q\", \"github_reviewed_at\": \"2026-05-05T21:27:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-9695-8fr9-hw5q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9695-8fr9-hw5q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42612\"}], \"nvd_published_at\": \"2026-05-11T16:17:34Z\", \"published_at\": \"2026-05-05T21:27:15Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-9695-8fr9-hw5q\", \"https://github.com/getgrav/grav/commit/5a12f9be8314682c8713e569e330f11805d0a663\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42612\", \"https://github.com/advisories/GHSA-9695-8fr9-hw5q\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-9695-8fr9-hw5q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav Vulnerable to Publisher-Level Stored XSS via Unquoted Event Attributes\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:52:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-9695-8fr9-hw5q\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.0-beta.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.0-beta.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9695-8fr9-hw5q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.0-beta.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42612"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.731791Z",
+  "provenance": {
+    "content_sha256": "e7326c81f3985577edd0845444cb08c5b8378299b2bca903981afb67ecc50360",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T21:27:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9695-8fr9-hw5q",
+  "status": "active",
+  "title": "Grav Vulnerable to Publisher-Level Stored XSS via Unquoted Event Attributes",
+  "updated_at": "2026-05-13T13:52:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9695-8fr9-hw5q"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/152317477?v=4\", \"events_url\": \"https://api.github.com/users/tenbbughunters/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tenbbughunters/followers\", \"following_url\": \"https://api.github.com/users/tenbbughunters/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tenbbughunters/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tenbbughunters\", \"id\": 152317477, \"login\": \"tenbbughunters\", \"node_id\": \"U_kgDOCRQuJQ\", \"organizations_url\": \"https://api.github.com/users/tenbbughunters/orgs\", \"received_events_url\": \"https://api.github.com/users/tenbbughunters/received_events\", \"repos_url\": \"https://api.github.com/users/tenbbughunters/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tenbbughunters/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tenbbughunters/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tenbbughunters\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-25119\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}], \"description\": \"## Summary\\n\\nWhen `ENABLE_REVERSE_PROXY_AUTHENTICATION` is enabled, Gogs accepts the configured authentication header (default: `X-WEBAUTH-USER`) directly from client requests without validating that the request originated from a trusted reverse proxy. Any remote attacker who can reach the Gogs service can forge this header to impersonate any user or trigger automatic account creation, completely bypassing authentication.\\n\\n## Root Cause\\n\\nThe vulnerability exists because Gogs reads the authentication header directly from the incoming HTTP request without any verification that the header was set by a trusted reverse proxy.\\n\\n### Vulnerable Code Flow\\n\\nIn `internal/context/auth.go` lines 206-234:\\n\\n```go\\nfunc authenticatedUser(store AuthStore, ctx *macaron.Context, sess session.Store) (_ *database.User, isBasicAuth, isTokenAuth bool) {\\n    // ... existing auth checks ...\\n\\n    if uid <= 0 {\\n        if conf.Auth.EnableReverseProxyAuthentication {\\n            // Reads header DIRECTLY from client request - NO VALIDATION!\\n            webAuthUser := ctx.Req.Header.Get(conf.Auth.ReverseProxyAuthenticationHeader)\\n            if len(webAuthUser) > 0 {\\n                user, err := store.GetUserByUsername(ctx.Req.Context(), webAuthUser)\\n                if err != nil {\\n                    if !database.IsErrUserNotExist(err) {\\n                        log.Error(\\\"Failed to get user by name: %v\\\", err)\\n                        return nil, false, false\\n                    }\\n\\n                    // Check if enabled auto-registration.\\n                    if conf.Auth.EnableReverseProxyAutoRegistration {\\n                        // Creates new user with forged username!\\n                        user, err = store.CreateUser(\\n                            ctx.Req.Context(),\\n                            webAuthUser,\\n                            gouuid.NewV4().String()+\\\"@localhost\\\",\\n                            database.CreateUserOptions{\\n                                Activated: true,\\n                            },\\n                        )\\n                        if err != nil {\\n                            log.Error(\\\"Failed to create user %q: %v\\\", webAuthUser, err)\\n                            return nil, false, false\\n                        }\\n                    }\\n                }\\n                // Returns user as authenticated without any verification!\\n                return user, false, false\\n            }\\n        }\\n        // ... fallback to basic auth ...\\n    }\\n    // ...\\n}\\n```\\n\\nThe code has **zero validation** that:\\n1. The request came through a reverse proxy\\n2. The header was set by the proxy (not the client)\\n3. Gogs is actually behind a reverse proxy\\n4. The direct access to Gogs is restricted\\n\\nThe vulnerability occurs when:\\n- Gogs is publicly accessible (e.g., `0.0.0.0:3000`)\\n- `ENABLE_REVERSE_PROXY_AUTHENTICATION = true`\\n\\n## Proof of Concept\\n\\n### Prerequisites\\n\\nGogs instance with the following configuration in `custom/conf/app.ini`:\\n\\n```ini\\n[auth]\\nENABLE_REVERSE_PROXY_AUTHENTICATION = true\\n```\\n\\nAn attacker can impersonate any user including administrators:\\n\\n```bash\\n# Become admin instantly\\ncurl http://gogs.example.com/ -H \\\"X-WEBAUTH-USER: <username>\\\"\\n```\\n\\n<img width=\\\"1835\\\" height=\\\"1143\\\" alt=\\\"impersonation_example\\\" src=\\\"https://github.com/user-attachments/assets/bae60772-5eb3-4f54-9fe0-5db01595bd56\\\" />\\n\\n## Recommended Fixes\\n\\nAdd validation to ensure headers come from trusted sources:\\n\\n```go\\nfunc authenticatedUser(store AuthStore, ctx *macaron.Context, sess session.Store) (_ *database.User, isBasicAuth, isTokenAuth bool) {\\n    // ... existing code ...\\n\\n    if uid <= 0 {\\n        if conf.Auth.EnableReverseProxyAuthentication {\\n            // Validate request is from trusted proxy\\n            if !isRequestFromTrustedProxy(ctx.Req) {\\n                log.Warn(\\\"Reverse proxy auth header received from untrusted source: %s\\\", ctx.RemoteAddr())\\n                return nil, false, false\\n            }\\n\\n            webAuthUser := ctx.Req.Header.Get(conf.Auth.ReverseProxyAuthenticationHeader)\\n            // ... rest of the code ...\\n        }\\n    }\\n    // ...\\n}\\n\\n// New validation function\\nfunc isRequestFromTrustedProxy(req *http.Request) bool {\\n    // Check if request is from localhost/trusted IPs\\n    remoteIP := getRemoteIP(req)\\n\\n    // Only accept from localhost by default\\n    if remoteIP.IsLoopback() {\\n        return true\\n    }\\n\\n    // Check against configured trusted proxy IPs\\n    for _, trustedIP := range conf.Auth.TrustedProxyIPs {\\n        if remoteIP.String() == trustedIP {\\n            return true\\n        }\\n    }\\n\\n    return false\\n}\\n```\\n\\nAdd configuration option:\\n\\n```ini\\n[auth]\\nENABLE_REVERSE_PROXY_AUTHENTICATION = false\\nREVERSE_PROXY_AUTHENTICATION_HEADER = X-WEBAUTH-USER\\n; Comma-separated list of trusted proxy IPs (default: 127.0.0.1)\\nTRUSTED_PROXY_IPS = 127.0.0.1,::1\\n; Whether to require trusted proxy validation (recommended: true)\\nREQUIRE_TRUSTED_PROXY = true\\n```\\n\\n## References\\n\\n- [CWE-290: Authentication Bypass by Spoofing](https://cwe.mitre.org/data/definitions/290.html)\\n- [OWASP: Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)\\n- [OWASP Top 10 2021 - A07: Identification and Authentication Failures](https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/)\", \"epss\": {\"percentage\": 0.00864, \"percentile\": 0.54525}, \"ghsa_id\": \"GHSA-w6j9-vw59-27wv\", \"github_reviewed_at\": \"2026-06-22T17:09:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-w6j9-vw59-27wv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w6j9-vw59-27wv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-25119\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-22T17:09:51Z\", \"references\": [\"https://github.com/gogs/gogs/security/advisories/GHSA-w6j9-vw59-27wv\", \"https://github.com/gogs/gogs/pull/8264\", \"https://github.com/gogs/gogs/commit/0089c4c8e5b8d99eb6e5c8727f8f40d765f1f58a\", \"https://github.com/gogs/gogs/releases/tag/v0.14.3\", \"https://github.com/advisories/GHSA-w6j9-vw59-27wv\"], \"repository_advisory_url\": \"https://api.github.com/repos/gogs/gogs/security-advisories/GHSA-w6j9-vw59-27wv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gogs/gogs\", \"summary\": \"Gogs has an Authentication Bypass via Unvalidated Reverse Proxy Headers\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-22T17:09:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-w6j9-vw59-27wv\", \"vulnerabilities\": [{\"first_patched_version\": \"0.14.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"gogs.io/gogs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.14.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w6j9-vw59-27wv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gogs.io/gogs: <= 0.14.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-25119"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gogs.io/gogs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.625727Z",
+  "provenance": {
+    "content_sha256": "a31ea2409484a7f639eaf86eaf8029ab90db5b5efcad86d81e0024fd53c83e40",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-22T17:09:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w6j9-vw59-27wv",
+  "status": "active",
+  "title": "Gogs has an Authentication Bypass via Unvalidated Reverse Proxy Headers",
+  "updated_at": "2026-06-22T17:09:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w6j9-vw59-27wv"
+}

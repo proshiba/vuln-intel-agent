@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/207488196?v=4\", \"events_url\": \"https://api.github.com/users/Dobby153/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Dobby153/followers\", \"following_url\": \"https://api.github.com/users/Dobby153/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Dobby153/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Dobby153\", \"id\": 207488196, \"login\": \"Dobby153\", \"node_id\": \"U_kgDODF4ExA\", \"organizations_url\": \"https://api.github.com/users/Dobby153/orgs\", \"received_events_url\": \"https://api.github.com/users/Dobby153/received_events\", \"repos_url\": \"https://api.github.com/users/Dobby153/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Dobby153/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Dobby153/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Dobby153\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-43893\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"### Impact\\n\\n`exiftool-vendored` starts ExifTool in `-stay_open True -@ -` mode, where arguments are read from stdin one per line. In affected versions, several caller-supplied strings were interpolated into ExifTool arguments without rejecting line delimiters. A newline or carriage return inside one of those strings could split a single intended argument into multiple ExifTool arguments, allowing argument injection. The fix also rejects NUL bytes as unsafe control characters.\\n\\nApplications that pass attacker-controlled strings to affected APIs may allow an attacker to make ExifTool read files accessible to the ExifTool process, or write output to attacker-chosen file system paths accessible to that process. No remote code execution has been demonstrated.\\n\\nThe reported write-path issue is caused by unsanitized tag **keys**. Tag **values** passed to `ExifTool#write` are not affected, because `WriteTask` already encodes whitespace characters in values (e.g. `\\\\n` -> `&#10;`) before transmission.\\n\\nConfirmed affected inputs:\\n\\n- **Tag-name arguments / tag keys** — keys of the `tags` object passed to `ExifTool#write`; entries of the `retain` option to `ExifTool#deleteAllTags`; entries of the `numericTags` option to `ExifTool#read`; the `tagname` argument to `ExifTool#extractBinaryTag` and `#extractBinaryTagToBuffer`.\\n- **Filename / path arguments** to `ExifTool#write`, `#read`, `#readRaw`, `#deleteAllTags`, `#rewriteAllTags`, `#extractBinaryTag`, `#extractBinaryTagToBuffer`, and the binary-extraction convenience methods `#extractJpgFromRaw`, `#extractPreview`, and `#extractThumbnail`. `path.resolve()` does not strip newlines, so an application that accepts attacker-controlled filenames containing newline characters was vulnerable.\\n- **The `imageHashType` option** to `ExifTool#read`. TypeScript types restrict this to a literal union, but JS callers or callers with weakened type checking could reach the sink.\\n\\nApplications that only pass hardcoded strings for tag names, options, and filenames are not affected.\\n\\n### Patches\\n\\nFixed in **v35.19.0**. Two layers of defense:\\n\\n1. **Per-site input validation.** A new `validateTagName` helper rejects any tag-name string containing characters outside the ExifTool tag grammar (letters, digits, `:`, `-`, `_`, and the ExifTool modifiers `*`, `?`, `+`, `#`). Applied at every tag-name interpolation site.\\n2. **Defense-in-depth at the command renderer.** `ExifToolTask.renderCommand` now rejects _any_ argument containing `\\\\r`, `\\\\n`, or `\\\\0` before it is sent to the ExifTool process. This catches injection via filename arguments, option values, and any future interpolation site that forgets the per-site validator.\\n\\n### Workarounds\\n\\nUpgrade to v35.19.0 or later.\\n\\nIf upgrading immediately is not possible, reject untrusted strings containing control characters before passing them to the affected APIs. Conservative guard:\\n\\n```ts\\nfunction assertSafeForExifTool(s: string): void {\\n  if (typeof s !== \\\"string\\\" || /[\\\\x00-\\\\x20=<>]/.test(s)) {\\n    throw new Error(\\\"Rejected unsafe string for ExifTool\\\");\\n  }\\n}\\n```\\n\\nApply to tag names, `retain` / `numericTags` entries, binary-extraction tag names, filenames, and the `imageHashType` option. This is a denylist and is strictly weaker than the library's internal validator; it is sufficient to block the known PoCs but will accept strings that the library itself now rejects.\\n\\n### Resources\\n\\n- ExifTool `-stay_open` / argument-file documentation: https://exiftool.org/exiftool_pod.html#stay_open-FLAG\\n- ExifTool tag-name reference: https://exiftool.org/TagNames/\\n- CWE-88: Improper Neutralization of Argument Delimiters in a Command ('Argument Injection') — https://cwe.mitre.org/data/definitions/88.html\\n\\n### Credit\\n\\n- Reporter: Hank Tam\\n- Affiliation: Independent\", \"epss\": {\"percentage\": 0.00485, \"percentile\": 0.3852}, \"ghsa_id\": \"GHSA-cw26-7653-2rp5\", \"github_reviewed_at\": \"2026-05-05T19:53:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-cw26-7653-2rp5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cw26-7653-2rp5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-43893\"}], \"nvd_published_at\": \"2026-05-11T22:22:14Z\", \"published_at\": \"2026-05-05T19:53:47Z\", \"references\": [\"https://github.com/photostructure/exiftool-vendored.js/security/advisories/GHSA-cw26-7653-2rp5\", \"https://exiftool.org/TagNames\", \"https://exiftool.org/exiftool_pod.html#stay_open-FLAG\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-43893\", \"https://github.com/advisories/GHSA-cw26-7653-2rp5\"], \"repository_advisory_url\": \"https://api.github.com/repos/photostructure/exiftool-vendored.js/security-advisories/GHSA-cw26-7653-2rp5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/photostructure/exiftool-vendored.js\", \"summary\": \"exiftool-vendored vulnerable to argument injection via newline characters in tag names\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T14:19:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-cw26-7653-2rp5\", \"vulnerabilities\": [{\"first_patched_version\": \"35.19.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"exiftool-vendored\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 35.18.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cw26-7653-2rp5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "exiftool-vendored: <= 35.18.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-43893"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "exiftool-vendored"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.662197Z",
+  "provenance": {
+    "content_sha256": "4fa353d09d66def6f9c6ee30cc6ac906a81b32d414e9cee2b6c334e649944461",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T19:53:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cw26-7653-2rp5",
+  "status": "active",
+  "title": "exiftool-vendored vulnerable to argument injection via newline characters in tag names",
+  "updated_at": "2026-05-13T14:19:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cw26-7653-2rp5"
+}

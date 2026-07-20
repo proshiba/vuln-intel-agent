@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/73113688?v=4\", \"events_url\": \"https://api.github.com/users/FORIMOC/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/FORIMOC/followers\", \"following_url\": \"https://api.github.com/users/FORIMOC/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/FORIMOC/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/FORIMOC\", \"id\": 73113688, \"login\": \"FORIMOC\", \"node_id\": \"MDQ6VXNlcjczMTEzNjg4\", \"organizations_url\": \"https://api.github.com/users/FORIMOC/orgs\", \"received_events_url\": \"https://api.github.com/users/FORIMOC/received_events\", \"repos_url\": \"https://api.github.com/users/FORIMOC/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/FORIMOC/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/FORIMOC/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/FORIMOC\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/49851084?v=4\", \"events_url\": \"https://api.github.com/users/Yuremin/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yuremin/followers\", \"following_url\": \"https://api.github.com/users/Yuremin/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yuremin/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yuremin\", \"id\": 49851084, \"login\": \"Yuremin\", \"node_id\": \"MDQ6VXNlcjQ5ODUxMDg0\", \"organizations_url\": \"https://api.github.com/users/Yuremin/orgs\", \"received_events_url\": \"https://api.github.com/users/Yuremin/received_events\", \"repos_url\": \"https://api.github.com/users/Yuremin/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yuremin/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yuremin/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yuremin\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1511975?v=4\", \"events_url\": \"https://api.github.com/users/sanketsudake/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sanketsudake/followers\", \"following_url\": \"https://api.github.com/users/sanketsudake/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sanketsudake/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sanketsudake\", \"id\": 1511975, \"login\": \"sanketsudake\", \"node_id\": \"MDQ6VXNlcjE1MTE5NzU=\", \"organizations_url\": \"https://api.github.com/users/sanketsudake/orgs\", \"received_events_url\": \"https://api.github.com/users/sanketsudake/received_events\", \"repos_url\": \"https://api.github.com/users/sanketsudake/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sanketsudake/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sanketsudake/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sanketsudake\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46614\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\nThe Fission router registers an internal-style route — `/fission-function/<name>` and `/fission-function/<ns>/<name>` — for every `Function` object, independent of whether any `HTTPTrigger` exists for that function. The route was mounted on the same listener as user-defined `HTTPTrigger`s (`svc/router`, port 8888), so any caller who could reach the router could invoke any function by guessing its `metadata.name` (and namespace), bypassing the host / path / method / method-allow-list restrictions encoded in `HTTPTrigger` objects.\\n\\n### Affected component\\n\\n- `pkg/router/httpTriggers.go:280-284` — `internalRoute` registration via `utils.UrlForFunction(fn.Name, fn.Namespace)`, bound to the function handler.\\n\\n### Impact\\n\\nAn external caller who reaches the public router could:\\n\\n1. Invoke functions that the operator intentionally did not publish through an `HTTPTrigger` (e.g. functions used only as Kubewatcher / Timer / MessageQueue trigger targets, internal helpers, or sample functions).\\n2. Bypass `HTTPTrigger`-level restrictions: a function published only on `POST /api/v2/foo` could still be invoked as `GET /fission-function/<ns>/<name>` with arbitrary headers and body.\\n3. Enumerate function names by probing the response semantics (404 vs 200 vs 502 from cold start).\\n\\nIn multi-tenant deployments this also crosses tenant boundaries when functions in tenant namespace B are reachable from tenant A's pods (or from anywhere on the internet if the router is ingress-exposed).\\n\\n### Root cause\\n\\n`/fission-function/...` was historically used by internal trigger sources (timer, kubewatcher, mqtrigger) that share the cluster network with the router, but the route was registered on the public listener that also serves user `HTTPTrigger`s. The two audiences were never separated.\\n\\n### Fix\\n\\nReleased in [v1.23.0](https://github.com/fission/fission/releases/tag/v1.23.0):\\n\\n- **PR #3369** (commit `814d232c`): the router now runs **two** listeners — a public listener (port 8888, `svc/router`) that serves only user-defined `HTTPTrigger`s, `/router-healthz`, and `/_version`, and an internal listener (port 8889, `svc/router-internal`, ClusterIP-only) that exclusively serves `/fission-function/<ns>/<name>`. The internal listener is wrapped with the `pkg/auth/hmac.ServiceVerifier` using the `ServiceRouterInternal` derived key — internal trigger sources sign their requests with a per-service HKDF-derived key from a cluster master secret. Empty master secret falls back to pass-through (preserves compatibility for clusters not yet rotating in a secret).\\n- **PR #3365** (commit `0aa24788`): added per-service `NetworkPolicy` resources to `charts/fission-all`, ensuring `svc/router-internal` is only reachable from `kubewatcher`, `timer`, `mqtrigger`, and `mqt-keda` pods inside the release namespace.\\n- The internal-listener path itself is still **`/fission-function/<ns>/<name>`** — only its location moved.\\n\\n### Mitigation (until upgrade)\\n\\n1. Apply a `NetworkPolicy` to the Fission namespace that allows ingress to `svc/router` (port 8888) only from the consuming project's ingress controller, and blocks `/fission-function/...` at the ingress layer (path-based filter on the ingress).\\n2. Avoid exposing the router directly via LoadBalancer/NodePort; front it with an ingress that path-filters `/fission-function/`.\\n3. Treat function `metadata.name` as **not** a secret — names should not be the access control boundary.\", \"epss\": {\"percentage\": 0.00353, \"percentile\": 0.27511}, \"ghsa_id\": \"GHSA-3g33-6vg6-27m8\", \"github_reviewed_at\": \"2026-05-21T20:14:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-3g33-6vg6-27m8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3g33-6vg6-27m8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46614\"}], \"nvd_published_at\": \"2026-06-10T18:17:05Z\", \"published_at\": \"2026-05-21T20:14:51Z\", \"references\": [\"https://github.com/fission/fission/security/advisories/GHSA-3g33-6vg6-27m8\", \"https://github.com/fission/fission/pull/3365\", \"https://github.com/fission/fission/pull/3369\", \"https://github.com/fission/fission/releases/tag/v1.23.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46614\", \"https://github.com/advisories/GHSA-3g33-6vg6-27m8\"], \"repository_advisory_url\": \"https://api.github.com/repos/fission/fission/security-advisories/GHSA-3g33-6vg6-27m8\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/fission/fission\", \"summary\": \"Fission router exposes /fission-function/<ns>/<name> on its public listener, allowing invocation of any function without an HTTPTrigger\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-10T18:41:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-3g33-6vg6-27m8\", \"vulnerabilities\": [{\"first_patched_version\": \"1.23.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/fission/fission\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3g33-6vg6-27m8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/fission/fission: <= 1.22.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46614"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/fission/fission"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.309273Z",
+  "provenance": {
+    "content_sha256": "e5a7ce656675a189817e1a10657137ece0f337e83b0ddd07df6b7174ea608de5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-21T20:14:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3g33-6vg6-27m8",
+  "status": "active",
+  "title": "Fission router exposes /fission-function/<ns>/<name> on its public listener, allowing invocation of any function without an HTTPTrigger",
+  "updated_at": "2026-06-10T18:41:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3g33-6vg6-27m8"
+}

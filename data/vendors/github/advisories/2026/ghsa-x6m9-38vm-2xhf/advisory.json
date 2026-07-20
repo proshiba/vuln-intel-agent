@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/97537483?v=4\", \"events_url\": \"https://api.github.com/users/Zwique/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Zwique/followers\", \"following_url\": \"https://api.github.com/users/Zwique/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Zwique/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Zwique\", \"id\": 97537483, \"login\": \"Zwique\", \"node_id\": \"U_kgDOBdBNyw\", \"organizations_url\": \"https://api.github.com/users/Zwique/orgs\", \"received_events_url\": \"https://api.github.com/users/Zwique/received_events\", \"repos_url\": \"https://api.github.com/users/Zwique/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Zwique/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Zwique/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Zwique\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/93228314?v=4\", \"events_url\": \"https://api.github.com/users/adamus2/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adamus2/followers\", \"following_url\": \"https://api.github.com/users/adamus2/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adamus2/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adamus2\", \"id\": 93228314, \"login\": \"adamus2\", \"node_id\": \"U_kgDOBY6NGg\", \"organizations_url\": \"https://api.github.com/users/adamus2/orgs\", \"received_events_url\": \"https://api.github.com/users/adamus2/received_events\", \"repos_url\": \"https://api.github.com/users/adamus2/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adamus2/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adamus2/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adamus2\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-226\", \"name\": \"Sensitive Information in Resource Not Removed Before Reuse\"}], \"description\": \"## Summary\\n\\n`TemplateContext.Reset()` claims that a `TemplateContext` can be reused safely on the same thread, but it does not clear `CachedTemplates`. If an application pools `TemplateContext` objects and uses an `ITemplateLoader` that resolves content per request, tenant, or user, a previously authorized include can be served to later renders without calling `TemplateLoader.Load()` again.\\n\\n## Details\\n\\nThe relevant code path is:\\n\\n- `TemplateContext.Reset()` only clears output, globals, cultures, and source files in `src/Scriban/TemplateContext.cs` lines 877–902.\\n- `CachedTemplates` is initialized once and kept on the context in `src/Scriban/TemplateContext.cs` line 197.\\n- `include` resolves templates through `IncludeFunction.Invoke()` in `src/Scriban/Functions/IncludeFunction.cs` lines 29–43.\\n- `IncludeFunction.Invoke()` calls `TemplateContext.GetOrCreateTemplate()` in `src/Scriban/TemplateContext.cs` lines 1249–1256.\\n- If a template path is already present in `CachedTemplates`, Scriban returns the cached compiled template and does **not** call `TemplateLoader.Load()` again.\\n\\nThis becomes a security issue when `ITemplateLoader.Load()` returns request-dependent content. A first render can prime the cache with an admin-only or tenant-specific template, and later renders on the same reused `TemplateContext` will receive that stale template even after `Reset()`.\\n\\n---\\n\\n## Proof of Concept\\n\\n### Setup\\n\\n```bash\\nmkdir scriban-poc1\\ncd scriban-poc1\\ndotnet new console --framework net8.0\\ndotnet add package Scriban --version 6.6.0\\n```\\n\\n### `Program.cs`\\n\\n```csharp\\nusing Scriban;\\nusing Scriban.Parsing;\\nusing Scriban.Runtime;\\n\\nvar loader = new SwitchingLoader();\\nvar context = new TemplateContext\\n{\\n    TemplateLoader = loader,\\n};\\n\\nvar template = Template.Parse(\\\"{{ include 'profile' }}\\\");\\n\\nloader.Content = \\\"admin-only\\\";\\nConsole.WriteLine(\\\"first=\\\" + template.Render(context));\\n\\ncontext.Reset();\\n\\nloader.Content = \\\"guest-view\\\";\\nConsole.WriteLine(\\\"second=\\\" + template.Render(context));\\n\\nsealed class SwitchingLoader : ITemplateLoader\\n{\\n    public string Content { get; set; } = string.Empty;\\n\\n    public string GetPath(TemplateContext context, SourceSpan callerSpan, string templateName) => templateName;\\n\\n    public string Load(TemplateContext context, SourceSpan callerSpan, string templatePath) => Content;\\n\\n    public ValueTask<string> LoadAsync(TemplateContext context, SourceSpan callerSpan, string templatePath)\\n        => new(Content);\\n}\\n```\\n\\n### Run\\n\\n```bash\\ndotnet run\\n```\\n\\n### Actual Output\\n\\n```\\nfirst=admin-only\\nsecond=admin-only\\n```\\n\\n### Expected Output\\n\\n```\\nfirst=admin-only\\nsecond=guest-view\\n```\\n\\nThe second render should reload the template after `Reset()`, but it instead reuses the cached compiled template from the previous render.\\n\\n---\\n\\n## Impact\\n\\nThis is a cross-render data isolation issue. Any application that reuses `TemplateContext` objects and uses a request-dependent `ITemplateLoader` can leak previously authorized template content across requests, users, or tenants.\\n\\nThe issue impacts applications that:\\n\\n- Pool or reuse `TemplateContext`\\n- Call `Reset()` between requests\\n- Use `include`\\n- Resolve include content based on request-specific state\", \"ghsa_id\": \"GHSA-x6m9-38vm-2xhf\", \"github_reviewed_at\": \"2026-03-24T22:09:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-x6m9-38vm-2xhf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x6m9-38vm-2xhf\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-24T22:09:49Z\", \"references\": [\"https://github.com/scriban/scriban/security/advisories/GHSA-x6m9-38vm-2xhf\", \"https://github.com/advisories/GHSA-x6m9-38vm-2xhf\"], \"repository_advisory_url\": \"https://api.github.com/repos/scriban/scriban/security-advisories/GHSA-x6m9-38vm-2xhf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/scriban/scriban\", \"summary\": \"Scriban has an authorization bypass due to stale include cache surviving TemplateContext.Reset() \", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T13:07:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-x6m9-38vm-2xhf\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"scriban\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}, {\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"Scriban.Signed\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x6m9-38vm-2xhf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Scriban.Signed: < 7.0.0",
+      "scriban: < 7.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Scriban.Signed",
+      "scriban"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.043319Z",
+  "provenance": {
+    "content_sha256": "3806cb256eb81c30e9228081200a23bf410ca939060d1b645f3835be31edd9cf",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-24T22:09:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x6m9-38vm-2xhf",
+  "status": "active",
+  "title": "Scriban has an authorization bypass due to stale include cache surviving TemplateContext.Reset() ",
+  "updated_at": "2026-07-06T13:07:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x6m9-38vm-2xhf"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44555\", \"cvss\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# Base Model Routing Bypasses Access Control via Model Chaining\\n\\n## Affected Component\\n\\nModel chaining via `base_model_id`:\\n- `backend/open_webui/routers/models.py` (lines 170-214, `create_new_model`)\\n- `backend/open_webui/routers/models.py` (lines 254-308, `import_models`)\\n- `backend/open_webui/main.py` (lines 1696-1711, base model resolution in chat completion)\\n- `backend/open_webui/routers/openai.py` (lines 1032-1037, base model payload rewrite)\\n- `backend/open_webui/routers/ollama.py` (lines 1086-1090, base model payload rewrite)\\n- `backend/open_webui/utils/models.py` (line 380, `check_model_access` — checks user-facing model only)\\n\\n## Affected Versions\\n\\nCurrent main branch (commit `6fdd19bf1`) and likely all versions with the model chaining (`base_model_id`) feature.\\n\\n## Description\\n\\nOpen WebUI supports model composition via `base_model_id`: a user-defined model (e.g., \\\"Cheap Assistant\\\") can reference an existing base model (e.g., \\\"gpt-4-turbo-restricted\\\") that provides the actual inference capability. When a user queries the composed model, the access control pipeline verifies the user has access to the composed model but never re-verifies access to the chained base model.\\n\\nAdditionally, the model creation and import endpoints accept arbitrary `base_model_id` values without checking that the caller has access to that base model. Combined, this allows any user with the default model creation permission to create a model that chains to a restricted base model — and then invoke it, causing the server to dispatch the request to the restricted base model using the admin-configured API key.\\n\\n```python\\n# utils/models.py:380 — access check runs against the user-facing model only\\ndef check_model_access(user, model):\\n    if user.role == 'user':\\n        ...check access grants on `model`...\\n\\n# main.py:1696-1711 — base model resolved without access check\\nbase_model = request.app.state.MODELS.get(model.info.base_model_id)\\nif base_model:\\n    # payload[\\\"model\\\"] is rewritten to base_model.id\\n    # but no check_model_access(user, base_model) is performed\\n\\n# openai.py:1032-1037 / ollama.py:1086-1090 — the rewritten payload is dispatched\\npayload['model'] = base_model_id\\n```\\n\\n## Attack Scenario\\n\\n1. Admin provisions a premium/restricted model `gpt-4-turbo-restricted` and configures access grants so only the \\\"ML Engineers\\\" group can use it.\\n2. Attacker (a regular user not in that group) calls:\\n   ```\\n   POST /api/v1/models/create\\n   {\\n     \\\"id\\\": \\\"cheap-assistant\\\",\\n     \\\"name\\\": \\\"Cheap Assistant\\\",\\n     \\\"base_model_id\\\": \\\"gpt-4-turbo-restricted\\\",\\n     \\\"params\\\": {},\\n     \\\"meta\\\": {}\\n   }\\n   ```\\n   The creation endpoint does not validate the attacker's access to `gpt-4-turbo-restricted`.\\n3. Attacker now owns `cheap-assistant`. `check_model_access(attacker, cheap-assistant)` passes trivially because they are the owner.\\n4. Attacker sends:\\n   ```\\n   POST /api/chat/completions\\n   {\\\"model\\\": \\\"cheap-assistant\\\", \\\"messages\\\": [...]}\\n   ```\\n5. At `main.py:1696`, the pipeline resolves `cheap-assistant.base_model_id` to `gpt-4-turbo-restricted`, rewrites `payload[\\\"model\\\"]` to the base model ID, and dispatches the upstream request with the admin-configured API key for the backend.\\n6. The attacker receives responses from the restricted model, bypassing the access grant policy.\\n\\nThe same bypass is available via the import endpoint, which additionally allows overwriting existing models (see related finding on model import ownership).\\n\\n## Impact\\n\\n- Regular users can query restricted models by chaining through a self-owned wrapper model\\n- Access control on `gpt-4-turbo-restricted` (or equivalent paid/tiered/internal models) becomes silently ineffective\\n- Direct cost impact on pay-per-token backends (OpenAI, Anthropic, Azure) — the admin's API key is used for requests the admin intended to forbid\\n- Creates a false sense of security — the admin sees access restrictions work through the standard model selector but not through user-created chains\\n\\n## Preconditions\\n\\n- Attacker must have model creation permission (default `workspace.models` permission, granted to all users by default)\\n- A restricted base model must exist on the instance (the target of the chain)\", \"epss\": {\"percentage\": 0.00248, \"percentile\": 0.158}, \"ghsa_id\": \"GHSA-9vvh-qmjx-p4q8\", \"github_reviewed_at\": \"2026-05-08T19:45:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-9vvh-qmjx-p4q8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9vvh-qmjx-p4q8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44555\"}], \"nvd_published_at\": \"2026-05-15T20:16:46Z\", \"published_at\": \"2026-05-08T19:45:03Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-9vvh-qmjx-p4q8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44555\", \"https://github.com/advisories/GHSA-9vvh-qmjx-p4q8\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-9vvh-qmjx-p4q8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI's Base Model Routing Bypasses Access Control via Model Chaining\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:52:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-9vvh-qmjx-p4q8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.12\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9vvh-qmjx-p4q8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.8.12"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44555"
+    ],
+    "cvss_score": 7.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.021707Z",
+  "provenance": {
+    "content_sha256": "8e4e0e55575f75f240485b1dd3ff00d46dd614736e7860fad2b5d571b6a2b79d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T19:45:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9vvh-qmjx-p4q8",
+  "status": "active",
+  "title": "Open WebUI's Base Model Routing Bypasses Access Control via Model Chaining",
+  "updated_at": "2026-05-15T23:52:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9vvh-qmjx-p4q8"
+}

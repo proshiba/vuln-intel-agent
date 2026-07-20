@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/112731017?v=4\", \"events_url\": \"https://api.github.com/users/hackerman70000/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hackerman70000/followers\", \"following_url\": \"https://api.github.com/users/hackerman70000/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hackerman70000/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hackerman70000\", \"id\": 112731017, \"login\": \"hackerman70000\", \"node_id\": \"U_kgDOBrgjiQ\", \"organizations_url\": \"https://api.github.com/users/hackerman70000/orgs\", \"received_events_url\": \"https://api.github.com/users/hackerman70000/received_events\", \"repos_url\": \"https://api.github.com/users/hackerman70000/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hackerman70000/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hackerman70000/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hackerman70000\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7470739?v=4\", \"events_url\": \"https://api.github.com/users/FeBe95/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/FeBe95/followers\", \"following_url\": \"https://api.github.com/users/FeBe95/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/FeBe95/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/FeBe95\", \"id\": 7470739, \"login\": \"FeBe95\", \"node_id\": \"MDQ6VXNlcjc0NzA3Mzk=\", \"organizations_url\": \"https://api.github.com/users/FeBe95/orgs\", \"received_events_url\": \"https://api.github.com/users/FeBe95/received_events\", \"repos_url\": \"https://api.github.com/users/FeBe95/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/FeBe95/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/FeBe95/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/FeBe95\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-25639\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-754\", \"name\": \"Improper Check for Unusual or Exceptional Conditions\"}, {\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"# Denial of Service via **proto** Key in mergeConfig\\n\\n### Summary\\n\\nThe `mergeConfig` function in axios crashes with a TypeError when processing configuration objects containing `__proto__` as an own property. An attacker can trigger this by providing a malicious configuration object created via `JSON.parse()`, causing complete denial of service.\\n\\n### Details\\n\\nThe vulnerability exists in `lib/core/mergeConfig.js` at lines 98-101:\\n\\n```javascript\\nutils.forEach(Object.keys({ ...config1, ...config2 }), function computeConfigValue(prop) {\\n  const merge = mergeMap[prop] || mergeDeepProperties;\\n  const configValue = merge(config1[prop], config2[prop], prop);\\n  (utils.isUndefined(configValue) && merge !== mergeDirectKeys) || (config[prop] = configValue);\\n});\\n```\\n\\nWhen `prop` is `'__proto__'`:\\n\\n1. `JSON.parse('{\\\"__proto__\\\": {...}}')` creates an object with `__proto__` as an own enumerable property\\n2. `Object.keys()` includes `'__proto__'` in the iteration\\n3. `mergeMap['__proto__']` performs prototype chain lookup, returning `Object.prototype` (truthy object)\\n4. The expression `mergeMap[prop] || mergeDeepProperties` evaluates to `Object.prototype`\\n5. `Object.prototype(...)` throws `TypeError: merge is not a function`\\n\\nThe `mergeConfig` function is called by:\\n\\n- `Axios._request()` at `lib/core/Axios.js:75`\\n- `Axios.getUri()` at `lib/core/Axios.js:201`\\n- All HTTP method shortcuts (`get`, `post`, etc.) at `lib/core/Axios.js:211,224`\\n\\n### PoC\\n\\n```javascript\\nimport axios from \\\"axios\\\";\\n\\nconst maliciousConfig = JSON.parse('{\\\"__proto__\\\": {\\\"x\\\": 1}}');\\nawait axios.get(\\\"https://httpbin.org/get\\\", maliciousConfig);\\n```\\n\\n**Reproduction steps:**\\n\\n1. Clone axios repository or `npm install axios`\\n2. Create file `poc.mjs` with the code above\\n3. Run: `node poc.mjs`\\n4. Observe the TypeError crash\\n\\n**Verified output (axios 1.13.4):**\\n\\n```\\nTypeError: merge is not a function\\n    at computeConfigValue (lib/core/mergeConfig.js:100:25)\\n    at Object.forEach (lib/utils.js:280:10)\\n    at mergeConfig (lib/core/mergeConfig.js:98:9)\\n```\\n\\n**Control tests performed:**\\n| Test | Config | Result |\\n|------|--------|--------|\\n| Normal config | `{\\\"timeout\\\": 5000}` | SUCCESS |\\n| Malicious config | `JSON.parse('{\\\"__proto__\\\": {\\\"x\\\": 1}}')` | **CRASH** |\\n| Nested object | `{\\\"headers\\\": {\\\"X-Test\\\": \\\"value\\\"}}` | SUCCESS |\\n\\n**Attack scenario:**\\nAn application that accepts user input, parses it with `JSON.parse()`, and passes it to axios configuration will crash when receiving the payload `{\\\"__proto__\\\": {\\\"x\\\": 1}}`.\\n\\n### Impact\\n\\n**Denial of Service** - Any application using axios that processes user-controlled JSON and passes it to axios configuration methods is vulnerable. The application will crash when processing the malicious payload.\\n\\nAffected environments:\\n\\n- Node.js servers using axios for HTTP requests\\n- Any backend that passes parsed JSON to axios configuration\\n\\nThis is NOT prototype pollution - the application crashes before any assignment occurs.\", \"epss\": {\"percentage\": 0.025, \"percentile\": 0.82833}, \"ghsa_id\": \"GHSA-43fc-jf86-j433\", \"github_reviewed_at\": \"2026-02-09T17:46:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-43fc-jf86-j433\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-43fc-jf86-j433\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-25639\"}], \"nvd_published_at\": \"2026-02-09T21:15:49Z\", \"published_at\": \"2026-02-09T17:46:14Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-43fc-jf86-j433\", \"https://github.com/axios/axios/pull/7369\", \"https://github.com/axios/axios/commit/28c721588c7a77e7503d0a434e016f852c597b57\", \"https://github.com/axios/axios/releases/tag/v1.13.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-25639\", \"https://github.com/axios/axios/pull/7388\", \"https://github.com/axios/axios/commit/d7ff1409c68168d3057fc3891f911b2b92616f9e\", \"https://github.com/axios/axios/releases/tag/v0.30.3\", \"https://github.com/advisories/GHSA-43fc-jf86-j433\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-43fc-jf86-j433\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios is Vulnerable to Denial of Service via __proto__ Key in mergeConfig\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T13:46:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-43fc-jf86-j433\", \"vulnerabilities\": [{\"first_patched_version\": \"1.13.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, <= 1.13.4\"}, {\"first_patched_version\": \"0.30.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.30.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-43fc-jf86-j433",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: <= 0.30.2",
+      "axios: >= 1.0.0, <= 1.13.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-25639"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.430799Z",
+  "provenance": {
+    "content_sha256": "2c0ee6c7e9f6a26ce30ab9dc5de75ed335476fa91522d338d4fd284136cffc64",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-02-09T17:46:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-43fc-jf86-j433",
+  "status": "active",
+  "title": "Axios is Vulnerable to Denial of Service via __proto__ Key in mergeConfig",
+  "updated_at": "2026-05-08T13:46:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-43fc-jf86-j433"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74776018?v=4\", \"events_url\": \"https://api.github.com/users/Mitchell45/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Mitchell45/followers\", \"following_url\": \"https://api.github.com/users/Mitchell45/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Mitchell45/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Mitchell45\", \"id\": 74776018, \"login\": \"Mitchell45\", \"node_id\": \"MDQ6VXNlcjc0Nzc2MDE4\", \"organizations_url\": \"https://api.github.com/users/Mitchell45/orgs\", \"received_events_url\": \"https://api.github.com/users/Mitchell45/received_events\", \"repos_url\": \"https://api.github.com/users/Mitchell45/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Mitchell45/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Mitchell45/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Mitchell45\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52825\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\nKimai contains an authenticated improper authorization vulnerability in Team-related assignment APIs. A Teamlead who can edit their own team can use backend API endpoints to add users or activities that fall outside their intended visible or manageable scope, even when the frontend correctly hides those targets.\\n\\nThis affects both team member assignment and team activity assignment. The issue is caused by treating \\\"may edit this team\\\" as equivalent to \\\"may attach any referenced object to this team\\\", without performing a second authorization check on the target user or activity.\\n\\n### Details\\n\\nThe issue affects at least the following API routes:\\n\\n- `POST /api/teams/{id}/members/{userId}`\\n- `POST /api/teams/{id}/activities/{activityId}`\\n\\nIn both cases, the backend checks whether the caller may edit the `Team`, but it does not verify whether the referenced `User` or `Activity` falls inside the caller's allowed management scope.\\n\\nFor team member assignment, the frontend form correctly limits the visible user choices. In `src/Form/TeamEditForm.php`, the team edit form uses `UserType`:\\n\\n```php\\n$builder->add('users', UserType::class, [\\n    'label' => 'add_user.label',\\n    'help' => 'team.add_user.help',\\n    'mapped' => false,\\n    'multiple' => false,\\n    'expanded' => false,\\n    'required' => false,\\n    'ignore_users' => $team !== null ? $team->getUsers() : []\\n]);\\n```\\n\\nIn `src/Form/Type/UserType.php`, the user selector is built from `UserRepository::getQueryBuilderForFormType()`:\\n\\n```php\\n$query = new UserFormTypeQuery();\\n$query->setUser($options['user']);\\n\\n$qb = $this->userRepository->getQueryBuilderForFormType($query);\\n$users = $qb->getQuery()->getResult();\\n```\\n\\nAnd in `src/Repository/UserRepository.php`, Teamlead-visible candidates are limited to team members from teams they lead:\\n\\n```php\\nif (null !== $user && $user->isTeamlead()) {\\n    $userIds = [];\\n    foreach ($user->getTeams() as $team) {\\n        if ($team->isTeamlead($user)) {\\n            foreach ($team->getUsers() as $teamMember) {\\n                $userIds[] = $teamMember->getId();\\n            }\\n        }\\n    }\\n    $userIds = array_unique($userIds);\\n    $qb->setParameter('teamMember', $userIds);\\n    $or->add($qb->expr()->in('u.id', ':teamMember'));\\n}\\n```\\n\\nHowever, the actual member-assignment API does not reuse that restriction. In `src/API/TeamController.php`:\\n\\n```php\\n#[IsGranted('edit', 'team')]\\n#[Route(methods: ['POST'], path: '/{id}/members/{userId}', name: 'post_team_member', requirements: ['id' => '\\\\d+', 'userId' => '\\\\d+'])]\\npublic function postMemberAction(Team $team, #[MapEntity(mapping: ['userId' => 'id'])] User $member): Response\\n{\\n    if ($member->isInTeam($team)) {\\n        throw new BadRequestHttpException('User is already member of the team');\\n    }\\n\\n    $team->addUser($member);\\n    $this->teamService->saveTeam($team);\\n}\\n```\\n\\nFor activity assignment, the same pattern appears. In `src/API/TeamController.php`:\\n\\n```php\\n#[IsGranted('edit', 'team')]\\n#[Route(methods: ['POST'], path: '/{id}/activities/{activityId}', name: 'post_team_activity', requirements: ['id' => '\\\\d+', 'activityId' => '\\\\d+'])]\\npublic function postActivityAction(Team $team, #[MapEntity(mapping: ['activityId' => 'id'])] Activity $activity, ActivityRepository $activityRepository): Response\\n{\\n    if ($team->hasActivity($activity)) {\\n        throw new BadRequestHttpException('Team has already access to activity');\\n    }\\n\\n    $team->addActivity($activity);\\n    $activityRepository->saveActivity($activity);\\n}\\n```\\n\\nThe `Team` voter only checks whether the current user may edit that team, not whether the referenced object is within the Teamlead's legitimate scope. In `src/Voter/TeamVoter.php`:\\n\\n```php\\nif (!$user->isAdmin() && !$user->isSuperAdmin() && !$user->isTeamleadOf($subject)) {\\n    return false;\\n}\\n\\nreturn $this->permissionManager->hasRolePermission($user, $attribute . '_team');\\n```\\n\\nFor activities, this is especially risky because later authorization logic may trust the team assignment that was just written. In `src/Security/RolePermissionManager.php`:\\n\\n```php\\npublic function checkTeamAccessActivity(Activity $activity, User $user): bool\\n{\\n    if ($activity->getProject() !== null && !$this->checkTeamAccessProject($activity->getProject(), $user)) {\\n        return false;\\n    }\\n\\n    return $this->checkTeamAccess($activity->getTeams(), $user);\\n}\\n```\\n\\nSo once a Teamlead is able to write a new team/activity relation, later access-control decisions may treat that relation as legitimate input.\\n\\n*A PoC was provided, but removed for security reasons.*\\n\\n### Impact\\n\\nThis vulnerability allows a Teamlead to use their own editable team as an expansion container for objects that should remain outside their authorized scope. In the validated member-assignment case, the attacker can forcibly add users who are not supposed to be manageable through that Teamlead's visible range. In the activity-assignment case, the attacker can attach activities that are outside the intended authorization boundary of the team.\\n\\nOnce such relations are written, downstream authorization, visibility, and business workflows may start treating them as legitimate. This can affect user scoping, team-based access control, customer/project/activity visibility, time-entry behavior, statistics, and reporting. The issue therefore breaks the trustworthiness of `Team` as a security isolation container.\\n\\n# Solution\\n\\nSeveral new permission checks were added to `src/API/TeamController.php` -\\n- Check if user can be accessed with `#[IsGranted('access_user', 'member')]` before adding as new team member \\n- Check if customer can be seen with `#[IsGranted('view', 'customer')]` before a team is granted access to a customer\\n- Check if project can be seen with `#[IsGranted('view', 'project')]` before a team is granted access to a project\\n- Check if activity can be seen with `#[IsGranted('view', 'activity')]` before a team is granted access to an activity\\n\\nSee [https://www.kimai.org/en/security/ghsa-xv4r-4885-gwpg](https://www.kimai.org/en/security/ghsa-xv4r-4885-gwpg) for more information.\", \"ghsa_id\": \"GHSA-xv4r-4885-gwpg\", \"github_reviewed_at\": \"2026-07-14T00:09:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-xv4r-4885-gwpg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xv4r-4885-gwpg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52825\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-14T00:09:03Z\", \"references\": [\"https://github.com/kimai/kimai/security/advisories/GHSA-xv4r-4885-gwpg\", \"https://github.com/advisories/GHSA-xv4r-4885-gwpg\"], \"repository_advisory_url\": \"https://api.github.com/repos/kimai/kimai/security-advisories/GHSA-xv4r-4885-gwpg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kimai/kimai\", \"summary\": \"Kimai has Improper Authorization in Team Member and Team Activity Assignment APIs Which Allows Expansion of Team Scope Beyond Authorized Visibility\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-14T00:09:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-xv4r-4885-gwpg\", \"vulnerabilities\": [{\"first_patched_version\": \"2.58.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"kimai/kimai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.57.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xv4r-4885-gwpg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "kimai/kimai: <= 2.57.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-52825"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "kimai/kimai"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.120195Z",
+  "provenance": {
+    "content_sha256": "7c93320f18d84272b988a528cc7e121f94a2855c140d9bead005f01e5055d834",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-14T00:09:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xv4r-4885-gwpg",
+  "status": "active",
+  "title": "Kimai has Improper Authorization in Team Member and Team Activity Assignment APIs Which Allows Expansion of Team Scope Beyond Authorized Visibility",
+  "updated_at": "2026-07-14T00:09:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xv4r-4885-gwpg"
+}

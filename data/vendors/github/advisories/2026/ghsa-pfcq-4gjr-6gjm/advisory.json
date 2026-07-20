@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/261977334?v=4\", \"events_url\": \"https://api.github.com/users/kodareef5/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kodareef5/followers\", \"following_url\": \"https://api.github.com/users/kodareef5/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kodareef5/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kodareef5\", \"id\": 261977334, \"login\": \"kodareef5\", \"node_id\": \"U_kgDOD5109g\", \"organizations_url\": \"https://api.github.com/users/kodareef5/orgs\", \"received_events_url\": \"https://api.github.com/users/kodareef5/received_events\", \"repos_url\": \"https://api.github.com/users/kodareef5/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kodareef5/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kodareef5/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kodareef5\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40937\", \"cvss\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# Missing Admin Auth on Notification Target Endpoints in RustFS\\n\\n\\n### Finding Summary\\n\\nAll four notification target admin API endpoints in `rustfs/src/admin/handlers/event.rs` use a `check_permissions` helper that validates authentication only (access key + session token), without performing any admin-action authorization via `validate_admin_request`. Every other admin handler in the codebase correctly calls `validate_admin_request` with a specific `AdminAction`. This is the only admin handler file that skips authorization.\\n\\nA non-admin user can overwrite a shared admin-defined notification target by name, causing subsequent bucket events to be delivered to an attacker-controlled endpoint. This enables cross-user event interception and audit evasion.\\n\\n### What Was Proven Live\\n\\n1. **Authorization bypass on all four endpoints** (03_readonly_user_bypass.py)\\n   - PUT, GET list, GET arns, DELETE all return 200 for readonly-user\\n   - Control routes (list-users, kms/status) correctly return 403\\n   - Unauthenticated requests correctly rejected (403 Signature required)\\n\\n2. **SSRF via health probe** (04_ssrf_listener_landing.py)\\n   - HEAD request from rustfs container to attacker-controlled listener\\n   - No host validation: only scheme check (http/https)\\n\\n3. **Target hijacking and event exfiltration** (05_target_hijacking.py, 06_full_event_exfil.py)\\n   - Readonly-user overwrites admin-configured target URL by name\\n   - Subsequent S3 events delivered to attacker-controlled endpoint\\n   - Captured event body includes object keys, bucket names, user identities, and request metadata\\n\\n4. **Audit evasion** (05_target_hijacking.py)\\n   - Readonly-user can delete unbound targets\\n   - Readonly-user can overwrite bound targets (silently redirecting events)\\n\\n### Escalation Vectors Tested But Not Viable\\n\\n1. **Self-referencing webhook to admin API** (13_self_referencing_test.py)\\n   - Webhook sends unsigned POST with event JSON body\\n   - Admin endpoints require SigV4 auth -- unsigned request rejected\\n   - \\\"Confused deputy\\\" via self-referencing does NOT work\\n\\n2. **Protocol smuggling via non-HTTP targets**\\n   - Only 2 target types implemented: webhook and MQTT (`event.rs:613` enforces this)\\n   - No Redis, Kafka, AMQP, or other protocol targets exist\\n   - CRLF injection in webhook config fields sanitized by reqwest\\n   - MQTT uses rumqttc (pure Rust binary protocol client), no raw TCP injection\\n\\n3. **MQTT target for RCE**\\n   - No unsafe code in MQTT handler\\n   - rumqttc 0.29.0 has no known public CVEs\\n   - No Command::new, template engines, or deserialization of broker responses\\n\\n4. **Unauth access**\\n   - Endpoints correctly reject unauthenticated requests (403)\\n   - Endpoints correctly reject invalid credentials (403)\\n\\n### Prior Art\\n\\nNo existing advisory covers notification target endpoints. 11 published GHSAs on rustfs/rustfs cover different handlers. Closest:\\n- CVE-2026-22042 (ImportIam wrong action constant) -- same bug class, different file\\n- CVE-2026-22043 (deny_only short-circuit) -- different bug class\\n\\n### Recommendation\\n\\nSubmit via GitHub PVR. The finding is well-supported with live PoC, code references, and clear root cause. The fix is straightforward (add `validate_admin_request` calls to event.rs handlers). Core submission should reference 2-3 focused PoC scripts (readonly bypass, target hijack, event exfil), not the full set of 13 exploratory scripts.\\n\\n\\nKoda Reef\\n\\n### Patch\\nThis issue has been patched in version https://github.com/rustfs/rustfs/releases/tag/1.0.0-alpha.94.\", \"epss\": {\"percentage\": 0.00293, \"percentile\": 0.20747}, \"ghsa_id\": \"GHSA-pfcq-4gjr-6gjm\", \"github_reviewed_at\": \"2026-04-22T19:24:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-pfcq-4gjr-6gjm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pfcq-4gjr-6gjm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40937\"}], \"nvd_published_at\": \"2026-04-22T21:17:08Z\", \"published_at\": \"2026-04-22T19:24:53Z\", \"references\": [\"https://github.com/rustfs/rustfs/security/advisories/GHSA-pfcq-4gjr-6gjm\", \"https://github.com/rustfs/rustfs/releases/tag/1.0.0-alpha.94\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40937\", \"https://github.com/advisories/GHSA-pfcq-4gjr-6gjm\"], \"repository_advisory_url\": \"https://api.github.com/repos/rustfs/rustfs/security-advisories/GHSA-pfcq-4gjr-6gjm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/rustfs/rustfs\", \"summary\": \"RustFS: Missing admin authorization on notification target endpoints allows unauthenticated configuration of event webhooks\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T16:22:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-pfcq-4gjr-6gjm\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"rustfs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.0.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pfcq-4gjr-6gjm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "rustfs: <= 0.0.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-22042",
+      "CVE-2026-22043",
+      "CVE-2026-40937"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "rustfs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.414191Z",
+  "provenance": {
+    "content_sha256": "a96b6d81366319667f8b123e60548270a2f8e1b916a16938a4ba43bc741d3559",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T19:24:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pfcq-4gjr-6gjm",
+  "status": "active",
+  "title": "RustFS: Missing admin authorization on notification target endpoints allows unauthenticated configuration of event webhooks",
+  "updated_at": "2026-04-27T16:22:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pfcq-4gjr-6gjm"
+}

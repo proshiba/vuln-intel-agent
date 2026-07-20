@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/24554122?v=4\", \"events_url\": \"https://api.github.com/users/robinhundt/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/robinhundt/followers\", \"following_url\": \"https://api.github.com/users/robinhundt/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/robinhundt/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/robinhundt\", \"id\": 24554122, \"login\": \"robinhundt\", \"node_id\": \"MDQ6VXNlcjI0NTU0MTIy\", \"organizations_url\": \"https://api.github.com/users/robinhundt/orgs\", \"received_events_url\": \"https://api.github.com/users/robinhundt/received_events\", \"repos_url\": \"https://api.github.com/users/robinhundt/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/robinhundt/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/robinhundt/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/robinhundt\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50185\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-758\", \"name\": \"Reliance on Undefined, Unspecified, or Implementation-Defined Behavior\"}], \"description\": \"### Summary\\n\\nThe aarch64 implementations of `Cmov` and `CmovEq` seem to assume that the high bits when loading a value of size smaller than a register into a register are zero-extended. However, this is not the case and these bits are unspecified. This can result in a `left.cmovz(&right, condition)` not moving `right` into `left`, even if `condition == 0`. \\n\\n### Details\\n\\nThe Rust reference for inline assembly states that:\\n> If a value is of a smaller size than the register it is allocated in then the upper bits of that register will have an undefined value for inputs [..]. [Reference](https://doc.rust-lang.org/reference/inline-assembly.html#r-asm.register-operands.smaller-value)\\n\\nIf the high bits `[8..]` of the selector loaded into a register in the `Cmov` implementation or the high bits `[16..]` of `self` or `other` for CmovEq (specifically the implementation for `u16` and `i16`) are set, the inline asm compares will produce a different result than the Rust code expects based on the narrow types.\\n\\nIn other words, the following assert fails, even though `condition as u8` is zero:\\n```rust\\nlet condition: u32 = black_box(1 << 8);\\nlet mut left = 1;\\nlet right = 2;\\nleft.cmovz(&right, condition as u8);\\nassert_eq!(left, right);\\n```\\nBecause the ninth bit is set in the original variable, this bit is also set when the truncated condition is loaded into the input register for the `cmp`, causing the `csel` to select the wrong value.\\n\\nThe problematic code is located in `cmov/src/backends/aarch64.rs` [here for Cmov](https://github.com/RustCrypto/utils/blob/dad5e3b9e66d929e86144fe7c8f25371892e35f3/cmov/src/backends/aarch64.rs#L4-L19) and [here for CmovEq](https://github.com/RustCrypto/utils/blob/dad5e3b9e66d929e86144fe7c8f25371892e35f3/cmov/src/backends/aarch64.rs#L60-L72).\\n\\nThe following function:\\n```rust\\n#[unsafe(no_mangle)]\\npub fn cmovz_wrong_output(left: &mut i32, right: i32, condition: u32) {\\n    left.cmovz(&right, condition as u8);\\n}\\n```\\nproduces the assembly:\\n```asm\\ncmovz_wrong_output:\\n\\t.cfi_startproc\\n\\tldr w8, [x0]\\n\\t//APP\\n\\tcmp w2, #0\\n\\tcsel w8, w1, w8, eq\\n\\t//NO_APP\\n\\tstr w8, [x0]\\n\\tret\\n```\\n\\nwhich compares the 32-bits of the condition value against 0, instead of the intended 8.\\n\\nSimilarly, the following function using `cmoveq`\\n```rust\\n#[unsafe(no_mangle)]\\npub fn cmoveq_wrong_output(left: u32, right: u32, input: u8, output: &mut u8) {\\n    (left as u16).cmoveq(&(right as u16), input, output);\\n}\\n```\\ncompiles to:\\n```asm\\ncmoveq_wrong_output:\\n\\t.cfi_startproc\\n\\tldrb w8, [x3]\\n\\tand w9, w2, #0xff\\n\\t//APP\\n\\teor w10, w0, w1\\n\\tcmp w10, #0\\n\\tcsel w8, w9, w8, eq\\n\\t//NO_APP\\n\\tstrb w8, [x3]\\n\\tret\\n```\\nwhere 32 bits of left and right are compared instead of 16. The same happens for `i16`.\\n\\nFor CmovEq, it seems the `u8/i8` impls are not affected, as they are calling `u16::from` in [the implementation](https://github.com/RustCrypto/utils/blob/dad5e3b9e66d929e86144fe7c8f25371892e35f3/cmov/src/lib.rs#L119) which causes the upper bits to be masked out.\\n\\n### PoC\\n\\nThe following two test cases fail on `aarch64-unknown-linux-gnu` when compiled with `--release` (the cmovz one even in debug) emulated with qemu.\\n\\n```\\n> rustc --version\\nrustc 1.94.0 (4a4ef493e 2026-03-02)\\n```\\n\\n```rust\\n#[cfg(test)]\\nmod tests {\\n    use core::hint::black_box;\\n\\n    use cmov::{Cmov, CmovEq};\\n\\n    #[test]\\n    fn cmovz_wrong_output() {\\n        // The black box is necessary here, as otherwise the compiler will \\n        // provide a constant 0 to the csel\\n        let condition: u32 = black_box(1 << 8);\\n        let mut left = 1;\\n        let right = 2;\\n        // I added this debug_assert as a sanity check, but funnily it causes\\n        // the wrong cmov behavior in debug as well (as opposed to only in release mode without the debug_assert)\\n        debug_assert_eq!(0, condition as u8);\\n        left.cmovz(&right, condition as u8);\\n        assert_eq!(left, right);\\n    }\\n\\n    #[test]\\n    fn cmoveq_wrong_output() {\\n        let input = 1;\\n        let mut output = 0;\\n        let left: u32 = black_box(1 << 16);\\n        let right: u32 = black_box(1 << 17);\\n        // asserting in release mode here would hide the bug, the debug_assert_eq is\\n        // a sanity check that these values SHOULD be equal\\n        debug_assert_eq!(left as u16, right as u16);\\n        (left as u16).cmoveq(&(right as u16), input, &mut output);\\n        assert_eq!(input, output);\\n    }\\n}\\n```\\n\\n### Impact\\n\\nUnder specific circumstances, this issue can cause `Cmov/CmovEq` to produce incorrect output on `aarch64`. However, whether this bug can actually manifest depends on the surrounding code that calls the relevant impls. In the PoC, a narrowing cast is required, which masks out the set bits from Rust's point of view, but which are then used in the inline assembly. \\n\\n### Additional Finding\\n\\nPR [#1299](https://github.com/RustCrypto/utils/pull/1299) fixed a different bug in the aarch64 backend but introduced a small error. The `csel!` macro expect a `cmp` expression as its first argument which is never used. The compare is always `\\\"cmp {0:w}, 0\\\",` even for `csel64!`, which intends to use `cmp {0:x}, 0`. Given the bug described above, this oversight actually reduces its impact slightly, as only the bits in position`[8..32]` can cause issues,  even for those impls that use `csel64!`.\", \"epss\": {\"percentage\": 0.00159, \"percentile\": 0.05476}, \"ghsa_id\": \"GHSA-3rjw-m598-pq24\", \"github_reviewed_at\": \"2026-07-02T17:18:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-3rjw-m598-pq24\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3rjw-m598-pq24\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50185\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-02T17:18:11Z\", \"references\": [\"https://github.com/RustCrypto/utils/security/advisories/GHSA-3rjw-m598-pq24\", \"https://github.com/advisories/GHSA-3rjw-m598-pq24\"], \"repository_advisory_url\": \"https://api.github.com/repos/RustCrypto/utils/security-advisories/GHSA-3rjw-m598-pq24\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/RustCrypto/utils\", \"summary\": \"Cmov/CmovEq on aarch64 can produce wrong results if high-bits of registers are set \", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T17:18:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-3rjw-m598-pq24\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.4\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"cmov\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.1.1, < 0.5.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3rjw-m598-pq24",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "cmov: >= 0.1.1, < 0.5.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50185"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "cmov"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.280274Z",
+  "provenance": {
+    "content_sha256": "c6614f3e59eb87886541dd3e96f8ca260381e62bdf487e771883326711a95c6c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T17:18:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3rjw-m598-pq24",
+  "status": "active",
+  "title": "Cmov/CmovEq on aarch64 can produce wrong results if high-bits of registers are set ",
+  "updated_at": "2026-07-02T17:18:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3rjw-m598-pq24"
+}

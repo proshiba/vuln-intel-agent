@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/96663170?v=4\", \"events_url\": \"https://api.github.com/users/koDove/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/koDove/followers\", \"following_url\": \"https://api.github.com/users/koDove/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/koDove/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/koDove\", \"id\": 96663170, \"login\": \"koDove\", \"node_id\": \"U_kgDOBcL2gg\", \"organizations_url\": \"https://api.github.com/users/koDove/orgs\", \"received_events_url\": \"https://api.github.com/users/koDove/received_events\", \"repos_url\": \"https://api.github.com/users/koDove/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/koDove/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/koDove/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/koDove\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44001\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}], \"description\": \"### Summary\\nA sandbox escape vulnerability in vm2 v3.10.5 allows any sandboxed code to crash the host Node.js process via a single Promise constructor that triggers an unhandled rejection propagating to the host. The fix for CVE-2026-22709 (v3.10.2) only sanitized the `onRejected` callback in `.then()` and `.catch()` overrides and did not address the executor-to-unhandledRejection path.\\n\\n### Details\\nWhen sandboxed code creates a `Promise` whose executor sets `Error.name` to a `Symbol()` and then accesses `.stack`, V8's internal `FormatStackTrace` (C++) attempts `Symbol.toString()`, which throws a **host-realm TypeError**. Because this error originates inside the Promise executor and no `.catch()` handler is attached, it becomes an **unhandled rejection** that propagates to the host process.\\n\\n- `lib/setup-sandbox.js:38` — `localPromise` wraps the native `Promise` constructor but does not wrap the executor in try-catch.\\n- `lib/setup-sandbox.js:165-230` — `resetPromiseSpecies` and the `.then()`/`.catch()` overrides sanitize the `onRejected` callback chains, but do not intercept unhandled rejections originating from the executor itself.\\n\\nThe CVE-2026-22709 patch (v3.10.2) sanitized `.then()` and `.catch()` callback chains but left the executor-to-unhandledRejection path completely open.\\n\\n**Root Cause**: Promise executor errors are not caught/sanitized before they can propagate as unhandled rejections to the host process, causing an immediate process crash.\\n\\n**`allowAsync: false` does not help**: This setting only blocks `async`/`await` syntax and overrides `.then()`/`.catch()` to throw. The `Promise` constructor itself is still callable. Worse, because `.catch()` is blocked, any rejection from the executor is *guaranteed* to be unhandled — making `allowAsync: false` paradoxically more dangerous than `true` for this vulnerability.\\n\\n### PoC\\n\\n**Library-level PoC (Node.js script — primary):**\\n```javascript\\nconst { VM } = require(\\\"vm2\\\");\\n\\n// Works with ANY allowAsync setting — both true and false\\nconst vm = new VM({ timeout: 5000, allowAsync: false });\\n\\ntry {\\n  const result = vm.run(`\\n    new Promise(function(r, j) {\\n      var e = new Error();\\n      e.name = Symbol();\\n      e.stack;\\n    });\\n  `);\\n  console.log(\\\"Result:\\\", result);   // Reaches here (returns Promise object)\\n} catch (err) {\\n  console.log(\\\"Caught:\\\", err);       // Never executed\\n}\\n\\nconsole.log(\\\"After try-catch\\\");      // Also prints normally\\n\\n// But on the next microtask tick:\\n// [UnhandledPromiseRejection: TypeError: Cannot convert a Symbol value to a string]\\n// Exit code: 1\\n//\\n// try-catch cannot help — vm.run() returns synchronously,\\n// the rejection fires asynchronously outside any catch scope.\\n//\\n// NOTE: allowAsync: false only blocks async/await syntax and\\n// .then()/.catch() method calls. The Promise constructor itself\\n// still executes, and the unhandled rejection still propagates.\\n// In fact, allowAsync: false makes it WORSE — .catch() is blocked,\\n// so the rejection is guaranteed to be unhandled.\\n```\\n\\n**HTTP demonstration (web service impact):**\\n```bash\\n# 1. Confirm server is running\\ncurl -s http://localhost:3000/api/execute \\\\\\n  -X POST -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"\\\\\\\"alive\\\\\\\"\\\"}'\\n# => {\\\"output\\\":[],\\\"errors\\\":[],\\\"result\\\":\\\"\\\\\\\"alive\\\\\\\"\\\",\\\"executionTime\\\":1}\\n\\n# 2. Send payload — server process will crash\\ncurl -s -X POST http://localhost:3000/api/execute \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"new Promise(function(r,j){var e=new Error();e.name=Symbol();e.stack})\\\"}'\\n\\n# 3. Server is dead (connection refused until restart)\\ncurl -s http://localhost:3000/  # => connection refused\\n```\\n\\n### Impact\\n- **DoS**: A single request crashes the entire host Node.js process. All concurrent users lose service immediately. In Node.js 15+, unhandled rejections terminate the process by default — no special configuration is required for the crash to occur.\\n- **Persistent DoS despite restart policies**: Even when container orchestration (Docker restart policy, Kubernetes liveness probes, PM2, etc.) automatically restarts the crashed process, an attacker can send repeated requests to crash the process again before it fully recovers. In our testing, a single `curl` request caused the Docker container to restart (confirmed via `StartedAt` timestamp change), and sending the next request immediately after restart triggered another crash. This creates a **continuous denial-of-service loop** where the service never becomes available to legitimate users — each restart is met with another crash before any real request can be served.\\n- **Amplification**: A single HTTP request (~150 bytes) terminates the entire host process serving all users. The cost to the attacker is negligible compared to the impact.\\n- **Scope**: **All applications using vm2, regardless of `allowAsync` setting.** `allowAsync: false` only blocks `async`/`await` syntax and `.then()`/`.catch()` method calls — the `Promise` constructor itself still executes, and the unhandled rejection still propagates. In fact, `allowAsync: false` makes the vulnerability *worse* because `.catch()` is blocked, guaranteeing the rejection is always unhandled.\", \"epss\": {\"percentage\": 0.00448, \"percentile\": 0.35765}, \"ghsa_id\": \"GHSA-hw58-p9xv-2mjh\", \"github_reviewed_at\": \"2026-05-07T04:10:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-hw58-p9xv-2mjh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hw58-p9xv-2mjh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44001\"}], \"nvd_published_at\": \"2026-05-13T18:16:16Z\", \"published_at\": \"2026-05-07T04:10:29Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-hw58-p9xv-2mjh\", \"https://github.com/advisories/GHSA-99p7-6v5w-7xg8\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44001\", \"https://github.com/advisories/GHSA-hw58-p9xv-2mjh\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-hw58-p9xv-2mjh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 has a Sandbox Escape via Promise Constructor Unhandled Rejection (Process Crash DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:36:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-hw58-p9xv-2mjh\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hw58-p9xv-2mjh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.10.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-22709",
+      "CVE-2026-44001"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.360674Z",
+  "provenance": {
+    "content_sha256": "3d9a98eb58afe3016f2d7ba260aa98cdd199a17e4cce55fecaf4b48119fb7dc2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T04:10:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hw58-p9xv-2mjh",
+  "status": "active",
+  "title": "vm2 has a Sandbox Escape via Promise Constructor Unhandled Rejection (Process Crash DoS)",
+  "updated_at": "2026-05-14T20:36:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hw58-p9xv-2mjh"
+}

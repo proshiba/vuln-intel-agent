@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-41885\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-74\", \"name\": \"Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')\"}], \"description\": \"### Summary\\n\\nVersions of `i18next-locize-backend` prior to 9.0.2 interpolate `lng`, `ns`, `projectId`, and `version` directly into the configured `loadPath` / `privatePath` / `addPath` / `updatePath` / `getLanguagesPath` URL templates with no path-component validation and no encoding. When an application exposes any of these values to user-controlled input (`?lng=` / `?ns=` query parameters via `i18next-browser-languagedetector`, cookies, request headers, or a URL-derived `projectId`), a crafted value can change the structure of the outgoing request URL.\\n\\nAffected call sites in `lib/index.js` (pre-patch): the `interpolate()` helper is used at the five URL-build sites — `_readAny`/`read` (line 415 for private, 426 for public), `getLanguages` (lines 271 and 296), and `writePage` (lines 616 and 622) for the missing-key and update POST paths. The helper `interpolate` in `lib/utils.js` substitutes raw values with no encoding.\\n\\n### Impact\\n\\nAn attacker who can influence `lng`, `ns`, `projectId`, or `version` can:\\n\\n- **Path traversal** — `lng = '../../admin'` against `https://api.locize.app/{{projectId}}/{{version}}/{{lng}}/{{ns}}` changes the request URL path segment that reaches the locize CDN / API.\\n- **Query-string injection** — `lng = 'en?x=y'` appends an attacker-chosen query to the URL.\\n- **Fragment truncation** — `lng = 'en#x'` silently truncates the path in browser fetches.\\n- **URL-encoded bypass** — `lng = 'en%2F..'` leverages server-side decoding to reintroduce `/..`.\\n\\nThe worst-case concrete impact is loading an unintended translation resource (potentially causing wrong content to render) and, when a custom `loadPath` is configured against an internal / file-scheme URL, **SSRF or arbitrary-file read** on the host running the backend.\\n\\nAdditionally, the pre-patch `interpolate()` function read `data[key]` without excluding prototype-chain properties — under prototype-pollution conditions in the same process, that path could pull values from `Object.prototype` into the URL.\\n\\n### Related fixes shipped in 9.0.2\\n\\n- The `defaults()` helper replaces `for...in` iteration with `Object.keys()` plus an explicit prototype-key guard so a polluted `Object.prototype` cannot leak into the merged options object.\\n- New `utils.interpolateUrl` / `isSafeUrlSegment` / `sanitizeLogValue` / `redactUrlCredentials` helpers mirror the pattern shipped in `i18next-http-backend@3.0.5` (see its advisory [GHSA-q89c-q3h5-w34g](https://github.com/i18next/i18next-http-backend/security/advisories/GHSA-q89c-q3h5-w34g)).\\n\\n### Affected versions\\n\\nAll versions of `i18next-locize-backend` prior to **9.0.2**.\\n\\n### Patch\\n\\nFixed in **9.0.2**. `lib/index.js` now uses `interpolateUrl()` at every URL-build site and returns an error callback (or silently drops the queued write for `writePage`) when any interpolated value fails the safety check. Legitimate i18next language-code shapes (BCP-47, `en_US`, `zh-Hant-HK`, `my-custom.ns`, `+`-joined multi-language values) all pass.\\n\\n### Workarounds\\n\\nNo workaround short of upgrading. If you cannot upgrade immediately, sanitise `lng` / `ns` / `projectId` / `version` at your application boundary before passing them through to i18next — reject values containing `..`, `/`, `\\\\`, `?`, `#`, `%`, whitespace, control characters, and cap the length.\\n\\n### Credits\\n\\nDiscovered via an internal security audit of the i18next / locize ecosystem.\\n\\n### References\\n\\n- [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)\\n- [CWE-74: Injection](https://cwe.mitre.org/data/definitions/74.html)\\n- [CWE-1321: Prototype Pollution (amplification path)](https://cwe.mitre.org/data/definitions/1321.html)\\n- Related advisory in the same ecosystem: [GHSA-q89c-q3h5-w34g (i18next-http-backend)](https://github.com/i18next/i18next-http-backend/security/advisories/GHSA-q89c-q3h5-w34g)\", \"epss\": {\"percentage\": 0.00224, \"percentile\": 0.12771}, \"ghsa_id\": \"GHSA-mgcp-mfp8-3q45\", \"github_reviewed_at\": \"2026-04-22T20:28:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-mgcp-mfp8-3q45\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mgcp-mfp8-3q45\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41885\"}], \"nvd_published_at\": \"2026-05-08T16:16:11Z\", \"published_at\": \"2026-04-22T20:28:27Z\", \"references\": [\"https://github.com/locize/i18next-locize-backend/security/advisories/GHSA-mgcp-mfp8-3q45\", \"https://github.com/locize/i18next-locize-backend/commit/8f81ad4707aa0e90647fde4da5fbe5b23153c6e1\", \"https://github.com/locize/i18next-locize-backend/releases/tag/v9.0.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41885\", \"https://github.com/advisories/GHSA-mgcp-mfp8-3q45\"], \"repository_advisory_url\": \"https://api.github.com/repos/locize/i18next-locize-backend/security-advisories/GHSA-mgcp-mfp8-3q45\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/locize/i18next-locize-backend\", \"summary\": \"i18next-locize-backend has URL Injection via Unsanitized Path Parameters\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:30:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-mgcp-mfp8-3q45\", \"vulnerabilities\": [{\"first_patched_version\": \"9.0.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"i18next-locize-backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 9.0.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mgcp-mfp8-3q45",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "i18next-locize-backend: < 9.0.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41885"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "i18next-locize-backend"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.854780Z",
+  "provenance": {
+    "content_sha256": "cda760e1871e2cc114ee372874421ce39a3d141f69109760cc8520cbe1df0971",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T20:28:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mgcp-mfp8-3q45",
+  "status": "active",
+  "title": "i18next-locize-backend has URL Injection via Unsanitized Path Parameters",
+  "updated_at": "2026-05-13T13:30:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mgcp-mfp8-3q45"
+}
