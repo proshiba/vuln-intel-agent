@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-43883\", \"cvss\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n\\n`plugin/PayPalYPT/agreementCancel.json.php` cancels a PayPal billing agreement using an attacker-supplied `agreement` parameter without verifying that the authenticated user owns the agreement. A low-privilege authenticated user who learns or obtains another user's PayPal billing agreement ID can silently suspend the victim's recurring subscription, causing revenue loss to the platform and loss of paid service to the victim.\\n\\n## Details\\n\\nAVideo's PayPalYPT plugin ships two near-duplicate endpoints that cancel a PayPal billing agreement. Only one of them enforces ownership:\\n\\n- `plugin/PayPalYPT/PayPalAgreementCancel.json.php:19` — correctly requires either admin or the agreement's owner:\\n  ```php\\n  if (!User::isAdmin() && !Subscription::isAgreementFromUser($_POST['agreement_id'], User::getId())) {\\n      $obj->msg = \\\"Only the owner can delete his agreement\\\";\\n      die(json_encode($obj));\\n  }\\n  ```\\n\\n- `plugin/PayPalYPT/agreementCancel.json.php:9-26` — only checks `User::isLogged()` (in fact twice, redundantly) and then calls the cancellation directly:\\n\\n  ```php\\n  if (!User::isLogged()) { ... die; }              // line 9\\n  if (empty($_REQUEST['agreement'])) { ... die; }   // line 14\\n  if (!User::isLogged()) { ... die; }              // line 19 — duplicate; no ownership check\\n  $plugin = AVideoPlugin::loadPluginIfEnabled(\\\"PayPalYPT\\\");\\n  $agreement = PayPalYPT::cancelAgreement($_REQUEST['agreement']);  // line 26\\n  ```\\n\\n`PayPalYPT::cancelAgreement()` at `plugin/PayPalYPT/PayPalYPT.php:548-566` resolves the agreement ID against PayPal and calls `$createdAgreement->suspend($agreementStateDescriptor, $apiContext)` unconditionally — the server does not verify that the logged-in user's `users_id` matches the owner recorded in `PayPalYPT_log` (or wherever the agreement was registered):\\n\\n```php\\npublic static function cancelAgreement($agreement_id)\\n{\\n    ...\\n    $createdAgreement = self::getBillingAgreement($agreement_id);\\n    try {\\n        $createdAgreement->suspend($agreementStateDescriptor, $apiContext);\\n        return Agreement::get($createdAgreement->getId(), $apiContext);\\n    } catch (Exception $ex) {\\n        return false;\\n    }\\n}\\n```\\n\\nThe intended UI caller is `subscriptions_list.php:84` which posts the current user's own agreement IDs — but the server accepts any `agreement` parameter from any logged-in user. Agreement IDs can leak via `_error_log` entries written in `agreementCancel.json.php:34` and `webhook.php` during normal operation, via PayPal receipt emails, or via other administrative and payment-log screens. No CSRF token is required, but the root defect is missing authorization, not CSRF.\\n\\n## PoC\\n\\n1. Log in as any low-privilege user (registered subscriber, commenter, free-tier account created via `signUp`).\\n2. Obtain the target's PayPal agreement ID (e.g., `I-ABCD1234XYZ`). This may come from server error logs, email receipts, admin/payment screens, or other disclosures.\\n3. Send the request with the victim's agreement ID:\\n\\n   ```bash\\n   curl -X POST 'https://target.example/plugin/PayPalYPT/agreementCancel.json.php' \\\\\\n     -b 'PHPSESSID=<attacker_session>' \\\\\\n     -d 'agreement=I-ABCD1234XYZ'\\n   ```\\n\\n4. Expected response:\\n   ```json\\n   {\\\"error\\\":false,\\\"msg\\\":\\\"\\\"}\\n   ```\\n   The victim's billing agreement is suspended at PayPal via `Agreement::suspend()` (PayPalYPT.php:560). The victim stops being billed; AVideo subsequently reflects the subscription as inactive.\\n\\n## Impact\\n\\n- Any authenticated user can silently cancel another user's active PayPal recurring billing agreement.\\n- Revenue disruption for the platform operator — any affected subscribers stop being billed.\\n- Service disruption for the victim — their paid subscription lapses.\\n- The defect is purely an authorization gap; the sister endpoint `PayPalAgreementCancel.json.php` demonstrates that the owner/admin check was intentional for this action but was not applied to this duplicate.\\n\\n## Recommended Fix\\n\\nPort the ownership check from the sister endpoint into `agreementCancel.json.php`:\\n\\n```php\\nif (!User::isAdmin() && !Subscription::isAgreementFromUser($_REQUEST['agreement'], User::getId())) {\\n    $obj->msg = \\\"Only the owner can cancel this agreement\\\";\\n    die(json_encode($obj));\\n}\\n```\\n\\nAlternative, preferred remediation: delete the duplicate `agreementCancel.json.php` entirely and point the `cancelAgreement()` JS helper in `subscriptions_list.php:84` at the already-protected `PayPalAgreementCancel.json.php` endpoint (sending the expected `agreement_id` POST field). While patching, also remove the redundant second `User::isLogged()` branch at line 19.\", \"epss\": {\"percentage\": 0.00167, \"percentile\": 0.06279}, \"ghsa_id\": \"GHSA-958h-qp3x-q4gj\", \"github_reviewed_at\": \"2026-05-05T22:16:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-958h-qp3x-q4gj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-958h-qp3x-q4gj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-43883\"}], \"nvd_published_at\": \"2026-05-11T22:22:12Z\", \"published_at\": \"2026-05-05T22:16:12Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-958h-qp3x-q4gj\", \"https://github.com/WWBN/AVideo/commit/0da3dcff1eda2f497694bf82b559829471c292c2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-43883\", \"https://github.com/advisories/GHSA-958h-qp3x-q4gj\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-958h-qp3x-q4gj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"AVideo: IDOR in PayPalYPT Plugin Allows Any Authenticated User to Cancel Arbitrary PayPal Subscription Agreements\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T14:20:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-958h-qp3x-q4gj\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"wwbn/avideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-958h-qp3x-q4gj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wwbn/avideo: <= 29.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-43883"
+    ],
+    "cvss_score": 4.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wwbn/avideo"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.638327Z",
+  "provenance": {
+    "content_sha256": "4d56ed76c076957acf401c9076aa53d8e3e5bd46ca4b4540fce8db276a69125b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T22:16:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-958h-qp3x-q4gj",
+  "status": "active",
+  "title": "AVideo: IDOR in PayPalYPT Plugin Allows Any Authenticated User to Cancel Arbitrary PayPal Subscription Agreements",
+  "updated_at": "2026-05-13T14:20:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-958h-qp3x-q4gj"
+}

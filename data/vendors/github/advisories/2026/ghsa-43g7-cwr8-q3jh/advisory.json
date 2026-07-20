@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5543599?v=4\", \"events_url\": \"https://api.github.com/users/MrAlias/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrAlias/followers\", \"following_url\": \"https://api.github.com/users/MrAlias/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrAlias/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrAlias\", \"id\": 5543599, \"login\": \"MrAlias\", \"node_id\": \"MDQ6VXNlcjU1NDM1OTk=\", \"organizations_url\": \"https://api.github.com/users/MrAlias/orgs\", \"received_events_url\": \"https://api.github.com/users/MrAlias/received_events\", \"repos_url\": \"https://api.github.com/users/MrAlias/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrAlias/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrAlias/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrAlias\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6207777?v=4\", \"events_url\": \"https://api.github.com/users/grcevski/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/grcevski/followers\", \"following_url\": \"https://api.github.com/users/grcevski/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/grcevski/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/grcevski\", \"id\": 6207777, \"login\": \"grcevski\", \"node_id\": \"MDQ6VXNlcjYyMDc3Nzc=\", \"organizations_url\": \"https://api.github.com/users/grcevski/orgs\", \"received_events_url\": \"https://api.github.com/users/grcevski/received_events\", \"repos_url\": \"https://api.github.com/users/grcevski/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/grcevski/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/grcevski/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/grcevski\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45686\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-190\", \"name\": \"Integer Overflow or Wraparound\"}], \"description\": \"### Summary\\n\\nA remotely reachable integer overflow in OBI's memcached text protocol parser can crash the OBI process and cause denial of service. When parsing memcached storage commands such as `set`, `add`, `replace`, `append`, `prepend`, or `cas`, OBI accepts extremely large `<bytes>` values and adds the payload delimiter length without checking for overflow. A crafted request with `<bytes>` set to `math.MaxInt` or `math.MaxInt-1` causes the computed payload length to wrap negative and triggers a runtime panic in `LargeBufferReader.Peek`.\\n\\n### Details\\n\\nThe issue is in the memcached request parser at `pkg/ebpf/common/memcached_detect_transform.go`.\\n\\n`memcachedCommandBytesField` parses the storage command `<bytes>` field with `strconv.Atoi` and only rejects negative values:\\n\\n```go\\nsize, err := strconv.Atoi(string(fields[4]))\\nif err != nil || size < 0 {\\n\\treturn 0, false\\n}\\n```\\n\\nBecause there is no upper bound check, values up to `math.MaxInt` are accepted.\\n\\n`memcachedConsumeStoragePayload` then computes the payload length by adding the trailing `\\\\r\\\\n` delimiter length:\\n\\n```go\\npayloadLen := bytesField + len(memcachedDelimBytes)\\npayload, err := r.Peek(payloadLen)\\n```\\n\\nIf `bytesField` is `math.MaxInt` or `math.MaxInt-1`, this addition overflows the signed `int` and produces a negative `payloadLen`.\\n\\nThat negative length is passed into `LargeBufferReader.Peek` in `pkg/internal/largebuf/large_buffer.go`. `Peek` checks whether `n > Remaining()` but does not reject negative values before slicing:\\n\\n```go\\nif r.rchunk < len(r.lb.chunks) && r.roff+n <= len(r.lb.chunks[r.rchunk]) {\\n\\treturn r.lb.chunks[r.rchunk][r.roff : r.roff+n], nil\\n}\\n```\\n\\nWith a negative `n`, the slice expression uses a negative upper bound and causes a Go runtime panic. Since OBI runs as a privileged instrumentation process and parses observed memcached traffic, an attacker who can send crafted memcached storage commands to an instrumented service can crash OBI remotely.\\n\\nAffected logic identified by the scan:\\n\\n- `pkg/ebpf/common/memcached_detect_transform.go:322`\\n- `pkg/ebpf/common/memcached_detect_transform.go:386`\\n- `pkg/internal/largebuf/large_buffer.go:501`\\n\\n### PoC\\n\\nThe repository already contains a runnable memcached fixture under `internal/test/oats/memcached/`. The steps below reproduce the crash using only files from this repository.\\n\\n1. From the repository root, start the checked-in memcached environment:\\n\\n   ```bash\\n   docker compose \\\\\\n     -f internal/test/oats/memcached/docker-compose-include-base.yml \\\\\\n     -f internal/test/oats/memcached/docker-compose-obi-python-memcached.yml \\\\\\n     up --build\\n   ```\\n\\n   This starts:\\n\\n   - `memcached` on port `11211`\\n   - `testserver`, the Python app in `internal/test/integration/components/pythonmemcached/main.py`\\n   - `autoinstrumenter`, the OBI process launched with `--config=/configs/instrumenter-config-traces.yml`\\n\\n   The relevant repo-local files are:\\n\\n   - `internal/test/oats/memcached/docker-compose-obi-python-memcached.yml`\\n   - `internal/test/oats/memcached/configs/instrumenter-config-traces.yml`\\n\\n2. In a second shell, confirm the environment is working:\\n\\n   ```bash\\n   curl http://127.0.0.1:8080/memcached\\n   ```\\n\\n3. From the same repository root, send a crafted memcached storage command from inside the instrumented `testserver` container. On 64-bit systems, use `9223372036854775807` (`math.MaxInt`):\\n\\n   ```bash\\n   docker compose \\\\\\n     -f internal/test/oats/memcached/docker-compose-include-base.yml \\\\\\n     -f internal/test/oats/memcached/docker-compose-obi-python-memcached.yml \\\\\\n     exec testserver \\\\\\n     python -c 'import socket; s=socket.create_connection((\\\"memcached\\\",11211), timeout=5); s.sendall(b\\\"set crash 0 0 9223372036854775807\\\\r\\\\nvalue\\\\r\\\\n\\\"); s.close()'\\n   ```\\n\\n   On 32-bit systems, replace `9223372036854775807` with `2147483647`.\\n\\n4. OBI parses the request header, accepts the `<bytes>` field as an `int`, and computes:\\n\\n   ```go\\n   payloadLen = bytesField + len(\\\"\\\\r\\\\n\\\")\\n   ```\\n\\n5. That addition overflows negative and the negative `payloadLen` is passed to `LargeBufferReader.Peek`, which slices with an invalid bound and panics.\\n\\n6. Confirm the crash by checking the `autoinstrumenter` container status or logs:\\n\\n   ```bash\\n   docker compose \\\\\\n     -f internal/test/oats/memcached/docker-compose-include-base.yml \\\\\\n     -f internal/test/oats/memcached/docker-compose-obi-python-memcached.yml \\\\\\n     ps autoinstrumenter\\n   ```\\n\\n   ```bash\\n   docker compose \\\\\\n     -f internal/test/oats/memcached/docker-compose-include-base.yml \\\\\\n     -f internal/test/oats/memcached/docker-compose-obi-python-memcached.yml \\\\\\n     logs autoinstrumenter\\n   ```\\n\\n   The expected result is that the OBI process crashes with a panic originating from `LargeBufferReader.Peek`, with the call path including `memcachedConsumeStoragePayload`.\\n\\n### Impact\\n\\nThis is a remote denial-of-service vulnerability in OBI's memcached protocol parsing path.\\n\\nImpacted deployments are those where:\\n\\n- OBI is running with the vulnerable memcached parser, and\\n- OBI observes memcached text protocol traffic from applications or services that an attacker can reach or influence.\\n\\nA successful attack does not require code execution or authentication against OBI itself. An attacker only needs to cause a vulnerable instrumented service to emit or receive a crafted memcached storage command. The result is a panic in OBI and loss of telemetry collection until the process is restarted.\", \"epss\": {\"percentage\": 0.00354, \"percentile\": 0.27517}, \"ghsa_id\": \"GHSA-43g7-cwr8-q3jh\", \"github_reviewed_at\": \"2026-05-18T20:21:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-43g7-cwr8-q3jh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-43g7-cwr8-q3jh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45686\"}], \"nvd_published_at\": \"2026-06-02T16:16:43Z\", \"published_at\": \"2026-05-18T20:21:52Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/security/advisories/GHSA-43g7-cwr8-q3jh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45686\", \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/tag/v0.9.0\", \"https://github.com/advisories/GHSA-43g7-cwr8-q3jh\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-ebpf-instrumentation/security-advisories/GHSA-43g7-cwr8-q3jh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation\", \"summary\": \"OpenTelemetry eBPF Instrumentation: Memcached payload length overflow can crash OBI\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T10:58:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-43g7-cwr8-q3jh\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/obi\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.7.0, < 0.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-43g7-cwr8-q3jh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.opentelemetry.io/obi: >= 0.7.0, < 0.9.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45686"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.opentelemetry.io/obi"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.571312Z",
+  "provenance": {
+    "content_sha256": "9e72b7d640e6c4e513520c127d86698c18da643f3642d4dadaf69cb7eba867a8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-18T20:21:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-43g7-cwr8-q3jh",
+  "status": "active",
+  "title": "OpenTelemetry eBPF Instrumentation: Memcached payload length overflow can crash OBI",
+  "updated_at": "2026-06-09T10:58:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-43g7-cwr8-q3jh"
+}

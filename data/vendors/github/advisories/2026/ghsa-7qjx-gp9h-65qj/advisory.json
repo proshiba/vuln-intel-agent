@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28739806?v=4\", \"events_url\": \"https://api.github.com/users/matte1782/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/matte1782/followers\", \"following_url\": \"https://api.github.com/users/matte1782/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/matte1782/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/matte1782\", \"id\": 28739806, \"login\": \"matte1782\", \"node_id\": \"MDQ6VXNlcjI4NzM5ODA2\", \"organizations_url\": \"https://api.github.com/users/matte1782/orgs\", \"received_events_url\": \"https://api.github.com/users/matte1782/received_events\", \"repos_url\": \"https://api.github.com/users/matte1782/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/matte1782/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/matte1782/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/matte1782\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"## Summary\\n\\n`server/handlers.go::handleTokenExchange` (lines 1804-1893) does not call `isConnectorAllowed(client.AllowedConnectors, connID)` before issuing tokens, while sibling handlers do. This is a per-client connector ACL gap on the token-exchange endpoint; the redirect-flow paths enforce the same field correctly.\\n\\n## Affected code path\\n\\n`handleTokenExchange` reads `connector_id` from the request body at `server/handlers.go:1822`. Validators called between read and token issuance:\\n\\n- `s.getConnector(ctx, connID)` at line 1836 - confirms connector exists\\n- `GrantTypeAllowed(conn.GrantTypes, grantTypeTokenExchange)` at line 1842 - confirms connector permits this grant\\n- **(missing)** `isConnectorAllowed(client.AllowedConnectors, connID)` - never called\\n\\nTokens are issued at lines 1887 / 1889, bound to `client.ID` carrying claims derived from `connID`.\\n\\nSibling handlers DO enforce the check:\\n\\n- `server/handlers.go::handleConnectorLogin:377` - calls `isConnectorAllowed`, returns HTTP 403 \\\"Connector not allowed for this client.\\\" (line 380).\\n- `server/oauth2.go::parseAuthorizationRequest:535` - same enforcement for the authorization-code flow.\\n\\nThe doc-string at `storage/storage.go:192-194` reads:\\n\\n> *AllowedConnectors is a list of connector IDs that the client is allowed to use for authentication. If empty, all connectors are allowed.*\\n\\nThe phrasing is unconditional - a permission ACL, not a UX filter.\\n\\n## Impact (concrete scenario)\\n\\n- Connector `corp-okta` - high-trust, gates production access\\n- Connector `dev-google` - low-trust, internal Gmail\\n- Client `dev-app` configured with `allowedConnectors: [\\\"dev-google\\\"]` (admin intent: dev-app only sees dev-google identities)\\n- `dev-app`s client secret leaks (CI artifact, env file, breached service-account secret store)\\n\\nWithout the bug, the leaked secret would only allow the attacker to mint tokens via `dev-google` - blast radius bounded by what any dev-google user can already do.\\n\\nWith the bug, an attacker holding their own legitimate `corp-okta` ID token sends:\\n\\n```\\nPOST /token\\nContent-Type: application/x-www-form-urlencoded\\n\\ngrant_type=urn:ietf:params:oauth:grant-type:token-exchange\\n&client_id=dev-app\\n&client_secret=<leaked>\\n&connector_id=corp-okta\\n&subject_token=<attackers own corp-okta id token>\\n&subject_token_type=urn:ietf:params:oauth:token-type:id_token\\n&scope=openid+groups\\n```\\n\\nDex returns an ID token signed by Dex, `aud=dev-app`, carrying the attackers `corp-okta` groups. Downstream services trusting tokens issued for `dev-app` see the attacker as a `corp-okta` user - a combination the admins policy explicitly forbade.\\n\\n## Severity (self-assessed)\\n\\nCVSS 3.1 vector: `AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N` -> **8.7 HIGH**.\\n\\nThe `PR:H` precondition is a real reduction (requires leaked confidential client_secret PLUS attacker holding a `subject_token` from a forbidden connector that has token-exchange enabled). Defer to your scoring - HIGH and MEDIUM are both defensible.\\n\\n## Affected version\\n\\n`master` only - **not yet in any released tag**. Latest release `v2.45.1` (2026-03-03) predates PR #4610 (commit `f80a89d`, 2026-03-11) which introduced `AllowedConnectors`. Production deployments on stable releases are NOT affected; deployments pulling from master / nightly images are. A fix can be merged ahead of the next release without an embargo for past versions.\\n\\n## Precedent / lineage\\n\\n- PR #4610 (commit `f80a89d`, 2026-03-11) - added the `AllowedConnectors` field, `isConnectorAllowed`, `filterConnectors`, and the redirect-flow check sites (`handleConnectorLogin:377`, `parseAuthorizationRequest:535`). Did not modify `handleTokenExchange`.\\n- PR #4619 (commit `7777773`, 2026-03-11, same author, one day earlier) - added `GrantTypeAllowed(conn.GrantTypes, grantTypeTokenExchange)` to `handleTokenExchange`. Added a connector-side grant-type gate but did not add the symmetric client-side connector ACL.\\n\\n## Suggested fix\\n\\nInsert `isConnectorAllowed(client.AllowedConnectors, connID)` between the existing `getConnector` / `GrantTypeAllowed` checks and the connector cast at line 1847, returning HTTP 403 via the token-endpoint error helper. Mirror the existing patterns at `handlers.go:377-380` and `oauth2.go:535`. One-block addition.\\n\\n## Verification methodology\\n\\nTwo-stage verification per IRIS / XBOW pattern (LLM-assisted research with non-LLM verifier as last stage):\\n\\n1. **Code-mechanics** - independent cold-read of `server/handlers.go`, `server/oauth2.go`, `storage/storage.go` confirmed the missing check at `handleTokenExchange` and the present checks at the two siblings; cross-checked diffs of PR #4610 (`f80a89d`) and PR #4619 (`7777773`).\\n2. **External grounding** - cross-checked `docs/configuration/customization`, `docs/guides/token-exchange/`, RFC 8693 (which defers per-client policy to implementations), `.github/SECURITY.md`, GHSA dashboard, huntr.com, and existing issues including #3546 (different mechanism: connector-level disable list, orthogonal to this finding). No prior public report of this gap was found.\\n\\n`semgrep` (`p/golang` + `p/security-audit`) on `server/` returned no ERROR-severity findings - the static tool cannot detect missing-validator gaps; evidence rests on file:line grep + sibling-handler comparison above.\\n\\n## Reporter\\n\\nMatteo Panzeri (GitHub: @matte1782, contact: matteo1782@gmail.com). Please credit as **Matteo Panzeri** if a CVE is requested.\", \"ghsa_id\": \"GHSA-7qjx-gp9h-65qj\", \"github_reviewed_at\": \"2026-06-09T21:59:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-7qjx-gp9h-65qj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7qjx-gp9h-65qj\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-09T21:59:33Z\", \"references\": [\"https://github.com/dexidp/dex/security/advisories/GHSA-7qjx-gp9h-65qj\", \"https://github.com/dexidp/dex/commit/204dbb2e3ff7692af3b7ca4362b1ee46fb43c227\", \"https://github.com/advisories/GHSA-7qjx-gp9h-65qj\"], \"repository_advisory_url\": \"https://api.github.com/repos/dexidp/dex/security-advisories/GHSA-7qjx-gp9h-65qj\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/dexidp/dex\", \"summary\": \"Dex: Token-exchange endpoint is missing AllowedConnectors enforcement\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T21:59:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-7qjx-gp9h-65qj\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260303131938-204dbb2e3ff7\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/dexidp/dex\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260303131938-204dbb2e3ff7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7qjx-gp9h-65qj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/dexidp/dex: < 0.0.0-20260303131938-204dbb2e3ff7"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/dexidp/dex"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.377229Z",
+  "provenance": {
+    "content_sha256": "d4680bdc89f374778ac3ad0a2f617ee33d45a86987b012220074e08f8b014c76",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-09T21:59:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7qjx-gp9h-65qj",
+  "status": "active",
+  "title": "Dex: Token-exchange endpoint is missing AllowedConnectors enforcement",
+  "updated_at": "2026-06-09T21:59:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7qjx-gp9h-65qj"
+}

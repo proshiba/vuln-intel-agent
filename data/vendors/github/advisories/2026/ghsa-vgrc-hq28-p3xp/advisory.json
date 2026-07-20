@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/186935591?v=4\", \"events_url\": \"https://api.github.com/users/0xlally/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xlally/followers\", \"following_url\": \"https://api.github.com/users/0xlally/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xlally/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xlally\", \"id\": 186935591, \"login\": \"0xlally\", \"node_id\": \"U_kgDOCyRpJw\", \"organizations_url\": \"https://api.github.com/users/0xlally/orgs\", \"received_events_url\": \"https://api.github.com/users/0xlally/received_events\", \"repos_url\": \"https://api.github.com/users/0xlally/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xlally/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xlally/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xlally\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nHysteria's UDP relay treats the destination address as packet-scoped, but ACL and outbound policy are applied only once when a new UDP session is created. After an authenticated client opens a UDP session using an allowed first destination, later packets in the same `Session ID` can be sent to different destinations without re-running ACL evaluation.\\n\\nThis allows an authenticated user to bypass server-side UDP ACL rules and reach localhost or RFC1918/private-network UDP services from the server's network perspective, even when those destinations are explicitly rejected by ACL.\\n\\nVerified on current HEAD at commit `64c396385631579598cc29d5561bff98c439772f`.\\n\\n## Why this is a security issue\\n\\nThis report is not based on the assumption that one UDP session must be bound to one destination. The protocol and official client both support per-packet destinations:\\n\\n- `PROTOCOL.md:93-107` defines each `UDPMessage` as carrying its own `Addr` field.\\n- `core/client/udp.go:52-62` exposes `Send(data, addr)`, allowing the same UDP session to send to arbitrary addresses.\\n\\nThe problem is that the security-relevant destination is packet-scoped, while ACL and outbound authorization are cached at session scope.\\n\\nThis is also not a `RequestHook`-bypass claim. I understand `RequestHook` is first-packet-oriented. The broader issue is that operator-configured ACL policy intended to block UDP destinations is not enforced on later packets within the same session.\\n\\nBecause the ACL documentation is presented as the mechanism for handling or blocking client requests, and includes examples of denying `udp/443` and private network CIDRs, operators can reasonably rely on ACL as a UDP egress security boundary. This boundary can currently be bypassed by reusing a previously authorized UDP session.\\n\\n## Root cause\\n\\nThe relevant flow appears to be:\\n\\n- `core/server/udp.go:280-299`: when a new session is created, the first destination is passed through `m.io.Hook(...)`, logged, and then `m.io.UDP(addr)` is called once to create the outbound UDP connection.\\n- `core/server/server.go:397-398`: `m.io.UDP(addr)` delegates to `io.Outbound.UDP(reqAddr)`.\\n- `app/cmd/server.go:1187-1190`: resolver, ACL, and actual outbounds are intentionally chained through the `Outbound` interface.\\n- `core/server/udp.go:125`: the initial outbound connection is created only from the first packet via `DialFunc(firstMsg.Addr, firstMsg.Data)`.\\n- `core/server/udp.go:92-111`: later packets in the same session take the current packet address and directly call `e.conn.WriteTo(dfMsg.Data, addr)` without re-running ACL or outbound policy evaluation.\\n\\nIn other words, destination selection is packet-scoped, but authorization is session-scoped.\\n\\n## Impact\\n\\nAny authenticated client that is allowed to use UDP relay can:\\n\\n- open one UDP session using an allowed first destination;\\n- reuse the same session to send packets to destinations that ACL should reject;\\n- reach UDP services on `127.0.0.1` or on RFC1918/private-network addresses from the server's network perspective.\\n\\nIn real deployments, this can expose internal-only UDP services such as:\\n\\n- internal DNS resolvers;\\n- service discovery endpoints;\\n- telemetry or metrics listeners;\\n- local administrative daemons;\\n- application-specific UDP services intended to be reachable only from localhost or the internal network.\\n\\nThis breaks the server's documented ACL-based UDP egress restrictions.\\n\\n## Reproduction\\n\\nTwo cases were reproduced with integration tests.\\n\\n### Case 1: localhost bypass\\n\\nACL:\\n\\n```text\\ndirect(127.0.0.1, udp/<allowedPort>)\\nreject(127.0.0.1/32)\\n```\\n\\nSteps:\\n\\n1. Start one UDP echo service on `127.0.0.1:<allowedPort>`.\\n2. Start another UDP echo service on `127.0.0.1:<blockedPort>`.\\n3. Connect an authenticated Hysteria client and create one UDP session.\\n4. Send a packet to the allowed loopback destination to establish the session.\\n5. Reuse the same UDP session and send a packet to the blocked loopback destination.\\n\\nObserved result:\\n\\n- The second packet is relayed successfully and the blocked loopback service replies.\\n\\nExpected result:\\n\\n- The second packet should be rejected because `127.0.0.1/32` is denied by ACL.\\n\\n### Case 2: private-network bypass\\n\\nACL:\\n\\n```text\\ndirect(127.0.0.1, udp/<allowedPort>)\\nreject(10.0.0.0/8)\\n```\\n\\nor the corresponding local RFC1918 range, such as `192.168.0.0/16` or `172.16.0.0/12`.\\n\\nSteps:\\n\\n1. Start one UDP echo service on `127.0.0.1:<allowedPort>`.\\n2. Start another UDP echo service on a real RFC1918 address of the server host.\\n3. Connect an authenticated Hysteria client and create one UDP session.\\n4. Send a packet to the allowed loopback destination first.\\n5. Reuse the same UDP session and send a packet to the RFC1918 destination.\\n\\nObserved result:\\n\\n- The private-address packet is relayed successfully and receives a reply.\\n\\nExpected result:\\n\\n- The packet should be rejected by ACL.\\n\\n## PoC and local evidence\\n\\nA local integration test file was added during verification:\\n\\n- `core/internal/integration_tests/udp_private_acl_bypass_test.go`\\n\\nThe two tests are:\\n\\n- `TestClientServerUDPACLBYPASSLoopback`\\n- `TestClientServerUDPACLBYPASSPrivateIPv4`\\n\\nThey can be executed with:\\n\\n```bash\\ngo test ./core/internal/integration_tests -run 'TestClientServerUDPACLBYPASS(Loopback|PrivateIPv4)' -count=1\\n```\\n\\nThe tests pass locally and demonstrate that a destination blocked by ACL becomes reachable after the session is established with an allowed first destination.\\n\\n## Suggested fixes\\n\\nAny of the following would address the issue:\\n\\n1. Re-evaluate ACL and outbound policy for every defragmented UDP packet before forwarding it with `WriteTo`.\\n2. Alternatively, enforce a single immutable destination per UDP session and reject destination changes after the first packet.\\n3. Ensure logging and policy hooks are aligned with the chosen model so that policy enforcement and observability reflect the real per-packet destination.\\n\\n## Severity assessment\\n\\nSuggested CVSS v3.1 vector: `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L`\\n\\nThis reflects a network-reachable issue with low attack complexity, requiring only an authenticated client, no victim interaction, and allowing impact beyond the proxy process by exposing localhost and internal-network UDP resources from the server's trust boundary.\", \"ghsa_id\": \"GHSA-vgrc-hq28-p3xp\", \"github_reviewed_at\": \"2026-06-26T19:48:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-vgrc-hq28-p3xp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vgrc-hq28-p3xp\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-26T19:48:50Z\", \"references\": [\"https://github.com/apernet/hysteria/security/advisories/GHSA-vgrc-hq28-p3xp\", \"https://github.com/advisories/GHSA-vgrc-hq28-p3xp\"], \"repository_advisory_url\": \"https://api.github.com/repos/apernet/hysteria/security-advisories/GHSA-vgrc-hq28-p3xp\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/apernet/hysteria\", \"summary\": \"Hysteria has an authenticated UDP ACL bypass that enables localhost and private-network UDP SSRF\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T19:48:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-vgrc-hq28-p3xp\", \"vulnerabilities\": [{\"first_patched_version\": \"2.9.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/apernet/hysteria/core/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, <= 2.9.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vgrc-hq28-p3xp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/apernet/hysteria/core/v2: >= 2.0.0, <= 2.9.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/apernet/hysteria/core/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.080231Z",
+  "provenance": {
+    "content_sha256": "5360808eba95d50c984b6ec5e0e3c8f9bde2a31075b52eee82fc3e49f948bb20",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T19:48:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vgrc-hq28-p3xp",
+  "status": "active",
+  "title": "Hysteria has an authenticated UDP ACL bypass that enables localhost and private-network UDP SSRF",
+  "updated_at": "2026-06-26T19:48:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vgrc-hq28-p3xp"
+}

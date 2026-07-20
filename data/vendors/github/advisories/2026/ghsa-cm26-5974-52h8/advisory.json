@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/15832659?v=4\", \"events_url\": \"https://api.github.com/users/Pig-Tail/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Pig-Tail/followers\", \"following_url\": \"https://api.github.com/users/Pig-Tail/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Pig-Tail/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Pig-Tail\", \"id\": 15832659, \"login\": \"Pig-Tail\", \"node_id\": \"MDQ6VXNlcjE1ODMyNjU5\", \"organizations_url\": \"https://api.github.com/users/Pig-Tail/orgs\", \"received_events_url\": \"https://api.github.com/users/Pig-Tail/received_events\", \"repos_url\": \"https://api.github.com/users/Pig-Tail/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Pig-Tail/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Pig-Tail/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Pig-Tail\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61699\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-299\", \"name\": \"Improper Check for Certificate Revocation\"}, {\"cwe_id\": \"CWE-672\", \"name\": \"Operation on a Resource after Expiration or Release\"}], \"description\": \"### Summary\\n\\nnebula-mesh revokes a host by adding its certificate fingerprint to a per-CA blocklist and shipping that list to every other agent on each poll. Slack's Nebula enforces certificate revocation ONLY through the `pki.blocklist` list in `config.yml` (no CRL/OCSP). The project's own code states this: `internal/pki/durations.go:15` — \\\"Revocation via the blocklist remains the immediate security control.\\\"\\n\\nThe server side is fully implemented (computes per-CA blocklist via `GetBlocklistForCA`, returns it in the agent-updates response, sets `has_updates=true` when non-empty). The agent side was never implemented:\\n\\n1. The agent decodes the `blocklist` JSON field into `UpdatesResponse.Blocklist` (`internal/agent/poller.go:33`) and then DISCARDS it — `poll()` applies `CertificatePEM`, `CACertPEM`, `ConfigYAML`, but never references `updates.Blocklist` (`internal/agent/poller.go:300-339`).\\n2. The config generator has NO field to emit `pki.blocklist` — `pkiSection` is only `ca`/`cert`/`key` (`internal/configgen/marshal.go:42-46`) and `GeneratorInput` carries no blocklist (`internal/configgen/generator.go:23-52`). So even the server-rendered `config.yml` shipped via `ConfigYAML` cannot carry it.\\n\\nResult: a blocked/offboarded/compromised host's certificate is never rejected by its peers. Its handshakes keep succeeding for the full remaining cert lifetime — up to 30 days for agent hosts (`DefaultAgentCertDuration`) and 365 days for mobile hosts (`DefaultMobileCertDuration`). Blocking a host in the UI/API has no effect on the data plane.\\n\\n### Affected components\\n\\n- Agent drops the blocklist: `internal/agent/poller.go:33` (decode target), `internal/agent/poller.go:300-339` (poll() applies cert/CA/config, never the blocklist).\\n- Generator cannot emit it: `internal/configgen/marshal.go:42-46` (`pkiSection{CA,Cert,Key}`), `internal/configgen/generator.go:23-52` (`GeneratorInput` has no blocklist), `internal/api/enroll.go:255-330` (`renderHostConfig`, source of shipped ConfigYAML).\\n- Server correctly produces/ships it (proves intent): `internal/store/sqlite.go:2034` (`GetBlocklistForCA`), `internal/api/updates.go:182-191` (`resp.Blocklist`), `internal/api/updates.go:277` (`has_updates` set on blocklist change).\\n- Dead helper: `internal/pki/blocklist.go` (`Blocklist` type) is never used in non-test code — no server-side enforcement either.\\n\\n### Reachability (hop by hop)\\n\\n1. Operator clicks Block on host B (or B is compromised/offboarded). B's fingerprint enters the per-CA `blocklist` table.\\n2. Every other host A under the same CA polls `GET /api/v1/agent/updates`; server returns `blocklist: [<B-fp>, ...]` and `has_updates=true`.\\n3. A's agent decodes `Blocklist` then discards it; `poll()` has no blocklist branch.\\n4. Even on a config re-render, `configgen.Generate` emits `pki: {ca,cert,key}` with no `blocklist` key (proven by PoC).\\n5. A's Nebula daemon has an empty blocklist and accepts handshakes from B's still-valid cert. B keeps full mesh access.\\n\\n### Impact\\n\\nRevocation is the only in-band mechanism that isolates a compromised/offboarded host from a Nebula mesh. Because the blocklist never reaches any peer's config.yml, a Blocked host retains full overlay reachability to every peer under its CA (and internal services on the mesh) for up to 30d (agent) / 365d (mobile). An attacker who exfiltrates `host.key`+`host.crt` can run stock slackhq/nebula directly, ignore the agent's 403/410 poll responses, and stay connected after the operator revokes the host. Operator-visible state (UI shows blocked, audit log records it) is misleading.\\n\\n### Proof of Concept (benign)\\n\\n`internal/configgen/blocklist_poc_test.go` renders a fully-populated host config and asserts the output contains the `pki` section but NO `blocklist` key:\\n\\n```\\n$ go test ./internal/configgen/ -run TestPoC_NMESH001 -v\\n=== RUN   TestPoC_NMESH001_GeneratedConfigOmitsBlocklist\\n    CONFIRMED: generated config has a pki section but no blocklist key\\n    pki:\\n      ca: /etc/nebula/ca.crt\\n      cert: /etc/nebula/host.crt\\n      key: /etc/nebula/host.key\\n    ...\\n--- PASS\\n```\\n\\nThe agent half is verifiable by inspection: `poll()` has branches for CertificatePEM/CACertPEM/ConfigYAML/RekeyRequired but none for Blocklist.\\n\\n### Distinctness\\n\\nNOT a duplicate of GHSA-339v / CVE-2026-53602 (revocation durability = a blocked host getting a NEW cert re-issued; its fix `CheckIssuanceAllowed` is present and orthogonal). This bug is that the EXISTING cert is never rejected at peers — the distribution/enforcement layer. Checked against all 17 known advisories; none cover blocklist application in the agent or `pki.blocklist` generation.\\n\\n### Remediation\\n\\n1. Add `Blocklist []safeString` to `pkiSection` (yaml `blocklist,omitempty`) and `GeneratorInput`; consider also `pki.disconnect_invalid: true`.\\n2. Have the agent apply `updates.Blocklist` by re-rendering/rewriting `config.yml` + SIGHUP (same path as `ConfigYAML`). Simplest: fold the blocklist into the server-rendered `ConfigYAML` so it flows through the existing write path.\\n3. Add a regression test asserting a non-empty server blocklist yields a `pki.blocklist` entry in the agent's written config.yml.\", \"ghsa_id\": \"GHSA-cm26-5974-52h8\", \"github_reviewed_at\": \"2026-07-14T20:28:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-cm26-5974-52h8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cm26-5974-52h8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61699\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-14T20:28:18Z\", \"references\": [\"https://github.com/forgekeep/nebula-mesh/security/advisories/GHSA-cm26-5974-52h8\", \"https://github.com/forgekeep/nebula-mesh/commit/0426e2f224a9b1e2029029bf923c93ed39d21cdb\", \"https://github.com/forgekeep/nebula-mesh/releases/tag/v0.7.1\", \"https://github.com/advisories/GHSA-cm26-5974-52h8\"], \"repository_advisory_url\": \"https://api.github.com/repos/forgekeep/nebula-mesh/security-advisories/GHSA-cm26-5974-52h8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/forgekeep/nebula-mesh\", \"summary\": \"nebula-mesh: Certificate revocation is never enforced at the mesh\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-14T20:28:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-cm26-5974-52h8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.7.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/forgekeep/nebula-mesh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.7.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cm26-5974-52h8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/forgekeep/nebula-mesh: < 0.7.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53602",
+      "CVE-2026-61699"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/forgekeep/nebula-mesh"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.021066Z",
+  "provenance": {
+    "content_sha256": "7255ccf7c77349d06e2bbe0852f916e612fce1a2fe5f526bb432e91fb3eff937",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-14T20:28:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cm26-5974-52h8",
+  "status": "active",
+  "title": "nebula-mesh: Certificate revocation is never enforced at the mesh",
+  "updated_at": "2026-07-14T20:28:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cm26-5974-52h8"
+}

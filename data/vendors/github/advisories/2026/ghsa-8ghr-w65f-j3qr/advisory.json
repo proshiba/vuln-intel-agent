@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47721\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nAn authorization issue in the Scheduler API allowed authenticated non-admin users to create or modify scheduled actions that should be restricted to administrators.\\n\\n## Details\\n\\nThe Scheduler API did not correctly enforce administrator permissions when processing scheduler modifications.\\n\\nAs a result, authenticated users with non-administrative roles could create or modify scheduled actions that execute privileged operations, including device value changes and server-side script execution.\\n\\nThe issue was fixed in version 1.3.2 by enforcing the appropriate permission checks for scheduler modifications.\\n\\n\\n## Impact\\n\\nAn operator-level user in FUXA reaches the PLC-write and server-side-script-execution surface that the platform otherwise restricts to administrators. In a SCADA deployment those two privileges cover setpoint control and the automation scripting engine. Alice schedules a job that rewrites a pump's enable tag, opens a safety interlock, or runs a project script that walks the device tree. The scheduled-action model extends the attack: Alice does not need to keep a session open for the action to fire, and a repeating schedule re-applies her changes every cycle even if an admin reverts them manually.\\n\\n**CVSS 3.1**: `AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L` (Medium, 6.3). CWE-862.\\n\\n## Recommended Fix\\n\\nAdd `authJwt.haveAdminPermission(permission)` to both `POST /api/scheduler` and `DELETE /api/scheduler`, matching every other write endpoint that reaches `runtime.devices.setTagValue` or `runtime.scriptsMgr.runScript`.\\n\\n```javascript\\nschedulerApp.post(\\\"/api/scheduler\\\", secureFnc, function(req, res) {\\n    if (res.statusCode === 403) {\\n        runtime.logger.error(\\\"api post scheduler: Tocken Expired\\\");\\n        return;\\n    }\\n    const permission = checkGroupsFnc(req);\\n    const isGuest = authJwt.isGuestUser(req.userId, req.userGroups);\\n    if (runtime.settings?.secureEnabled && (isGuest || !authJwt.haveAdminPermission(permission))) {\\n        res.status(401).json({error:\\\"unauthorized_error\\\", message: \\\"Unauthorized!\\\"});\\n        runtime.logger.error(\\\"api post scheduler: admin permission required\\\");\\n        return;\\n    }\\n    // ... rest unchanged ...\\n});\\n```\\n\\nApply the same change to the delete handler at `server/api/scheduler/index.js:102-112`. As defense in depth, the scheduler service should also validate each `deviceActions` entry against the creator's stored groups before execution (e.g., reject `onRunScript` on any scheduler whose author is not an admin at execution time).\\n\\n---\\nA fix is available at https://github.com/frangoteam/FUXA/releases/tag/v1.3.2.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"epss\": {\"percentage\": 0.00048, \"percentile\": 0.1534}, \"ghsa_id\": \"GHSA-8ghr-w65f-j3qr\", \"github_reviewed_at\": \"2026-06-08T23:07:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-8ghr-w65f-j3qr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8ghr-w65f-j3qr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47721\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-08T23:07:02Z\", \"references\": [\"https://github.com/frangoteam/FUXA/security/advisories/GHSA-8ghr-w65f-j3qr\", \"https://github.com/frangoteam/FUXA/releases/tag/v1.3.2\", \"https://github.com/advisories/GHSA-8ghr-w65f-j3qr\"], \"repository_advisory_url\": \"https://api.github.com/repos/frangoteam/FUXA/security-advisories/GHSA-8ghr-w65f-j3qr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/frangoteam/FUXA\", \"summary\": \"FUXA's scheduler API missing admin check enables operator-to-admin escalation via scheduled device actions\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:07:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-8ghr-w65f-j3qr\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"fuxa-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.14-1243\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8ghr-w65f-j3qr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fuxa-server: <= 1.1.14-1243"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47721"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fuxa-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.264363Z",
+  "provenance": {
+    "content_sha256": "2e30e2695b6a37e8ab8801ba9aa46249f6c8c6d8d7525afcb62f9a3c404d018f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-08T23:07:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8ghr-w65f-j3qr",
+  "status": "active",
+  "title": "FUXA's scheduler API missing admin check enables operator-to-admin escalation via scheduled device actions",
+  "updated_at": "2026-06-08T23:07:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8ghr-w65f-j3qr"
+}

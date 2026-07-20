@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92563389?v=4\", \"events_url\": \"https://api.github.com/users/komi22/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/komi22/followers\", \"following_url\": \"https://api.github.com/users/komi22/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/komi22/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/komi22\", \"id\": 92563389, \"login\": \"komi22\", \"node_id\": \"U_kgDOBYRnvQ\", \"organizations_url\": \"https://api.github.com/users/komi22/orgs\", \"received_events_url\": \"https://api.github.com/users/komi22/received_events\", \"repos_url\": \"https://api.github.com/users/komi22/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/komi22/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/komi22/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/komi22\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40173\", \"cvss\": {\"score\": 9.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-215\", \"name\": \"Insertion of Sensitive Information Into Debugging Code\"}, {\"cwe_id\": \"CWE-522\", \"name\": \"Insufficiently Protected Credentials\"}], \"description\": \"### Summary\\nAn unauthenticated debug endpoint in Dgraph Alpha exposes the full process command line, including the configured admin token from `--security \\\"token=...\\\"`.\\n\\nThis does not break token validation logic directly; instead, it discloses the credential and enables unauthorized admin-level access by reusing the leaked token in `X-Dgraph-AuthToken`.\\n\\n### Details\\nThe behavior occurs entirely within core Alpha HTTP routing and does not require any external proxy, plugin, or non-core integration.\\n\\nThe core issue is not that admin token protection is absent, but that the protected secret is exposed in cleartext through an unauthenticated core debug endpoint.\\n\\nRelevant code paths:\\n- `dgraph/cmd/alpha/run.go:17` imports `net/http/pprof`, which registers `/debug/pprof/*` handlers on the default mux.\\n- `dgraph/cmd/alpha/run.go:533` uses `http.Handle(\\\"/\\\", audit.AuditRequestHttp(baseMux))`, so default-mux handlers remain reachable.\\n- `dgraph/cmd/alpha/admin.go:52` enforces admin token checks in `adminAuthHandler` for admin endpoints.\\n- `dgraph/cmd/alpha/admin.go:74` shows `/admin/config/cache_mb` behind `adminAuthHandler`.\\n\\nCredential-exposure chain:\\n1. `/debug/pprof/cmdline` is reachable without authentication.\\n2. Its output includes the configured admin token from process arguments.\\n3. The disclosed token is accepted by `adminAuthHandler` when sent as `X-Dgraph-AuthToken`.\\n4. An attacker gains unauthorized access to admin-only functionality.\\n\\nObserved local evidence (safe validation):\\n- Request: `GET /admin/config/cache_mb` without token\\n  - Status: 200 (request rejected at application layer)\\n  - Body contains error: `Invalid X-Dgraph-AuthToken`\\n  - The endpoint returns HTTP 200 but indicates authentication failure in the response body.\\n- Request: `GET /debug/pprof/cmdline` without token\\n  - Status: 200\\n  - Body excerpt includes: `--security=token=TopSecretToken123;`\\n- Request: `GET /admin/config/cache_mb` with `X-Dgraph-AuthToken: TopSecretToken123`\\n  - Status: 200\\n  - Body: `4096`\\n\\nImportant policy/triage clarification:\\n- This issue persists even when the admin-token security feature is enabled: the token itself is exposed via an unauthenticated core debug endpoint, making this more than a misconfiguration-only concern.\\n- Network restrictions (bind/whitelist/firewall) may reduce exposure, but they do not remediate the underlying credential disclosure behavior.\\n\\n### PoC\\n\\n- Branch: `main`\\n- Commit: `b15c87e93`\\n- Describe: `v25.3.1`\\n\\nPreconditions:\\n- Alpha HTTP port is reachable by attacker traffic.\\n- Admin token is configured via supported startup flag: `--security \\\"token=...\\\"`.\\n- `/debug/pprof/*` is exposed on the same Alpha HTTP listener.\\n- This behavior occurs with documented startup flags and without any non-default or unsupported configuration.\\n\\nReproduction steps:\\n1. Start Zero and Alpha (example local setup):\\n   - `dgraph zero --my=127.0.0.1:5280 --port_offset=200 --bindall=false --wal=./zw`\\n   - `dgraph alpha --my=127.0.0.1:7280 --zero=127.0.0.1:5280 --port_offset=200 --bindall=false --security \\\"token=TopSecretToken123;\\\" --postings=./p --wal=./w --tmp=./t`\\n\\n2. Verify admin endpoint rejects unauthenticated request:\\n   - `curl -i http://127.0.0.1:8280/admin/config/cache_mb`\\n   - Expected body includes `Invalid X-Dgraph-AuthToken`.\\n\\n3. Read token from unauthenticated debug endpoint:\\n   - `curl -s http://127.0.0.1:8280/debug/pprof/cmdline`\\n   - Expected output includes `--security=token=TopSecretToken123;`.\\n\\n4. Reuse leaked token against admin endpoint:\\n   - `curl -i -H \\\"X-Dgraph-AuthToken: TopSecretToken123\\\" http://127.0.0.1:8280/admin/config/cache_mb`\\n   - Expected: successful response (example observed: `4096`).\\n\\nNote: The PoC uses `127.0.0.1` only for safe local validation. The vulnerable condition is unauthenticated reachability of `/debug/pprof/cmdline`; in any deployment where Alpha HTTP is reachable by untrusted parties, the same token disclosure and subsequent unauthorized admin access apply.\\n\\n### Impact\\n\\n- Unauthenticated disclosure of a sensitive admin credential via debug endpoint, enabling unauthorized privileged administrative access through token reuse\\n- Operators running Dgraph Alpha with admin token configured, where Alpha HTTP/debug routes are reachable by untrusted users or networks.\\n\\nThe attack requires network reachability to the Alpha HTTP port. In deployments where this interface is exposed beyond trusted boundaries, the issue is remotely exploitable without authentication.\\n\\nDepending on exposed admin functionality in deployment policy, this may allow configuration changes, operational control actions, and other privileged administrative operations exposed through `/admin/*`.\", \"epss\": {\"percentage\": 0.00509, \"percentile\": 0.39595}, \"ghsa_id\": \"GHSA-95mq-xwj4-r47p\", \"github_reviewed_at\": \"2026-04-16T21:08:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-95mq-xwj4-r47p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-95mq-xwj4-r47p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40173\"}], \"nvd_published_at\": \"2026-04-15T21:17:27Z\", \"published_at\": \"2026-04-16T21:08:07Z\", \"references\": [\"https://github.com/dgraph-io/dgraph/security/advisories/GHSA-95mq-xwj4-r47p\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40173\", \"https://github.com/dgraph-io/dgraph/releases/tag/v25.3.2\", \"https://github.com/advisories/GHSA-95mq-xwj4-r47p\"], \"repository_advisory_url\": \"https://api.github.com/repos/dgraph-io/dgraph/security-advisories/GHSA-95mq-xwj4-r47p\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/dgraph-io/dgraph\", \"summary\": \"Dgraph: Unauthenticated /debug/pprof/cmdline discloses admin auth token, enabling unauthorized access to protected Alpha admin endpoints\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T16:45:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-95mq-xwj4-r47p\", \"vulnerabilities\": [{\"first_patched_version\": \"25.3.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/dgraph-io/dgraph/v25\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 25.3.2\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/dgraph-io/dgraph/v24\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 24.1.7\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/dgraph-io/dgraph\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.2.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-95mq-xwj4-r47p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/dgraph-io/dgraph/v24: <= 24.1.7",
+      "github.com/dgraph-io/dgraph/v25: < 25.3.2",
+      "github.com/dgraph-io/dgraph: <= 1.2.8"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40173"
+    ],
+    "cvss_score": 9.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/dgraph-io/dgraph",
+      "github.com/dgraph-io/dgraph/v24",
+      "github.com/dgraph-io/dgraph/v25"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.325269Z",
+  "provenance": {
+    "content_sha256": "c8f19693fd8e9191595115212c159e13d8b8fc657ec75ffada8a5d808a04c5e8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T21:08:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-95mq-xwj4-r47p",
+  "status": "active",
+  "title": "Dgraph: Unauthenticated /debug/pprof/cmdline discloses admin auth token, enabling unauthorized access to protected Alpha admin endpoints",
+  "updated_at": "2026-04-27T16:45:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-95mq-xwj4-r47p"
+}

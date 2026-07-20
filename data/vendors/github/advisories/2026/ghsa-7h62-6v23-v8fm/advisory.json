@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50284\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\n`AssetsController::actionDeleteFolder()` only requires the `deleteAssets:<volume-uid>` permission for the target folder. It never enforces `deletePeerAssets:<volume-uid>`, even though `Assets::deleteFoldersByIds()` cascades deletion to every descendant folder and every asset inside, regardless of who uploaded them. A low-privilege user who has been granted folder-management rights on a shared volume can therefore destroy assets uploaded by other users (peer assets), bypassing the per-asset peer-permission check that the sibling `actionDeleteAsset` endpoint correctly applies.\\n\\nThis is the same bug class that was just fixed in `actionMoveFolder` as **GHSA-3w32-23wj-rxg3** (commit `05c2042`, Apr 23 2026); the fix added `requireVolumePermissionByFolder('deletePeerAssets', …)` and `savePeerAssets` checks to the move endpoint but did not propagate to the delete-folder endpoint.\\n\\n## Details\\n\\n`src/controllers/AssetsController.php:552-569`:\\n\\n```php\\npublic function actionDeleteFolder(): Response\\n{\\n    $this->requireAcceptsJson();\\n    $folderId = $this->request->getRequiredBodyParam('folderId');\\n\\n    $assets = Craft::$app->getAssets();\\n    $folder = $assets->getFolderById($folderId);\\n\\n    if (!$folder) {\\n        throw new BadRequestHttpException('The folder cannot be found');\\n    }\\n\\n    // Check if it's possible to delete objects in the target volume.\\n    $this->requireVolumePermissionByFolder('deleteAssets', $folder); // <-- only checks deleteAssets\\n    $assets->deleteFoldersByIds($folderId);\\n\\n    return $this->asSuccess();\\n}\\n```\\n\\n`requireVolumePermissionByFolder()` (`src/controllers/AssetsControllerTrait.php:75-88`) only resolves to a single `requirePermission('deleteAssets:<vol-uid>')` call. The peer-equivalent helper (`requirePeerVolumePermissionByAsset`) is never invoked because there is no folder-level peer helper that iterates the folder's contents.\\n\\n`Assets::deleteFoldersByIds()` (`src/services/Assets.php:311-349`) then enumerates the folder + every descendant folder, queries every asset under those IDs, and calls `Craft::$app->getElements()->deleteElement($asset, true)` directly:\\n\\n```php\\n$assetQuery = Asset::find()->folderId($allFolderIds);\\n$elementService = Craft::$app->getElements();\\n\\nforeach (Db::each($assetQuery) as $asset) {\\n    $asset->keepFileOnDelete = !$deleteDir;\\n    $elementService->deleteElement($asset, true);\\n}\\n```\\n\\nThis bypasses `Asset::canDelete()` (`src/elements/Asset.php:1515-1536`):\\n\\n```php\\npublic function canDelete(User $user): bool\\n{\\n    if ($this->isFolder) { return false; }\\n    if (parent::canDelete($user)) { return true; }\\n    $volume = $this->getVolume();\\n    if (Assets::isTempUploadFs($volume->getFs())) { return true; }\\n\\n    if ($this->uploaderId !== $user->id) {\\n        return $user->can(\\\"deletePeerAssets:$volume->uid\\\"); // <-- never reached on cascade delete\\n    }\\n    return $user->can(\\\"deleteAssets:$volume->uid\\\");\\n}\\n```\\n\\nCompare to `actionDeleteAsset` (`src/controllers/AssetsController.php:579-613`), which correctly does:\\n\\n```php\\n$this->requireVolumePermissionByAsset('deleteAssets', $asset);\\n$this->requirePeerVolumePermissionByAsset('deletePeerAssets', $asset);\\n```\\n\\nThe fix that landed in `05c2042` for `actionMoveFolder` (`src/controllers/AssetsController.php:733-765`) added both `savePeerAssets` and `deletePeerAssets` `requireVolumePermissionByFolder` checks to mirror the per-asset pattern, but the same hardening was not applied to `actionDeleteFolder` or `actionRenameFolder` (which also calls `deleteFoldersByIds` indirectly through later logic).\\n\\nThe asymmetry between the two endpoints demonstrates the missing check.\\n\\n## Impact\\n\\n- Integrity / availability of other users' assets on any volume where the attacker has `deleteAssets` but not `deletePeerAssets`: the attacker can permanently delete peer-owned files (and their parent folder structure) on the underlying filesystem, with no recovery via Craft's UI.\\n- The Craft permission model explicitly distinguishes \\\"delete your own assets\\\" (`deleteAssets`) from \\\"delete other users' assets\\\" (`deletePeerAssets`) precisely so administrators can grant the former without the latter on shared volumes — this finding renders that distinction unenforceable for any user given folder-delete rights.\\n- No information disclosure or remote code execution; impact is bounded to the affected volume's contents.\\n- Does not require any non-default configuration: the affected endpoint is enabled by default and only requires that an administrator has split `deleteAssets` from `deletePeerAssets` (the documented, supported permission model).\", \"epss\": {\"percentage\": 0.00249, \"percentile\": 0.16146}, \"ghsa_id\": \"GHSA-7h62-6v23-v8fm\", \"github_reviewed_at\": \"2026-07-02T18:49:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-7h62-6v23-v8fm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7h62-6v23-v8fm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50284\"}], \"nvd_published_at\": \"2026-07-01T23:16:52Z\", \"published_at\": \"2026-07-02T18:49:04Z\", \"references\": [\"https://github.com/craftcms/cms/security/advisories/GHSA-7h62-6v23-v8fm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50284\", \"https://github.com/craftcms/cms/commit/b4e08977f0c9bdf002a77f9f6d1346cd55ac0598\", \"https://github.com/advisories/GHSA-7h62-6v23-v8fm\"], \"repository_advisory_url\": \"https://api.github.com/repos/craftcms/cms/security-advisories/GHSA-7h62-6v23-v8fm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/craftcms/cms\", \"summary\": \"Craft CMS: Missing peer-permission check in `AssetsController::actionDeleteFolder` allows deletion of other users' assets\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T18:49:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-7h62-6v23-v8fm\", \"vulnerabilities\": [{\"first_patched_version\": \"5.9.22\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"craftcms/cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.0-RC1, < 5.9.22\"}, {\"first_patched_version\": \"4.17.15\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"craftcms/cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0-RC1, < 4.17.15\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7h62-6v23-v8fm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "craftcms/cms: >= 4.0.0-RC1, < 4.17.15",
+      "craftcms/cms: >= 5.0.0-RC1, < 5.9.22"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-50284"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "craftcms/cms"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.230027Z",
+  "provenance": {
+    "content_sha256": "ae38eef4b784b0a6952d918ffe289a474d2ec9a177a3b0304c7cd117aa3f8b9b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-02T18:49:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7h62-6v23-v8fm",
+  "status": "active",
+  "title": "Craft CMS: Missing peer-permission check in `AssetsController::actionDeleteFolder` allows deletion of other users' assets",
+  "updated_at": "2026-07-02T18:49:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7h62-6v23-v8fm"
+}

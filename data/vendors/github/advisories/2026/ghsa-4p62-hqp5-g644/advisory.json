@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/165980942?v=4\", \"events_url\": \"https://api.github.com/users/SepineTam/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SepineTam/followers\", \"following_url\": \"https://api.github.com/users/SepineTam/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SepineTam/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SepineTam\", \"id\": 165980942, \"login\": \"SepineTam\", \"node_id\": \"U_kgDOCeSrDg\", \"organizations_url\": \"https://api.github.com/users/SepineTam/orgs\", \"received_events_url\": \"https://api.github.com/users/SepineTam/received_events\", \"repos_url\": \"https://api.github.com/users/SepineTam/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SepineTam/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SepineTam/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SepineTam\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47708\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-77\", \"name\": \"Improper Neutralization of Special Elements used in a Command ('Command Injection')\"}], \"description\": \"### Summary\\nThe `log_file_name` parameter in the `stata_do` API and CLI is directly interpolated into a Stata command string without sanitization. The security guard (`GuardValidator`) only scans the do-file content but does not validate this parameter. An attacker can inject arbitrary Stata commands (including `shell`, `python`, `erase`, etc.) by crafting a malicious `log_file_name` containing quotes, newlines, or Stata command separators.\\n\\n### Details\\n\\nIn `src/stata_mcp/stata/stata_do/do.py`, both `_execute_unix_like` and `_execute_windows` construct a Stata command string using Python f-strings:\\n\\n```python\\ncommands = f\\\"\\\"\\\"\\ncapture log close\\n{self.generate_log_command(log_file, is_replace)}\\n...\\ndo \\\"{dofile_path}\\\"\\n...\\n\\\"\\\"\\\"\\n```\\n\\nThe `generate_log_command` method returns:\\n\\n```python\\nlog_cmd = f'log using \\\"{log_file.as_posix()}\\\", {replace_clause} {log_type} name({log_type}_log)'\\n```\\n\\nWhere `log_file` is constructed from user-supplied `log_name`:\\n\\n```python\\ndef generate_log_file(self, log_name: str, extension='log'):\\n    return self.log_file_path / f\\\"{log_name}.{extension}\\\"\\n```\\n\\nThe `log_name` parameter comes directly from user input (via MCP tool `stata_do` or CLI `stata-mcp tool do`) without any validation. Since the path is embedded inside double quotes in a Stata command string, an attacker can break out of the string context and inject arbitrary commands.\\n\\nAdditionally, `generate_log_file` does not prevent path traversal via `log_name`, allowing arbitrary file write outside the intended log directory.\\n\\n### Proof of Concept\\n\\nWhen calling `stata_do` via MCP tool with:\\n\\n```json\\n{\\n  \\\"dofile_path\\\": \\\"test.do\\\",\\n  \\\"log_file_name\\\": \\\"'; shell echo pwned > /tmp/pwned.txt; '\\\"\\n}\\n```\\n\\nThe generated Stata commands become:\\n\\n```stata\\nlog using \\\"<log_dir>/'; shell echo pwned > /tmp/pwned.txt; '.log\\\", replace text name(text_log)\\n```\\n\\nStata interprets this as multiple commands, with `shell echo pwned > /tmp/pwned.txt;` executed as an arbitrary shell command.\\n\\n### Impact\\n\\n- **Remote Code Execution** via `shell` command injection\\n- **Arbitrary file write/overwrite** via path traversal in `log_name`\\n- Complete bypass of the security guard, as the guard only validates do-file content, not wrapper parameters\\n\\n### Remediation / Fix\\n\\n1. Apply strict allowlist validation to `log_name` (only alphanumeric, underscore, dot, hyphen; max 128 chars)\\n2. Resolve and verify the constructed log path remains within the intended log directory\\n3. Consider generating safe internal filenames (e.g., UUIDs) instead of accepting user-defined log names for command construction\\n4. Apply similar sanitization to `dofile_path` before embedding it into Stata command strings\\n\\n### References\\n\\n- Issue: #74\\n- Fix commit: https://github.com/SepineTam/stata-mcp/commit/e6f945941ae0c7cf5e74a428e0b3dc82b396382f\", \"epss\": {\"percentage\": 0.00629, \"percentile\": 0.70833}, \"ghsa_id\": \"GHSA-4p62-hqp5-g644\", \"github_reviewed_at\": \"2026-06-04T21:00:42Z\", \"html_url\": \"https://github.com/advisories/GHSA-4p62-hqp5-g644\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4p62-hqp5-g644\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47708\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T21:00:42Z\", \"references\": [\"https://github.com/SepineTam/stata-mcp/security/advisories/GHSA-4p62-hqp5-g644\", \"https://github.com/SepineTam/mcp-for-stata/issues/74\", \"https://github.com/SepineTam/mcp-for-stata/commit/e6f945941ae0c7cf5e74a428e0b3dc82b396382f\", \"https://github.com/advisories/GHSA-4p62-hqp5-g644\"], \"repository_advisory_url\": \"https://api.github.com/repos/SepineTam/mcp-for-stata/security-advisories/GHSA-4p62-hqp5-g644\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/SepineTam/stata-mcp\", \"summary\": \"MCP-for-Stata: Command injection via log_file_name parameter in Stata command wrapper\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T21:00:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-4p62-hqp5-g644\", \"vulnerabilities\": [{\"first_patched_version\": \"1.17.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"stata-mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.17.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4p62-hqp5-g644",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "stata-mcp: < 1.17.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47708"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "stata-mcp"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.819338Z",
+  "provenance": {
+    "content_sha256": "454ccbf5868efdb46cbe44970e68c292be7807a793e21c6de41eff34e24938f7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T21:00:42Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4p62-hqp5-g644",
+  "status": "active",
+  "title": "MCP-for-Stata: Command injection via log_file_name parameter in Stata command wrapper",
+  "updated_at": "2026-06-04T21:00:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4p62-hqp5-g644"
+}

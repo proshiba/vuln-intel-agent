@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-48154\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}], \"description\": \"## Vulnerability: CWE-362 — Concurrent Map Access Race Condition in InMemorySecret2FA\\n\\n**CWE:** CWE-362 (Concurrent Execution using Shared Resource with Improper Synchronization)\\n\\n### Affected Component\\n- `github.com/pilinux/gorest` — Go REST API boilerplate\\n- InMemorySecret2FA — in-memory 2FA secret store\\n\\n### Vulnerability Locations\\n\\n| File | Line | Role |\\n|------|------|------|\\n| `database/model/twoFA.go` | 43 | Global `map[uint64]Secret2FA` — bare map, no sync.RWMutex |\\n| `handler/login.go` | 139 | Map write during user login |\\n| `handler/twoFA.go` | 205 | Map write during 2FA setup |\\n| `handler/twoFA.go` | 272 | Map write during 2FA activation |\\n| `handler/twoFA.go` | 575 | Map write during 2FA verification |\\n| `handler/twoFA.go` | 189 | Map read during 2FA operations |\\n| `handler/twoFA.go` | 245 | Map read during 2FA operations |\\n| `handler/twoFA.go` | 491 | Map read during 2FA operations |\\n| `service/common.go` | 79 | Map delete |\\n\\n### Data Flow\\n\\n```\\nMultiple HTTP goroutines (concurrent requests)\\n    │\\n    ├── handler/login.go:139 ─► map write ──┐\\n    ├── handler/twoFA.go:205 ─► map write ──┼── InMemorySecret2FA (bare map)\\n    ├── handler/twoFA.go:189 ─► map read ───┤      ▲  NO sync.RWMutex\\n    ├── handler/twoFA.go:245 ─► map read ───┤      │\\n    ├── handler/twoFA.go:491 ─► map read ───┤      │\\n    └── service/common.go:79 ─► map delete ─┘      │\\n                                                   │\\n            Go runtime detects concurrent map      │\\n            read+write or write+write              │\\n                │                                  │\\n                ▼                                  │\\n    fatal error: concurrent map read and map write │\\n    fatal error: concurrent map writes             │\\n                │                                  │\\n                ▼                                  │\\n         Process crash (DoS) ──────────────────────┘\\n```\\n\\n### Description\\n\\nThe `InMemorySecret2FA` in `database/model/twoFA.go` was defined as a package-level `map[uint64]Secret2FA` — a bare Go map with no synchronization primitive. Multiple HTTP handlers in `handler/login.go` and `handler/twoFA.go` read from and wrote to this map concurrently. Go's runtime detects unsynchronized concurrent map access and throws an unrecoverable `fatal error`, which crashes the entire process.\\n\\nThis is a CWE-362 race condition: the shared resource (the map) is accessed concurrently without proper synchronization, and the failure mode is a hard process crash (denial of service).\\n\\n### Trigger Conditions\\n\\n1. Two users with 2FA enabled logging in simultaneously — concurrent map writes\\n2. One user logging in (map write) while another performs 2FA verification (map read)\\n3. Any concurrent combination of the 9 affected handler locations\\n\\n### Proof of Concept\\n\\n```bash\\n# Simulate two concurrent logins with 2FA enabled\\nfor i in 1 2; do\\n    curl -X POST http://target:8080/api/v1/login         -H \\\"Content-Type: application/json\\\"         -d \\\"{\\\"email\\\":\\\"user${i}@example.com\\\",\\\"password\\\":\\\"testpass\\\"}\\\" &\\ndone\\nwait\\n\\n# Go runtime output:\\n# fatal error: concurrent map writes\\n# goroutine 34 [running]:\\n# runtime.throw({0x...})\\n#   runtime/map.go:...\\n```\\n\\n### Impact\\n\\n- **Availability (High):** Hard process crash via Go runtime fatal error. No recovery possible — the process exits. An attacker can repeat the concurrent requests to crash the service on demand.\\n- **Confidentiality (None):** The crash itself does not leak data.\\n- **Integrity (None):** No data corruption (Go prevents it by crashing).\\n\\n### Fix (PR #391)\\n\\nIntroduced `Secret2FAStore` struct with `sync.RWMutex` protection:\\n\\n```go\\n// BEFORE: database/model/twoFA.go — bare map, no protection\\nvar InMemorySecret2FA map[uint64]Secret2FA\\n\\n// AFTER: Wrapped with sync.RWMutex\\ntype Secret2FAStore struct {\\n    mu   sync.RWMutex\\n    data map[uint64]Secret2FA\\n}\\n\\nfunc (s *Secret2FAStore) Get(key uint64) (Secret2FA, bool) {\\n    s.mu.RLock()\\n    defer s.mu.RUnlock()\\n    v, ok := s.data[key]\\n    return cloneSecret2FA(v), ok\\n}\\n\\nfunc (s *Secret2FAStore) Set(key uint64, value Secret2FA) {\\n    s.mu.Lock()\\n    defer s.mu.Unlock()\\n    s.data[key] = cloneSecret2FA(value)\\n}\\n\\nfunc (s *Secret2FAStore) Delete(key uint64) {\\n    s.mu.Lock()\\n    defer s.mu.Unlock()\\n    delete(s.data, key)\\n}\\n\\n// cloneSecret2FA returns a deep copy of a Secret2FA.\\n// This prevents external code from mutating the store's data\\n// through shared slice backing arrays.\\nfunc cloneSecret2FA(v Secret2FA) Secret2FA {\\n\\tout := Secret2FA{Image: v.Image}\\n\\tif v.PassHash != nil {\\n\\t\\tout.PassHash = append([]byte(nil), v.PassHash...)\\n\\t}\\n\\tif v.KeySalt != nil {\\n\\t\\tout.KeySalt = append([]byte(nil), v.KeySalt...)\\n\\t}\\n\\tif v.Secret != nil {\\n\\t\\tout.Secret = append([]byte(nil), v.Secret...)\\n\\t}\\n\\treturn out\\n}\\n```\\n\\nAll 9 handler call sites updated from direct map access to store method calls.\\n\\n### Not Vulnerable (verified during audit)\\n\\n- JWT: RSA keys from files, appleboy/gin-jwt middleware — correct\\n- Password hashing: Argon2 via pilinux/argon2 — correct\\n- SQL queries: GORM parameterized — correct\\n- CORS: validates wildcard+credentials combination at config load — correct\\n\\n### Patched Versions\\n\\nAll versions after PR #391 merge.\\n\\n### Resources\\n\\n- Fix PR: https://github.com/pilinux/gorest/pull/391\\n\\n### Credit\\n\\nReported by @saaa99999999 via manual security audit.\", \"epss\": {\"percentage\": 0.00051, \"percentile\": 0.16557}, \"ghsa_id\": \"GHSA-cpwg-x64r-rgwg\", \"github_reviewed_at\": \"2026-06-12T18:29:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-cpwg-x64r-rgwg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cpwg-x64r-rgwg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48154\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-12T18:29:08Z\", \"references\": [\"https://github.com/pilinux/gorest/security/advisories/GHSA-cpwg-x64r-rgwg\", \"https://github.com/pilinux/gorest/pull/391\", \"https://github.com/advisories/GHSA-cpwg-x64r-rgwg\"], \"repository_advisory_url\": \"https://api.github.com/repos/pilinux/gorest/security-advisories/GHSA-cpwg-x64r-rgwg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pilinux/gorest\", \"summary\": \"gorest InMemorySecret2FA race condition allows process crash via concurrent map access (CWE-362)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T18:29:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-cpwg-x64r-rgwg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.12.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/pilinux/gorest\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.12.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cpwg-x64r-rgwg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/pilinux/gorest: <= 1.12.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48154"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/pilinux/gorest"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.078325Z",
+  "provenance": {
+    "content_sha256": "ea29ceaad812cc1fd279e80b463e64e49ff821e2c03e16fb486fb0766cace5d7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-12T18:29:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cpwg-x64r-rgwg",
+  "status": "active",
+  "title": "gorest InMemorySecret2FA race condition allows process crash via concurrent map access (CWE-362)",
+  "updated_at": "2026-06-12T18:29:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cpwg-x64r-rgwg"
+}

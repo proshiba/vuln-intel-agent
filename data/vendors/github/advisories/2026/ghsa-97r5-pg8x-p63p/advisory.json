@@ -1,0 +1,54 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/39668014?v=4\", \"events_url\": \"https://api.github.com/users/0xHunSec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xHunSec/followers\", \"following_url\": \"https://api.github.com/users/0xHunSec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xHunSec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xHunSec\", \"id\": 39668014, \"login\": \"0xHunSec\", \"node_id\": \"MDQ6VXNlcjM5NjY4MDE0\", \"organizations_url\": \"https://api.github.com/users/0xHunSec/orgs\", \"received_events_url\": \"https://api.github.com/users/0xHunSec/received_events\", \"repos_url\": \"https://api.github.com/users/0xHunSec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xHunSec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xHunSec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xHunSec\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46715\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\n\\n  Flask-Security-Too 5.8.0's OAuth reauthentication flow can mark a\\n  session as fresh after verifying an OAuth account that belongs to a\\n  different user.\\n\\n  If an attacker can operate an already-authenticated but stale victim\\n  session, they can complete OAuth verification using their own OAuth\\n  identity. The victim session is then treated as recently\\n  reauthenticated, allowing freshness-protected account actions to\\n  proceed. This was reproduced against the built-in `/change-username`\\n  route.\\n\\n  ### Details\\n\\n  The issue is in the OAuth verification callback.\\n\\n  `_oauth_response_common()` resolves the OAuth provider identity to a\\n  Flask-Security user:\\n\\n  - `flask_security/oauth_glue.py:101-108`\\n\\n  `oauth_verify_response()` then accepts any resolved user and updates\\n  the current session freshness timestamp:\\n\\n  - `flask_security/oauth_glue.py:182-214`\\n  - `flask_security/oauth_glue.py:201-204`\\n\\n  The missing check is that the OAuth-resolved user must match the\\n  current authenticated session user. In the failing case:\\n\\n  - current session user: `victim@example.com`\\n  - OAuth verified user: `attacker@example.com`\\n  - session marked fresh: yes\\n\\n  So the attacker is not logging in as the victim, but they are\\n  satisfying the victim session's reauthentication requirement with a\\n  different account.\\n\\n  ### PoC\\n\\n  Tested version:\\n\\n  - `Flask-Security-Too 5.8.0`\\n  - tag `5.8.0`\\n  - commit `08288dff6907e413d848a16aaf43fc2c2b2a3b72`\\n\\n Used a minimal Flask app with:\\n\\n  ```python\\n  SECURITY_OAUTH_ENABLE = True\\n  SECURITY_OAUTH_BUILTIN_PROVIDERS = [\\\"github\\\"]\\n  SECURITY_FRESHNESS = timedelta(seconds=1)\\n  SECURITY_FRESHNESS_GRACE_PERIOD = timedelta(seconds=0)\\n  SECURITY_USERNAME_ENABLE = True\\n  SECURITY_CHANGE_USERNAME = True\\n\\n  The OAuth provider was replaced with a localhost mock provider\\n  returning attacker@example.com. This avoids hitting a live third-party\\n  provider while still exercising Flask-Security-Too's real OAuth\\n  verification handler.\\n\\n  Reproduction steps:\\n\\n  1. Log in as victim@example.com.\\n  2. Wait until the session is no longer fresh.\\n  3. Confirm POST /change-username is blocked with 401 and\\n     reauth_required=true.\\n  4. Start OAuth verification with POST /login/oauth-verify-start/\\n     github.\\n  5. Complete the callback with an OAuth identity for\\n     attacker@example.com.\\n  6. Confirm the session is still for victim@example.com, but fs_paa has\\n     been updated.\\n  7. Retry POST /change-username.\\n  8. The victim user's username is changed successfully.\\n\\n  Observed result:\\n\\n  {\\n    \\\"pre_bypass_status\\\": 401,\\n    \\\"pre_bypass_reauth_required\\\": true,\\n    \\\"attacker_identity\\\": \\\"attacker@example.com\\\",\\n    \\\"oauth_verify_response_status\\\": 302,\\n    \\\"post_bypass_change_username_status\\\": 200,\\n    \\\"final_email\\\": \\\"victim@example.com\\\",\\n    \\\"final_username\\\": \\\"victimowned1777878574\\\",\\n    \\\"direct_impact_verified\\\": true\\n  }\\n\\n  Note: CSRF was disabled in the local harness only to keep the test\\n  focused on the reauthentication check. This is not a CSRF bypass\\n  report.\\n\\n  This bypasses Flask-Security-Too's freshness/reauthentication\\n  boundary.\\n\\n  Applications using OAuth verification together with freshness-\\n  protected account operations may allow a stale victim session to be\\n  refreshed using a different user's OAuth account. In my test, this\\n  allowed the victim account's username to be changed through Flask-\\n  Security-Too's built-in /change-username route.\\n\\n  A likely fix is to reject OAuth verification unless the resolved OAuth\\n  user matches current_user before updating session[\\\"fs_paa\\\"].\", \"epss\": {\"percentage\": 0.00035, \"percentile\": 0.1094}, \"ghsa_id\": \"GHSA-97r5-pg8x-p63p\", \"github_reviewed_at\": \"2026-05-22T17:48:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-97r5-pg8x-p63p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-97r5-pg8x-p63p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46715\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-22T17:48:54Z\", \"references\": [\"https://github.com/pallets-eco/flask-security/security/advisories/GHSA-97r5-pg8x-p63p\", \"https://github.com/advisories/GHSA-97r5-pg8x-p63p\"], \"repository_advisory_url\": \"https://api.github.com/repos/pallets-eco/flask-security/security-advisories/GHSA-97r5-pg8x-p63p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pallets-eco/flask-security\", \"summary\": \"Flask-Security-Too OAuth reauthentication freshness bypass via cross-   user OAuth identity acceptance\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-22T17:49:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-97r5-pg8x-p63p\", \"vulnerabilities\": [{\"first_patched_version\": \"5.8.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"Flask-Security-Too\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.8.0, < 5.8.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-97r5-pg8x-p63p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Flask-Security-Too: >= 5.8.0, < 5.8.1"
+    ],
+    "cves": [
+      "CVE-2026-46715"
+    ],
+    "cvss_score": 0.0,
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Flask-Security-Too"
+    ],
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.423929Z",
+  "provenance": {
+    "content_sha256": "ff7990b4e1cc8af79be3fe362dcd7a2c267f0aed7ee88c1fa80dec3abbdbe031",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-22T17:48:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-97r5-pg8x-p63p",
+  "status": "active",
+  "title": "Flask-Security-Too OAuth reauthentication freshness bypass via cross-   user OAuth identity acceptance",
+  "updated_at": "2026-05-22T17:49:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-97r5-pg8x-p63p"
+}

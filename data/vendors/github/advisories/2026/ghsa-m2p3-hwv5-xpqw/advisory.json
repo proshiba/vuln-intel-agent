@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/93228314?v=4\", \"events_url\": \"https://api.github.com/users/adamus2/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adamus2/followers\", \"following_url\": \"https://api.github.com/users/adamus2/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adamus2/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adamus2\", \"id\": 93228314, \"login\": \"adamus2\", \"node_id\": \"U_kgDOBY6NGg\", \"organizations_url\": \"https://api.github.com/users/adamus2/orgs\", \"received_events_url\": \"https://api.github.com/users/adamus2/received_events\", \"repos_url\": \"https://api.github.com/users/adamus2/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adamus2/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adamus2/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adamus2\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"## Summary\\n\\nThe `LimitToString` safety limit (default 1MB since commit `b5ac4bf`) can be bypassed to allocate approximately 1GB of memory by exploiting the per-call reset of `_currentToStringLength` in `ObjectToString`. Each template expression rendered through `TemplateContext.Write(SourceSpan, object)` triggers a separate top-level `ObjectToString` call that resets the length counter to zero, and the underlying `StringBuilderOutput` has no cumulative output size limit. An attacker who can supply a template can cause an out-of-memory condition in the host application.\\n\\n## Details\\n\\nThe root cause is in `TemplateContext.Helpers.cs`, in the `ObjectToString` method:\\n\\n```csharp\\n// src/Scriban/TemplateContext.Helpers.cs:89-111\\npublic virtual string ObjectToString(object value, bool nested = false)\\n{\\n    if (_objectToStringLevel == 0)\\n    {\\n        _currentToStringLength = 0;  // <-- resets on every top-level call\\n    }\\n    try\\n    {\\n        _objectToStringLevel++;\\n        // ...\\n        var result = ObjectToStringImpl(value, nested);\\n        if (LimitToString > 0 && _objectToStringLevel == 1 && result != null && result.Length >= LimitToString)\\n        {\\n            return result + \\\"...\\\";\\n        }\\n        return result;\\n    }\\n    // ...\\n}\\n```\\n\\nEach time a template expression is rendered, `TemplateContext.Write(SourceSpan, object)` calls `ObjectToString`:\\n\\n```csharp\\n// src/Scriban/TemplateContext.cs:693-701\\npublic virtual TemplateContext Write(SourceSpan span, object textAsObject)\\n{\\n    if (textAsObject != null)\\n    {\\n        var text = ObjectToString(textAsObject);  // fresh _currentToStringLength = 0\\n        Write(text);\\n    }\\n    return this;\\n}\\n```\\n\\nThe `StringBuilderOutput.Write` method appends unconditionally with no size check:\\n\\n```csharp\\n// src/Scriban/Runtime/StringBuilderOutput.cs:47-50\\npublic void Write(string text, int offset, int count)\\n{\\n    Builder.Append(text, offset, count);  // no cumulative limit\\n}\\n```\\n\\n**Execution flow:**\\n1. Template creates a string of length 1,048,575 (one byte under the 1MB `LimitToString` default)\\n2. A `for` loop iterates up to `LoopLimit` (default 1000) times\\n3. Each iteration renders the string via `Write(span, x)` → `ObjectToString(x)`\\n4. `ObjectToString` resets `_currentToStringLength = 0` since `_objectToStringLevel == 0`\\n5. The string passes the `LimitToString` check (1,048,575 < 1,048,576)\\n6. Full string is appended to `StringBuilder` — no cumulative tracking\\n7. After 1000 iterations: ~1GB allocated in-memory\\n\\n## PoC\\n\\n```csharp\\nusing Scriban;\\n\\n// Uses only default TemplateContext settings (LoopLimit=1000, LimitToString=1048576)\\nvar template = Template.Parse(\\\"{{ x = \\\\\\\"\\\\\\\" | string.pad_left 1048575 }}{{ for i in 1..1000 }}{{ x }}{{ end }}\\\");\\n// This will allocate ~1GB in the StringBuilder, likely causing OOM\\nvar result = template.Render();\\n```\\n\\nEquivalent Scriban template:\\n```scriban\\n{{ x = \\\"\\\" | string.pad_left 1048575 }}{{ for i in 1..1000 }}{{ x }}{{ end }}\\n```\\n\\nEach of the 1000 loop iterations outputs a 1,048,575-character string. Each passes the per-call `LimitToString` check independently. Total output: ~1,000,000,000 characters (~1GB) allocated in the `StringBuilder`.\\n\\n## Impact\\n\\n- **Denial of Service:** An attacker who can supply Scriban templates (common in CMS, email templating, report generation) can crash the host application via out-of-memory\\n- **Process-level impact:** OOM kills the entire .NET process, not just the template rendering — affects all concurrent users\\n- **Bypass of safety mechanism:** The `LimitToString` limit was specifically introduced to prevent resource exhaustion, but the per-call reset makes it ineffective against cumulative abuse\\n- **Low complexity:** The exploit template is trivial — a single line\\n\\n## Recommended Fix\\n\\nAdd a cumulative output size counter to `TemplateContext` that tracks total bytes written across all `Write` calls, independent of the per-object `LimitToString`:\\n\\n```csharp\\n// In TemplateContext.cs — add new property and field\\nprivate long _totalOutputLength;\\n\\n/// <summary>\\n/// Gets or sets the maximum total output length in characters. Default is 10485760 (10 MB). 0 means no limit.\\n/// </summary>\\npublic int OutputLimit { get; set; } = 10485760;\\n\\n// In TemplateContext.Write(string, int, int) — add check before writing\\npublic TemplateContext Write(string text, int startIndex, int count)\\n{\\n    if (text != null)\\n    {\\n        if (OutputLimit > 0)\\n        {\\n            _totalOutputLength += count;\\n            if (_totalOutputLength > OutputLimit)\\n            {\\n                throw new ScriptRuntimeException(CurrentSpan, \\n                    $\\\"The output limit of {OutputLimit} characters was reached.\\\");\\n            }\\n        }\\n        // ... existing indent/write logic\\n    }\\n    return this;\\n}\\n```\\n\\nThis provides defense-in-depth: `LimitToString` caps individual object serialization, while `OutputLimit` caps total template output.\", \"ghsa_id\": \"GHSA-m2p3-hwv5-xpqw\", \"github_reviewed_at\": \"2026-03-24T22:15:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-m2p3-hwv5-xpqw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m2p3-hwv5-xpqw\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-24T22:15:43Z\", \"references\": [\"https://github.com/scriban/scriban/security/advisories/GHSA-m2p3-hwv5-xpqw\", \"https://github.com/advisories/GHSA-m2p3-hwv5-xpqw\"], \"repository_advisory_url\": \"https://api.github.com/repos/scriban/scriban/security-advisories/GHSA-m2p3-hwv5-xpqw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/scriban/scriban\", \"summary\": \"Scriban: Denial of Service via Unbounded Cumulative Template Output Bypassing LimitToString\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T13:09:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-m2p3-hwv5-xpqw\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"Scriban\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}, {\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"Scriban.Signed\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m2p3-hwv5-xpqw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Scriban.Signed: < 7.0.0",
+      "Scriban: < 7.0.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Scriban",
+      "Scriban.Signed"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.033009Z",
+  "provenance": {
+    "content_sha256": "02fe58fcf60d7fa891b02ed35c65c20b956c53419da47f379fb32c76faf8ef2f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-24T22:15:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m2p3-hwv5-xpqw",
+  "status": "active",
+  "title": "Scriban: Denial of Service via Unbounded Cumulative Template Output Bypassing LimitToString",
+  "updated_at": "2026-07-06T13:09:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m2p3-hwv5-xpqw"
+}

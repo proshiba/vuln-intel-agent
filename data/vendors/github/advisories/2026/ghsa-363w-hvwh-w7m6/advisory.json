@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/196433316?v=4\", \"events_url\": \"https://api.github.com/users/MerlijnW70/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MerlijnW70/followers\", \"following_url\": \"https://api.github.com/users/MerlijnW70/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MerlijnW70/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MerlijnW70\", \"id\": 196433316, \"login\": \"MerlijnW70\", \"node_id\": \"U_kgDOC7VVpA\", \"organizations_url\": \"https://api.github.com/users/MerlijnW70/orgs\", \"received_events_url\": \"https://api.github.com/users/MerlijnW70/received_events\", \"repos_url\": \"https://api.github.com/users/MerlijnW70/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MerlijnW70/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MerlijnW70/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MerlijnW70\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45719\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"# Security Advisory: CouchDB Reduce Injection via Unsanitized Calculation Parameter in V1 Views API\\n\\n**Affected Software:** Budibase\\n**Affected Component:** `packages/server/src/api/controllers/view/viewBuilder.ts`, `packages/server/src/api/routes/view.ts`\\n**CWE:** CWE-94 (Improper Control of Generation of Code)\\n**Discovery Date:** 2026-03-24\\n\\n---\\n\\n## Summary\\n\\nThe V1 Views API (`POST /api/views`) accepts a `calculation` parameter from the request body that is interpolated directly into a CouchDB reduce function definition without validation. Although an internal `SCHEMA_MAP` object defines the valid calculation types (`sum`, `count`, `stats`), no actual validation is performed against this map before the value is used in string interpolation.\\n\\nA user with Builder permissions can inject arbitrary JavaScript code that will be executed within the CouchDB JavaScript engine when the view is queried.\\n\\n---\\n\\n## Affected Component\\n\\n**Route:** `POST /api/views` (V1 legacy views endpoint)\\n**File:** `packages/server/src/api/routes/view.ts`, line 45\\n\\n```js\\n.post(\\\"/api/views\\\", viewController.v1.save)\\n```\\n\\nNote: This route has no Joi request body validator, unlike the V2 views endpoint which uses `viewValidator()`.\\n\\n**Vulnerable code:** `packages/server/src/api/controllers/view/viewBuilder.ts`, line 213\\n\\n```js\\nconst reduction = field && calculation ? { reduce: `_${calculation}` } : {}\\n\\nreturn {\\n  meta: { field, tableId, groupBy, filters, schema, calculation, ... },\\n  map: `function (doc) { ... }`,\\n  ...reduction,    // <-- unvalidated calculation string becomes CouchDB reduce\\n}\\n```\\n\\n---\\n\\n## Vulnerability Detail\\n\\nThe `viewBuilder` function constructs a CouchDB design document view definition. It correctly sanitizes all inputs that flow into the `map` function string (using `JSON.stringify` for field names and a strict `TOKEN_MAP` allowlist for filter operators).\\n\\nHowever, the `calculation` parameter follows a different path:\\n\\n1. User submits `calculation` via `POST /api/views` request body\\n2. No Joi validator is present on this V1 route\\n3. `viewBuilder` receives `calculation` as a raw string\\n4. It is interpolated as: `` reduce: `_${calculation}` ``\\n5. This reduce definition is saved to a CouchDB design document\\n6. When the view is queried, CouchDB evaluates the reduce value\\n\\nCouchDB's behavior for reduce functions:\\n- Values starting with `_` followed by a known built-in (`_sum`, `_count`, `_stats`) are executed as native reducers\\n- Any other value is treated as a **JavaScript function string** and executed in CouchDB's SpiderMonkey JS engine\\n\\nThe `SCHEMA_MAP` object in the same file defines `sum`, `count`, and `stats` as valid keys, but this map is only used for schema construction — it is never used as an input validator for the `calculation` parameter.\\n\\n---\\n\\n## Steps to Reproduce\\n\\n**Prerequisites:** Authenticated session with Builder role permissions.\\n\\n**1. Send a crafted view creation request:**\\n\\n```bash\\ncurl -X POST https://<budibase-instance>/api/views \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"Cookie: <builder-session-cookie>\\\" \\\\\\n  -d '{\\n    \\\"name\\\": \\\"test_view\\\",\\n    \\\"tableId\\\": \\\"<valid-table-id>\\\",\\n    \\\"field\\\": \\\"amount\\\",\\n    \\\"calculation\\\": \\\"stats\\\\\\\"); } function(keys,values,rereduce){ var data = \\\\\\\"\\\\\\\"; for(var i in this) { data += i + \\\\\\\"=\\\\\\\" + this[i] + \\\\\\\",\\\\\\\"; } return data; } //\\\"\\n  }'\\n```\\n\\n**2. Query the created view:**\\n\\n```bash\\ncurl https://<budibase-instance>/api/views/test_view?group=true \\\\\\n  -H \\\"Cookie: <builder-session-cookie>\\\"\\n```\\n\\n**3. Expected result:** The injected JavaScript function executes in CouchDB's JS context during reduce evaluation. The function can:\\n- Enumerate objects available in the CouchDB sandbox\\n- Access document data from the reduce `values` parameter\\n- Return arbitrary data in the view response\\n\\n**Simplified test:** To verify the injection point without complex payloads:\\n\\n```json\\n{\\n  \\\"name\\\": \\\"calc_test\\\",\\n  \\\"tableId\\\": \\\"<valid-table-id>\\\",\\n  \\\"field\\\": \\\"amount\\\",\\n  \\\"calculation\\\": \\\"INVALID_NOT_A_BUILTIN\\\"\\n}\\n```\\n\\nThis produces `reduce: \\\"_INVALID_NOT_A_BUILTIN\\\"`. CouchDB will reject this as neither a valid built-in nor a valid function, confirming that arbitrary strings reach the reduce evaluator.\\n\\n---\\n\\n## Impact\\n\\n- **Code execution:** Arbitrary JavaScript runs in CouchDB's SpiderMonkey sandbox\\n- **Data access:** The reduce function receives all matching document values, allowing data exfiltration across the database\\n- **Scope limitation:** CouchDB's JS sandbox prevents filesystem or network access — this is not OS-level RCE\\n- **Authentication required:** Attacker must have Builder role, which already grants significant application access\\n- **Persistence:** The injected reduce function persists in the design document and executes on every view query\\n\\n---\\n\\n## Recommended Fix\\n\\nAdd an allowlist validation in `viewBuilder` before the reduce interpolation:\\n\\n```typescript\\nconst VALID_CALCULATIONS = [\\\"sum\\\", \\\"count\\\", \\\"stats\\\"];\\n\\nif (calculation && !VALID_CALCULATIONS.includes(calculation)) {\\n  throw new Error(`Invalid calculation type: ${calculation}`);\\n}\\n\\nconst reduction = field && calculation ? { reduce: `_${calculation}` } : {};\\n```\\n\\nAdditionally, add a Joi validator to the V1 views route to match the V2 endpoint:\\n\\n```typescript\\n// In packages/server/src/api/routes/view.ts\\n.post(\\\"/api/views\\\", v1ViewValidator(), viewController.v1.save)\\n```\\n\\n---\\n\\n## Additional Context\\n\\nThe V2 views API (`POST /api/v2/views`) uses `viewValidator()` with Joi schema validation and a separate calculation handling path. This finding is specific to the V1 legacy endpoint which lacks equivalent input validation.\\n\\nThe `map` function string in the same code is properly protected — all user inputs reaching it are escaped via `JSON.stringify()` or validated against a strict `TOKEN_MAP` allowlist. Only the `reduce` path is affected.\", \"epss\": {\"percentage\": 0.00263, \"percentile\": 0.17553}, \"ghsa_id\": \"GHSA-363w-hvwh-w7m6\", \"github_reviewed_at\": \"2026-05-18T17:47:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-363w-hvwh-w7m6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-363w-hvwh-w7m6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45719\"}], \"nvd_published_at\": \"2026-05-27T18:16:26Z\", \"published_at\": \"2026-05-18T17:47:58Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-363w-hvwh-w7m6\", \"https://github.com/Budibase/budibase/releases/tag/3.38.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45719\", \"https://github.com/advisories/GHSA-363w-hvwh-w7m6\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-363w-hvwh-w7m6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: CouchDB Reduce Injection via Unsanitized Calculation Parameter in V1 Views API \", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:51:51Z\", \"url\": \"https://api.github.com/advisories/GHSA-363w-hvwh-w7m6\", \"vulnerabilities\": [{\"first_patched_version\": \"3.38.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.38.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-363w-hvwh-w7m6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: < 3.38.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45719"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.973017Z",
+  "provenance": {
+    "content_sha256": "9ca9e4fa80af199ae184330d50e35a3bf7c66b46138cda573e52a7b378ccdd79",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-18T17:47:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-363w-hvwh-w7m6",
+  "status": "active",
+  "title": "Budibase: CouchDB Reduce Injection via Unsanitized Calculation Parameter in V1 Views API ",
+  "updated_at": "2026-06-08T23:51:51Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-363w-hvwh-w7m6"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5543599?v=4\", \"events_url\": \"https://api.github.com/users/MrAlias/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrAlias/followers\", \"following_url\": \"https://api.github.com/users/MrAlias/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrAlias/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrAlias\", \"id\": 5543599, \"login\": \"MrAlias\", \"node_id\": \"MDQ6VXNlcjU1NDM1OTk=\", \"organizations_url\": \"https://api.github.com/users/MrAlias/orgs\", \"received_events_url\": \"https://api.github.com/users/MrAlias/received_events\", \"repos_url\": \"https://api.github.com/users/MrAlias/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrAlias/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrAlias/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrAlias\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45685\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}, {\"cwe_id\": \"CWE-704\", \"name\": \"Incorrect Type Conversion or Cast\"}], \"description\": \"### Summary\\n\\nMalformed MongoDB wire messages can trigger uncaught panics in the MongoDB TCP parser, allowing a remote unauthenticated attacker to crash the telemetry agent and cause a denial of service. The parser operates on raw attacker-controlled network payloads before the input is fully validated, so a single crafted message can terminate telemetry collection for the affected process or node.\\n\\n### Details\\n\\nMongoDB parsing support was introduced by commit `2070f568a` (`Add Initial support for mongodb`), so the explicit released version minimum affected is `v0.1.0`.\\n\\nThere are two related panic conditions in released `go.opentelemetry.io/obi` versions:\\n\\n- In `v0.1.0` through `v0.3.0`, `parseOpMessage` reads OP_MSG flag bits from `buf[msgHeaderSize:msgHeaderSize+int32Size]` without first ensuring the buffer is at least `msgHeaderSize + int32Size` bytes long. A truncated OP_MSG packet can therefore trigger a slice-bounds panic before the parser returns an error.\\n- In `v0.1.0` through `v0.3.0`, `parseSections` consumes the section type byte and then reads the document-sequence length from `buf[offSet:offSet+int32Size]` without re-validating that enough bytes remain after the type byte. A malformed document-sequence section can therefore trigger another slice-bounds panic.\\n- In `v0.1.0` through `v0.8.0`, `parseFirstField` assumes the collection name for collection-scoped commands is always a string and performs an unchecked type assertion on `field.Value`. A malformed BSON document can therefore trigger a runtime panic with `interface conversion` instead of returning a parse error.\\n\\nThe bounds-check panic was fixed by commit `3aa58cdaaa97fbb72f8ef4c3609ae425aacaf8bb` (`Fix MongoDB client panic`), which first appears in release `v0.4.0`. The unchecked BSON type assertion is still present in `v0.8.0`.\\n\\nBecause this code runs while decoding attacker-controlled MongoDB traffic, the failure mode is process termination rather than graceful rejection of invalid input. In deployments where the telemetry agent monitors traffic from untrusted or partially trusted clients, a single malformed packet can terminate collection until the agent is restarted.\\n\\nAffected code paths are in `pkg/ebpf/common/mongo_detect_transform.go` and correspond to `parseOpMessage`, `parseSections`, and `parseFirstField`.\\n\\n### PoC\\n\\nThe following reproductions are fully self-contained. They create a temporary test file inside an affected checkout and then run `go test` against the real parser code in the repository.\\n\\n1. Reproduce the `v0.1.0` through `v0.3.0` bounds-check panics:\\n\\n   ```bash\\n   git clone https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git obi-poc\\n   cd obi-poc\\n   git checkout v0.3.0\\n\\n   cat > pkg/ebpf/common/mongo_security_poc_test.go <<'EOF'\\n   package ebpfcommon\\n\\n   import \\\"testing\\\"\\n\\n   func TestSecurityPoCParseOpMessageShortPanics(t *testing.T) {\\n\\t   parseOpMessage(make([]byte, 16), 0, false, nil)\\n   }\\n\\n   func TestSecurityPoCParseSectionsShortDocSequencePanics(t *testing.T) {\\n\\t   parseSections([]byte{byte(sectionTypeDocumentSequence), 0x01, 0x02, 0x03})\\n   }\\n   EOF\\n\\n   go test ./pkg/ebpf/common -run 'TestSecurityPoCParseOpMessageShortPanics|TestSecurityPoCParseSectionsShortDocSequencePanics' -count=1\\n   ```\\n\\n   Expected result:\\n\\n   - `TestSecurityPoCParseOpMessageShortPanics` panics with a message similar to `slice bounds out of range [:20] with capacity 16`\\n   - `TestSecurityPoCParseSectionsShortDocSequencePanics` panics with a message similar to `slice bounds out of range [:5] with capacity 4`\\n\\n1. Reproduce the `v0.1.0` through `v0.8.0` unchecked BSON type-assertion panic:\\n\\n   ```bash\\n   git clone https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git obi-poc\\n   cd obi-poc\\n   git checkout v0.8.0\\n\\n   cat > pkg/ebpf/common/mongo_security_poc_test.go <<'EOF'\\n   package ebpfcommon\\n\\n   import (\\n\\t   \\\"testing\\\"\\n\\n\\t   \\\"go.mongodb.org/mongo-driver/v2/bson\\\"\\n   )\\n\\n   func TestSecurityPoCParseFirstFieldTypeAssertionPanics(t *testing.T) {\\n\\t   parseFirstField(bson.E{Key: commFind, Value: int32(123)})\\n   }\\n   EOF\\n\\n   go test ./pkg/ebpf/common -run TestSecurityPoCParseFirstFieldTypeAssertionPanics -count=1\\n   ```\\n\\n   Expected result: panic with a message similar to `interface conversion: interface {} is int32, not string`.\\n\\n### Impact\\n\\nThis is a remote denial-of-service vulnerability in the MongoDB protocol parser. Any deployment that enables MongoDB parsing and processes attacker-controlled or malformed MongoDB traffic is impacted. Successful exploitation lets an unauthenticated attacker crash the telemetry agent by sending a crafted OP_MSG packet or malformed BSON document, causing loss of observability until the process is restarted.\", \"epss\": {\"percentage\": 0.00463, \"percentile\": 0.3699}, \"ghsa_id\": \"GHSA-j8p6-96vp-f3r9\", \"github_reviewed_at\": \"2026-05-18T20:20:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-j8p6-96vp-f3r9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j8p6-96vp-f3r9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45685\"}], \"nvd_published_at\": \"2026-06-02T16:16:43Z\", \"published_at\": \"2026-05-18T20:20:03Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/security/advisories/GHSA-j8p6-96vp-f3r9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45685\", \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/tag/v0.9.0\", \"https://github.com/advisories/GHSA-j8p6-96vp-f3r9\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-ebpf-instrumentation/security-advisories/GHSA-j8p6-96vp-f3r9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation\", \"summary\": \"OpenTelemetry eBPF Instrumentation: MongoDB parser panics on malformed wire messages\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T10:58:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-j8p6-96vp-f3r9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/obi\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j8p6-96vp-f3r9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.opentelemetry.io/obi: < 0.9.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45685"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.opentelemetry.io/obi"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.573599Z",
+  "provenance": {
+    "content_sha256": "5b6c0510560e94f06ee03b5fbd0fb612dd2b284d8e1d520200eccf87e79e0199",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-18T20:20:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j8p6-96vp-f3r9",
+  "status": "active",
+  "title": "OpenTelemetry eBPF Instrumentation: MongoDB parser panics on malformed wire messages",
+  "updated_at": "2026-06-09T10:58:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j8p6-96vp-f3r9"
+}

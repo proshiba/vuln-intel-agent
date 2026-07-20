@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/56028149?v=4\", \"events_url\": \"https://api.github.com/users/Giancannella/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Giancannella/followers\", \"following_url\": \"https://api.github.com/users/Giancannella/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Giancannella/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Giancannella\", \"id\": 56028149, \"login\": \"Giancannella\", \"node_id\": \"MDQ6VXNlcjU2MDI4MTQ5\", \"organizations_url\": \"https://api.github.com/users/Giancannella/orgs\", \"received_events_url\": \"https://api.github.com/users/Giancannella/received_events\", \"repos_url\": \"https://api.github.com/users/Giancannella/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Giancannella/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Giancannella/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Giancannella\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/26974049?v=4\", \"events_url\": \"https://api.github.com/users/FrancescoDAlterio/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/FrancescoDAlterio/followers\", \"following_url\": \"https://api.github.com/users/FrancescoDAlterio/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/FrancescoDAlterio/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/FrancescoDAlterio\", \"id\": 26974049, \"login\": \"FrancescoDAlterio\", \"node_id\": \"MDQ6VXNlcjI2OTc0MDQ5\", \"organizations_url\": \"https://api.github.com/users/FrancescoDAlterio/orgs\", \"received_events_url\": \"https://api.github.com/users/FrancescoDAlterio/received_events\", \"repos_url\": \"https://api.github.com/users/FrancescoDAlterio/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/FrancescoDAlterio/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/FrancescoDAlterio/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/FrancescoDAlterio\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40249\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-636\", \"name\": \"Not Failing Securely ('Failing Open')\"}, {\"cwe_id\": \"CWE-754\", \"name\": \"Improper Check for Unusual or Exceptional Conditions\"}], \"description\": \"### Summary\\nA fail-open request handling flaw in the UDR service causes the `/nudr-dr/v2/policy-data/subs-to-notify/{subsId}` PUT handler to continue processing requests even after request body retrieval or deserialization errors.\\n\\nThis may allow unintended modification of existing Policy Data notification subscriptions with invalid, empty, or partially processed input, depending on downstream processor behavior.\\n\\n### Details\\nThe endpoint `PUT /nudr-dr/v2/policy-data/subs-to-notify/{subsId}` is intended to update an existing Policy Data notification subscription only after the HTTP request body has been successfully read and parsed into a valid `PolicyDataSubscription` object. [file:93]\\n\\nIn the free5GC UDR implementation, the function `HandlePolicyDataSubsToNotifySubsIdPut` in`NFs/udr/internal/sbi/api_datarepository.go` does not terminate execution after input-processing failures. [file:93]\\n\\nThe request flow is:\\n\\n1. The handler calls `c.GetRawData()` to read the HTTP request body. [file:93]\\n2. If `GetRawData()` fails, the handler sends an HTTP 500 error response, but **does not return**. [file:93]\\n3. The handler then calls `openapi.Deserialize(policyDataSubscription, reqBody, \\\"application/json\\\")`. [file:93]\\n4. If deserialization fails, the handler sends an HTTP 400 error response, but again **does not return**. [file:93]\\n5. Execution continues and the handler still invokes `s.Processor().PolicyDataSubsToNotifySubsIdPutProcedure(c, subsId, policyDataSubscription)`. [file:93]\\n\\nAs a result, the endpoint operates in a fail-open manner: request processing may continue after fatal input validation or body handling errors, instead of being safely aborted. [file:93]\\n\\nThe issue is compounded by the handler's deserialization call, which passes `policyDataSubscription` directly to `openapi.Deserialize(...)` instead of passing a pointer to the destination object. This inconsistent usage further increases the risk that request processing continues with an empty, partially initialized, or otherwise unintended subscription object. [file:93]\\n\\nThis differs from safer handlers in the same file, which use a helper pattern that explicitly returns on body read or deserialization failure before calling the corresponding processor routine. [file:93]\\n\\n### Security Impact\\nThis issue affects a write-capable API that updates Policy Data notification subscriptions identified by `subsId`. [file:93]  \\nBecause execution continues after body read or parsing failure, the processor may receive an uninitialized, partially initialized, or otherwise unintended `PolicyDataSubscription` object for persistence. [file:93]\\n\\nThe exact runtime impact depends on downstream processor behavior and storage validation. [file:93]  \\nAt minimum, this is a security-relevant robustness flaw that can lead to inconsistent request handling or unintended modification attempts; under certain runtime conditions it may allow updates that should not be processed after an input error. [file:93]\\n\\n### Reproduction Status\\nThe code path has been statically confirmed. [file:93]  A complete runtime proof of unintended subscription modification after\\n`GetRawData()` or deserialization failure has not yet been established. [file:93]\\n\\n### Patch\\nThe handler should immediately terminate after sending an error response for body read or deserialization failure. [file:93]\\n\\nA minimal fix is to add missing `return` statements in `HandlePolicyDataSubsToNotifySubsIdPut` and pass a pointer to the destination\\nobject during deserialization: [file:93]\\n\\n```go\\nreqBody, err := c.GetRawData()\\nif err != nil {\\n    logger.DataRepoLog.Errorf(\\\"Get Request Body error: %+v\\\", err)\\n    pd := openapi.ProblemDetailsSystemFailure(err.Error())\\n    c.Set(sbi.IN_PB_DETAILS_CTX_STR, pd.Cause)\\n    c.JSON(http.StatusInternalServerError, pd)\\n    return\\n}\\n\\nerr = openapi.Deserialize(&policyDataSubscription, reqBody, \\\"application/json\\\")\\nif err != nil {\\n    logger.DataRepoLog.Errorf(\\\"Deserialize Request Body error: %+v\\\", err)\\n    pd := util.ProblemDetailsMalformedReqSyntax(err.Error())\\n    c.Set(sbi.IN_PB_DETAILS_CTX_STR, pd.Cause)\\n    c.JSON(http.StatusBadRequest, pd)\\n    return\\n}\\n```\", \"epss\": {\"percentage\": 0.00321, \"percentile\": 0.23673}, \"ghsa_id\": \"GHSA-gx38-8h33-pmxr\", \"github_reviewed_at\": \"2026-04-14T20:00:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-gx38-8h33-pmxr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gx38-8h33-pmxr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40249\"}], \"nvd_published_at\": \"2026-04-16T22:16:38Z\", \"published_at\": \"2026-04-14T20:00:59Z\", \"references\": [\"https://github.com/free5gc/free5gc/security/advisories/GHSA-gx38-8h33-pmxr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40249\", \"https://github.com/advisories/GHSA-gx38-8h33-pmxr\"], \"repository_advisory_url\": \"https://api.github.com/repos/free5gc/free5gc/security-advisories/GHSA-gx38-8h33-pmxr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/free5gc/udr\", \"summary\": \"free5gc UDR fail-open request handling in PolicyDataSubsToNotifySubsIdPut may allow unintended subscription updates after input errors\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:35:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-gx38-8h33-pmxr\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/free5gc/udr\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gx38-8h33-pmxr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/free5gc/udr: <= 1.4.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40249"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/free5gc/udr"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.862851Z",
+  "provenance": {
+    "content_sha256": "0c7babedd64658d483783618390a17ff0de070b4f2a806f59dcea6428b52bb21",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-14T20:00:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gx38-8h33-pmxr",
+  "status": "active",
+  "title": "free5gc UDR fail-open request handling in PolicyDataSubsToNotifySubsIdPut may allow unintended subscription updates after input errors",
+  "updated_at": "2026-04-24T20:35:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gx38-8h33-pmxr"
+}

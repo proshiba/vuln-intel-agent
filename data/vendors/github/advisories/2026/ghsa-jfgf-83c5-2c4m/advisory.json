@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-42353\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nVersions of `i18next-http-middleware` prior to 3.9.3 pass the user-controlled `lng` and `ns` values from `getResourcesHandler` directly into `i18next.services.backendConnector.load(languages, namespaces, …)` without any sanitisation. Depending on which backend is configured, the unvalidated path segments enable one of two attacks:\\n\\n- **Filesystem path traversal** when the middleware is paired with `i18next-fs-backend` (or any backend that interpolates `lng` / `ns` into a filesystem path).\\n- **Server-Side Request Forgery (SSRF)** when the middleware is paired with `i18next-http-backend` (or any backend that interpolates into an HTTP URL).\\n\\nExample request:\\n\\n```\\nGET /locales/resources.json?lng=../../etc/passwd&ns=root\\n```\\n\\nwith `i18next-fs-backend` reads the attacker-chosen file from disk; with `i18next-http-backend` reshapes the outgoing URL to target an internal service.\\n\\n### Impact\\n\\n- **Arbitrary file read** via `fs`-style backends — any file the Node process can read becomes reachable (source, configuration, `.ssh` keys, `.env`, Docker secrets, etc.).\\n- **SSRF** via `http`-style backends — requests to internal IPs / hostnames not normally reachable from the internet; combined with cloud metadata endpoints this can escalate to credential theft.\\n- **Unbounded growth of `i18next.options.ns`** — a now-incidental amplification: the pre-patch `getResourcesHandler` pushed every unique `ns` value into the shared `i18next.options.ns` singleton array without validation or bounds, enabling memory exhaustion from repeated unique payloads.\\n\\nThe severity is bounded by the backend in place, but the middleware itself exposed the unsanitised path; this is the \\\"weakest link\\\" layer.\\n\\n### Affected versions\\n\\n`< 3.9.3`.\\n\\n### Patch\\n\\nFixed in **3.9.3**. The patch introduces `utils.isSafeIdentifier` and applies it in `getResourcesHandler` before `lng` and `ns` reach the backend connector:\\n\\n```js\\nlanguages  = languages.filter(utils.isSafeIdentifier)\\nnamespaces = namespaces.filter(utils.isSafeIdentifier)\\n```\\n\\n`isSafeIdentifier` uses a denylist approach — it still accepts any legitimate i18next language-code shape ([i18next FAQ](https://www.i18next.com/how-to/faq#how-should-the-language-codes-be-formatted)) — rejecting:\\n\\n- `..` sequences (relative path traversal)\\n- path separators (`/`, `\\\\`)\\n- control characters (C0/C1)\\n- prototype keys (`__proto__` / `constructor` / `prototype`)\\n- empty strings and values longer than 128 characters\\n\\nUnsafe values are dropped; only safe values reach the backend. The fix is a defence-in-depth layer on top of any sanitisation the backend itself may apply.\\n\\n### Workarounds\\n\\nNo workaround short of upgrading. Front-proxying the middleware with a WAF rule that rejects requests containing `..`, `/`, `\\\\`, or URL-structure characters in `lng` / `ns` is a partial mitigation. Upgrading the configured backend (`i18next-fs-backend` ≥ 2.6.4, `i18next-http-backend` ≥ 3.0.5) also closes the same attack at the next layer.\\n\\n### Related advisories fixed in the same release\\n\\n- [GHSA-5fgg-jcpf-8jjw](https://github.com/i18next/i18next-http-middleware/security/advisories/GHSA-5fgg-jcpf-8jjw) — prototype pollution via `setPath` and `missingKeyHandler`. Independently fixable, filed separately per CNA rules.\\n- [GHSA-c3h8-g69v-pjrg](https://github.com/i18next/i18next-http-middleware/security/advisories/GHSA-c3h8-g69v-pjrg) — HTTP response splitting + XSS-filter bypass (CVE-2026-41683).\\n\\n### Credits\\n\\nDiscovered via an internal security audit of the i18next ecosystem.\\n\\n### Resources\\n\\n- [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)\\n- [CWE-918: Server-Side Request Forgery (SSRF)](https://cwe.mitre.org/data/definitions/918.html) (specific sub-case when paired with an HTTP backend)\\n- [i18next FAQ: language code formatting](https://www.i18next.com/how-to/faq#how-should-the-language-codes-be-formatted)\", \"epss\": {\"percentage\": 0.00387, \"percentile\": 0.30597}, \"ghsa_id\": \"GHSA-jfgf-83c5-2c4m\", \"github_reviewed_at\": \"2026-04-29T22:26:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-jfgf-83c5-2c4m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jfgf-83c5-2c4m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42353\"}], \"nvd_published_at\": \"2026-05-08T16:16:12Z\", \"published_at\": \"2026-04-29T22:26:36Z\", \"references\": [\"https://github.com/i18next/i18next-http-middleware/security/advisories/GHSA-jfgf-83c5-2c4m\", \"https://www.i18next.com/how-to/faq#how-should-the-language-codes-be-formatted\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42353\", \"https://github.com/advisories/GHSA-jfgf-83c5-2c4m\"], \"repository_advisory_url\": \"https://api.github.com/repos/i18next/i18next-http-middleware/security-advisories/GHSA-jfgf-83c5-2c4m\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/i18next/i18next-http-middleware\", \"summary\": \"i18next-http-middleware has path traversal / SSRF via user-controlled language and namespace parameters\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:30:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-jfgf-83c5-2c4m\", \"vulnerabilities\": [{\"first_patched_version\": \"3.9.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"i18next-http-middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jfgf-83c5-2c4m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "i18next-http-middleware: < 3.9.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41683",
+      "CVE-2026-42353"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "i18next-http-middleware"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.850106Z",
+  "provenance": {
+    "content_sha256": "f41cf225cf66122fb7db19bc7abb75663a11246d5172d0e120c94cb6837acad6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-29T22:26:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jfgf-83c5-2c4m",
+  "status": "active",
+  "title": "i18next-http-middleware has path traversal / SSRF via user-controlled language and namespace parameters",
+  "updated_at": "2026-05-13T13:30:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jfgf-83c5-2c4m"
+}

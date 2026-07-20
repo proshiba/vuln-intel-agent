@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/56028149?v=4\", \"events_url\": \"https://api.github.com/users/Giancannella/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Giancannella/followers\", \"following_url\": \"https://api.github.com/users/Giancannella/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Giancannella/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Giancannella\", \"id\": 56028149, \"login\": \"Giancannella\", \"node_id\": \"MDQ6VXNlcjU2MDI4MTQ5\", \"organizations_url\": \"https://api.github.com/users/Giancannella/orgs\", \"received_events_url\": \"https://api.github.com/users/Giancannella/received_events\", \"repos_url\": \"https://api.github.com/users/Giancannella/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Giancannella/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Giancannella/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Giancannella\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42459\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-209\", \"name\": \"Generation of Error Message Containing Sensitive Information\"}], \"description\": \"## Summary\\n\\nThe free5GC UDM component fails to validate the `supi` path parameter in six GET handlers of the `nudm-sdm` (Subscriber Data Management) service. An unauthenticated attacker can inject control characters into the SUPI parameter, causing UDM to forward a malformed request to UDR and return a `500 Internal Server Error` response that exposes internal infrastructure details.\\n\\n## Affected Package\\n\\n- **Ecosystem**: Go\\n- **Package**: `github.com/free5gc/udm`\\n- **Affected versions**: `<= v1.4.2`\\n- **Patched versions**: none yet\\n\\n## Details\\n\\nThe following handlers in `internal/sbi/api_subscriberdatamanagement.go` do not call `validator.IsValidSupi()` before passing the `supi` parameter to the processor:\\n\\n- `HandleGetSmfSelectData` — `GET /:supi/smf-select-data`\\n- `HandleGetSupi` — `GET /:supi`\\n- `HandleGetTraceData` — `GET /:supi/trace-data`\\n- `HandleGetUeContextInSmfData` — `GET /:supi/ue-context-in-smf-data`\\n- `HandleGetNssai` — `GET /:supi/nssai`\\n- `HandleGetSmData` — `GET /:supi/sm-data`\\n\\nBy contrast, `HandleGetAmData` in the same file correctly validates the `supi` parameter:\\n\\n```go\\n// HandleGetAmData — correctly validates (not vulnerable)\\nsupi := c.Params.ByName(\\\"supi\\\")\\nif !validator.IsValidSupi(supi) {\\n    c.JSON(http.StatusBadRequest, problemDetail)\\n    return\\n}\\n\\n// HandleGetSmfSelectData — missing validation (vulnerable)\\nsupi := c.Params.ByName(\\\"supi\\\")\\n// ← no validator.IsValidSupi(supi) call\\ns.Processor().GetSmfSelectDataProcedure(c, supi, plmnID, supportedFeatures)\\n```\\n\\nThe malformed `supi` is passed to the processor which constructs a URL to forward the request to UDR. Go's `net/url` parser rejects the URL containing control characters and returns an error. UDM catches this error and responds with a `500 SYSTEM_FAILURE` that includes the full internal UDR URL in the `detail` field.\\n\\n**This is a missed fix of CVE-2026-27642**, which applied the same `validator.IsValidSupi()` check only to `internal/sbi/api_ueauthentication.go` (`HandleConfirmAuth` and `HandleGenerateAuthData`), leaving the SDM service handlers unpatched.\\n\\n## Proof of Concept\\n\\n```bash\\n# Vulnerable — returns 500 with internal UDR URL exposed\\ncurl \\\"http://<UDM_HOST>/nudm-sdm/v2/imsi-22277%00INJECTED/smf-select-data\\\"\\ncurl \\\"http://<UDM_HOST>/nudm-sdm/v2/imsi-22277%00INJECTED/nssai\\\"\\ncurl \\\"http://<UDM_HOST>/nudm-sdm/v2/imsi-22277%00INJECTED/trace-data\\\"\\ncurl \\\"http://<UDM_HOST>/nudm-sdm/v2/imsi-22277%00INJECTED/sm-data\\\"\\n\\n# Expected (vulnerable) response:\\n# HTTP 500\\n# {\\n#   \\\"title\\\": \\\"System failure\\\",\\n#   \\\"status\\\": 500,\\n#   \\\"detail\\\": \\\"parse \\\\\\\"http://udr.internal:80/nudr-dr/v2/subscription-data/imsi-22277\\\\x00INJECTED//provisioned-data/smf-selection-subscription-data\\\\\\\": net/url: invalid control character in URL\\\",\\n#   \\\"cause\\\": \\\"SYSTEM_FAILURE\\\"\\n# }\\n\\n# Protected endpoint (for comparison) — returns 400\\ncurl \\\"http://<UDM_HOST>/nudm-sdm/v2/imsi-22277%00INJECTED/am-data\\\"\\n# HTTP 400\\n# {\\\"title\\\":\\\"Malformed request syntax\\\",\\\"status\\\":400,\\\"detail\\\":\\\"Supi is invalid\\\",\\\"cause\\\":\\\"MANDATORY_IE_INCORRECT\\\"}\\n```\\n\\n## Impact\\n\\nAn unauthenticated remote attacker can send a crafted GET request to any of the six affected endpoints to obtain:\\n\\n1. Internal UDR hostname and port\\n2. Full internal API path structure (`/nudr-dr/v2/subscription-data/...`)\\n3. UDR API version\\n4. Internal service naming convention\\n\\nThis information can be used to facilitate further attacks against the UDR or other internal 5G core components.\\n\\n## Recommended Fix\\n\\nAdd `validator.IsValidSupi()` to all six affected handlers, following the pattern already used in `HandleGetAmData`:\\n\\n```go\\nsupi := c.Params.ByName(\\\"supi\\\")\\nif !validator.IsValidSupi(supi) {\\n    problemDetail := models.ProblemDetails{\\n        Title:  \\\"Malformed request syntax\\\",\\n        Status: http.StatusBadRequest,\\n        Detail: \\\"Supi is invalid\\\",\\n        Cause:  \\\"MANDATORY_IE_INCORRECT\\\",\\n    }\\n    c.Set(sbi.IN_PB_DETAILS_CTX_STR, http.StatusText(int(problemDetail.Status)))\\n    c.JSON(int(problemDetail.Status), problemDetail)\\n    return\\n}\\n```\", \"epss\": {\"percentage\": 0.00324, \"percentile\": 0.24532}, \"ghsa_id\": \"GHSA-585v-hcgf-jhfr\", \"github_reviewed_at\": \"2026-05-07T02:09:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-585v-hcgf-jhfr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-585v-hcgf-jhfr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42459\"}], \"nvd_published_at\": \"2026-05-27T17:16:35Z\", \"published_at\": \"2026-05-07T02:09:58Z\", \"references\": [\"https://github.com/free5gc/free5gc/security/advisories/GHSA-585v-hcgf-jhfr\", \"https://github.com/free5gc/free5gc/security/advisories/GHSA-h4wg-rp7m-8xx4\", \"https://github.com/free5gc/udm/blob/v1.4.3/internal/sbi/api_subscriberdatamanagement.go\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42459\", \"https://github.com/advisories/GHSA-585v-hcgf-jhfr\"], \"repository_advisory_url\": \"https://api.github.com/repos/free5gc/free5gc/security-advisories/GHSA-585v-hcgf-jhfr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/free5gc/free5gc\", \"summary\": \"Free5GC UDM has Improper Input Validation and Generation of Error Messages Containing Sensitive Information\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:46:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-585v-hcgf-jhfr\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/free5gc/udm\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-585v-hcgf-jhfr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/free5gc/udm: <= 1.4.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-27642",
+      "CVE-2026-42459"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/free5gc/udm"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.062450Z",
+  "provenance": {
+    "content_sha256": "0ace60b055f3857ee6b7f43090c7d24bd77754cf3d714755e11922bf68d4ac5c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T02:09:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-585v-hcgf-jhfr",
+  "status": "active",
+  "title": "Free5GC UDM has Improper Input Validation and Generation of Error Messages Containing Sensitive Information",
+  "updated_at": "2026-06-08T23:46:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-585v-hcgf-jhfr"
+}

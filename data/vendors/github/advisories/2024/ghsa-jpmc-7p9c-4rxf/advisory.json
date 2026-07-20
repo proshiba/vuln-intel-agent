@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/41469221?v=4\", \"events_url\": \"https://api.github.com/users/markylaing/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/markylaing/followers\", \"following_url\": \"https://api.github.com/users/markylaing/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/markylaing/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/markylaing\", \"id\": 41469221, \"login\": \"markylaing\", \"node_id\": \"MDQ6VXNlcjQxNDY5MjIx\", \"organizations_url\": \"https://api.github.com/users/markylaing/orgs\", \"received_events_url\": \"https://api.github.com/users/markylaing/received_events\", \"repos_url\": \"https://api.github.com/users/markylaing/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/markylaing/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/markylaing/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/markylaing\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6601329?v=4\", \"events_url\": \"https://api.github.com/users/cookesan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cookesan/followers\", \"following_url\": \"https://api.github.com/users/cookesan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cookesan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cookesan\", \"id\": 6601329, \"login\": \"cookesan\", \"node_id\": \"MDQ6VXNlcjY2MDEzMjk=\", \"organizations_url\": \"https://api.github.com/users/cookesan/orgs\", \"received_events_url\": \"https://api.github.com/users/cookesan/received_events\", \"repos_url\": \"https://api.github.com/users/cookesan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cookesan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cookesan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cookesan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2024-6219\", \"cvss\": {\"score\": 3.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-295\", \"name\": \"Improper Certificate Validation\"}], \"description\": \"### Summary\\nIf a `server.ca` file is present in `LXD_DIR` at LXD start up, LXD is in \\\"PKI mode\\\". In this mode, all clients must have certificates that have been signed by the CA. \\n\\nThe LXD configuration option `core.trust_ca_certificates` defaults to `false`. This means that although the client certificate has been signed by the CA, LXD will additionally add the certificate to the trust store and verify it via mTLS.\\n\\nWhen a restricted certificate is added to the trust store in this mode, it's restrictions are not honoured, and the client has full access to LXD.\\n\\n### Details\\nWhen authorization was refactored to allow for generalisation (at the time for TLS, RBAC, and OpenFGA, see https://github.com/canonical/lxd/pull/12313), PKI mode did not account for the `core.trust_ca_certificates` configuration option. When this option is enabled, all CA-signed client certificates are given full access to LXD. [This cherry-pick from Incus](https://github.com/canonical/lxd/pull/12513/commits/5cdc9a35b9c51e981b1e70330bde0413ccacc7fd) was added to LXD to fix the issue. \\n\\nThe cherry-pick fixed the immediate issue and allowed full access to LXD for CA-signed client certificates when `core.trust_ca_certificates` is enabled, but did not consider the behaviour of LXD when `core.trust_ca_certificates` is disabled. \\n\\nWhen `core.trust_ca_certificates` is false, restrictions that are applied to a certificate should be honoured. Instead, they are being ignored due to the presence of a `server.ca` file in `LXD_DIR`.\\n\\n### PoC\\n```\\n# Install/initialize LXD\\n$ snap install lxd --channel 5.21/stable\\n$ lxd init --auto\\n$ lxc config set core.https_address=127.0.0.1:8443\\n\\n# Use easyrsa for configuring CA: https://github.com/OpenVPN/easy-rsa\\n$ cp -R /usr/share/easy-rsa \\\"/tmp/pki\\\"\\n$ export EASYRSA_KEY_SIZE=4096\\n$ cd /tmp/pki\\n$ ./easyrsa init-pki\\n$ echo \\\"lxd\\\" | ./easyrsa build-ca nopass\\n$ ./easyrsa build-client-full lxd-client nopass\\n$ cp pki/ca.crt /var/snap/lxd/common/lxd/server.ca\\n$ cp pki/issued/lxd-client.crt ~/snap/lxd/common/config/client.crt\\n$ cp pki/private/lxd-client.key ~/snap/lxd/common/config/client.key\\n\\n# Restart daemon.\\n$ systemctl reload snap.lxd.daemon\\n\\n# Add a restricted certificate to the trust store.\\n$ token=\\\"$(lxc config trust add --name ca-test --quiet --restricted)\\\"\\n$ lxc remote add tls \\\"${token}\\\"\\n\\n# Our client has a CA-signed certificate, but it is restricted, so the client should not be able to view server config.\\n$ lxc config get tls: core.https_address\\n127.0.0.1:8443\\n```\\n\\n### Impact\\nI believe this vulnerability is low impact because PKI mode is:\\n1. Not the standard or recommended mode of operation for LXD.\\n2. While `core.trust_ca_certificates` defaults to false, we believe that users who enable PKI mode will generally have `core.trust_ca_certificates` enabled to allow for passwordless PKI with CRL revocation (see https://github.com/canonical/lxd/issues/3832). When this mode is enabled, all clients with CA-signed certificates have root access* anyway.\\n\\n*Note: If a restricted certificate is added before `core.trust_ca_certificates` is enabled, the certificate becomes unrestricted. We believe this was the original intention of the PR, but this should be changed to disallow any unintended permission change.\", \"epss\": {\"percentage\": 0.00156, \"percentile\": 0.05127}, \"ghsa_id\": \"GHSA-jpmc-7p9c-4rxf\", \"github_reviewed_at\": \"2024-12-09T22:43:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-jpmc-7p9c-4rxf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jpmc-7p9c-4rxf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2024-6219\"}], \"nvd_published_at\": \"2024-12-06T00:15:04Z\", \"published_at\": \"2024-12-09T22:43:13Z\", \"references\": [\"https://github.com/canonical/lxd/security/advisories/GHSA-jpmc-7p9c-4rxf\", \"https://nvd.nist.gov/vuln/detail/CVE-2024-6219\", \"https://github.com/canonical/lxd/pull/12313\", \"https://pkg.go.dev/vuln/GO-2024-3313\", \"https://www.cve.org/CVERecord?id=CVE-2024-6219\", \"https://github.com/canonical/lxd/commit/5cdc9a35b9c51e981b1e70330bde0413ccacc7fd\", \"https://github.com/advisories/GHSA-jpmc-7p9c-4rxf\"], \"repository_advisory_url\": \"https://api.github.com/repos/canonical/lxd/security-advisories/GHSA-jpmc-7p9c-4rxf\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/canonical/lxd\", \"summary\": \"lxd has a restricted TLS certificate privilege escalation when in PKI mode\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T19:31:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-jpmc-7p9c-4rxf\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20240403103450-0e7f2b5bf4d2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/canonical/lxd\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20240403103450-0e7f2b5bf4d2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jpmc-7p9c-4rxf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/canonical/lxd: < 0.0.0-20240403103450-0e7f2b5bf4d2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2024-6219"
+    ],
+    "cvss_score": 3.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/canonical/lxd"
+    ],
+    "remote": false,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.084721Z",
+  "provenance": {
+    "content_sha256": "a69faf241f2e0a9109e6ce53bd061e43532aa4eedc3c0526ff5d2e600488f101",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2024-12-09T22:43:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jpmc-7p9c-4rxf",
+  "status": "active",
+  "title": "lxd has a restricted TLS certificate privilege escalation when in PKI mode",
+  "updated_at": "2026-06-26T19:31:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jpmc-7p9c-4rxf"
+}

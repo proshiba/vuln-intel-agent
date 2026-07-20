@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nKoel's Subsonic `createPodcastChannel.view` endpoint accepts a user supplied podcast feed URL and fetches it server-side before applying the safe URL checks that are used for podcast episode enclosure URLs. An authenticated Subsonic API user can provide a loopback or internal URL as the feed URL and cause the Koel backend to issue a request to that address.\\n\\nA related redirect gap exists in the podcast stream helper: `PodcastService::getStreamableUrl()` validates only the original URL, then lets Guzzle follow redirects and accepts the final redirected URL without re-validating it.\\n\\n## Impact\\n\\nAn attacker with any valid Koel account and Subsonic API key can trigger server-side requests from the Koel host to loopback or internal network services. This can be used for blind SSRF against internal HTTP endpoints reachable by the Koel deployment. If an internal service returns valid RSS/XML or permissive CORS responses, parts of the response or final URL may be reflected back through normal podcast or stream behavior.\\n\\n## Reproduction\\n\\n1. Start Koel v9.6.0 or current main and create a normal user.\\n2. Obtain the user's Subsonic API key.\\n3. Start a local canary HTTP server on the Koel host at `127.0.0.1:8103` that records requests and returns this minimal RSS feed:\\n\\n```xml\\n<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?>\\n<rss version=\\\"2.0\\\">\\n  <channel>\\n    <title>Internal Canary Feed</title>\\n    <link>https://example.com/</link>\\n    <description>Internal feed SSRF canary</description>\\n    <item>\\n      <title>Episode One</title>\\n      <guid>koel-internal-canary-episode-1</guid>\\n      <pubDate>Mon, 01 Jun 2026 12:00:00 GMT</pubDate>\\n      <enclosure url=\\\"https://example.com/episode.mp3\\\" length=\\\"1\\\" type=\\\"audio/mpeg\\\" />\\n    </item>\\n  </channel>\\n</rss>\\n```\\n\\n4. Send an authenticated Subsonic request:\\n\\n```http\\nGET /rest/createPodcastChannel.view?apiKey=<SUBSONIC_API_KEY>&f=json&url=http://127.0.0.1:8103/feed.xml HTTP/1.1\\nHost: koel.example\\n```\\n\\n5. The endpoint returns a successful Subsonic response and the canary records a backend request:\\n\\n```text\\nGET /feed.xml\\n```\\n\\nUnauthenticated control: the same request without a valid API key fails and does not hit the canary.\\n\\nRedirect control for the stream helper: calling `PodcastService::getStreamableUrl()` with direct `http://127.0.0.1:8102/secret` returns `null` and makes no canary request. Calling it with a safe-looking public URL that redirects to `http://127.0.0.1:8102/secret` causes the backend to request `OPTIONS /secret` and returns the loopback final URL.\\n\\n## Root cause\\n\\n`app/Http/Requests/Subsonic/CreatePodcastChannelRequest.php` validates `url` only as `required|string|url`. The controller passes it to `PodcastService::addPodcast()`, where `PodcastService.php` calls `createParser($url)` and `Poddle::fromUrl($url, ...)` before any `Network::isSafeUrl()` check. The enclosure URL guard in `synchronizeEpisodes()` runs later and only covers episode enclosure URLs, not the feed URL that was already fetched.\\n\\nFor streaming, `PodcastService::getStreamableUrl()` checks `Network::isSafeUrl($url)` on the original URL, then follows redirects with Guzzle and accepts the last redirect target from `X-Guzzle-Redirect-History` without validating that target.\\n\\n## Remediation\\n\\nValidate the podcast feed URL with the same safe URL policy before `Poddle::fromUrl()` performs any request. Re-validate every redirect target before following it, or disable automatic redirects and manually fetch only targets that pass the safe URL policy. Apply the same redirect validation in `getStreamableUrl()`. Add regression tests for direct loopback and private IP feed URLs, DNS names resolving to private ranges, and public URL to loopback redirects.\", \"ghsa_id\": \"GHSA-8q6q-m837-fv64\", \"github_reviewed_at\": \"2026-07-15T17:31:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-8q6q-m837-fv64\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8q6q-m837-fv64\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T17:31:12Z\", \"references\": [\"https://github.com/koel/koel/security/advisories/GHSA-8q6q-m837-fv64\", \"https://github.com/koel/koel/releases/tag/v9.7.0\", \"https://github.com/advisories/GHSA-8q6q-m837-fv64\"], \"repository_advisory_url\": \"https://api.github.com/repos/koel/koel/security-advisories/GHSA-8q6q-m837-fv64\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/koel/koel\", \"summary\": \" Koel has SSRF through Authenticated Subsonic podcast feed URLs\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T17:31:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-8q6q-m837-fv64\", \"vulnerabilities\": [{\"first_patched_version\": \"9.7.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phanan/koel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8q6q-m837-fv64",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phanan/koel: <= 9.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phanan/koel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.992273Z",
+  "provenance": {
+    "content_sha256": "3d0a0ad32d4564ebd6c931b42f8277d136ea4031a50f909bb59015c38652f75d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T17:31:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8q6q-m837-fv64",
+  "status": "active",
+  "title": " Koel has SSRF through Authenticated Subsonic podcast feed URLs",
+  "updated_at": "2026-07-15T17:31:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8q6q-m837-fv64"
+}

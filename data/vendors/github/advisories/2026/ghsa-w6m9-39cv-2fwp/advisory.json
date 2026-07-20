@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/165803850?v=4\", \"events_url\": \"https://api.github.com/users/QiaoNPC/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/QiaoNPC/followers\", \"following_url\": \"https://api.github.com/users/QiaoNPC/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/QiaoNPC/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/QiaoNPC\", \"id\": 165803850, \"login\": \"QiaoNPC\", \"node_id\": \"U_kgDOCeH3Sg\", \"organizations_url\": \"https://api.github.com/users/QiaoNPC/orgs\", \"received_events_url\": \"https://api.github.com/users/QiaoNPC/received_events\", \"repos_url\": \"https://api.github.com/users/QiaoNPC/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/QiaoNPC/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/QiaoNPC/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/QiaoNPC\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/272386658?v=4\", \"events_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/followers\", \"following_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Across-Verticals-Malaysia\", \"id\": 272386658, \"login\": \"Across-Verticals-Malaysia\", \"node_id\": \"U_kgDOEDxKYg\", \"organizations_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/orgs\", \"received_events_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/received_events\", \"repos_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Across-Verticals-Malaysia/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Across-Verticals-Malaysia\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25802519?v=4\", \"events_url\": \"https://api.github.com/users/enchant97/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/enchant97/followers\", \"following_url\": \"https://api.github.com/users/enchant97/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/enchant97/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/enchant97\", \"id\": 25802519, \"login\": \"enchant97\", \"node_id\": \"MDQ6VXNlcjI1ODAyNTE5\", \"organizations_url\": \"https://api.github.com/users/enchant97/orgs\", \"received_events_url\": \"https://api.github.com/users/enchant97/received_events\", \"repos_url\": \"https://api.github.com/users/enchant97/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/enchant97/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/enchant97/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/enchant97\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40263\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-208\", \"name\": \"Observable Timing Discrepancy\"}], \"description\": \"### Summary\\nA timing side-channel in the login endpoint allows unauthenticated attackers to determine whether a username exists by measuring response time differences. Requests for valid usernames take noticeably longer because the server performs bcrypt password verification, while requests for nonexistent usernames return much faster. This enables reliable remote username enumeration and increases the risk of targeted credential attacks.\\n\\n### Details\\nThe issue affects the login endpoint:\\n\\n- `POST /api/auth/token`\\n\\nThe root cause is that authentication processing takes different code paths depending on whether the supplied username exists. When the username is found, the server performs `bcrypt.CompareHashAndPassword`, which adds substantial latency. When the username does not exist, the server returns immediately without performing an equivalent bcrypt operation.\\n\\nVulnerable flow:\\n\\n```go\\nuser, err := db.Where(\\\"username = ?\\\", username).First(&user)\\nif err != nil {\\n    return ErrUnauthorized\\n}\\nerr = bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(password))\\n```\\n\\nThis creates a measurable timing discrepancy between:\\n- **existing username + wrong password** requests, which incur bcrypt cost\\n- **nonexistent username + any password** requests, which avoid bcrypt entirely\\n\\nBecause no constant-time equalization is performed, the endpoint leaks account existence through timing behavior.\\n\\nThe measurements provided show a large and consistent gap between the two cases across repeated trials, making the difference distinguishable without requiring especially high request volume. In the supplied test results:\\n- existing user requests averaged about `0.0616s`\\n- nonexistent user requests averaged about `0.0027s`\\n\\nThat gap is large enough to support reliable username enumeration under typical testing conditions.\\n\\n### PoC\\nThe issue can be reproduced by sending repeated authentication attempts to the login endpoint using the same invalid password while alternating between a known valid username and a nonexistent username, then comparing average response times. Valid usernames consistently take longer because bcrypt verification is performed.\\n\\n### Impact\\n- **Type:** Timing side-channel / username enumeration\\n- **Who is impacted:** Any deployment exposing the affected login endpoint\\n- **Security impact:** Unauthenticated attackers can confirm valid usernames one at a time, improving the effectiveness of credential stuffing, password spraying, phishing, and other targeted account attacks\\n- **Attack preconditions:** None beyond network access to the login endpoint\\n- **Confidentiality impact:** Low to moderate, depending on the sensitivity of account existence in the target environment\", \"epss\": {\"percentage\": 0.002, \"percentile\": 0.09845}, \"ghsa_id\": \"GHSA-w6m9-39cv-2fwp\", \"github_reviewed_at\": \"2026-04-13T19:31:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-w6m9-39cv-2fwp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w6m9-39cv-2fwp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40263\"}], \"nvd_published_at\": \"2026-04-17T01:17:40Z\", \"published_at\": \"2026-04-13T19:31:50Z\", \"references\": [\"https://github.com/enchant97/note-mark/security/advisories/GHSA-w6m9-39cv-2fwp\", \"https://github.com/enchant97/note-mark/commit/cf4c6f6acf70b569d80396d323b067c00d45c034\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40263\", \"https://github.com/advisories/GHSA-w6m9-39cv-2fwp\"], \"repository_advisory_url\": \"https://api.github.com/repos/enchant97/note-mark/security-advisories/GHSA-w6m9-39cv-2fwp\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/enchant97/note-mark\", \"summary\": \"Note Mark: Username Enumeration via Login Endpoint Timing Side-Channel\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:37:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-w6m9-39cv-2fwp\", \"vulnerabilities\": [{\"first_patched_version\": \"0.19.2-0.20260411145025-cf4c6f6acf70\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/enchant97/note-mark/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.19.2-0.20260411145025-cf4c6f6acf70\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w6m9-39cv-2fwp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/enchant97/note-mark/backend: < 0.19.2-0.20260411145025-cf4c6f6acf70"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40263"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/enchant97/note-mark/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.842811Z",
+  "provenance": {
+    "content_sha256": "fb10f55c2d6376ff294bfe38712d50d9d9cad1251afc3a3969f2b12910fa19c6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-13T19:31:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w6m9-39cv-2fwp",
+  "status": "active",
+  "title": "Note Mark: Username Enumeration via Login Endpoint Timing Side-Channel",
+  "updated_at": "2026-04-24T20:37:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w6m9-39cv-2fwp"
+}

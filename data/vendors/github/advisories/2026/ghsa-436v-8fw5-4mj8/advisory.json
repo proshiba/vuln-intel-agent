@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/46104508?v=4\", \"events_url\": \"https://api.github.com/users/kq5y/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kq5y/followers\", \"following_url\": \"https://api.github.com/users/kq5y/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kq5y/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kq5y\", \"id\": 46104508, \"login\": \"kq5y\", \"node_id\": \"MDQ6VXNlcjQ2MTA0NTA4\", \"organizations_url\": \"https://api.github.com/users/kq5y/orgs\", \"received_events_url\": \"https://api.github.com/users/kq5y/received_events\", \"repos_url\": \"https://api.github.com/users/kq5y/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kq5y/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kq5y/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kq5y\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-35533\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"### Summary\\n\\n`mise` loads trust-control settings from a local project `.mise.toml` before the trust check runs. An attacker who can place a malicious `.mise.toml` in a repository can make that same file appear trusted and then reach dangerous directives such as `[env] _.source`, templates, hooks, or tasks.\\n\\nThe strongest current variant is `trusted_config_paths = [\\\"/\\\"]`. I confirmed on current `v2026.3.17` in Docker that this causes an untrusted project config to become trusted during `mise hook-env`, which then executes an attacker-controlled `_.source` script. The same preload issue also lets local `yes = true` / `ci = true` auto-approve trust prompts on `v2026.2.18+`, but the primary PoC below uses the stronger `trusted_config_paths` path.\\n\\n### Details\\n\\nThe vulnerable load order is:\\n\\n1. [`Settings::try_get()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/settings.rs#L254-L283) preloads local settings files.\\n2. [`parse_settings_file()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/settings.rs#L505-L510) returns `settings_file.settings` without checking whether the file is trusted.\\n3. [`trust_check()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/config_file/mod.rs#L297-L321) later consults those already-loaded settings.\\n\\nThe main trust-bypass path is in [`is_trusted()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/config_file/mod.rs#L324-L387):\\n\\n```rust\\nlet settings = Settings::get();\\nfor p in settings.trusted_config_paths() {\\n    if canonicalized_path.starts_with(p) {\\n        add_trusted(canonicalized_path.to_path_buf());\\n        return true;\\n    }\\n}\\n```\\n\\nIf a local project file sets:\\n\\n```toml\\n[settings]\\ntrusted_config_paths = [\\\"/\\\"]\\n```\\n\\nthen every absolute path matches, so the same untrusted file is marked trusted before the dangerous-directive guard is reached.\\n\\nRelated variant: [`trust_check()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/config_file/mod.rs#L307-L316) auto-accepts explicit trust prompts when `Settings::get().yes` is true, and [`Settings::try_get()`](https://github.com/jdx/mise/blob/37997e70cd2216d1a86726fba0c8c09c3986ad06/src/config/settings.rs#L330-L332) sets `yes = true` when `ci` is set. I confirmed that regression on `v2026.2.18`, but the primary PoC below does not depend on it.\\n\\n### PoC\\n\\nTest environment:\\n\\n- Docker\\n- `linux-arm64`\\n- `mise v2026.3.17`\\n\\nNegative control:\\n\\n```toml\\n[env]\\n_.source = [\\\"./poc.sh\\\"]\\n```\\n\\n`mise ls` fails with:\\n\\n```text\\nConfig files in /work/poc/.mise.toml are not trusted.\\n```\\n\\nand `/tmp/mise-proof.txt` is not created.\\n\\nPrimary exploit:\\n\\n```toml\\n[settings]\\ntrusted_config_paths = [\\\"/\\\"]\\n\\n[env]\\n_.source = [\\\"./poc.sh\\\"]\\n```\\n\\nwith:\\n\\n```bash\\n#!/usr/bin/env bash\\necho trusted_paths_hookenv > /tmp/mise-proof.txt\\n```\\n\\nThen:\\n\\n```bash\\nmise hook-env -s bash --force\\n```\\n\\nObserved:\\n\\n```text\\n/tmp/mise-proof.txt => trusted_paths_hookenv\\n```\\n\\nRelated regression check:\\n\\n- `v2026.2.17`: local `yes = true` does not bypass trust\\n- `v2026.2.18`: the same local `yes = true` value auto-approves the trust prompt and the side effect file is created\\n\\n### Impact\\n\\nAn attacker who can place a `.mise.toml` in a repository can make `mise` trust and evaluate dangerous directives from that same untrusted file.\\n\\nDemonstrated on current supported versions:\\n\\n- execution via `[env] _.source` during `mise hook-env`\\n- bypass of the protection that `mise trust` is supposed to provide for dangerous config features\\n\\nOn newer versions, the same root cause also lets local `yes` / `ci` values auto-approve explicit trust prompts.\\n\\n### Suggested Fix\\n\\nDo not honor trust-control settings from non-global project config files.\\n\\nAt minimum, ignore these fields when loading local project config:\\n\\n- `trusted_config_paths`\\n- `yes`\\n- `ci`\\n- `paranoid`\\n\\nFor example:\\n\\n```rust\\npub fn parse_settings_file(path: &Path) -> Result<SettingsPartial> {\\n    let raw = file::read_to_string(path)?;\\n    let settings_file: SettingsFile = toml::from_str(&raw)?;\\n    let mut settings = settings_file.settings;\\n\\n    if !config::is_global_config(path) {\\n        settings.yes = None;\\n        settings.ci = None;\\n        settings.trusted_config_paths = None;\\n        settings.paranoid = None;\\n    }\\n\\n    Ok(settings)\\n}\\n```\", \"epss\": {\"percentage\": 0.00154, \"percentile\": 0.0488}, \"ghsa_id\": \"GHSA-436v-8fw5-4mj8\", \"github_reviewed_at\": \"2026-04-07T20:13:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-436v-8fw5-4mj8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-436v-8fw5-4mj8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-35533\"}], \"nvd_published_at\": \"2026-04-07T21:17:17Z\", \"published_at\": \"2026-04-07T20:13:11Z\", \"references\": [\"https://github.com/jdx/mise/security/advisories/GHSA-436v-8fw5-4mj8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-35533\", \"https://github.com/advisories/GHSA-436v-8fw5-4mj8\"], \"repository_advisory_url\": \"https://api.github.com/repos/jdx/mise/security-advisories/GHSA-436v-8fw5-4mj8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jdx/mise\", \"summary\": \"Local settings bypass config trust checks\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T19:30:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-436v-8fw5-4mj8\", \"vulnerabilities\": [{\"first_patched_version\": \"2026.6.4\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"mise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2026.2.18, < 2026.6.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-436v-8fw5-4mj8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mise: >= 2026.2.18, < 2026.6.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-35533"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mise"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.980321Z",
+  "provenance": {
+    "content_sha256": "030964d982dc057ddb5d4de817c04a9fb27f152813e95d44c4e30580839a9167",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-07T20:13:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-436v-8fw5-4mj8",
+  "status": "active",
+  "title": "Local settings bypass config trust checks",
+  "updated_at": "2026-06-12T19:30:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-436v-8fw5-4mj8"
+}

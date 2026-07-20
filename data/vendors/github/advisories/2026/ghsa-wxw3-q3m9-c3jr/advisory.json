@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/109031036?v=4\", \"events_url\": \"https://api.github.com/users/Jvr2022/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jvr2022/followers\", \"following_url\": \"https://api.github.com/users/Jvr2022/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jvr2022/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jvr2022\", \"id\": 109031036, \"login\": \"Jvr2022\", \"node_id\": \"U_kgDOBn-ufA\", \"organizations_url\": \"https://api.github.com/users/Jvr2022/orgs\", \"received_events_url\": \"https://api.github.com/users/Jvr2022/received_events\", \"repos_url\": \"https://api.github.com/users/Jvr2022/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jvr2022/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jvr2022/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jvr2022\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28645413?v=4\", \"events_url\": \"https://api.github.com/users/alavesa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/alavesa/followers\", \"following_url\": \"https://api.github.com/users/alavesa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/alavesa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/alavesa\", \"id\": 28645413, \"login\": \"alavesa\", \"node_id\": \"MDQ6VXNlcjI4NjQ1NDEz\", \"organizations_url\": \"https://api.github.com/users/alavesa/orgs\", \"received_events_url\": \"https://api.github.com/users/alavesa/received_events\", \"repos_url\": \"https://api.github.com/users/alavesa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/alavesa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/alavesa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/alavesa\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}, {\"cwe_id\": \"CWE-352\", \"name\": \"Cross-Site Request Forgery (CSRF)\"}], \"description\": \"### Am I affected?\\n\\nUsers are affected if all of the following are true:\\n\\n- The application uses `better-auth` at a version below `1.6.2` (or `@better-auth/sso` paired with such a version).\\n- `betterAuth({ account: { storeStateStrategy } })` is set to `\\\"cookie\\\"`. The default `\\\"database\\\"` is not affected.\\n- The application wires at least one OAuth provider through `genericOAuth({ config })` with `pkce: false`, or it supplies a custom `getToken` or `tokenUrl` that does not require the stored `codeVerifier`. Stock social providers with PKCE on are not affected.\\n- The provider returns arbitrary `code` values to the configured callback URL.\\n\\nIf users are on `better-auth@1.6.2` or later, they are not affected.\\n\\nFix:\\n\\n1. Upgrade to `better-auth@1.6.2` or later (current stable is `1.6.10`).\\n2. If users cannot upgrade, see workarounds below.\\n\\n### Summary\\n\\nIn `parseGenericState`, the cookie branch decrypted the `oauth_state` cookie and validated expiry, but did not compare the incoming OAuth `state` query parameter to the nonce that `generateGenericState` issued at sign-in. Any callback to `/api/auth/oauth2/callback/<providerId>` that arrived with a forged `state` and any `code` was therefore accepted as long as the browser still held a live `oauth_state` cookie. With `pkce: false` (or any `getToken` path that does not enforce a code-verifier round-trip), an attacker who forced the victim to deliver an attacker-controlled authorization code to the callback would mint a session bound to the attacker's external identity in the victim's browser. Account-linking flows behaved the same way, binding the attacker's external account to an authenticated victim row.\\n\\n### Details\\n\\nThe cookie branch of `parseGenericState` did not compare the cookie's stored nonce to the incoming `state` parameter. The database branch (the default) was not affected because the verification row is keyed by `state` and the lookup itself enforces equality.\\n\\nThe fix re-binds the cookie to the nonce: `generateGenericState` writes `oauthState: state` into the encrypted payload before storage, and `parseGenericState` rejects when `parsedData.oauthState !== state`. The same primitive covers every caller (`generic-oauth`, social, account-link, oauth-proxy passthrough, OIDC SSO, SAML relay state).\\n\\n### Patches\\n\\nFixed in `better-auth@1.6.2` via [PR #8949](https://github.com/better-auth/better-auth/pull/8949) (commit `9deb7936a`, merged 2026-04-09). The cookie branch of `parseGenericState` now rejects when the encrypted payload's nonce does not match the incoming `state` parameter; the database branch gained a defense-in-depth equality check.\\n\\n### Workarounds\\n\\nIf users cannot upgrade immediately:\\n\\n- **Switch `storeStateStrategy` back to `\\\"database\\\"`** (the default). This closes the cookie-only bypass without a code change.\\n- **Enable `pkce: true`** on every affected `genericOAuth` provider. The `codeVerifier` is the missing primitive that the attacker cannot supply.\\n\\n### Impact\\n\\n- **Forced-login (CSRF on OAuth callback)**: the attacker forces the victim's browser into an authenticated session bound to the attacker's external identity, allowing the attacker to observe the victim's actions inside the application.\\n- **Persistent account linking**: account-link flows bind the attacker's external account to the victim's authenticated row, granting persistent access until the link is removed.\\n\\n### Credit\\n\\nReported by @Jvr2022 via private advisory disclosure, and by @alavesa (PatchPilots audit) via the public duplicate [issue #8897](https://github.com/better-auth/better-auth/issues/8897).\\n\\n### Resources\\n\\n- [CWE-352: Cross-Site Request Forgery (CSRF)](https://cwe.mitre.org/data/definitions/352.html)\\n- [CWE-345: Insufficient Verification of Data Authenticity](https://cwe.mitre.org/data/definitions/345.html)\\n- [CWE-287: Improper Authentication](https://cwe.mitre.org/data/definitions/287.html)\\n- [RFC 6749 §10.12: Cross-Site Request Forgery](https://datatracker.ietf.org/doc/html/rfc6749#section-10.12)\\n- [RFC 7636: Proof Key for Code Exchange](https://datatracker.ietf.org/doc/html/rfc7636)\", \"ghsa_id\": \"GHSA-wxw3-q3m9-c3jr\", \"github_reviewed_at\": \"2026-05-15T17:33:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-wxw3-q3m9-c3jr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wxw3-q3m9-c3jr\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-15T17:33:40Z\", \"references\": [\"https://github.com/better-auth/better-auth/security/advisories/GHSA-wxw3-q3m9-c3jr\", \"https://github.com/better-auth/better-auth/issues/8897\", \"https://github.com/better-auth/better-auth/pull/8949\", \"https://github.com/better-auth/better-auth/commit/9deb7936aba7931f2db4b460141f476508f11bfd\", \"https://github.com/advisories/GHSA-wxw3-q3m9-c3jr\"], \"repository_advisory_url\": \"https://api.github.com/repos/better-auth/better-auth/security-advisories/GHSA-wxw3-q3m9-c3jr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/better-auth/better-auth\", \"summary\": \"Better Auth: OAuth callback accepts mismatched `state` when cookie-backed state storage is used without PKCE\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T17:33:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-wxw3-q3m9-c3jr\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"better-auth\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.6.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wxw3-q3m9-c3jr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "better-auth: < 1.6.2"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "better-auth"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.160191Z",
+  "provenance": {
+    "content_sha256": "ae797df6643ddbb731f4086269fcb8449581e7b7e2efa3ec1865bc7dc064ea89",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-15T17:33:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wxw3-q3m9-c3jr",
+  "status": "active",
+  "title": "Better Auth: OAuth callback accepts mismatched `state` when cookie-backed state storage is used without PKCE",
+  "updated_at": "2026-05-15T17:33:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wxw3-q3m9-c3jr"
+}

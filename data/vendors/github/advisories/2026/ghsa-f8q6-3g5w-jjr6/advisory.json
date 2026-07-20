@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48014\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\nThis is a vertical authorization bypass in the Admin API affecting order state transition features (`/api/_action/order/{orderId}/state/{transition}` and similar transaction/delivery transition routes). The root cause is that the transition action routes do not declare required server-side ACL privileges, allowing low-privileged users to pass the authorization boundary. As a result, authenticated users without `order:update` can still change order states, causing real security impact such as operational integrity loss, automation workflow misuse, and fulfillment/settlement/support process disruption.\\n\\n## Description\\nShopware’s permission model requires server-side enforcement independent of UI guards. However, the dedicated order-state transition action endpoints are missing ACL metadata, so accounts without regular order update privileges can still submit transition requests that are processed by the backend. In real reproduction, the same low-privileged account receives 403 on the normal order update API, while the transition action API succeeds with 200 and updates order state in the database. The key point is that reproduction is possible through direct API calls regardless of UI access restrictions or hidden buttons. This is not a functional edge case; it is an implementation gap in authorization boundaries that enables privilege escalation behavior where a “read/limited-edit” user can control order lifecycle states.\\n\\n### Expected Behavior\\n- Order, order-transaction, and order-delivery transition endpoints must perform explicit server-side ACL checks.\\n- Requests should be rejected unless the caller has the proper entity update privileges, such as `order:update`, `order_transaction:update`, or `order_delivery:update`.\\n- If an account gets 403 on the normal order update API, transition actions on the same protected resource should also be blocked by equivalent policy.\\n- Even if transition internals use SYSTEM_SCOPE, caller authorization must be validated before entering the transition execution path.\\n\\n### Root Cause\\nFile: `src/Core/Checkout/Order/Api/OrderActionController.php`\\n\\n```php\\n#[Route(\\n    path: '/api/_action/order/{orderId}/state/{transition}',\\n    name: 'api.action.order.state_machine.order.transition_state',\\n    methods: [Request::METHOD_POST]\\n)]\\npublic function orderStateTransition(\\n    string $orderId,\\n    string $transition,\\n    Request $request,\\n    Context $context\\n): JsonResponse {\\n    $toPlace = $this->orderService->orderStateTransition(\\n        $orderId,\\n        $transition,\\n        $request->request,\\n        $context\\n    );\\n\\n    return new JsonResponse($toPlace->jsonSerialize());\\n}\\n```\\n\\nThis route exposes state transitions but forwards user-controlled inputs (`orderId`, `transition`) into the service layer without `PlatformRequest::ATTRIBUTE_ACL` and without an explicit `context->isAllowed(...)` privilege check. An untrusted caller can directly control the transition target.\\n\\nFile: `src/Core/Framework/Api/Acl/AclAnnotationValidator.php`\\n\\n```php\\n$privileges = $request->attributes->get(PlatformRequest::ATTRIBUTE_ACL);\\n\\nif (!$privileges) {\\n    return;\\n}\\n```\\n\\nIf route ACL metadata is absent, ACL validation exits immediately. Therefore these action routes skip authorization validation entirely.\\n\\nFile: `src/Core/System/StateMachine/StateMachineRegistry.php`\\n\\n```php\\npublic function transition(Transition $transition, Context $context): StateMachineStateCollection\\n{\\n    return $context->scope(Context::SYSTEM_SCOPE, function (Context $context) use ($transition): StateMachineStateCollection {\\n        // ...\\n        $this->stateMachineHistoryRepository->create([$stateMachineHistoryEntity], $context);\\n        $repository->upsert($data, $context);\\n        // ...\\n    });\\n}\\n```\\n\\nTransitions run in SYSTEM_SCOPE and persist state/history with system context. This requires strict pre-authorization at the route/controller boundary, but that pre-check is missing, so low-privileged calls still lead to real state changes.\\n\\n## Impact\\nThe precondition is a remotely reachable authenticated low-privileged Admin API user (for example, operator/support account, or a compromised restricted account). The attacker only needs a valid order identifier, then calls transition action endpoints to cancel/reopen/advance order states without intended update privileges. This attack remains feasible even when UI access is restricted, because direct API calls still work. As a result, business workflows can be manipulated: order lifecycle integrity is broken, payment/shipping/document/notification/automation flows can be triggered incorrectly, and operational disruption can follow. In realistic scenarios, an attacker with a restricted account can mass-cancel or selectively alter orders, causing customer-support spikes, settlement inconsistencies, fulfillment mistakes, and practical availability degradation of day-to-day operations.\\n\\n## Patch Recommendation\\n- Add explicit ACL requirements to order/order-transaction/order-delivery transition routes in `OrderActionController`, aligned with entity update privileges.\\n- Centralize server-side privilege checks at transition entry points so transition paths and normal update paths follow consistent authorization policy.\\n- Keep SYSTEM_SCOPE writes strictly behind authorization gates; ensure caller privilege decisions are completed in pre-check logic before transition execution.\\n- Review transition-related APIs to guarantee privilege model mapping (`order:*`, `order_transaction:*`, `order_delivery:*`) is consistently enforced and no unprotected route remains.\", \"epss\": {\"percentage\": 0.00233, \"percentile\": 0.14162}, \"ghsa_id\": \"GHSA-f8q6-3g5w-jjr6\", \"github_reviewed_at\": \"2026-06-04T19:33:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-f8q6-3g5w-jjr6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f8q6-3g5w-jjr6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48014\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T19:33:02Z\", \"references\": [\"https://github.com/shopware/shopware/security/advisories/GHSA-f8q6-3g5w-jjr6\", \"https://github.com/shopware/shopware/releases/tag/v6.6.10.18\", \"https://github.com/shopware/shopware/releases/tag/v6.7.10.1\", \"https://github.com/advisories/GHSA-f8q6-3g5w-jjr6\"], \"repository_advisory_url\": \"https://api.github.com/repos/shopware/shopware/security-advisories/GHSA-f8q6-3g5w-jjr6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/shopware/shopware\", \"summary\": \"Shopware: Admin API ACL Bypass in Order State Transition Endpoints\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T19:33:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-f8q6-3g5w-jjr6\", \"vulnerabilities\": [{\"first_patched_version\": \"6.7.10.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 6.7.0.0, < 6.7.10.1\"}, {\"first_patched_version\": \"6.6.10.18\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 6.6.10.18\"}, {\"first_patched_version\": \"6.7.10.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 6.7.0.0, < 6.7.10.1\"}, {\"first_patched_version\": \"6.6.10.18\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 6.6.10.18\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f8q6-3g5w-jjr6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "shopware/core: < 6.6.10.18",
+      "shopware/core: >= 6.7.0.0, < 6.7.10.1",
+      "shopware/platform: < 6.6.10.18",
+      "shopware/platform: >= 6.7.0.0, < 6.7.10.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48014"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "shopware/core",
+      "shopware/platform"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.833035Z",
+  "provenance": {
+    "content_sha256": "f79151eb1b3e50271ff7c383a44040d2102476fcd1922de3fb445a2bd66cf719",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T19:33:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f8q6-3g5w-jjr6",
+  "status": "active",
+  "title": "Shopware: Admin API ACL Bypass in Order State Transition Endpoints",
+  "updated_at": "2026-06-04T19:33:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f8q6-3g5w-jjr6"
+}

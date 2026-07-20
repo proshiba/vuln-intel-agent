@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/60306789?v=4\", \"events_url\": \"https://api.github.com/users/morimori-dev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/morimori-dev/followers\", \"following_url\": \"https://api.github.com/users/morimori-dev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/morimori-dev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/morimori-dev\", \"id\": 60306789, \"login\": \"morimori-dev\", \"node_id\": \"MDQ6VXNlcjYwMzA2Nzg5\", \"organizations_url\": \"https://api.github.com/users/morimori-dev/orgs\", \"received_events_url\": \"https://api.github.com/users/morimori-dev/received_events\", \"repos_url\": \"https://api.github.com/users/morimori-dev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/morimori-dev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/morimori-dev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/morimori-dev\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44568\", \"cvss\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Vulnerability Details\\n\\n**CWE-79**: Cross-site Scripting (XSS)\\n\\nThe `AccountPending.svelte` component renders the admin-configured \\\"Pending User Overlay Content\\\" using `marked.parse()` inside `{@html}` with an incorrect DOMPurify application order:\\n\\n### Vulnerable Code\\n\\n**`src/lib/components/layout/Overlay/AccountPending.svelte` (lines 43-48)**:\\n\\n```svelte\\n{@html marked.parse(\\n    DOMPurify.sanitize(\\n        ($config?.ui?.pending_user_overlay_content ?? '').replace(/\\\\n/g, '<br>')\\n    )\\n)}\\n```\\n\\nDOMPurify is applied to the raw Markdown input **before** `marked.parse()` processes it. This is the wrong order. DOMPurify sanitizes the Markdown text (which contains no HTML tags), then `marked.parse()` converts Markdown link syntax into HTML `<a>` tags with `javascript:` href, and the result is rendered with `{@html}` unsanitized.\\n\\nThe correct pattern (used elsewhere in the codebase, e.g., `NotebookView.svelte:77`) is:\\n```javascript\\nDOMPurify.sanitize(marked.parse(src))  // sanitize AFTER markdown parsing\\n```\\n\\n## Steps to Reproduce\\n\\n### Prerequisites\\n- Open WebUI v0.8.10\\n- Admin account\\n- A second user account with \\\"pending\\\" role\\n\\n### Steps\\n\\n1. Log in as admin and navigate to **Admin Settings** → **Settings** → **General**.\\n\\n2. Set **Default User Role** to `pending`.\\n\\n3. In the **Pending User Overlay Content** field, enter:\\n```\\n# Account Pending\\n\\nYour account is under review.\\n\\n[Contact Support](javascript:alert(document.domain))\\n```\\n\\n4. Save the settings.\\n\\n5. In a separate browser (or incognito window), create a new account or log in as a pending user.\\n\\n6. The pending overlay is displayed. Click the \\\"Contact Support\\\" link.\\n\\n7. A JavaScript alert dialog appears showing `localhost` (the document domain), confirming XSS execution.\\n\\n### Verified Output\\n\\nThe `alert(document.domain)` executes successfully, displaying \\\"localhost\\\" in a JavaScript dialog box.\\n\\n## Impact\\n\\nAn admin can inject arbitrary JavaScript into the Pending User Overlay Content that executes in the browser context of any pending user who views the overlay page. This could be used to:\\n\\n- **Session hijacking**: Steal pending users' JWT tokens from cookies/localStorage\\n- **Credential theft**: Replace the pending overlay with a fake login form\\n- **Phishing**: Redirect pending users to malicious sites\\n\\nWhile this requires admin privileges to set the overlay content, it enables an admin to attack pending users (who have not yet been granted full access). In multi-admin deployments, a compromised admin account could use this to escalate attacks.\\n\\n## Proposed Fix\\n\\nApply DOMPurify **after** `marked.parse()`, not before:\\n\\n```svelte\\n<!-- Before (vulnerable): -->\\n{@html marked.parse(\\n    DOMPurify.sanitize(\\n        ($config?.ui?.pending_user_overlay_content ?? '').replace(/\\\\n/g, '<br>')\\n    )\\n)}\\n\\n<!-- After (fixed): -->\\n{@html DOMPurify.sanitize(\\n    marked.parse(\\n        ($config?.ui?.pending_user_overlay_content ?? '').replace(/\\\\n/g, '<br>'),\\n        { async: false }\\n    )\\n)}\\n```\\n<img width=\\\"1510\\\" height=\\\"1093\\\" alt=\\\"2026-03-23_03-07\\\" src=\\\"https://github.com/user-attachments/assets/bcc94dd6-4f06-472b-9979-9759458c76b3\\\" />\", \"epss\": {\"percentage\": 0.0017, \"percentile\": 0.06555}, \"ghsa_id\": \"GHSA-fq3v-xjjx-95rc\", \"github_reviewed_at\": \"2026-05-08T22:21:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-fq3v-xjjx-95rc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fq3v-xjjx-95rc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44568\"}], \"nvd_published_at\": \"2026-05-15T20:16:48Z\", \"published_at\": \"2026-05-08T22:21:33Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-fq3v-xjjx-95rc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44568\", \"https://github.com/advisories/GHSA-fq3v-xjjx-95rc\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-fq3v-xjjx-95rc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI has Stored XSS in Pending User Overlay via Incorrect DOMPurify Application Order\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:53:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-fq3v-xjjx-95rc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.12\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fq3v-xjjx-95rc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.8.12"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44568"
+    ],
+    "cvss_score": 4.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.998830Z",
+  "provenance": {
+    "content_sha256": "8c1fd1ebbe5e8f1800b618bfa6306dcfc1abd92bc4ad6a3e624786b4f0b5313e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T22:21:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fq3v-xjjx-95rc",
+  "status": "active",
+  "title": "Open WebUI has Stored XSS in Pending User Overlay via Incorrect DOMPurify Application Order",
+  "updated_at": "2026-05-15T23:53:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fq3v-xjjx-95rc"
+}

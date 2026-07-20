@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47069\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.1, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-93\", \"name\": \"Improper Neutralization of CRLF Sequences ('CRLF Injection')\"}], \"description\": \"### Summary\\n\\nCRLF injection in `hackney_cookie:setcookie/3` (`src/hackney_cookie.erl`). The function validates `Name` and `Value` against CR/LF and control characters but concatenates the `domain` and `path` options verbatim into the output binary. If either option carries attacker-controlled data, a `Host` header forwarded as the cookie domain, a request URI forwarded as the cookie path, a `\\\\r\\\\n` in the value splits the `Set-Cookie` header and lets the attacker inject additional headers into the HTTP response.\\n\\n### Details\\n\\n**1. Asymmetric validation**\\n\\nLines 27–34 of `hackney_cookie.erl` run `binary:match` on `Name` and `Value`, rejecting `=`, `,`, `;`, whitespace, `\\\\r`, `\\\\n`, `\\\\013`, and `\\\\014`. The `Domain` and `Path` options (lines 47 and 51) skip this check entirely and land straight in the result iolist:\\n\\n```erlang\\n[<<\\\"; Domain=\\\">>, Domain]\\n[<<\\\"; Path=\\\">>,   Path]\\n```\\n\\n`iolist_to_binary(...)` on line 63 flattens everything and returns it to the caller.\\n\\n**2. Injection**\\n\\nA `Path` of `<<\\\"/x\\\\r\\\\nSet-Cookie: admin=1; Path=/\\\">>` produces a binary with a literal `\\\\r\\\\n`. Written into a `Set-Cookie` response header, the receiving HTTP parser splits it into two headers — one legitimate, one attacker-controlled.\\n\\n**3. Realistic trigger**\\n\\nCommon patterns: keying the cookie domain off `Host`, deriving the path from the request URI, or copying a `Location` path into a cookie. Any of these lets a remote attacker control the injected content.\\n\\n### PoC\\n\\n1. Call `hackney_cookie:setcookie(<<\\\"sid\\\">>, <<\\\"abc\\\">>, [{path, <<\\\"/x\\\\r\\\\nSet-Cookie: admin=1; Path=/\\\">>}])`.\\n2. The returned binary contains a literal `\\\\r\\\\n` followed by a second `Set-Cookie:` line.\\n3. Write the result into a `Set-Cookie` response header — the client parses two headers, including `admin=1`.\\n\\n### Impact\\n\\nCookie injection / HTTP response splitting at the `hackney_cookie` API boundary. Affects hackney 0.9.0 through 4.0.0 wherever `domain` or `path` options are populated from request data. Exploitation can overwrite session/auth cookies, fix cookies, or strip `Secure`/`HttpOnly` flags. CVSS v4.0: **2.1 (LOW)** — requires attacker-controlled input to reach the `domain` or `path` option.\\n\\n## Resources\\n\\n* Introduction commit: https://github.com/benoitc/hackney/commit/602d5c7f2ea4acbc83ed75230655d935a0750ebc\\n* Patch commit: https://github.com/benoitc/hackney/commit/8e02b99c28aea1b3fa2ddc0e66f51fe5bb0ac540\", \"epss\": {\"percentage\": 0.00374, \"percentile\": 0.29501}, \"ghsa_id\": \"GHSA-mp55-p8c9-rfw2\", \"github_reviewed_at\": \"2026-06-26T21:54:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-mp55-p8c9-rfw2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mp55-p8c9-rfw2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47069\"}], \"nvd_published_at\": \"2026-05-25T15:16:21Z\", \"published_at\": \"2026-06-26T21:54:19Z\", \"references\": [\"https://github.com/benoitc/hackney/security/advisories/GHSA-mp55-p8c9-rfw2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47069\", \"https://github.com/benoitc/hackney/commit/8e02b99c28aea1b3fa2ddc0e66f51fe5bb0ac540\", \"https://cna.erlef.org/cves/CVE-2026-47069.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-47069\", \"https://github.com/advisories/GHSA-mp55-p8c9-rfw2\"], \"repository_advisory_url\": \"https://api.github.com/repos/benoitc/hackney/security-advisories/GHSA-mp55-p8c9-rfw2\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/benoitc/hackney\", \"summary\": \"Hackney has CRLF / header injection via unvalidated `domain` and `path` options\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T21:54:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-mp55-p8c9-rfw2\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.1\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"hackney\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.0, < 4.0.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mp55-p8c9-rfw2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "hackney: >= 0.9.0, < 4.0.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47069"
+    ],
+    "cvss_score": 2.1,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "hackney"
+    ],
+    "remote": false,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.956030Z",
+  "provenance": {
+    "content_sha256": "d4dd4a7a18ad8fcf3c21bea3da8245b2684d0ff2654e942a7cf46b81f6da19c1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T21:54:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mp55-p8c9-rfw2",
+  "status": "active",
+  "title": "Hackney has CRLF / header injection via unvalidated `domain` and `path` options",
+  "updated_at": "2026-06-26T21:54:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mp55-p8c9-rfw2"
+}

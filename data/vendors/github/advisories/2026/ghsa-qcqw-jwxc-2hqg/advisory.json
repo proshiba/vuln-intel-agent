@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/124338722?v=4\", \"events_url\": \"https://api.github.com/users/hits313/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hits313/followers\", \"following_url\": \"https://api.github.com/users/hits313/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hits313/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hits313\", \"id\": 124338722, \"login\": \"hits313\", \"node_id\": \"U_kgDOB2lCIg\", \"organizations_url\": \"https://api.github.com/users/hits313/orgs\", \"received_events_url\": \"https://api.github.com/users/hits313/received_events\", \"repos_url\": \"https://api.github.com/users/hits313/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hits313/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hits313/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hits313\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48508\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\n`StrictRolePermission` and `AuthorityCreatorPermission` in `lemur/auth/permissions.py` call `flask_principal.Permission.__init__()` with zero `Need`s when their config flags are unset. Both flags defaulted to `False` in code prior to the fix, so this was the state of any Lemur install that hadn't explicitly opted in.\\n\\nFlask-Principal's `Permission.allows()` returns `True` whenever `self.needs` is empty. The `.can()` gate therefore passes for every authenticated identity, including the lowest-privilege role Lemur ships (`read-only`).\\n\\nA user holding only `read-only` can create root Certificate Authorities, create and edit notifications (an SSRF sink), create domain entries, and upload arbitrary certificates. These classes are the sole authorization check on those endpoints.\\n\\n## Root Cause\\n\\n```python\\n# lemur/auth/permissions.py\\nclass AuthorityCreatorPermission(Permission):\\n    def __init__(self):\\n        requires_admin = current_app.config.get(\\\"ADMIN_ONLY_AUTHORITY_CREATION\\\", False)\\n        if requires_admin:\\n            super().__init__(RoleNeed(\\\"admin\\\"))\\n        else:\\n            super().__init__()              # empty Need set\\n\\nclass StrictRolePermission(Permission):\\n    def __init__(self):\\n        strict_role_enforcement = current_app.config.get(\\\"LEMUR_STRICT_ROLE_ENFORCEMENT\\\", False)\\n        if strict_role_enforcement:\\n            needs = [RoleNeed(\\\"admin\\\"), RoleNeed(\\\"operator\\\")]\\n            super().__init__(*needs)\\n        else:\\n            super().__init__()              # empty Need set\\n```\\n\\n`flask_principal.Permission.allows()` (upstream, v0.4.0):\\n\\n```python\\ndef allows(self, identity):\\n    if self.needs and not self.needs.intersection(identity.provides):\\n        return False\\n    ...\\n    return True\\n```\\n\\nWhen `self.needs == set()`, the first guard is falsy and is skipped. `excludes` is also empty, so `allows()` returns `True` for any identity. `AuthenticatedResource` (the parent class for these views) sets `method_decorators = [login_required]`, which checks authentication only, no role. So the permission `.can()` is the only authorization layer in front of these endpoints.\\n\\n## Affected Endpoints\\n\\nViews whose only authorization check is `StrictRolePermission().can()` or `AuthorityCreatorPermission().can()`:\\n\\n| Method   | Path                                      | Source                                  |\\n|----------|-------------------------------------------|-----------------------------------------|\\n| POST     | /api/1/authorities                        | lemur/authorities/views.py:231          |\\n| POST     | /api/1/certificates/upload                | lemur/certificates/views.py:651         |\\n| POST     | /api/1/pending_certificates/\\\\<id>/upload  | lemur/pending_certificates/views.py:545 |\\n| POST     | /api/1/notifications                      | lemur/notifications/views.py:227        |\\n| PUT/DEL  | /api/1/notifications/\\\\<id>                | lemur/notifications/views.py:370,384    |\\n| POST     | /api/1/domains                            | lemur/domains/views.py:131              |\\n\\n`POST /api/1/authorities` is gated by `AuthorityCreatorPermission().can() and StrictRolePermission().can()`; both have empty Needs by default. The other rows are gated by `StrictRolePermission().can()` alone.\\n\\nNote on scope: `PUT /api/1/authorities/<id>` also references `StrictRolePermission`, but its gate is `AuthorityPermission(...).can() and StrictRolePermission().can()`. `AuthorityPermission` is constructed with non-empty Needs (`RoleNeed(\\\"admin\\\")` plus authority-scoped needs), so that endpoint is not bypassable by a `read-only` user and is excluded from this report.\\n\\n## Impact\\n\\nA user holding only the `read-only` role can:\\n\\n1. Create root Certificate Authorities. CA cert and private key are persisted in Lemur's DB with the attacker as owner. Any internal trust store that pins Lemur-managed roots can now be signed against by the attacker.\\n2. Upload arbitrary certificates via `/certificates/upload`, including attacker-supplied keys with destinations such as AWS push.\\n3. Create or modify notifications, which reach an SSRF sink (see related finding F3, Slack notification webhook).\\n4. Mark arbitrary domains as `sensitive`, manipulating Lemur's domain registry and the cert-issuance approval path.\\n\\nCombined with any low-privilege credential leak (phished employee, leaked SSO token) or insider access, this is a pivot from \\\"any authenticated identity\\\" to control of the PKI issuance plane.\\n\\n## Remediation\\n\\nThe config flag defaults for `ADMIN_ONLY_AUTHORITY_CREATION` and `LEMUR_STRICT_ROLE_ENFORCEMENT` were changed from `False` to `True`. Restrictive role enforcement is now active on all default installs without requiring explicit configuration.\\n\\n```python\\nclass AuthorityCreatorPermission(Permission):\\n    def __init__(self):\\n        requires_admin = current_app.config.get(\\\"ADMIN_ONLY_AUTHORITY_CREATION\\\", True)\\n        ...\\n\\nclass StrictRolePermission(Permission):\\n    def __init__(self):\\n        strict_role_enforcement = current_app.config.get(\\\"LEMUR_STRICT_ROLE_ENFORCEMENT\\\", True)\\n        ...\\n```\\n\\n**Note:** The opt-out branches (empty Needs) remain in the code. Operators who explicitly set `ADMIN_ONLY_AUTHORITY_CREATION = False` or `LEMUR_STRICT_ROLE_ENFORCEMENT = False` in their config will reintroduce the bypass. These flags should be left unset or set to `True`.\", \"epss\": {\"percentage\": 0.00035, \"percentile\": 0.10718}, \"ghsa_id\": \"GHSA-qcqw-jwxc-2hqg\", \"github_reviewed_at\": \"2026-06-25T18:48:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-qcqw-jwxc-2hqg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qcqw-jwxc-2hqg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48508\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-25T18:48:39Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-qcqw-jwxc-2hqg\", \"https://github.com/advisories/GHSA-qcqw-jwxc-2hqg\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-qcqw-jwxc-2hqg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur has an authorization bypass in StrictRolePermission / AuthorityCreatorPermission\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-25T18:48:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-qcqw-jwxc-2hqg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qcqw-jwxc-2hqg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: <= 1.9.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48508"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.204671Z",
+  "provenance": {
+    "content_sha256": "9d0adc45bef53bfa568b03fd0424f91d84e5a64556bc683b708bcd153b24141d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-25T18:48:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qcqw-jwxc-2hqg",
+  "status": "active",
+  "title": "Lemur has an authorization bypass in StrictRolePermission / AuthorityCreatorPermission",
+  "updated_at": "2026-06-25T18:48:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qcqw-jwxc-2hqg"
+}

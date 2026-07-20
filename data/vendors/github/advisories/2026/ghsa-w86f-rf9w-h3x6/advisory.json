@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47719\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nAn unauthenticated attacker (Alice) connects to FUXA's Socket.IO endpoint and emits a `device-webapi-request` event whose `property.address` field names an arbitrary URL. FUXA's `DEVICE_WEBAPI_REQUEST` handler at `server/runtime/index.js:296` calls `axios.get(address)` server-side and broadcasts the full response body back on the same event via `io.emit`. The companion handler `DEVICE_PROPERTY` at `server/runtime/index.js:153` has the same miss against OPC UA and ODBC endpoints. Both handlers skip the `isSocketWriteAuthorized()` check that the other write-capable events (`DEVICE_VALUES` at line 182, `DEVICE_ENABLE` at line 358) call. Alice reads cloud instance metadata, scans internal services, and connects to any OPC UA server or ODBC database the FUXA host can reach, then receives the results.\\n\\n## Details\\n\\n**Vulnerable handlers**: `server/runtime/index.js:153-171, 296-316`:\\n\\n```javascript\\nsocket.on(Events.IoEventTypes.DEVICE_PROPERTY, (message) => {\\n    try {\\n        if (message && message.endpoint && message.type) {\\n            devices.getSupportedProperty(message.endpoint, message.type).then(result => {\\n                message.result = result;\\n                io.emit(Events.IoEventTypes.DEVICE_PROPERTY, message);\\n            })\\n            // ...\\n        }\\n    }\\n    // ...\\n});\\n\\nsocket.on(Events.IoEventTypes.DEVICE_WEBAPI_REQUEST, (message) => {\\n    try {\\n        if (message && message.property) {\\n            devices.getRequestResult(message.property).then(result => {\\n                message.result = result;\\n                io.emit(Events.IoEventTypes.DEVICE_WEBAPI_REQUEST, message);\\n            })\\n            // ...\\n        }\\n    }\\n    // ...\\n});\\n```\\n\\n**Sink**: `server/runtime/devices/httprequest/index.js:471` for the webapi path:\\n\\n```javascript\\nif (property.method === 'GET') {\\n    axios.get(property.address).then(res => {\\n        resolve(res.data);\\n    // ...\\n```\\n\\nAlice fully controls `property.address`, and `io.emit` echoes the response body back on the same event. For the ODBC variant, `server/runtime/devices/odbc/index.js` builds the connection string from `endpoint.address` plus `endpoint.uid` and `endpoint.pwd`, so Alice supplies credentials and targets any reachable ODBC server.\\n\\n**Contrast**: `server/runtime/index.js:182` (the DEVICE_VALUES write handler) gates the exact same kind of action behind `isSocketWriteAuthorized(socket)`. The two handlers above skip that check.\\n\\nReachability: neither handler performs any authorization check, so both modes reach the sinks. `secureEnabled=true` does not close the gap because the Socket.IO connect block at `server/runtime/index.js:114-120` auto-issues a guest token to any client that connects without one, and the handlers run regardless of `socket.isAuthenticated`. This is the same pattern GHSA-vwcg-c828-9822's note warned about: enabling authentication does not mitigate the missing check here.\\n\\n\\n## Impact\\n\\nAlice uses FUXA as a read-SSRF oracle against any HTTP(S) service the FUXA host can reach, with the response body delivered back to her Socket.IO session. On cloud-hosted SCADA deployments this exfiltrates IAM credentials from the instance metadata service. On OT networks it reaches internal OPC UA servers, ODBC databases, and administrative consoles that have no other external exposure. The ODBC variant accepts attacker-supplied credentials, so Alice authenticates to any ODBC server that trusts connections from the FUXA host. The attack works against `secureEnabled=true` deployments as well as the default; no operator interaction required.\\n\\n**CVSS 3.1**: `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N` (High, 8.2). CWE-918.\\n\\n## Recommended Fix\\n\\nAdd the existing `isSocketWriteAuthorized(socket)` check at the top of both handlers, matching the pattern used by `DEVICE_VALUES` and `DEVICE_ENABLE`. Also switch `io.emit` to `socket.emit` so the response scopes to the requesting socket instead of broadcasting to every connected client. For defense in depth, validate `property.address` against an allowlist of schemes and reject private, loopback, and link-local address ranges before calling `axios.get` or the device connect paths.\\n\\n```javascript\\nsocket.on(Events.IoEventTypes.DEVICE_WEBAPI_REQUEST, (message) => {\\n    try {\\n        if (!isSocketWriteAuthorized(socket)) {\\n            logger.warn(`${Events.IoEventTypes.DEVICE_WEBAPI_REQUEST}: unauthorized request from ${socket.userId || 'guest'}`);\\n            return;\\n        }\\n        if (message && message.property) {\\n            // ... validate property.address against allowlist ...\\n            devices.getRequestResult(message.property).then(result => {\\n                message.result = result;\\n                socket.emit(Events.IoEventTypes.DEVICE_WEBAPI_REQUEST, message);\\n            })\\n            // ...\\n        }\\n    }\\n    // ...\\n});\\n```\\n\\nApply the same three changes (auth check, `socket.emit`, address validation) to `DEVICE_PROPERTY`.\\n\\n---\\nA fix is available at https://github.com/frangoteam/FUXA/releases/tag/v1.3.2.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"epss\": {\"percentage\": 0.00101, \"percentile\": 0.27522}, \"ghsa_id\": \"GHSA-w86f-rf9w-h3x6\", \"github_reviewed_at\": \"2026-06-08T23:06:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-w86f-rf9w-h3x6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w86f-rf9w-h3x6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47719\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-08T23:06:40Z\", \"references\": [\"https://github.com/frangoteam/FUXA/security/advisories/GHSA-w86f-rf9w-h3x6\", \"https://github.com/frangoteam/FUXA/releases/tag/v1.3.2\", \"https://github.com/advisories/GHSA-w86f-rf9w-h3x6\"], \"repository_advisory_url\": \"https://api.github.com/repos/frangoteam/FUXA/security-advisories/GHSA-w86f-rf9w-h3x6\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/frangoteam/FUXA\", \"summary\": \"FUXA: Unauthenticated SSRF via Socket.IO DEVICE_WEBAPI_REQUEST and DEVICE_PROPERTY with response reading\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:06:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-w86f-rf9w-h3x6\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"fuxa-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.14-1243\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w86f-rf9w-h3x6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fuxa-server: <= 1.1.14-1243"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47719"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fuxa-server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.268638Z",
+  "provenance": {
+    "content_sha256": "19607512dfae5311ad090270ba0196becd7e427c11c368833ad333c879704b74",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-08T23:06:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w86f-rf9w-h3x6",
+  "status": "active",
+  "title": "FUXA: Unauthenticated SSRF via Socket.IO DEVICE_WEBAPI_REQUEST and DEVICE_PROPERTY with response reading",
+  "updated_at": "2026-06-08T23:06:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w86f-rf9w-h3x6"
+}

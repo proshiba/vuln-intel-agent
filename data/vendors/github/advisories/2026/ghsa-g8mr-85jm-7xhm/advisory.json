@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-53633\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-749\", \"name\": \"Exposed Dangerous Method or Function\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nVitest Browser Mode exposes a `cdp()` API that forwards raw Chrome DevTools Protocol (CDP) methods over the Vitest browser WebSocket RPC. CDP is not gated by `browser.api.allowWrite`, `browser.api.allowExec`, `api.allowWrite`, or `api.allowExec`.\\n\\nAs a result, disabling Browser Mode write and exec operations does not prevent a browser API client from using CDP to perform equivalent actions. In a verified reproduction with `allowWrite: false` and `allowExec: false`, CDP `Page.setDownloadBehavior` set the browser download directory to the project root, and CDP `Runtime.evaluate` downloaded a controlled `vite.config.ts`. Vitest reloaded the changed config and executed attacker-controlled Node.js code.\\n\\nWhen the Browser Mode API is also exposed to the network, this becomes remotely exploitable because the generated browser runner page exposes the API token, active session id, project name, and project root path needed to connect to the browser WebSocket API and select the target download directory.\\n\\n## Impact\\n\\nThis affects Browser Mode projects using a CDP-capable provider, such as Playwright Chromium, when the browser API server is exposed to the network, for example with `--browser.api.host=0.0.0.0`.\\n\\nIn this mode Vitest warns that write and exec operations are disabled by default, but the generated browser runner page exposes enough metadata for a remote client to authenticate to the browser WebSocket API while an active session exists. This includes the browser API token, active session id, project name, and serialized test config including the project root path. The attacker can then call Vitest's CDP RPC and use Chrome's download controls to overwrite `vite.config.ts` in the project root. When Vitest reloads the changed config, attacker-controlled Node.js code executes on the host running Vitest.\\n\\nThe same exposed CDP bridge also allows direct browser-session JavaScript execution through `Runtime.evaluate`. A separate local probe showed that CDP can navigate the browser to a `file://` URL and read rendered file contents, but the primary verified impact is config-file overwrite leading to RCE.\\n\\n## Reproduction\\n\\nFor a concrete reproduction, start Browser Mode in watch mode using the official Lit example:\\n\\n```sh\\npnpm dlx tiged vitest-dev/vitest/examples/lit vitest-poc\\ncd vitest-poc\\npnpm install\\n```\\n\\nConfigure the Browser Mode API to listen on all interfaces while explicitly disabling write and exec operations:\\n\\n```ts\\nimport { playwright } from '@vitest/browser-playwright'\\nimport { defineConfig } from 'vite'\\n\\nexport default defineConfig({\\n  test: {\\n    browser: {\\n      enabled: true,\\n      provider: playwright(),\\n      instances: [\\n        { browser: 'chromium' },\\n      ],\\n      api: {\\n        host: '0.0.0.0',\\n        allowWrite: false,\\n        allowExec: false,\\n      },\\n    },\\n  },\\n})\\n```\\n\\nThen start the test server:\\n\\n```sh\\npnpm test\\n```\\n\\nVitest serves the browser runner HTML and WebSocket API at `http://localhost:63315`.\\n\\nWhile the browser session is active:\\n\\n1. Fetch the generated browser runner page:\\n\\n   ```text\\n   http://localhost:63315/__vitest_test__/\\n   ```\\n\\n2. Extract the embedded browser API token, active session id, project name, and project root:\\n\\n   - `window.VITEST_API_TOKEN`\\n   - `__vitest_browser_runner__.sessionId`\\n   - `__vitest_browser_runner__.config.name`\\n   - `__vitest_browser_runner__.config.root`\\n\\n3. Connect to the browser API WebSocket as a tester client:\\n\\n   ```text\\n   /__vitest_browser_api__?type=tester&rpcId=<fresh-id>&sessionId=<session-id>&projectName=<project-name>&method=none&token=<token>\\n   ```\\n\\n4. Call the `sendCdpEvent` RPC method with:\\n\\n   ```text\\n   Page.setDownloadBehavior({\\n     behavior: \\\"allow\\\",\\n     downloadPath: __vitest_browser_runner__.config.root\\n   })\\n   ```\\n\\n5. Call `sendCdpEvent` again with `Runtime.evaluate`. The evaluated JavaScript creates a Blob containing a malicious Vite config and clicks an anchor element `<a download=\\\"vite.config.ts\\\">`.\\n\\n6. Observed result:\\n\\n   - `vite.config.ts` is overwritten with attacker-controlled content.\\n   - Vitest reloads the changed config.\\n   - The injected Node.js payload runs on the host.\", \"epss\": {\"percentage\": 0.00585, \"percentile\": 0.44009}, \"ghsa_id\": \"GHSA-g8mr-85jm-7xhm\", \"github_reviewed_at\": \"2026-06-15T20:05:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-g8mr-85jm-7xhm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g8mr-85jm-7xhm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53633\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-15T20:05:15Z\", \"references\": [\"https://github.com/vitest-dev/vitest/security/advisories/GHSA-g8mr-85jm-7xhm\", \"https://github.com/advisories/GHSA-g8mr-85jm-7xhm\"], \"repository_advisory_url\": \"https://api.github.com/repos/vitest-dev/vitest/security-advisories/GHSA-g8mr-85jm-7xhm\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/vitest-dev/vitest\", \"summary\": \"Vitest Browser: Exposed Browser Mode API Can Proxy CDP and Overwrite Config Files, Leading to RCE\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-15T20:05:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-g8mr-85jm-7xhm\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.0-beta.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@vitest/browser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.0-beta.0, <= 5.0.0-beta.3\"}, {\"first_patched_version\": \"4.1.8\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@vitest/browser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 4.1.7\"}, {\"first_patched_version\": \"3.2.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@vitest/browser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, <= 3.2.4\"}, {\"first_patched_version\": \"0.1.24\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vite-plus\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.1.23\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g8mr-85jm-7xhm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@vitest/browser: >= 3.0.0, <= 3.2.4",
+      "@vitest/browser: >= 4.0.0, <= 4.1.7",
+      "@vitest/browser: >= 5.0.0-beta.0, <= 5.0.0-beta.3",
+      "vite-plus: <= 0.1.23"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53633"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@vitest/browser",
+      "vite-plus"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.781397Z",
+  "provenance": {
+    "content_sha256": "b3158d90c45e6312e7901fe5471a816128033f6e3c6f1e022142579e47fb0a42",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T20:05:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g8mr-85jm-7xhm",
+  "status": "active",
+  "title": "Vitest Browser: Exposed Browser Mode API Can Proxy CDP and Overwrite Config Files, Leading to RCE",
+  "updated_at": "2026-06-15T20:05:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g8mr-85jm-7xhm"
+}

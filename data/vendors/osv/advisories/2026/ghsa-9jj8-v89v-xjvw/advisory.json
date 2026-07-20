@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "## Summary\nThe `/static/<group>/<filename>` route accepts `group=\"..\"`, which causes `send_from_directory(\"static/..\", filename)` to execute. This moves the base directory up to `/app/changedetectionio`, enabling **unauthenticated local file read** of application source files (e.g., `flask_app.py`). Severity is **low information disclosure (C:L)**.\n\n### Details\nThe vulnerable code is in `changedetectionio/flask_app.py` inside `static_content()`:\n\n```\ngroup = re.sub(r'[^\\w.-]+', '', group.lower())\nfilename = re.sub(r'[^\\w.-]+', '', filename.lower())\n...\nreturn send_from_directory(f\"static/{group}\", path=filename)\n```\n\nThe `group` sanitization allows dots, so `group=\"..\"` passes validation.  \nThis results in `send_from_directory(\"static/..\", filename)`, effectively shifting the base directory to `/app/changedetectionio` and allowing reads of files in that directory.  \nThe route is unauthenticated, so **any user can retrieve source files** without logging in.\n\n> Limitation: the route only matches `/static/<group>/<filename>` and rejects slashes inside `filename`, so it cannot traverse further to arbitrary system paths like `/etc/passwd`. It is limited to files inside the application package directory.\n\n### PoC\n1) Start an instance (example: Docker on port 5050)\n```\ndocker run -d --name cdio -p 127.0.0.1:5050:5000 -v cdio-data:/datastore cdio-local\n```\n\n2) Reproduce  \n**(URL-encoded traversal)**\n```\ncurl -i http://127.0.0.1:5050/static/%2e%2e/flask_app.py\n```\n\n**(curl path passthrough)**\n```\ncurl --path-as-is -i http://127.0.0.1:5050/static/../flask_app.py\n```\n\n3) Observe that the response body contains Python source code from `flask_app.py`.\n\n### Impact\n- **Vulnerability type:** Directory Traversal / Local File Read\n- **Affected users:** Anyone with network access (no authentication required)\n- **Scope:** Source files under `/app/changedetectionio`\n- **Security impact:** Internal logic exposure can aid further exploitation (Confidentiality: Low)",
+  "canonical_id": "osv:ghsa-9jj8-v89v-xjvw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-25527"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [
+      "changedetection-io: 0.53.2"
+    ],
+    "mitigations": [],
+    "products": [
+      "changedetection-io"
+    ],
+    "remote": true,
+    "vendor_severity": "MODERATE"
+  },
+  "first_seen_at": "2026-07-20T19:52:05.022806Z",
+  "provenance": {
+    "content_sha256": "a7bc54c8eda5b657e2c3b55bea386eec693ad668dc3936b9abeecca5883bd7d0",
+    "extractor_version": "0.1.0",
+    "source_type": "osv_global"
+  },
+  "published_at": "2026-07-20T19:06:55Z",
+  "schema_version": 1,
+  "source_id": "osv",
+  "source_url": "https://github.com/dgtlmoon/changedetection.io/security/advisories/GHSA-9jj8-v89v-xjvw",
+  "status": "active",
+  "title": "changedetection.io is vulnerable to unauthenticated static path traversal",
+  "updated_at": "2026-07-20T19:15:27.590444Z",
+  "vendor": "OSV",
+  "vendor_advisory_id": "GHSA-9jj8-v89v-xjvw"
+}

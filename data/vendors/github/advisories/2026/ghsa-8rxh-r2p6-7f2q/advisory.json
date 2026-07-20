@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/120458619?v=4\", \"events_url\": \"https://api.github.com/users/bacon251/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bacon251/followers\", \"following_url\": \"https://api.github.com/users/bacon251/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bacon251/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bacon251\", \"id\": 120458619, \"login\": \"bacon251\", \"node_id\": \"U_kgDOBy4New\", \"organizations_url\": \"https://api.github.com/users/bacon251/orgs\", \"received_events_url\": \"https://api.github.com/users/bacon251/received_events\", \"repos_url\": \"https://api.github.com/users/bacon251/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bacon251/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bacon251/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bacon251\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41643\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-129\", \"name\": \"Improper Validation of Array Index\"}], \"description\": \"### Summary\\nA remote Denial of Service (DoS) vulnerability exists in GoBGP where a malformed BGP UPDATE message can trigger a runtime error: index out of range panic. This occurs during the processing of 4-byte AS attributes when the message structure causes an internal slice index shift that is not properly handled.\\n\\n### Details\\nThe vulnerability is located in internal/pkg/table/message.go within the UpdatePathAttrs4ByteAs function.\\n\\nWhen GoBGP processes a BGP UPDATE message containing both an AS_PATH and an AS4_PATH attribute, it attempts to merge or validate them to support 4-byte AS numbers. If the attributes are ordered such that AS4_PATH (Type 17) appears before AS_PATH (Type 2), and the AS4_PATH is deemed invalid/malformed, the code attempts to remove the AS4_PATH attribute from the msg.PathAttributes slice.\\nIt appears the crash happens due to an index shift in msg.PathAttributes:\\n```\\n#GoBGP v4.2.0\\n// Line 112: If AS4_PATH precedes AS_PATH, the deletion causes all subsequent attributes to shift left.\\nmsg.PathAttributes = append(msg.PathAttributes[:as4AttrPos], msg.PathAttributes[as4AttrPos+1:]...)\\n\\n// Line 206: The stale asAttrPos index is used here.\\n//The function continues to use the stale index (asAttrPos) to update the AS_PATH. Since the slice length has decreased, accessing the old index leads to a panic.\\nmsg.PathAttributes[asAttrPos] = bgp.NewPathAttributeAsPath(newIntfParams)\\n```\\nThis deletion causes all subsequent attributes in the slice to shift left by one position. However, the function continues to use the original asAttrPos index (calculated before the deletion) to access or modify the AS_PATH attribute later at [Line 206](https://www.google.com/search?q=https://github.com/osrg/gobgp/blob/v4.2.0/internal/pkg/table/message.go%23L206). Because the slice is now shorter, the \\\"stale\\\" index points out of bounds, triggering a panic and crashing the entire GoBGP process.\\n### PoC\\nEnvironment: * GoBGP version: 4.2.0\\nConfiguration: Passive peering enabled.\\nReproduction Steps:\\nConfigure GoBGP with a neighbor (e.g., 192.168.31.195).\\nSend a specially crafted BGP UPDATE hex payload:\\n```\\nff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff\\n00 22 02\\n00 00                  # Withdrawn Routes Length\\n00 0b                  # Total Path Attribute Length\\n40 11 01 02            # AS4_PATH (Type 17, Len 1, Val 02) - Triggers the bug\\n40 02 04 ff ff de ad   # AS_PATH (Type 2, Len 4)\\n```\\nThe GoBGP process will immediately crash with: panic: runtime error: index out of range [1] with length 1.\\n\\n### Impact\\nVulnerability Type: Remote Denial of Service (DoS).\\nImpacted Users: Any GoBGP deployment (v4.2.0 and earlier) that accepts BGP UPDATE messages from peers. Since this crash occurs in the FSM (Finite State Machine) handling loop, a single malicious peer or a malformed route propagated through a transit provider can consistently crash the BGP daemon, leading to a complete loss of routing capabilities.\", \"epss\": {\"percentage\": 0.00503, \"percentile\": 0.39509}, \"ghsa_id\": \"GHSA-8rxh-r2p6-7f2q\", \"github_reviewed_at\": \"2026-04-29T20:44:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-8rxh-r2p6-7f2q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8rxh-r2p6-7f2q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41643\"}], \"nvd_published_at\": \"2026-05-07T12:16:17Z\", \"published_at\": \"2026-04-29T20:44:04Z\", \"references\": [\"https://github.com/osrg/gobgp/security/advisories/GHSA-8rxh-r2p6-7f2q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41643\", \"https://github.com/osrg/gobgp/releases/tag/v4.3.0\", \"https://github.com/advisories/GHSA-8rxh-r2p6-7f2q\"], \"repository_advisory_url\": \"https://api.github.com/repos/osrg/gobgp/security-advisories/GHSA-8rxh-r2p6-7f2q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/osrg/gobgp\", \"summary\": \"GoBGP has Remote Denial of Service (Panic) in UpdatePathAttrs4ByteAs via Malformed BGP UPDATE\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T20:42:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-8rxh-r2p6-7f2q\", \"vulnerabilities\": [{\"first_patched_version\": \"4.3.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/osrg/gobgp/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.2.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8rxh-r2p6-7f2q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/osrg/gobgp/v4: <= 4.2.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41643"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/osrg/gobgp/v4"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.179338Z",
+  "provenance": {
+    "content_sha256": "af6815404f7d288c370c582efe2de68cac50bc5ce62997729c3b1a85634da9d6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-29T20:44:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8rxh-r2p6-7f2q",
+  "status": "active",
+  "title": "GoBGP has Remote Denial of Service (Panic) in UpdatePathAttrs4ByteAs via Malformed BGP UPDATE",
+  "updated_at": "2026-05-08T20:42:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8rxh-r2p6-7f2q"
+}

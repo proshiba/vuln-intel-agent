@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-41886\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}], \"description\": \"### Summary\\n\\nVersions of the `locize` client SDK (the browser module that wires up the locize InContext translation editor) prior to 4.0.21 register a `window.addEventListener(\\\"message\\\", …)` handler that dispatches to registered internal handlers (`editKey`, `commitKey`, `commitKeys`, `isLocizeEnabled`, `requestInitialize`, …) **without validating `event.origin`**.\\n\\nThe pre-patch listener in `src/api/postMessage.js` gates dispatch on `event.data.sender === \\\"i18next-editor-frame\\\"` — that value sits inside the attacker-controlled message payload, not the browser-enforced origin. Any web page that could embed or be embedded by a locize-enabled host — an iframe on a third-party page, a `window.open`-ed victim, a parent frame reaching down — could send a crafted `postMessage` and trigger the internal handlers.\\n\\n### Impact\\n\\nDepending on which handler the attacker invokes, distinct consequences follow. All of them share the same root cause: the handlers implicitly assumed the payload came from the real editor iframe.\\n\\n- **Cross-origin DOM XSS** via `editKey` / `commitKeys`: the pre-patch `handleEditKey` assigned attacker-controlled payload values to `item.node.innerHTML` and to `item.node.setAttribute(attr, value)`. That allowed planting `<script>`, `<img onerror>`, or `onclick`/`onload`/`onfocus` event handlers; and on attribute writes, `href=\\\"javascript:…\\\"` / `src=\\\"data:text/html,<script>…\\\"` / `style=\\\"…\\\"` / etc.\\n\\n- **`api.source` / `api.origin` hijack** via `isLocizeEnabled`: the handler set `api.source = e.source; api.origin = e.origin` — attacker-controlled values. All subsequent `sendMessage` calls (which post translations, callbacks, etc., back toward `api.source`) would go to the attacker window rather than the real editor, leaking translation content and any metadata the SDK forwards.\\n\\n- **CSS-injection / layout-escape** via `requestPopupChanges`: `containerStyle.height` / `.width` were interpolated into `calc()` expressions and `popup.style.setProperty()` without validation, allowing attackers to inject additional CSS declarations (semicolons, `behavior:url()` on legacy IE, CSS-exfil patterns) into the popup inline style.\\n\\nExploitation requires the attacker-owned page to share a window reference with the locize-enabled host: typical vectors are an `iframe` on an attacker-controlled page, a `window.opener`/`window.open` relationship, or a parent frame that can `postMessage` into an embedded locize host. The SDK intended model is that only the editor iframe at `https://incontext.locize.app` (or the configured staging/development origin) can reach these handlers.\\n\\n### Affected versions\\n\\nAll versions of `locize` prior to **4.0.21**.\\n\\n### Patch\\n\\nFixed in **4.0.21**. Two layers:\\n\\n1. **Primary** — validate `event.origin` at the top of `window.addEventListener(\\\"message\\\", …)` in `src/api/postMessage.js`. The expected origin is the configured iframe origin (`getIframeUrl()`), so custom environments continue to work. Messages from any other origin are silently dropped before any handler runs.\\n\\n2. **Defence-in-depth** — `handleEditKey` now rejects dangerous attribute-name writes (`on*`, `style`) and `javascript:` / `data:` / `vbscript:` / `file:` URLs on `href` / `src` / `action` / `formaction` / `xlink:href`; `innerHTML` assignments are sanitised through a throwaway DOMParser document (stripping `<script>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<base>`, `<style>` plus event handlers and dangerous URL schemes). Legitimate translation formatting (`<b>`, `<em>`, `<strong>`, `<a href=\\\"https://…\\\">`, etc.) passes through.\\n\\n3. **CSS-injection** — `handleRequestPopupChanges` now requires `containerStyle.height` / `.width` to match a strict CSS length pattern; malformed values are dropped silently.\\n\\n### Workarounds\\n\\nNo workaround short of upgrading.\\n\\n### Credits\\n\\nDiscovered via an internal security audit of the locize ecosystem.\", \"epss\": {\"percentage\": 0.00101, \"percentile\": 0.01131}, \"ghsa_id\": \"GHSA-w937-fg2h-xhq2\", \"github_reviewed_at\": \"2026-04-22T20:32:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-w937-fg2h-xhq2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w937-fg2h-xhq2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41886\"}], \"nvd_published_at\": \"2026-05-08T16:16:12Z\", \"published_at\": \"2026-04-22T20:32:11Z\", \"references\": [\"https://github.com/locize/locize/security/advisories/GHSA-w937-fg2h-xhq2\", \"https://github.com/locize/locize/commit/d006b75fadb8e8ab77b023e462850fc6e9170735\", \"https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage#security_concerns\", \"https://github.com/locize/locize/releases/tag/v4.0.21\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41886\", \"https://github.com/advisories/GHSA-w937-fg2h-xhq2\"], \"repository_advisory_url\": \"https://api.github.com/repos/locize/locize/security-advisories/GHSA-w937-fg2h-xhq2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/locize/locize\", \"summary\": \"locize Client SDK: Cross-origin DOM XSS & Handler Hijack Through Missing e.origin Validation in InContext Editor \", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:30:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-w937-fg2h-xhq2\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.21\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"locize\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.0.21\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w937-fg2h-xhq2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "locize: < 4.0.21"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41886"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "locize"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.852387Z",
+  "provenance": {
+    "content_sha256": "79a3cd1a5cb123ffa642b61cf1ce4696b2b25542939ff3165303a0bb7a938d6d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T20:32:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w937-fg2h-xhq2",
+  "status": "active",
+  "title": "locize Client SDK: Cross-origin DOM XSS & Handler Hijack Through Missing e.origin Validation in InContext Editor ",
+  "updated_at": "2026-05-13T13:30:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w937-fg2h-xhq2"
+}

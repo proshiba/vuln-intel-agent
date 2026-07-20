@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46359\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"## Summary\\n\\n`CurrentUser::setTokenData()` in `phpmyfaq/src/phpMyFAQ/User/CurrentUser.php` at lines 515-534 builds a SQL UPDATE statement with `sprintf` and interpolates OAuth token fields (`refresh_token`, `access_token`, `code_verifier`, and `json_encode($token['jwt'])`) without calling `$db->escape()`. Sibling methods `setAuthSource()` and `setRememberMe()` in the same file do call `$db->escape()` on user-controlled values, so the omission is local to this method. An attacker (Bob) whose Azure AD display name contains a single quote (for example `O'Brien`, or a deliberate SQL payload) breaks out of the string literal and injects arbitrary SQL against the phpMyFAQ database.\\n\\n## Details\\n\\n**Vulnerable code** (`phpmyfaq/src/phpMyFAQ/User/CurrentUser.php`, lines 513-534):\\n\\n```php\\npublic function setTokenData(#[\\\\SensitiveParameter] array $token): bool\\n{\\n    $update = sprintf(\\n        \\\"\\n        UPDATE\\n            %sfaquser\\n        SET\\n            refresh_token = '%s',\\n            access_token = '%s',\\n            code_verifier = '%s',\\n            jwt = '%s'\\n        WHERE\\n            user_id = %d\\\",\\n        Database::getTablePrefix(),\\n        $token['refresh_token'],\\n        $token['access_token'],\\n        $token['code_verifier'],\\n        json_encode($token['jwt'], JSON_THROW_ON_ERROR),\\n        $this->getUserId(),\\n    );\\n\\n    return (bool) $this->configuration->getDb()->query($update);\\n}\\n```\\n\\n`json_encode()` does NOT escape single quotes. A JWT claim such as `{\\\"preferred_username\\\": \\\"O'Malley\\\"}` produces `{\\\"preferred_username\\\":\\\"O'Malley\\\"}` after `json_encode`, which terminates the SQL string literal at the apostrophe.\\n\\n**Correct pattern in the same file** (`setAuthSource`, line 458-461):\\n\\n```php\\n$update = sprintf(\\n    \\\"UPDATE %sfaquser SET auth_source = '%s' WHERE user_id = %d\\\",\\n    Database::getTablePrefix(),\\n    $this->configuration->getDb()->escape($authSource),\\n    $this->getUserId(),\\n);\\n```\\n\\n`setRememberMe()` (line 471-478) follows the same safe pattern with `$db->escape()`.\\n\\n**Reachability**: The phpMyFAQ Azure AD (Entra ID) OAuth flow calls `setTokenData()` after token exchange. The token response includes an `id_token` whose payload originates from the identity provider. An attacker registers a Microsoft account with a display name or custom claim containing SQL metacharacters. When that user logs into a phpMyFAQ instance with Azure AD auth enabled, the malicious claim flows into the UPDATE without sanitization.\\n\\n## Proof of Concept\\n\\nPrerequisites: phpMyFAQ instance with Azure AD / Entra ID authentication enabled.\\n\\n1. Bob registers an Azure AD account with display name `x]\\\",\\\"email\\\":\\\"x',(SELECT SLEEP(5)))-- -`.\\n\\n2. Bob initiates the OAuth login flow on the target phpMyFAQ.\\n\\n3. After authorization, the token endpoint returns a JWT with the crafted claim.\\n\\n4. phpMyFAQ calls `setTokenData()` with the unsanitized token array. The resulting SQL becomes:\\n\\n```sql\\nUPDATE faquser\\nSET\\n    refresh_token = '<valid>',\\n    access_token = '<valid>',\\n    code_verifier = '<valid>',\\n    jwt = '{\\\"preferred_username\\\":\\\"x',(SELECT SLEEP(5)))-- -\\\"}'\\nWHERE\\n    user_id = 42\\n```\\n\\nThe single quote after `x` closes the `jwt` string literal. Everything after it executes as attacker-controlled SQL.\\n\\n5. To confirm time-based blind injection locally (requires modifying the OAuth token response in a proxy):\\n\\n```python\\nimport requests\\n\\n# Simulates what happens when the crafted JWT claim reaches the DB\\n# In production, this happens automatically through the OAuth flow\\npayload = \\\"x'||(SELECT SLEEP(5))||'\\\"\\n\\n# The interpolated query will pause for 5 seconds, confirming injection\\nprint(f\\\"Injected jwt value: {payload}\\\")\\nprint(\\\"If the login takes 5+ seconds longer than normal, injection succeeded.\\\")\\n```\\n\\n## Impact\\n\\nAn attacker who can authenticate via Azure AD with a crafted claim achieves arbitrary SQL execution on the phpMyFAQ database. This permits reading all FAQ data (including restricted entries), modifying or deleting content, and extracting password hashes and session tokens of all users including administrators.\\n\\n**CWE**: CWE-89 (SQL Injection)\\n\\n## Recommended Fix\\n\\nEscape all interpolated values using `$this->configuration->getDb()->escape()`, matching the pattern used by `setAuthSource()` and `setRememberMe()` in the same file:\\n\\n```php\\npublic function setTokenData(#[\\\\SensitiveParameter] array $token): bool\\n{\\n    $db = $this->configuration->getDb();\\n    $update = sprintf(\\n        \\\"\\n        UPDATE\\n            %sfaquser\\n        SET\\n            refresh_token = '%s',\\n            access_token = '%s',\\n            code_verifier = '%s',\\n            jwt = '%s'\\n        WHERE\\n            user_id = %d\\\",\\n        Database::getTablePrefix(),\\n        $db->escape($token['refresh_token']),\\n        $db->escape($token['access_token']),\\n        $db->escape($token['code_verifier']),\\n        $db->escape(json_encode($token['jwt'], JSON_THROW_ON_ERROR)),\\n        $this->getUserId(),\\n    );\\n\\n    return (bool) $db->query($update);\\n}\\n```\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"epss\": {\"percentage\": 0.00212, \"percentile\": 0.11492}, \"ghsa_id\": \"GHSA-pm8c-3qq3-72w7\", \"github_reviewed_at\": \"2026-05-06T20:44:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-pm8c-3qq3-72w7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pm8c-3qq3-72w7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46359\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T20:44:39Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-pm8c-3qq3-72w7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46359\", \"https://www.vulncheck.com/advisories/phpmyfaq-sql-injection-in-currentuser-settokendata-via-unescaped-oauth-token-fields\", \"https://github.com/advisories/GHSA-pm8c-3qq3-72w7\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-pm8c-3qq3-72w7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ has SQL Injection in CurrentUser::setTokenData through unescaped OAuth token fields\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-09T00:02:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-pm8c-3qq3-72w7\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}, {\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpmyfaq/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pm8c-3qq3-72w7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpmyfaq/phpmyfaq: <= 4.1.1",
+      "thorsten/phpmyfaq: <= 4.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46359"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpmyfaq/phpmyfaq",
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.879172Z",
+  "provenance": {
+    "content_sha256": "1eee3dc396cf1a03992f69d08fbe7ec1c7f95cc0052a2a08f3c0a68330cf08bb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T20:44:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pm8c-3qq3-72w7",
+  "status": "active",
+  "title": "phpMyFAQ has SQL Injection in CurrentUser::setTokenData through unescaped OAuth token fields",
+  "updated_at": "2026-06-09T00:02:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pm8c-3qq3-72w7"
+}

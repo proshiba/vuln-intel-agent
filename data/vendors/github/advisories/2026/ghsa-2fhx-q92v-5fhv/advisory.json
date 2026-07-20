@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/102439013?v=4\", \"events_url\": \"https://api.github.com/users/oduoke567/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/oduoke567/followers\", \"following_url\": \"https://api.github.com/users/oduoke567/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/oduoke567/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/oduoke567\", \"id\": 102439013, \"login\": \"oduoke567\", \"node_id\": \"U_kgDOBhsYZQ\", \"organizations_url\": \"https://api.github.com/users/oduoke567/orgs\", \"received_events_url\": \"https://api.github.com/users/oduoke567/received_events\", \"repos_url\": \"https://api.github.com/users/oduoke567/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/oduoke567/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/oduoke567/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/oduoke567\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49279\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"# AVideo: Stored XSS via `autoEvalCodeOnHTML` in MessageSQLite WebSocket Handler\\n\\n## Summary\\n\\nAVideo has a stored XSS vulnerability in the WebSocket messaging system. The `MessageSQLite.php` handler only strips `autoEvalCodeOnHTML` from `$json['msg']`, but `msgToResourceId()` reads from `$msg['json']` with higher priority. An attacker can place the XSS payload in the `json` key instead of `msg`, bypassing the sanitization entirely.\\n\\n\\n## Affected Versions\\n\\nAVideo <= latest\\n\\n## Vulnerability Details\\n\\n### Root Cause: Shallow sanitization only covers `$json['msg']`\\n\\n`plugin/YPTSocket/MessageSQLite.php` lines 268-271 — the incomplete fix:\\n\\n```php\\nif (empty($msgObj->isCommandLineInterface) && ($msgObj->sentFrom ?? '') !== 'php') {\\n    if (is_array($json['msg'] ?? null)) {\\n        unset($json['msg']['autoEvalCodeOnHTML']);  // Only strips from $json['msg']\\n    }\\n}\\n```\\n\\n`plugin/YPTSocket/MessageSQLite.php` lines 361-367 — the bypass via `msgToResourceId()`:\\n\\n```php\\nif (!empty($msg['json'])) {\\n    $obj['msg'] = $msg['json'];       // $msg['json']['autoEvalCodeOnHTML'] is NEVER stripped\\n} else if (!empty($msg['msg'])) {\\n    $obj['msg'] = $msg['msg'];        // Only this path was sanitized\\n} else {\\n    $obj['msg'] = $msg;\\n}\\n```\\n\\nCompare with the correctly patched `Message.php` (lines 254-256):\\n\\n```php\\n$json = removeAutoEvalCodeOnHTMLRecursive($json);  // Strips from ALL nested paths\\n```\\n\\nAnd `MessageSQLiteV2.php` (lines 302-303):\\n\\n```php\\n$json = removeAutoEvalCodeOnHTMLRecursive($json);  // Same recursive fix\\n```\\n\\n`MessageSQLite.php` does not call `removeAutoEvalCodeOnHTMLRecursive()` at all.\\n\\n### Attack Chain\\n\\n- Attacker sends a WebSocket message with `autoEvalCodeOnHTML` in the `json` key instead of `msg`\\n- The fix at line 268-271 only checks `$json['msg']` — the `json` key is untouched\\n- `msgToResourceId()` reads `$msg['json']` first (line 361) because `!empty($msg['json'])` is true\\n- The payload is delivered to the victim's WebSocket client and evaluated via `autoEvalCodeOnHTML`\\n\\n## Proof of Concept\\n\\n```javascript\\n// Connect to AVideo WebSocket as authenticated user\\nconst ws = new WebSocket('wss://TARGET/plugin/YPTSocket/server.php?token=USER_TOKEN');\\n\\nws.onopen = () => {\\n  ws.send(JSON.stringify({\\n    msg: \\\"Hello\\\",                               // sanitized path — decoy\\n    json: {autoEvalCodeOnHTML: \\\"alert('XSS')\\\"},  // unsanitized path — payload\\n    to_users_id: VICTIM_USER_ID,\\n    resourceId: RESOURCE_ID\\n  }));\\n};\\n// Victim's client evaluates alert('XSS') via autoEvalCodeOnHTML mechanism\\n```\\n\\n## Impact\\n\\nAn authenticated attacker can:\\n\\n- Execute arbitrary JavaScript in any connected user's browser session via the WebSocket messaging system\\n- Steal session cookies and authentication tokens\\n- Perform account takeover via session hijacking\\n- Chain with CSRF to execute admin actions on behalf of the victim\\n\\nThe vulnerability affects the default SQLite WebSocket backend configuration.\\n\\n## Suggested Remediation\\n\\nApply `removeAutoEvalCodeOnHTMLRecursive()` in `MessageSQLite.php`, consistent with `Message.php` and `MessageSQLiteV2.php`:\\n\\n```php\\n// Before (vulnerable — shallow strip):\\nif (is_array($json['msg'] ?? null)) {\\n    unset($json['msg']['autoEvalCodeOnHTML']);\\n}\\n\\n// After (fixed — recursive strip):\\n$json = removeAutoEvalCodeOnHTMLRecursive($json);\\n```\", \"epss\": {\"percentage\": 0.00327, \"percentile\": 0.24767}, \"ghsa_id\": \"GHSA-2fhx-q92v-5fhv\", \"github_reviewed_at\": \"2026-06-04T18:55:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-2fhx-q92v-5fhv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2fhx-q92v-5fhv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49279\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T18:55:04Z\", \"references\": [\"https://github.com/WWBN/AVideo/security/advisories/GHSA-2fhx-q92v-5fhv\", \"https://github.com/WWBN/AVideo/commit/3e0b3ce2bfa766183ff0ae227439394db57b1a23\", \"https://github.com/advisories/GHSA-2fhx-q92v-5fhv\"], \"repository_advisory_url\": \"https://api.github.com/repos/WWBN/AVideo/security-advisories/GHSA-2fhx-q92v-5fhv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/WWBN/AVideo\", \"summary\": \"WWBN AVideo: Stored XSS via autoEvalCodeOnHTML Bypass in MessageSQLite WebSocket Handler (CVE-2026-43874 Bypass)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T18:55:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-2fhx-q92v-5fhv\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"wwbn/avideo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 29.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2fhx-q92v-5fhv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wwbn/avideo: <= 29.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-43874",
+      "CVE-2026-49279"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wwbn/avideo"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.853250Z",
+  "provenance": {
+    "content_sha256": "34301b195b63cf68e0254a6babd9e1c3cc148557e62aec5e32b44a3d59a5d944",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T18:55:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2fhx-q92v-5fhv",
+  "status": "active",
+  "title": "WWBN AVideo: Stored XSS via autoEvalCodeOnHTML Bypass in MessageSQLite WebSocket Handler (CVE-2026-43874 Bypass)",
+  "updated_at": "2026-06-04T18:55:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2fhx-q92v-5fhv"
+}

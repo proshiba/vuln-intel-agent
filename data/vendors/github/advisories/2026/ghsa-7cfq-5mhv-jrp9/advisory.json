@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-44778\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"## Summary\\n\\nA malicious container can crash or destabilize the privileged Inspektor Gadget process when a **gadget using USDT probes** is deployed. The vulnerability is in the USDT note parser (`pkg/uprobetracer/usdt.go`) which is invoked when a gadget with a `SEC(\\\"usdt/...\\\")` section attaches to a target binary. An unprivileged process can place a crafted ELF binary at the expected library path, triggering one of two attack vectors:\\n\\n1. **Panic (immediate crash):** A stapsdt note with a small `DescSize` causes an out-of-bounds slice access, panicking the IG process.\\n2. **Memory exhaustion (OOM kill):** A stapsdt note with a very large `NameSize` or `DescSize` causes IG to allocate up to ~4 GiB of memory, which can killnthe process if deployed with memory restrictions (e.g., cgroup limits).\\n\\n**Important:** The vulnerability is only triggered when running a gadget that uses USDT probes (i.e., contains a `SEC(\\\"usdt/...\\\")` eBPF section). No gadget shipped by the Inspektor Gadget project uses USDT today. Users who deploy their own custom USDT gadgets are affected.\\n\\n## Severity\\n\\n**Low** — Denial of Service (process crash or OOM) of a privileged host process, triggered by an unprivileged container. The vulnerable code path is only reached when a gadget using USDT probes is deployed. No such gadget is shipped by the Inspektor Gadget project; only users running custom USDT gadgets are affected.\\n\\n- **Attack vector**: An unprivileged process in a container places a crafted ELF  file at a path that a USDT gadget targets (e.g., a library name resolved via the container's ld cache). When the gadget attaches, IG parses the malicious ELF and crashes.\\n- **Impact**: The IG process panics and crashes (vector 1) or is OOM-killed (vector 2). This is a DoS against the monitoring infrastructure, not a code execution or privilege escalation vulnerability.\\n- **Affected component**: `pkg/uprobetracer/usdt.go`, function `getUsdtInfo()`\\n- **Prerequisites**: A gadget with a `SEC(\\\"usdt/...\\\")` eBPF section must be running and configured to attach to a library inside the attacker's container.\\n  **No shipped gadgets use USDT probes**, so this only affects deployments with custom USDT gadgets.\\n\\n## Affected Versions\\n\\nAll versions of Inspektor Gadget that include USDT support in `pkg/uprobetracer/usdt.go`, starting from v0.28.0 (commit 7ee5e7a90 \\\"pkg/uprobetracer: support USDT trace points\\\").\\n\\n## Root Cause\\n\\n### Vector 1: Out-of-bounds slice access (panic)\\n\\nIn `pkg/uprobetracer/usdt.go`, the function `getUsdtInfo()` parses stapsdt notes from an ELF file's `.note.stapsdt` section. When a matching note is found (`name == \\\"stapsdt\\\\0\\\"` and `type == 3`), it reads three address fields from the note descriptor:\\n\\n```go\\n// usdt.go lines 137-139\\nelfLocation := elfReader.ByteOrder.Uint64(desc[:wordSize])\\nelfBase := elfReader.ByteOrder.Uint64(desc[wordSize : 2*wordSize])\\nelfSemaphore := elfReader.ByteOrder.Uint64(desc[2*wordSize : 3*wordSize])\\n```\\n\\nFor a 64-bit ELF, `wordSize = 8`, so this requires `desc` to be at least 24 bytes. However, `desc` is allocated based on the note's `DescSize` field from the ELF file:\\n\\n```go\\ndesc := make([]byte, alignUp(uint64(header.DescSize), 4))\\n```\\n\\nA crafted ELF with `DescSize = 1` produces a 4-byte `desc` buffer. The expression `desc[:8]` then panics with:\\n\\n```\\npanic: runtime error: slice bounds out of range [:8] with capacity 4\\n```\\n\\n### Vector 2: Unbounded memory allocation (OOM)\\n\\nThe `NameSize` and `DescSize` fields from the note header are used directly to allocate memory without any upper bound:\\n\\n```go\\nname := make([]byte, alignUp(uint64(header.NameSize), 4))\\ndesc := make([]byte, alignUp(uint64(header.DescSize), 4))\\n```\\n\\nA crafted ELF with `NameSize = 0xFFFFFFFF` would attempt to allocate ~4 GiB of memory. Under cgroup memory limits (common in Kubernetes deployments), this triggers an OOM kill of the IG process.\\n\\n### Vector 3: Missing panic recovery for `debug/elf`\\n\\nGo's `debug/elf` package is [not hardened against adversarial inputs](https://github.com/golang/go/issuesq=is%3Aissue+is%3Aopen+debug%2Felf+in%3Atitle) and may panic on malformed ELF headers. The cilium/ebpf library addresses this with its [`SafeELFFile` wrapper](https://github.com/cilium/ebpf/blob/main/internal/safeelf.go) that uses `recover()`, but `getUsdtInfo()` calls `elf.NewFile()` directly without any panic recovery.\\n\\n## Fix\\n\\nThe fix (3 changes in `pkg/uprobetracer/usdt.go`):\\n\\n1. **Bounds check on descriptor size**: Validate `len(desc) >= 3*wordSize` before accessing the address fields. Reject malformed notes with an error instead of panicking.\\n\\n2. **Cap allocation sizes**: Limit `NameSize` and `DescSize` to a reasonable maximum (1 MiB) before allocating memory, preventing DoS via memory exhaustion. There is no standard upper bound for ELF note fields; 1 MiB is a generous arbitrary cap — legitimate USDT notes are typically under 1 KB.\\n\\n3. **Panic recovery**: Wrap `getUsdtInfo()` with `defer/recover` to catch any panics from `debug/elf` on malformed input, converting them to errors.\\n\\n## Related\\n\\n- Go `debug/elf` known issues: https://github.com/golang/go/issues?q=is%3Aissue+is%3Aopen+debug%2Felf+in%3Atitle\\n- cilium/ebpf `SafeELFFile` wrapper: https://github.com/cilium/ebpf/blob/main/internal/safeelf.go — uses `recover()` around all `debug/elf` operations for exactly this reason.\", \"ghsa_id\": \"GHSA-7cfq-5mhv-jrp9\", \"github_reviewed_at\": \"2026-06-22T20:35:42Z\", \"html_url\": \"https://github.com/advisories/GHSA-7cfq-5mhv-jrp9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7cfq-5mhv-jrp9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44778\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-22T20:35:42Z\", \"references\": [\"https://github.com/inspektor-gadget/inspektor-gadget/security/advisories/GHSA-7cfq-5mhv-jrp9\", \"https://github.com/inspektor-gadget/inspektor-gadget/pull/5547\", \"https://github.com/inspektor-gadget/inspektor-gadget/commit/ec69da2e00c39bc43f389f943899e5ff9c7b011a\", \"https://github.com/inspektor-gadget/inspektor-gadget/releases/tag/v0.53.1\", \"https://github.com/advisories/GHSA-7cfq-5mhv-jrp9\"], \"repository_advisory_url\": \"https://api.github.com/repos/inspektor-gadget/inspektor-gadget/security-advisories/GHSA-7cfq-5mhv-jrp9\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/inspektor-gadget/inspektor-gadget\", \"summary\": \"Inspektor Gadget: Unprivileged container can crash USDT note parser via crafted ELF (no shipped gadget affected)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-22T20:35:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-7cfq-5mhv-jrp9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.53.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/inspektor-gadget/inspektor-gadget\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.28.0, < 0.53.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7cfq-5mhv-jrp9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/inspektor-gadget/inspektor-gadget: >= 0.28.0, < 0.53.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44778"
+    ],
+    "cvss_score": 2.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/inspektor-gadget/inspektor-gadget"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.587501Z",
+  "provenance": {
+    "content_sha256": "bf46eeabf6d5455040f460da408f8f01288e7515673562024dad617ea918e6fd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-22T20:35:42Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7cfq-5mhv-jrp9",
+  "status": "active",
+  "title": "Inspektor Gadget: Unprivileged container can crash USDT note parser via crafted ELF (no shipped gadget affected)",
+  "updated_at": "2026-06-22T20:35:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7cfq-5mhv-jrp9"
+}

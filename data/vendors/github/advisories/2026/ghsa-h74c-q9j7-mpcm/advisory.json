@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4237280?v=4\", \"events_url\": \"https://api.github.com/users/yordis/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yordis/followers\", \"following_url\": \"https://api.github.com/users/yordis/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yordis/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yordis\", \"id\": 4237280, \"login\": \"yordis\", \"node_id\": \"MDQ6VXNlcjQyMzcyODA=\", \"organizations_url\": \"https://api.github.com/users/yordis/orgs\", \"received_events_url\": \"https://api.github.com/users/yordis/received_events\", \"repos_url\": \"https://api.github.com/users/yordis/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yordis/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yordis/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yordis\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48597\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n\\nIn the Mint adapter for the Tesla HTTP client library, `Tesla.Adapter.Mint.open_conn/2` passes the URL scheme of every outgoing request through `String.to_atom/1` with no allow-list validation. Because BEAM atoms are permanent (never garbage-collected) and the atom table is bounded at roughly 1,048,576 entries, an attacker who can vary the URL scheme across requests can mint one fresh atom per request and eventually exhaust the table, crashing the VM.\\n\\n### Details\\n\\n**Vulnerable call** (`lib/tesla/adapter/mint.ex`, `open_conn/2`): the scheme field parsed from the request URI is passed directly to `String.to_atom/1` before being forwarded to `Mint.HTTP.connect/4`. Even though `Mint` raises for unrecognised schemes, the atom is already interned by that point. The function's HTTPS-branch guard confirms that no scheme normalisation occurs beforehand.\\n\\nThe attack surface has two entry points. First, any application-level URL-forwarding feature (webhook relay, link preview, SSRF-style proxy) where untrusted input reaches `Tesla.get/2` or equivalent. Second, any pipeline that includes `Tesla.Middleware.FollowRedirects`: a server under the attacker's control can return a `Location` header with a novel scheme, triggering the atom creation on the redirect follow.\\n\\n### PoC\\n\\n1. Stand up any application that accepts a user-supplied URL and forwards it through `Tesla.Adapter.Mint`.\\n2. Send requests to the application, each with a distinct, previously unseen URL scheme (e.g. `atk1://`, `atk2://`, ...).\\n3. Each request interns one new permanent atom; `Mint` rejects the connection but the atom persists.\\n4. After approximately 1,000,000 requests the BEAM atom table is exhausted and the VM crashes.\\n\\n### Impact\\n\\nHigh severity (CVSS v4.0: 8.2). Any application using `tesla` 1.3.0 through 1.18.2 with `Tesla.Adapter.Mint` that allows untrusted input to influence request URLs is vulnerable to remote denial of service. No authentication or special privileges are required beyond access to the application's HTTP endpoint. Fixed in tesla 1.18.3.\\n\\n### Configurations\\n\\nThe application must use `Tesla.Adapter.Mint` and either expose a feature that forwards attacker-controlled URLs to Tesla, or include `Tesla.Middleware.FollowRedirects` in the middleware pipeline.\\n\\n### References\\n\\n* Introduction commit: https://github.com/elixir-tesla/tesla/commit/ccd0823d4ba37581a37d8f6108f9a81b263237ef\\n* Patch commit: https://github.com/elixir-tesla/tesla/commit/4699c3cb3e2fd6078f99f45f11cf7466aeedbf0e\", \"epss\": {\"percentage\": 0.00301, \"percentile\": 0.21579}, \"ghsa_id\": \"GHSA-h74c-q9j7-mpcm\", \"github_reviewed_at\": \"2026-07-10T00:03:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-h74c-q9j7-mpcm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h74c-q9j7-mpcm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48597\"}], \"nvd_published_at\": \"2026-06-02T20:16:38Z\", \"published_at\": \"2026-07-10T00:03:51Z\", \"references\": [\"https://github.com/elixir-tesla/tesla/security/advisories/GHSA-h74c-q9j7-mpcm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48597\", \"https://github.com/elixir-tesla/tesla/commit/4699c3cb3e2fd6078f99f45f11cf7466aeedbf0e\", \"https://cna.erlef.org/cves/CVE-2026-48597.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-48597\", \"https://github.com/advisories/GHSA-h74c-q9j7-mpcm\"], \"repository_advisory_url\": \"https://api.github.com/repos/elixir-tesla/tesla/security-advisories/GHSA-h74c-q9j7-mpcm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/elixir-tesla/tesla\", \"summary\": \"Tesla vulnerable to atom exhaustion via untrusted URL scheme\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-10T00:03:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-h74c-q9j7-mpcm\", \"vulnerabilities\": [{\"first_patched_version\": \"1.18.3\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"tesla\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.3.0, < 1.18.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h74c-q9j7-mpcm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "tesla: >= 1.3.0, < 1.18.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48597"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "tesla"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.343730Z",
+  "provenance": {
+    "content_sha256": "dd28b907821872f9a853e9ec7da1e33825c7fa40c98544c983a95c1c6a9307e4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-10T00:03:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h74c-q9j7-mpcm",
+  "status": "active",
+  "title": "Tesla vulnerable to atom exhaustion via untrusted URL scheme",
+  "updated_at": "2026-07-10T00:03:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h74c-q9j7-mpcm"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5972917?v=4\", \"events_url\": \"https://api.github.com/users/Kielek/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kielek/followers\", \"following_url\": \"https://api.github.com/users/Kielek/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kielek/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kielek\", \"id\": 5972917, \"login\": \"Kielek\", \"node_id\": \"MDQ6VXNlcjU5NzI5MTc=\", \"organizations_url\": \"https://api.github.com/users/Kielek/orgs\", \"received_events_url\": \"https://api.github.com/users/Kielek/received_events\", \"repos_url\": \"https://api.github.com/users/Kielek/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kielek/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kielek/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kielek\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1439341?v=4\", \"events_url\": \"https://api.github.com/users/martincostello/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/martincostello/followers\", \"following_url\": \"https://api.github.com/users/martincostello/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/martincostello/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/martincostello\", \"id\": 1439341, \"login\": \"martincostello\", \"node_id\": \"MDQ6VXNlcjE0MzkzNDE=\", \"organizations_url\": \"https://api.github.com/users/martincostello/orgs\", \"received_events_url\": \"https://api.github.com/users/martincostello/received_events\", \"repos_url\": \"https://api.github.com/users/martincostello/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/martincostello/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/martincostello/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/martincostello\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7052238?v=4\", \"events_url\": \"https://api.github.com/users/arminru/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arminru/followers\", \"following_url\": \"https://api.github.com/users/arminru/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arminru/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arminru\", \"id\": 7052238, \"login\": \"arminru\", \"node_id\": \"MDQ6VXNlcjcwNTIyMzg=\", \"organizations_url\": \"https://api.github.com/users/arminru/orgs\", \"received_events_url\": \"https://api.github.com/users/arminru/received_events\", \"repos_url\": \"https://api.github.com/users/arminru/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arminru/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arminru/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arminru\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40891\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-789\", \"name\": \"Memory Allocation with Excessive Size Value\"}], \"description\": \"### Summary\\n\\nWhen exporting telemetry over gRPC using the OpenTelemetry Protocol (OTLP), the exporter may parse a server-provided `grpc-status-details-bin` trailer during retry handling. Prior to the fix, a malformed trailer could encode an extremely large length-delimited protobuf field which was used directly for allocation, allowing excessive memory allocation and potential denial of service (DoS).\\n\\n### Details\\n\\n#5980 introduced a retry path that parses `grpc-status-details-bin` to extract gRPC retry delay information for retryable responses.\\n\\nOn that path:\\n\\n- `OtlpGrpcExportClient` captures `grpc-status-details-bin` from retryable status responses (`ResourceExhausted` / `Unavailable`).\\n- `OtlpRetry` invokes `GrpcStatusDeserializer.TryGetGrpcRetryDelay` using this untrusted trailer value.\\n- `GrpcStatusDeserializer.DecodeBytes` decoded a protobuf varint length and allocated `new byte[length]` without validating the bounds against the remaining payload size.\\n\\nA malicious or compromised collector (or a MitM in weakly-protected deployments) could return a crafted `grpc-status-details-bin` payload that forces oversized allocation and memory exhaustion in the instrumented process.\\n\\n### Impact\\n\\nIf an OTLP/gRPC endpoint is attacker-controlled (or traffic is intercepted), a crafted retryable response can trigger large allocations during trailer parsing, which may exhaust memory and cause process instability/crash (availability impact / DoS).\\n\\n### Mitigation\\n\\nThe application's configured back-end/collector endpoint needs to behave maliciously. If the collector/back-end is a well-behaved implementation response bodies should not be excessively large if a request error occurs.\\n\\n### Workarounds\\n\\nNone known.\\n\\n### Remediation\\n\\n[#7064](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7064) updates `GrpcStatusDeserializer` to validate decoded length-delimited field sizes before allocation by ensuring the requested length is sane and does not exceed the remaining payload.\\n\\nThis causes malformed or truncated `grpc-status-details-bin` payloads to fail safely instead of attempting unbounded allocation.\", \"epss\": {\"percentage\": 0.00192, \"percentile\": 0.08995}, \"ghsa_id\": \"GHSA-mr8r-92fq-pj8p\", \"github_reviewed_at\": \"2026-04-23T21:40:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-mr8r-92fq-pj8p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mr8r-92fq-pj8p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40891\"}], \"nvd_published_at\": \"2026-04-23T18:16:28Z\", \"published_at\": \"2026-04-23T21:40:29Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-dotnet/security/advisories/GHSA-mr8r-92fq-pj8p\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40891\", \"https://github.com/open-telemetry/opentelemetry-dotnet/pull/5980\", \"https://github.com/open-telemetry/opentelemetry-dotnet/pull/7064\", \"https://github.com/advisories/GHSA-mr8r-92fq-pj8p\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-dotnet/security-advisories/GHSA-mr8r-92fq-pj8p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-dotnet\", \"summary\": \"OpenTelemetry dotnet: Unbounded `grpc-status-details-bin` parsing in OTLP/gRPC retry handling\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-23T21:40:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-mr8r-92fq-pj8p\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.3\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"OpenTelemetry.Exporter.OpenTelemetryProtocol\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.13.1, < 1.15.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mr8r-92fq-pj8p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "OpenTelemetry.Exporter.OpenTelemetryProtocol: >= 1.13.1, < 1.15.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40891"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "OpenTelemetry.Exporter.OpenTelemetryProtocol"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.955112Z",
+  "provenance": {
+    "content_sha256": "1dee3c36689b827ee5afdde40a97a0ff45cb9e626296bc4401531623766c6f6c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-23T21:40:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mr8r-92fq-pj8p",
+  "status": "active",
+  "title": "OpenTelemetry dotnet: Unbounded `grpc-status-details-bin` parsing in OTLP/gRPC retry handling",
+  "updated_at": "2026-04-23T21:40:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mr8r-92fq-pj8p"
+}

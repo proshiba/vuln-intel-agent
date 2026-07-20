@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-41894\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\nThe fix for CVE-2026-30869 in SiYuan v3.5.10 only added a denylist check (`IsSensitivePath`) but did not address the root cause — a redundant `url.PathUnescape()` call in `serveExport()`. An authenticated attacker can use double URL encoding (`%252e%252e`) to traverse directories and read arbitrary workspace files including the full SQLite database (`siyuan.db`), kernel log, and all user documents.\\n\\n### Details\\nIn `kernel/server/serve.go`, the `serveExport()` function (line 314-320) processes file paths as follows:\\n\\n```go\\nfilePath := strings.TrimPrefix(c.Request.URL.Path, \\\"/export/\\\")\\ndecodedPath, err := url.PathUnescape(filePath)     // second decode\\nfullPath := filepath.Join(exportBaseDir, decodedPath)\\n```\\n\\nGo's HTTP server already decodes percent-encoded characters once during request parsing. The additional `url.PathUnescape()` call creates a double-decode vulnerability:\\n\\n1. Attacker sends: `GET /export/%252e%252e/siyuan.db`\\n2. Go HTTP decodes `%25` → `%`, result: `URL.Path = /export/%2e%2e/siyuan.db`\\n3. Go's path cleaner sees `%2e%2e` as literal characters (not `..`), no redirect occurs\\n4. `url.PathUnescape(\\\"%2e%2e\\\")` decodes to `..`\\n5. `filepath.Join(exportBaseDir, \\\"../siyuan.db\\\")` resolves to `<workspace>/temp/siyuan.db`\\n\\nThe CVE-2026-30869 fix added `IsSensitivePath()` which blocks `<workspace>/conf/` and OS-level paths (`/etc`, `/root`, etc.). However, it does NOT block:\\n- `<workspace>/temp/siyuan.db` — full document database\\n- `<workspace>/temp/blocktree.db` — block tree database\\n- `<workspace>/temp/siyuan.log` — kernel log\\n- `<workspace>/temp/asset_content.db` — asset content database\\n\\nNote: the `/appearance/` handler in the same file correctly uses `gulu.File.IsSubPath()` to validate paths (line 447), but this check is missing from the `/export/` handler.\\n\\n### PoC\\n[poc.zip](https://github.com/user-attachments/files/26866234/poc.zip)\\nPlease extract the uploaded compressed file before proceeding\\n\\n1. docker compose up -d --build\\n2. sh poc.sh\\n\\n<img width=\\\"550\\\" height=\\\"184\\\" alt=\\\"스크린샷 2026-04-19 오후 5 08 30\\\" src=\\\"https://github.com/user-attachments/assets/6aea4334-0b5a-4f45-bd1f-ecfad61ba524\\\" />\\n\\n\\n\\n\\n### Impact\\n- Data exfiltration: An authenticated user (including low-privilege Publish/Reader users via the Publish service) can download the entire SQLite document database containing all blocks, documents, attributes, and full-text search indexes.\\n- Information disclosure: Kernel log (`siyuan.log`) leaks internal server paths, versions, configuration details, and error messages.\", \"epss\": {\"percentage\": 0.00313, \"percentile\": 0.22823}, \"ghsa_id\": \"GHSA-hjh7-r5w8-5872\", \"github_reviewed_at\": \"2026-04-22T20:51:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-hjh7-r5w8-5872\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hjh7-r5w8-5872\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41894\"}], \"nvd_published_at\": \"2026-04-24T19:17:14Z\", \"published_at\": \"2026-04-22T20:51:22Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-hjh7-r5w8-5872\", \"https://github.com/siyuan-note/siyuan/commit/bb481e1290c4a34255652ede85a546504505d2a7\", \"https://github.com/advisories/GHSA-2h2p-mvfx-868w\", \"https://github.com/siyuan-note/siyuan/releases/tag/v3.6.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41894\", \"https://github.com/advisories/GHSA-hjh7-r5w8-5872\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-hjh7-r5w8-5872\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Path Traversal via Double URL Encoding in `/export/` Endpoint (Incomplete Fix Bypass for CVE-2026-30869)\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T16:34:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-hjh7-r5w8-5872\", \"vulnerabilities\": [{\"first_patched_version\": \"3.6.5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.6.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hjh7-r5w8-5872",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 3.6.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-30869",
+      "CVE-2026-41894"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.375203Z",
+  "provenance": {
+    "content_sha256": "f13c8ea618367b901428d41cc7ddb3cb9032029350f7e0242b04b648b01422d8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T20:51:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hjh7-r5w8-5872",
+  "status": "active",
+  "title": "SiYuan: Path Traversal via Double URL Encoding in `/export/` Endpoint (Incomplete Fix Bypass for CVE-2026-30869)",
+  "updated_at": "2026-04-27T16:34:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hjh7-r5w8-5872"
+}

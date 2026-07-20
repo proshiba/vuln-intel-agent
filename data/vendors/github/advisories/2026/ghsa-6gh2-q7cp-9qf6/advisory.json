@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3671820?v=4\", \"events_url\": \"https://api.github.com/users/raresvis/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/raresvis/followers\", \"following_url\": \"https://api.github.com/users/raresvis/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/raresvis/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/raresvis\", \"id\": 3671820, \"login\": \"raresvis\", \"node_id\": \"MDQ6VXNlcjM2NzE4MjA=\", \"organizations_url\": \"https://api.github.com/users/raresvis/orgs\", \"received_events_url\": \"https://api.github.com/users/raresvis/received_events\", \"repos_url\": \"https://api.github.com/users/raresvis/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/raresvis/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/raresvis/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/raresvis\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/70060844?v=4\", \"events_url\": \"https://api.github.com/users/Gh05t666nero/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Gh05t666nero/followers\", \"following_url\": \"https://api.github.com/users/Gh05t666nero/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Gh05t666nero/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Gh05t666nero\", \"id\": 70060844, \"login\": \"Gh05t666nero\", \"node_id\": \"MDQ6VXNlcjcwMDYwODQ0\", \"organizations_url\": \"https://api.github.com/users/Gh05t666nero/orgs\", \"received_events_url\": \"https://api.github.com/users/Gh05t666nero/received_events\", \"repos_url\": \"https://api.github.com/users/Gh05t666nero/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Gh05t666nero/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Gh05t666nero/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Gh05t666nero\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45299\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nThe `profile_image_url` field on the user profile update form accepted arbitrary `data:` URI values without MIME-type validation. Two distinct attack paths were independently demonstrated by separate reporters:\\n\\n1. **`data:text/html;base64,...` in a new browser tab** (raresvis, 2025-04-17) — when a victim right-clicks a user's profile picture and chooses \\\"Open image in new tab\\\", the browser navigates to the data: URL and executes embedded scripts in the `data:` origin. Limited to social-engineering / redirect attacks because the script does not run in the application origin.\\n\\n2. **`data:image/svg+xml;base64,...` re-served by the application origin** (Gh05t666nero, 2026-01-09) — `GET /api/v1/users/{user_id}/profile/image` decoded the base64 and returned `StreamingResponse(media_type=<user-controlled>)` extracted from the `data:` header. With `media_type=image/svg+xml` and `Content-Disposition: inline`, the SVG-embedded scripts executed in the **application origin**, enabling JWT theft from `localStorage` and full account takeover of any user — including admins — who loaded the malicious profile image URL.\\n\\nBoth attack paths share the same root cause (lack of MIME-type validation on `profile_image_url`) and are closed by the same fix.\\n\\n## Vulnerable code (v0.7.0)\\n\\n`backend/open_webui/routers/users.py` `get_user_profile_image_by_id()`:\\n\\n```python\\nelif user.profile_image_url.startswith(\\\"data:image\\\"):\\n    header, base64_data = user.profile_image_url.split(\\\",\\\", 1)\\n    image_data = base64.b64decode(base64_data)\\n    image_buffer = io.BytesIO(image_data)\\n    media_type = header.split(\\\";\\\")[0].lstrip(\\\"data:\\\")  # user-controlled\\n    return StreamingResponse(\\n        image_buffer,\\n        media_type=media_type,\\n        headers={\\\"Content-Disposition\\\": \\\"inline\\\"},\\n    )\\n```\\n\\n## Fix\\n\\nCommit `773787c74` (2026-02-11), first contained in tag **v0.8.0**, applies the `validate_profile_image_url` field validator to every form that accepts `profile_image_url` (`UserModel`, `UpdateProfileForm`, `SignupForm` in `backend/open_webui/models/users.py` and `backend/open_webui/models/auths.py`). The validator explicitly rejects `data:image/svg+xml` and any non-image data URI, allowing only `data:image/{png,jpeg,gif,webp};base64` plus known internal paths and `http(s)://` URLs. This blocks both attack vectors at form submission time, so a malicious URL can no longer be persisted to the database.\\n\\n## Credits\\n\\n- **raresvis** — discovered the `data:text/html`-via-new-tab path\\n- **Gh05t666nero** — discovered the `data:image/svg+xml`-via-server-side path (the more severe origin-XSS vector that determined the consolidated CVSS)\\n\\nPer our Report Handling policy, the cluster is consolidated into the earliest filing with credit to every reporter who demonstrated a distinct exploitation path.\\n\\n## Affected / patched versions\\n\\n- Affected: `< 0.8.0`\\n- Patched: `>= 0.8.0`\", \"epss\": {\"percentage\": 0.00199, \"percentile\": 0.09721}, \"ghsa_id\": \"GHSA-6gh2-q7cp-9qf6\", \"github_reviewed_at\": \"2026-05-14T20:15:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-6gh2-q7cp-9qf6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6gh2-q7cp-9qf6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45299\"}], \"nvd_published_at\": \"2026-05-15T22:16:53Z\", \"published_at\": \"2026-05-14T20:15:19Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-6gh2-q7cp-9qf6\", \"https://github.com/open-webui/open-webui/releases/tag/v0.8.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45299\", \"https://github.com/advisories/GHSA-6gh2-q7cp-9qf6\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-6gh2-q7cp-9qf6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI has Stored Cross-Site Scripting In Profile Picture\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:57:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-6gh2-q7cp-9qf6\", \"vulnerabilities\": [{\"first_patched_version\": \"0.8.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.8.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6gh2-q7cp-9qf6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: < 0.8.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45299"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.750267Z",
+  "provenance": {
+    "content_sha256": "1f5790a80f3bbc0f570e44b5fda6eb7381018881b01052e09ebf869472d6c80e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:15:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6gh2-q7cp-9qf6",
+  "status": "active",
+  "title": "Open WebUI has Stored Cross-Site Scripting In Profile Picture",
+  "updated_at": "2026-05-19T15:57:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6gh2-q7cp-9qf6"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/111700861?v=4\", \"events_url\": \"https://api.github.com/users/KarimTantawey/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/KarimTantawey/followers\", \"following_url\": \"https://api.github.com/users/KarimTantawey/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/KarimTantawey/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/KarimTantawey\", \"id\": 111700861, \"login\": \"KarimTantawey\", \"node_id\": \"U_kgDOBqhrfQ\", \"organizations_url\": \"https://api.github.com/users/KarimTantawey/orgs\", \"received_events_url\": \"https://api.github.com/users/KarimTantawey/received_events\", \"repos_url\": \"https://api.github.com/users/KarimTantawey/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/KarimTantawey/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/KarimTantawey/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/KarimTantawey\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1135285?v=4\", \"events_url\": \"https://api.github.com/users/jankapunkt/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jankapunkt/followers\", \"following_url\": \"https://api.github.com/users/jankapunkt/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jankapunkt/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jankapunkt\", \"id\": 1135285, \"login\": \"jankapunkt\", \"node_id\": \"MDQ6VXNlcjExMzUyODU=\", \"organizations_url\": \"https://api.github.com/users/jankapunkt/orgs\", \"received_events_url\": \"https://api.github.com/users/jankapunkt/received_events\", \"repos_url\": \"https://api.github.com/users/jankapunkt/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jankapunkt/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jankapunkt/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jankapunkt\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/563596?v=4\", \"events_url\": \"https://api.github.com/users/dhensby/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dhensby/followers\", \"following_url\": \"https://api.github.com/users/dhensby/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dhensby/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dhensby\", \"id\": 563596, \"login\": \"dhensby\", \"node_id\": \"MDQ6VXNlcjU2MzU5Ng==\", \"organizations_url\": \"https://api.github.com/users/dhensby/orgs\", \"received_events_url\": \"https://api.github.com/users/dhensby/received_events\", \"repos_url\": \"https://api.github.com/users/dhensby/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dhensby/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dhensby/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dhensby\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41213\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-307\", \"name\": \"Improper Restriction of Excessive Authentication Attempts\"}, {\"cwe_id\": \"CWE-1289\", \"name\": \"Improper Validation of Unsafe Equivalence in Input\"}], \"description\": \"## Summary\\n\\nThe token exchange path accepts RFC7636-invalid `code_verifier` values (including one-character strings) for `S256` PKCE flows.  \\nBecause short/weak verifiers are accepted and failed verifier attempts do not consume the authorization code, an attacker who intercepts an authorization code can brute-force `code_verifier` guesses online until token issuance succeeds.\\n\\n\\n\\n### Root cause\\n\\n1. `lib/pkce/pkce.js` (`getHashForCodeChallenge`) only checks that `verifier` is a non-empty string before hashing for `S256`; it does not enforce RFC7636 ABNF (`43..128` unreserved chars).\\n2. `lib/grant-types/authorization-code-grant-type.js` compares `hash(code_verifier)` to stored `codeChallenge` without validating verifier format/length.\\n3. In `AuthorizationCodeGrantType.handle`, authorization code revocation happens **after** verifier validation. Invalid guesses fail before revoke, so the same code can be retried repeatedly.\\n\\n## Steps to Reproduce\\n\\n### Setup\\n\\n- PKCE authorization code exists with:\\n  - `codeChallengeMethod = \\\"S256\\\"`\\n  - `codeChallenge = BASE64URL(SHA256(\\\"z\\\"))` (verifier is one character, RFC-invalid)\\n- Attacker has intercepted the authorization code value.\\n\\n### Reproduction\\n\\n1. Send repeated token requests with guessed `code_verifier` values:\\n\\n```http\\nPOST /token HTTP/1.1\\nHost: oauth.example\\nContent-Type: application/x-www-form-urlencoded\\n\\ngrant_type=authorization_code&\\nclient_id=client1&\\nclient_secret=s3cret&\\ncode=stolen-auth-code&\\nredirect_uri=https://client.example/callback&\\ncode_verifier=<guess>\\n```\\n\\n2. Observe invalid guesses return `invalid_grant`.\\n3. Continue guessing (`a`..`z`).\\n4. When `code_verifier=z`, token issuance succeeds and returns bearer tokens.\\n\\n### Confirmed PoC output\\n\\n```text\\nBRUTE_FORCE_SUCCESS { tries: 26, guess: 'z', status: 200, tokenIssued: true }\\n```\\n\\n## Impact\\n\\nAn intercepted authorization code can be redeemed by brute-forcing low-entropy verifiers that the server should have rejected under RFC7636.  \\nThis weakens PKCE’s protection goal and allows token theft when clients generate short/predictable verifiers.\\n\\n## Recommended Fix\\n\\n1. Enforce `pkce.codeChallengeMatchesABNF(request.body.code_verifier)` in authorization code token exchange before hashing/comparison.\\n2. Reject verifier values outside RFC7636 charset/length (`43..128` unreserved).\\n3. Invalidate authorization codes on failed verifier attempts (or add strict retry limits) to prevent online guessing.\", \"epss\": {\"percentage\": 0.00259, \"percentile\": 0.17017}, \"ghsa_id\": \"GHSA-jhm7-29pj-4xvf\", \"github_reviewed_at\": \"2026-04-16T21:09:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-jhm7-29pj-4xvf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jhm7-29pj-4xvf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41213\"}], \"nvd_published_at\": \"2026-04-23T19:17:29Z\", \"published_at\": \"2026-04-16T21:09:50Z\", \"references\": [\"https://github.com/node-oauth/node-oauth2-server/security/advisories/GHSA-jhm7-29pj-4xvf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41213\", \"https://github.com/advisories/GHSA-jhm7-29pj-4xvf\"], \"repository_advisory_url\": \"https://api.github.com/repos/node-oauth/node-oauth2-server/security-advisories/GHSA-jhm7-29pj-4xvf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/node-oauth/node-oauth2-server\", \"summary\": \"@node-oauth/oauth2-server: PKCE code_verifier ABNF not enforced in token exchange allows brute-force redemption of intercepted authorization codes\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:53:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-jhm7-29pj-4xvf\", \"vulnerabilities\": [{\"first_patched_version\": \"5.3.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@node-oauth/oauth2-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jhm7-29pj-4xvf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@node-oauth/oauth2-server: <= 5.2.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41213"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@node-oauth/oauth2-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.674340Z",
+  "provenance": {
+    "content_sha256": "0524b2f94b4dab8267a77981ca6b0261ff2b998e462cf44ddf0fddfb9386bfa8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T21:09:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jhm7-29pj-4xvf",
+  "status": "active",
+  "title": "@node-oauth/oauth2-server: PKCE code_verifier ABNF not enforced in token exchange allows brute-force redemption of intercepted authorization codes",
+  "updated_at": "2026-04-24T20:53:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jhm7-29pj-4xvf"
+}

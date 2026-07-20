@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-47411\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\n**Type:** Authorization bypass enabling workspace metadata + settings tampering. The `PATCH /workspaces/{workspace_id}` endpoint is gated only by `require_workspace_member(workspace_id)` (default `min_role=\\\"member\\\"`). Any member can rewrite the workspace's `name`, `description`, and the `settings` JSON blob. The settings field is a free-form JSON object — depending on which downstream code reads it, this becomes a configuration-injection primitive for any setting the platform exposes there.\\n**File:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 63-74; `services/workspace_service.py`'s `update()` method.\\n**Root cause:** `Depends(require_workspace_member)` resolves to default `min_role=\\\"member\\\"`. `WorkspaceService.update(workspace_id, name, description, settings)` writes the new fields to the workspace row without any caller-permission check. The role hierarchy (`MemberService.has_role`) is never consulted.\\n\\n## Affected Code\\n\\n**File:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 63-74.\\n\\n```python\\n@router.patch(\\\"/{workspace_id}\\\", response_model=WorkspaceResponse)\\nasync def update_workspace(\\n    workspace_id: str,\\n    body: WorkspaceUpdate,\\n    user: AuthIdentity = Depends(require_workspace_member),         # <-- BUG: defaults to min_role=\\\"member\\\"\\n    session: AsyncSession = Depends(get_db),\\n):\\n    ws_svc = WorkspaceService(session)\\n    ws = await ws_svc.update(workspace_id, body.name, body.description, body.settings)  # <-- writes any value\\n    if ws is None:\\n        raise HTTPException(status_code=404, detail=\\\"Workspace not found\\\")\\n    return WorkspaceResponse.model_validate(ws)\\n```\\n\\n**Why it's wrong:** workspace name and settings are owner-tier fields. Renaming the workspace to a profanity is a low-impact griefing vector; rewriting the JSON `settings` blob is potentially a much higher-impact configuration injection (depending on what fields downstream code reads from `settings`, the attacker may flip feature flags, redirect webhook URLs, change LLM provider keys for shared configs, disable audit logging, etc.). The `require_workspace_member(min_role)` parameter is implemented and unused. This endpoint should require owner.\\n\\n## Exploit Chain\\n\\n1. Attacker is a member of workspace `W` with role \\\"member\\\". State: attacker holds JWT.\\n2. Attacker sends `PATCH /workspaces/W` with `Authorization: Bearer <attacker_jwt>` and body `{\\\"name\\\": \\\"Compromised\\\", \\\"description\\\": \\\"Owned by attacker\\\", \\\"settings\\\": {\\\"allow_public_invite\\\": true, \\\"ai_provider_url\\\": \\\"https://attacker.example/v1\\\"}}`. State: control flow enters `update_workspace`.\\n3. `require_workspace_member(W, attacker)` passes. `WorkspaceService.update(W, ...)` writes the three fields. State: workspace `W` now has attacker-chosen name, description, and settings.\\n4. The settings JSON is read by any downstream code that consults workspace settings (LLM proxying, invite flows, webhook routing). If the deployment uses settings-keyed configuration overrides, those overrides now point at attacker-controlled endpoints.\\n5. Final state: with one member-level token plus one PATCH, the attacker rewrites the workspace's metadata and settings, with effects ranging from cosmetic (rename) to substantive (settings-keyed config injection).\\n\\n## Security Impact\\n\\n**Severity:** sec-moderate. CVSS 6.5: network attack, low complexity, low privileges, no user interaction, scope unchanged, no confidentiality directly (though settings rewrites may enable indirect data exfiltration via attacker-pointed integration URLs), high integrity, no availability claim.\\n**Attacker capability:** rewrite any workspace's name, description, and settings JSON. The actual blast radius depends on what fields the deployment reads from `settings` — but that field is documented as a free-form JSON blob, so any future configuration the platform adds there becomes attacker-tunable.\\n**Preconditions:** `praisonai-platform` is deployed multi-tenant; attacker has any membership token in the target workspace.\\n**Differential:** source-inspection-verified. With the suggested fix below, member-tier tokens fail the gate and the metadata rewrite is rejected with 403.\\n\\n## Suggested Fix\\n\\n```diff\\n--- a/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n+++ b/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n@@ -63,11 +63,11 @@\\n @router.patch(\\\"/{workspace_id}\\\", response_model=WorkspaceResponse)\\n async def update_workspace(\\n     workspace_id: str,\\n     body: WorkspaceUpdate,\\n-    user: AuthIdentity = Depends(require_workspace_member),\\n+    user: AuthIdentity = Depends(_require_workspace_owner),  # see member-update-role advisory for helper\\n     session: AsyncSession = Depends(get_db),\\n ):\\n     ws_svc = WorkspaceService(session)\\n     ws = await ws_svc.update(workspace_id, body.name, body.description, body.settings)\\n     if ws is None:\\n         raise HTTPException(status_code=404, detail=\\\"Workspace not found\\\")\\n     return WorkspaceResponse.model_validate(ws)\\n```\\n\\nDefence-in-depth: validate the keys allowed in `body.settings` against an allowlist so the field cannot become an arbitrary config-injection primitive even for owners. The four companion workspace-mutation endpoints (`add_member`, `update_member_role`, `remove_member`, `delete_workspace`) exhibit the same default-min-role gap and are filed as their own advisories.\", \"epss\": {\"percentage\": 0.00029, \"percentile\": 0.08868}, \"ghsa_id\": \"GHSA-rcmc-q9rj-4wmq\", \"github_reviewed_at\": \"2026-06-01T14:23:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-rcmc-q9rj-4wmq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rcmc-q9rj-4wmq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47411\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-01T14:23:08Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-rcmc-q9rj-4wmq\", \"https://github.com/advisories/GHSA-rcmc-q9rj-4wmq\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-rcmc-q9rj-4wmq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"praisonai-platform: Any workspace member can rewrite workspace name, description, and settings via PATCH /workspaces/{id}\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-01T14:23:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-rcmc-q9rj-4wmq\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai-platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.1.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rcmc-q9rj-4wmq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai-platform: < 0.1.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47411"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai-platform"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.001968Z",
+  "provenance": {
+    "content_sha256": "e409330bf03666973783098a78ff522986ae506ae892402740af1df1555624f6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-01T14:23:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rcmc-q9rj-4wmq",
+  "status": "active",
+  "title": "praisonai-platform: Any workspace member can rewrite workspace name, description, and settings via PATCH /workspaces/{id}",
+  "updated_at": "2026-06-01T14:23:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rcmc-q9rj-4wmq"
+}

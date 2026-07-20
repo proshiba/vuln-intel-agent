@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/128969316?v=4\", \"events_url\": \"https://api.github.com/users/J1vvoo/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/J1vvoo/followers\", \"following_url\": \"https://api.github.com/users/J1vvoo/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/J1vvoo/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/J1vvoo\", \"id\": 128969316, \"login\": \"J1vvoo\", \"node_id\": \"U_kgDOB6_qZA\", \"organizations_url\": \"https://api.github.com/users/J1vvoo/orgs\", \"received_events_url\": \"https://api.github.com/users/J1vvoo/received_events\", \"repos_url\": \"https://api.github.com/users/J1vvoo/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/J1vvoo/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/J1vvoo/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/J1vvoo\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/127273427?v=4\", \"events_url\": \"https://api.github.com/users/im-soohyun/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/im-soohyun/followers\", \"following_url\": \"https://api.github.com/users/im-soohyun/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/im-soohyun/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/im-soohyun\", \"id\": 127273427, \"login\": \"im-soohyun\", \"node_id\": \"U_kgDOB5YJ0w\", \"organizations_url\": \"https://api.github.com/users/im-soohyun/orgs\", \"received_events_url\": \"https://api.github.com/users/im-soohyun/received_events\", \"repos_url\": \"https://api.github.com/users/im-soohyun/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/im-soohyun/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/im-soohyun/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/im-soohyun\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-68478\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}, {\"cwe_id\": \"CWE-610\", \"name\": \"Externally Controlled Reference to a Resource in Another Sphere\"}], \"description\": \"**Vulnerability Overview**\\n\\nIf an arbitrary path is specified in the request body's `fs_path`, the server serializes the Flow object into JSON and creates/overwrites a file at that path. There is no path restriction, normalization, or allowed directory enforcement, so absolute paths (e.g., /etc/poc.txt) are interpreted as is.\\n\\n**Vulnerable Code**\\n\\n1. It receives the request body (flow), updates the DB, and then passes it to the file-writing sink.\\n    \\n    https://github.com/langflow-ai/langflow/blob/ac6e2d2eabeee28085f2739d79f7ce4205ca082c/src/backend/base/langflow/api/v1/flows.py#L154-L168\\n    \\n    ```python\\n    @router.post(\\\"/\\\", response_model=FlowRead, status_code=201)\\n    async def create_flow(\\n        *,\\n        session: DbSession,\\n        flow: FlowCreate,\\n        current_user: CurrentActiveUser,\\n    ):\\n        try:\\n            db_flow = await _new_flow(session=session, flow=flow, user_id=current_user.id)\\n            await session.commit()\\n            await session.refresh(db_flow)\\n    \\n            await _save_flow_to_fs(db_flow)\\n    \\n        except Exception as e:\\n    ```\\n    \\n2. Applies authentication dependency (requires API Key/JWT) when accessing the endpoint.\\n    \\n    https://github.com/langflow-ai/langflow/blob/ac6e2d2eabeee28085f2739d79f7ce4205ca082c/src/backend/base/langflow/api/utils/core.py#L36-L38\\n    \\n    ```python\\n    CurrentActiveUser = Annotated[User, Depends(get_current_active_user)]\\n    CurrentActiveMCPUser = Annotated[User, Depends(get_current_active_user_mcp)]\\n    DbSession = Annotated[AsyncSession, Depends(get_session)]\\n    ```\\n    \\n3. The client can directly specify the save path, including `fs_path`.\\n    \\n    https://github.com/langflow-ai/langflow/blob/ac6e2d2eabeee28085f2739d79f7ce4205ca082c/src/backend/base/langflow/api/v1/flows.py#L66-L70\\n    \\n    ```python\\n    ):\\n        try:\\n            await _verify_fs_path(flow.fs_path)\\n    \\n            \\\"\\\"\\\"Create a new flow.\\\"\\\"\\\"\\n    ```\\n    \\n4. It attempts to create the file (or *the* file, in the case of a path without a parent) directly without path validation.\\n    \\n    https://github.com/langflow-ai/langflow/blob/ac6e2d2eabeee28085f2739d79f7ce4205ca082c/src/backend/base/langflow/api/v1/flows.py#L45-L49\\n    \\n    ```python\\n    async def _verify_fs_path(path: str | None) -> None:\\n        if path:\\n            path_ = Path(path)\\n            if not await path_.exists():\\n                await path_.touch()\\n    ```\\n    \\n5. Serializes the Flow object to JSON and writes it to the specified path in \\\"w\\\" mode (overwriting).\\n    \\n    https://github.com/langflow-ai/langflow/blob/ac6e2d2eabeee28085f2739d79f7ce4205ca082c/src/backend/base/langflow/api/v1/flows.py#L52-L58\\n    \\n    ```python\\n    async def _save_flow_to_fs(flow: Flow) -> None:\\n        if flow.fs_path:\\n            async with async_open(flow.fs_path, \\\"w\\\") as f:\\n                try:\\n                    await f.write(flow.model_dump_json())\\n                except OSError:\\n                    await logger.aexception(\\\"Failed to write flow %s to path %s\\\", flow.name, flow.fs_path)\\n    ```\\n    \\n\\n**PoC Description**\\n\\nWhen an authenticated user passes an arbitrary path in `fs_path`, the Flow JSON is written to that path. Since `/tmp` is usually writable, it is easy to reproduce. In a production environment, writing to system-protected directories may fail depending on permissions.\\n\\n**PoC**\\n\\n- **Before Exploit**\\n   \\n\\n    <img width=\\\"1918\\\" height=\\\"658\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/fe3c2306-091d-4cb0-b4dc-c7fb63c03d8d\\\" />\\n    \\n- **After Exploit**\\n    \\n    ```bash\\n    curl -sS -X POST \\\"http://localhost:7860/api/v1/flows/\\\" \\\\\\n      -H \\\"Content-Type: application/json\\\" \\\\\\n      -H \\\"x-api-key: sk-8Kyzf9IQ-UEJ_OtSTaJq4eniMT9_JKgZ7__q8PNkoxc\\\" \\\\\\n      -d '{\\\"name\\\":\\\"poc-etc\\\",\\\"data\\\":{\\\"nodes\\\":[],\\\"edges\\\":[]},\\\"fs_path\\\":\\\"/tmp/POC.txt\\\"}'\\n    ```\\n    \\n    <img width=\\\"1918\\\" height=\\\"742\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/cc0b0c96-1c2d-4d56-b558-5ba97e0ec174\\\" />\\n    \\n\\n### Impact\\n\\n- **Authenticated Arbitrary File Write (within server permission scope):** Risk of corrupting configuration/log/task files, disrupting application behavior, and tampering with files read by other components.\\n- **Both absolute and relative paths are allowed, enabling base directory traversal.** The risk of overwriting system files increases in environments with root privileges or weak mount/permission settings.\\n- **The file content is limited to Flow JSON,** but the impact is severe if the target file is parsed by a JSON parser or is subject to subsequent processing.\\n- **In production environments, it is essential to enforce a save root, normalize paths, block symlink traversal, and minimize permissions.**\", \"epss\": {\"percentage\": 0.03771, \"percentile\": 0.88731}, \"ghsa_id\": \"GHSA-f43r-cc68-gpx4\", \"github_reviewed_at\": \"2025-12-19T22:53:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-f43r-cc68-gpx4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f43r-cc68-gpx4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-68478\"}], \"nvd_published_at\": \"2025-12-19T18:15:51Z\", \"published_at\": \"2025-12-19T22:53:13Z\", \"references\": [\"https://github.com/langflow-ai/langflow/security/advisories/GHSA-f43r-cc68-gpx4\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-68478\", \"https://github.com/pypa/advisory-database/tree/main/vulns/langflow/PYSEC-2025-125.yaml\", \"https://github.com/advisories/GHSA-f43r-cc68-gpx4\"], \"repository_advisory_url\": \"https://api.github.com/repos/langflow-ai/langflow/security-advisories/GHSA-f43r-cc68-gpx4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/langflow-ai/langflow\", \"summary\": \"External Control of File Name or Path in Langflow\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-06T00:36:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-f43r-cc68-gpx4\", \"vulnerabilities\": [{\"first_patched_version\": \"1.7.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"langflow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.7.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f43r-cc68-gpx4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "langflow: < 1.7.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2025-68478"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "langflow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.519163Z",
+  "provenance": {
+    "content_sha256": "a79b325e39d9c6283ec538a835a51d0b1d82faad9cb316a81e15b123624694e1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-12-19T22:53:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f43r-cc68-gpx4",
+  "status": "active",
+  "title": "External Control of File Name or Path in Langflow",
+  "updated_at": "2026-06-06T00:36:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f43r-cc68-gpx4"
+}

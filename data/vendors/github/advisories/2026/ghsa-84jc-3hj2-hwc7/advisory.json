@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/452625?v=4\", \"events_url\": \"https://api.github.com/users/mbarbero/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mbarbero/followers\", \"following_url\": \"https://api.github.com/users/mbarbero/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mbarbero/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mbarbero\", \"id\": 452625, \"login\": \"mbarbero\", \"node_id\": \"MDQ6VXNlcjQ1MjYyNQ==\", \"organizations_url\": \"https://api.github.com/users/mbarbero/orgs\", \"received_events_url\": \"https://api.github.com/users/mbarbero/received_events\", \"repos_url\": \"https://api.github.com/users/mbarbero/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mbarbero/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mbarbero/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mbarbero\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:L\"}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-190\", \"name\": \"Integer Overflow or Wraparound\"}, {\"cwe_id\": \"CWE-696\", \"name\": \"Incorrect Behavior Order\"}], \"description\": \"### Summary\\nThe `POST /v1/domain/_image` and `POST /v1/oauth2/{rs_name}/_image` handlers call `validate_image()` on the uploaded body **before** the ACL check that restricts image upload to admins. Any bug in an image validator is therefore reachable by an unauthenticated remote client rather than being admin-gated.\\n\\nOne such bug exists today: `png_has_trailer()` panics on inputs shorter than 8 bytes, or whose first chunk-length field is near `u32::MAX`.\\n\\n**On a default build this has no server-wide impact.** The panic unwinds only the requester's own tokio task; the server process survives, no shared state is poisoned, and other connections are unaffected. This was reported privately rather than as a public issue because (a) the project previously treated an admin-triggered thread crash of identical impact as security-relevant (e51d0dee4), and this is reachable by a broader population; and (b) a downstream build with `panic = \\\"abort\\\"` would upgrade it to an unauthenticated process-crash DoS.\\n\\n### Details\\n\\n#### Validate-before-authorize ordering\\n\\nBoth handlers parse and validate attacker-controlled bytes before checking whether the caller is permitted to upload at all:\\n\\n- `server/core/src/https/v1_domain.rs:118` — `image.validate_image()` runs; `handle_image_update(client_auth_info, …)` (the ACL check) is at line 129.\\n- `server/core/src/https/v1_oauth2.rs:550` — same ordering.\\n\\nThe `VerifiedClientInformation` extractor (`server/core/src/https/extractors/mod.rs:18-90`) always returns `Ok` — it builds a `ClientAuthInfo` from whatever credentials are present (including none) and does not reject anonymous callers. Authorization is deferred to `handle_image_update()`, which is never reached if the validator panics or errors first.\\n\\n#### PNG validator panic (demonstrator)\\n\\n`validate_image()` (`server/lib/src/valueset/image/mod.rs:98`) checks only a 256 KiB maximum size, not a minimum, before dispatching to the format-specific validator.\\n\\n**Short input** — `server/lib/src/valueset/image/png.rs:73-76`:\\n\\n```rust\\npub fn png_has_trailer(contents: &Vec<u8>) -> Result<bool, ImageValidationError> {\\n    let buf = contents.as_slice();\\n    let (magic, buf) = buf.split_at(PNG_PRELUDE.len()); // 8; panics if len < 8\\n```\\n\\n**Chunk-length overflow** — `server/lib/src/valueset/image/png.rs:46,53`:\\n\\n```rust\\nif buf.len() < (length + 4) as usize {   // length: u32; wraps before the usize cast\\n    ...\\n}\\nlet (_, buf) = buf.split_at(length as usize);   // panics for length ≈ u32::MAX\\n```\\n\\nIn a release build `0xFFFF_FFFC + 4` wraps to `0`, the guard passes, and `split_at` panics.\\n\\n### PoC\\n\\n```sh\\nprintf '\\\\x89PNG' > /tmp/short.png\\ncurl -sk https://$KANIDM_HOST/v1/domain/_image \\\\\\n     -F 'image=@/tmp/short.png;type=image/png;filename=x.png'\\n# → connection reset / empty reply; server process remains up\\n```\\n\\nUnit-test confirmation (`cargo test -p kanidmd_lib --lib`):\\n\\n```rust\\n#[test]\\nfn audit_png_short_input_panics() {\\n    let short = vec![0x89u8, 0x50, 0x4e, 0x47];\\n    assert!(std::panic::catch_unwind(|| png_has_trailer(&short)).is_err());\\n}\\n\\n#[test]\\nfn audit_png_chunk_length_overflow_panics() {\\n    let mut data = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];\\n    data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFD]);\\n    data.extend_from_slice(b\\\"IHDR\\\");\\n    data.extend_from_slice(&[0u8; 8]);\\n    assert!(std::panic::catch_unwind(|| png_has_trailer(&data)).is_err());\\n}\\n```\\n\\nBoth tests pass (i.e. both inputs panic).\\n\\n### Impact\\n\\nThe only party affected is the requester, whose own connection is dropped. Repeating the request has no cumulative effect beyond ordinary request load.\\n\\nOn the upstream build:\\n\\n- Each connection runs in its own `tokio::task::spawn` (`server/core/src/https/mod.rs:481`); the accept loop continues after a task panic.\\n- No `panic = \\\"abort\\\"` in any workspace `[profile.*]`.\\n- No `Mutex`/`RwLock` held across the call site; nothing is poisoned.\\n- The panic occurs before any write actor is messaged; no DB or replication state is touched.\\n\\n**Residual risk:** a downstream packager that sets `panic = \\\"abort\\\"` (or links code that installs an abort handler) would see a full unauthenticated process crash. (No such packager is known)\\n\\n**Affected:** v1.1.0-rc.15 (introduced in e7f594a1c, #2112) through `master` @ edf50b9da.\", \"ghsa_id\": \"GHSA-84jc-3hj2-hwc7\", \"github_reviewed_at\": \"2026-05-06T23:39:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-84jc-3hj2-hwc7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-84jc-3hj2-hwc7\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T23:39:14Z\", \"references\": [\"https://github.com/kanidm/kanidm/security/advisories/GHSA-84jc-3hj2-hwc7\", \"https://github.com/advisories/GHSA-84jc-3hj2-hwc7\"], \"repository_advisory_url\": \"https://api.github.com/repos/kanidm/kanidm/security-advisories/GHSA-84jc-3hj2-hwc7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kanidm/kanidm\", \"summary\": \"kanidmd_lib: Image upload validators run before authorization; PNG validator panics on malformed input\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T23:39:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-84jc-3hj2-hwc7\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.3\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"kanidmd_lib\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-84jc-3hj2-hwc7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "kanidmd_lib: < 1.9.3"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "kanidmd_lib"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.616609Z",
+  "provenance": {
+    "content_sha256": "7ef3aa624184d552c398fd51a9d1fe81431995f6c82cc3a56f99a2a2ba377d15",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T23:39:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-84jc-3hj2-hwc7",
+  "status": "active",
+  "title": "kanidmd_lib: Image upload validators run before authorization; PNG validator panics on malformed input",
+  "updated_at": "2026-05-06T23:39:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-84jc-3hj2-hwc7"
+}

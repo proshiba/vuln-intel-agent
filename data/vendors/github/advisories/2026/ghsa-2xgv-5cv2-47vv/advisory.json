@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40115\", \"cvss\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"## Summary\\n\\nThe WSGI-based recipe registry server (`server.py`) reads the entire HTTP request body into memory based on the client-supplied `Content-Length` header with no upper bound. Combined with authentication being disabled by default (no token configured), any local process can send arbitrarily large POST requests to exhaust server memory and cause a denial of service. The Starlette-based server (`serve.py`) has `RequestSizeLimitMiddleware` with a 10MB limit, but the WSGI server lacks any equivalent protection.\\n\\n## Details\\n\\nThe vulnerable code path in `src/praisonai/praisonai/recipe/server.py`:\\n\\n**1. No size limit on body read (line 551-555):**\\n```python\\ncontent_length = int(environ.get(\\\"CONTENT_LENGTH\\\", 0))\\nbody = environ[\\\"wsgi.input\\\"].read(content_length) if content_length > 0 else b\\\"\\\"\\n```\\n\\nThe `content_length` is taken directly from the HTTP header with no maximum check. The entire body is read into a single `bytes` object in memory.\\n\\n**2. Second in-memory copy via multipart parsing (line 169-172):**\\n```python\\nresult = {\\\"fields\\\": {}, \\\"files\\\": {}}\\nboundary_bytes = f\\\"--{boundary}\\\".encode()\\nparts = body.split(boundary_bytes)\\n```\\n\\nThe `_parse_multipart` method splits the already-buffered body and stores file contents in a dict, creating additional in-memory copies.\\n\\n**3. Third copy to temp file (line 420-421):**\\n```python\\nwith tempfile.NamedTemporaryFile(suffix=\\\".praison\\\", delete=False) as tmp:\\n    tmp.write(bundle_content)\\n```\\n\\nThe bundle content is then written to disk and persisted in the registry, also without size checks.\\n\\n**4. Authentication disabled by default (line 91-94):**\\n```python\\ndef _check_auth(self, headers: Dict[str, str]) -> bool:\\n    if not self.token:\\n        return True  # No token configured = no auth\\n```\\n\\nThe `self.token` defaults to `None` unless `PRAISONAI_REGISTRY_TOKEN` is set or `--token` is passed on the CLI.\\n\\nThe entry point is `praisonai registry serve` (cli/features/registry.py:176), which calls `run_server()` binding to `127.0.0.1:7777` by default.\\n\\nIn contrast, `serve.py` (the Starlette server) has `RequestSizeLimitMiddleware` at line 725-732 enforcing a 10MB default limit. The WSGI server has no equivalent.\\n\\n## PoC\\n\\n```bash\\n# Start the registry server with default settings (no auth, localhost)\\npraisonai registry serve &\\n\\n# Step 1: Create a large bundle (~500MB)\\nmkdir -p /tmp/dos-test\\necho '{\\\"name\\\":\\\"dos\\\",\\\"version\\\":\\\"1.0.0\\\"}' > /tmp/dos-test/manifest.json\\ndd if=/dev/zero of=/tmp/dos-test/pad bs=1M count=500\\ntar czf /tmp/dos-bundle.praison -C /tmp/dos-test .\\n\\n# Step 2: Upload — server buffers ~500MB into RAM with no limit\\ncurl -X POST http://127.0.0.1:7777/v1/recipes/dos/1.0.0 \\\\\\n  -F 'bundle=@/tmp/dos-bundle.praison' -F 'force=true'\\n\\n# Step 3: Repeat to exhaust memory\\nfor v in 1.0.{1..10}; do\\n  curl -X POST http://127.0.0.1:7777/v1/recipes/dos/$v \\\\\\n    -F 'bundle=@/tmp/dos-bundle.praison' &\\ndone\\n# Server process will be OOM-killed\\n```\\n\\n## Impact\\n\\n- **Memory exhaustion**: A single large request can consume all available memory, crashing the server process (and potentially other processes via OOM killer).\\n- **Disk exhaustion**: Repeated uploads persist bundles to disk at `~/.praison/registry/` with no quota, potentially filling the filesystem.\\n- **No authentication barrier**: Default configuration requires no token, so any local process (including via SSRF from other services on the same host) can trigger this.\\n- **Availability impact**: The registry server becomes unavailable, blocking recipe publish/download operations.\\n\\nThe default bind address of `127.0.0.1` limits exploitability to local attackers or SSRF scenarios. If a user binds to `0.0.0.0` (common for shared environments or containers), the attack surface extends to the network.\\n\\n## Recommended Fix\\n\\nAdd a request size limit to the WSGI application, consistent with `serve.py`'s 10MB default:\\n\\n```python\\n# In create_wsgi_app(), before reading the body:\\nMAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10MB, matching serve.py\\n\\ndef application(environ, start_response):\\n    # ... existing code ...\\n    \\n    # Read body with size limit\\n    try:\\n        content_length = int(environ.get(\\\"CONTENT_LENGTH\\\", 0))\\n    except (ValueError, TypeError):\\n        content_length = 0\\n    \\n    if content_length > MAX_REQUEST_SIZE:\\n        status = \\\"413 Request Entity Too Large\\\"\\n        response_headers = [(\\\"Content-Type\\\", \\\"application/json\\\")]\\n        body = json.dumps({\\n            \\\"error\\\": {\\n                \\\"code\\\": \\\"request_too_large\\\",\\n                \\\"message\\\": f\\\"Request body too large. Max: {MAX_REQUEST_SIZE} bytes\\\"\\n            }\\n        }).encode()\\n        start_response(status, response_headers)\\n        return [body]\\n    \\n    body = environ[\\\"wsgi.input\\\"].read(content_length) if content_length > 0 else b\\\"\\\"\\n    # ... rest of handler ...\\n```\\n\\nAdditionally, consider:\\n- Adding a `--max-request-size` CLI flag to `praisonai registry serve`\\n- Adding per-recipe disk quota enforcement in `LocalRegistry.publish()`\", \"epss\": {\"percentage\": 0.00334, \"percentile\": 0.25503}, \"ghsa_id\": \"GHSA-2xgv-5cv2-47vv\", \"github_reviewed_at\": \"2026-04-10T19:23:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-2xgv-5cv2-47vv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2xgv-5cv2-47vv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40115\"}], \"nvd_published_at\": \"2026-04-09T22:16:35Z\", \"published_at\": \"2026-04-10T19:23:13Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-2xgv-5cv2-47vv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40115\", \"https://github.com/MervinPraison/PraisonAI/releases/tag/v4.5.128\", \"https://github.com/advisories/GHSA-2xgv-5cv2-47vv\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-2xgv-5cv2-47vv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI has Unrestricted Upload Size in WSGI Recipe Registry Server that Enables Memory Exhaustion DoS\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T17:07:37Z\", \"url\": \"https://api.github.com/advisories/GHSA-2xgv-5cv2-47vv\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.128\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"PraisonAI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.5.128\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2xgv-5cv2-47vv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "PraisonAI: < 4.5.128"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40115"
+    ],
+    "cvss_score": 6.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "PraisonAI"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.930616Z",
+  "provenance": {
+    "content_sha256": "7888bccfef73a91cff23195da0e236f59e21e758c1505869eb1b44f404885711",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-10T19:23:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2xgv-5cv2-47vv",
+  "status": "active",
+  "title": "PraisonAI has Unrestricted Upload Size in WSGI Recipe Registry Server that Enables Memory Exhaustion DoS",
+  "updated_at": "2026-04-24T17:07:37Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2xgv-5cv2-47vv"
+}

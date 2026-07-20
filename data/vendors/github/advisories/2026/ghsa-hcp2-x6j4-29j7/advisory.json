@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/147527775?v=4\", \"events_url\": \"https://api.github.com/users/tob-scott-a/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tob-scott-a/followers\", \"following_url\": \"https://api.github.com/users/tob-scott-a/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tob-scott-a/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tob-scott-a\", \"id\": 147527775, \"login\": \"tob-scott-a\", \"node_id\": \"U_kgDOCMsYXw\", \"organizations_url\": \"https://api.github.com/users/tob-scott-a/orgs\", \"received_events_url\": \"https://api.github.com/users/tob-scott-a/received_events\", \"repos_url\": \"https://api.github.com/users/tob-scott-a/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tob-scott-a/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tob-scott-a/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tob-scott-a\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/797?v=4\", \"events_url\": \"https://api.github.com/users/tarcieri/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tarcieri/followers\", \"following_url\": \"https://api.github.com/users/tarcieri/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tarcieri/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tarcieri\", \"id\": 797, \"login\": \"tarcieri\", \"node_id\": \"MDQ6VXNlcjc5Nw==\", \"organizations_url\": \"https://api.github.com/users/tarcieri/orgs\", \"received_events_url\": \"https://api.github.com/users/tarcieri/received_events\", \"repos_url\": \"https://api.github.com/users/tarcieri/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tarcieri/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tarcieri/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tarcieri\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-22705\", \"cvss\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1240\", \"name\": \"Use of a Cryptographic Primitive with a Risky Implementation\"}], \"description\": \"### Summary\\n\\nA timing side-channel was discovered in the Decompose algorithm which is used during ML-DSA signing to generate hints for the signature.\\n\\n### Details\\n\\nThe analysis was performed using a constant-time analyzer that examines compiled assembly code for instructions with data-dependent timing behavior. The analyzer flags:\\n\\n- **UDIV/SDIV instructions**: Hardware division instructions have early termination optimizations where execution time depends on operand values.\\n\\nThe `decompose` function used a hardware division instruction to compute `r1.0 / TwoGamma2::U32`. This function is called during signing through `high_bits()` and `low_bits()`, which process values derived from secret key components:\\n\\n- `(&w - &cs2).low_bits()` where `cs2` is derived from secret key component `s2`\\n- `Hint::new()` calls `high_bits()` on values derived from secret key component `t0`\\n\\n**Original Code**:\\n```rust\\nfn decompose<TwoGamma2: Unsigned>(self) -> (Elem, Elem) {\\n    // ...\\n    let mut r1 = r_plus - r0;\\n    r1.0 /= TwoGamma2::U32;  // Variable-time division on secret-derived data\\n    (r1, r0)\\n}\\n```\\n\\n### PoC\\n\\nI do not have an exploit written for this, currently.\\n\\n### Impact\\n\\nThe dividend (`r1.0`) is derived from secret key material. An attacker with precise timing measurements could extract information about the signing key by observing timing variations in the division operation.\\n\\n### Mitigation\\n\\nReplacing division with constant-time Barrett reduction mitigates this risk. Since `TwoGamma2` is a compile-time constant, we precompute the multiplicative inverse:\\n\\n```patch\\ndiff --git a/ml-dsa/src/algebra.rs b/ml-dsa/src/algebra.rs\\nindex 559b68a..bb126ce 100644\\n--- a/ml-dsa/src/algebra.rs\\n+++ b/ml-dsa/src/algebra.rs\\n@@ -54,8 +54,50 @@ pub(crate) trait Decompose {\\n     fn decompose<TwoGamma2: Unsigned>(self) -> (Elem, Elem);\\n }\\n \\n+/// Constant-time division by a compile-time constant divisor.\\n+///\\n+/// This trait provides a constant-time alternative to the hardware division\\n+/// instruction, which has variable timing based on operand values.\\n+/// Uses Barrett reduction to compute `x / M` where M is a compile-time constant.\\n+pub(crate) trait ConstantTimeDiv: Unsigned {\\n+    /// Bit shift for Barrett reduction, chosen to provide sufficient precision\\n+    const CT_DIV_SHIFT: usize;\\n+    /// Precomputed multiplier: ceil(2^SHIFT / M)\\n+    const CT_DIV_MULTIPLIER: u64;\\n+\\n+    /// Perform constant-time division of x by Self::U32\\n+    /// Requires: x < Q (the field modulus, ~2^23)\\n+    #[inline(always)]\\n+    fn ct_div(x: u32) -> u32 {\\n+        // Barrett reduction: q = (x * MULTIPLIER) >> SHIFT\\n+        // This gives us floor(x / M) for x < 2^SHIFT / MULTIPLIER * M\\n+        let x64 = u64::from(x);\\n+        let quotient = (x64 * Self::CT_DIV_MULTIPLIER) >> Self::CT_DIV_SHIFT;\\n+        quotient as u32\\n+    }\\n+}\\n+\\n+impl<M> ConstantTimeDiv for M\\n+where\\n+    M: Unsigned,\\n+{\\n+    // Use a shift that provides enough precision for the ML-DSA field (Q ~ 2^23)\\n+    // We need SHIFT > log2(Q) + log2(M) to ensure accuracy\\n+    // With Q < 2^24 and M < 2^20, SHIFT = 48 is sufficient\\n+    const CT_DIV_SHIFT: usize = 48;\\n+\\n+    // Precompute the multiplier at compile time\\n+    // We add (M-1) before dividing to get ceiling division, ensuring we never underestimate\\n+    #[allow(clippy::integer_division_remainder_used)]\\n+    const CT_DIV_MULTIPLIER: u64 = ((1u64 << Self::CT_DIV_SHIFT) + M::U64 - 1) / M::U64;\\n+}\\n+\\n impl Decompose for Elem {\\n     // Algorithm 36 Decompose\\n+    //\\n+    // This implementation uses constant-time division to avoid timing side-channels.\\n+    // The original algorithm used hardware division which has variable timing based\\n+    // on operand values, potentially leaking secret information during signing.\\n     fn decompose<TwoGamma2: Unsigned>(self) -> (Elem, Elem) {\\n         let r_plus = self.clone();\\n         let r0 = r_plus.mod_plus_minus::<TwoGamma2>();\\n@@ -63,8 +105,9 @@ impl Decompose for Elem {\\n         if r_plus - r0 == Elem::new(BaseField::Q - 1) {\\n             (Elem::new(0), r0 - Elem::new(1))\\n         } else {\\n-            let mut r1 = r_plus - r0;\\n-            r1.0 /= TwoGamma2::U32;\\n+            let diff = r_plus - r0;\\n+            // Use constant-time division instead of hardware division\\n+            let r1 = Elem::new(TwoGamma2::ct_div(diff.0));\\n             (r1, r0)\\n         }\\n     }\\n```\\n\\nSee our blog post on [how we avoided side-channels in our Go implementation of ML-DSA](https://blog.trailofbits.com/2025/11/14/how-we-avoided-side-channels-in-our-new-post-quantum-go-cryptography-libraries/) for more information.\", \"epss\": {\"percentage\": 0.00173, \"percentile\": 0.06905}, \"ghsa_id\": \"GHSA-hcp2-x6j4-29j7\", \"github_reviewed_at\": \"2026-01-13T15:10:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-hcp2-x6j4-29j7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hcp2-x6j4-29j7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-22705\"}], \"nvd_published_at\": \"2026-01-10T07:16:03Z\", \"published_at\": \"2026-01-13T15:10:03Z\", \"references\": [\"https://github.com/RustCrypto/signatures/security/advisories/GHSA-hcp2-x6j4-29j7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-22705\", \"https://github.com/RustCrypto/signatures/pull/1144\", \"https://github.com/RustCrypto/signatures/commit/035d9eef98486ecd00a8bf418c7817eb14dd6558\", \"https://rustsec.org/advisories/RUSTSEC-2025-0144.html\", \"https://github.com/advisories/GHSA-hcp2-x6j4-29j7\"], \"repository_advisory_url\": \"https://api.github.com/repos/RustCrypto/signatures/security-advisories/GHSA-hcp2-x6j4-29j7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/RustCrypto/signatures\", \"summary\": \"RustCrypto: Signatures has timing side-channel in ML-DSA decomposition\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T19:58:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-hcp2-x6j4-29j7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.0-rc.3\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"ml-dsa\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.1.0-rc.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hcp2-x6j4-29j7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ml-dsa: <= 0.1.0-rc.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-22705"
+    ],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ml-dsa"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.918572Z",
+  "provenance": {
+    "content_sha256": "52f9ebcedbf4c526909fb26714fee725be91fc19af93483773753ce784264dc3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-01-13T15:10:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hcp2-x6j4-29j7",
+  "status": "active",
+  "title": "RustCrypto: Signatures has timing side-channel in ML-DSA decomposition",
+  "updated_at": "2026-04-24T19:58:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hcp2-x6j4-29j7"
+}

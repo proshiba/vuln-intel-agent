@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3466247?v=4\", \"events_url\": \"https://api.github.com/users/Keyvanhardani/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Keyvanhardani/followers\", \"following_url\": \"https://api.github.com/users/Keyvanhardani/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Keyvanhardani/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Keyvanhardani\", \"id\": 3466247, \"login\": \"Keyvanhardani\", \"node_id\": \"MDQ6VXNlcjM0NjYyNDc=\", \"organizations_url\": \"https://api.github.com/users/Keyvanhardani/orgs\", \"received_events_url\": \"https://api.github.com/users/Keyvanhardani/received_events\", \"repos_url\": \"https://api.github.com/users/Keyvanhardani/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Keyvanhardani/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Keyvanhardani/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Keyvanhardani\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40296\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"It was discovered that there is a way to bypass HTML escaping in the HTML writer using custom number format codes.\\n\\n## The Problem\\n\\nIn `Writer/Html.php` around line 1592, the code checks if the formatted cell data equals the original data to decide whether to apply `htmlspecialchars()`:\\n\\n```php\\nif ($cellData === $origData) {\\n    $cellData = htmlspecialchars($cellData, ...);\\n}\\n```\\n\\nWhen a cell has a custom number format containing `@` (text placeholder) with any additional literal characters, the formatter replaces `@` with the cell value and adds the extra characters. This makes `$cellData !== $origData`, so `htmlspecialchars()` is **skipped entirely**.\\n\\nEven a single trailing space in the format (`@ `) is enough to bypass the escape.\\n\\n## Proof of Concept\\n\\n```php\\nuse PhpOffice\\\\PhpSpreadsheet\\\\Spreadsheet;\\nuse PhpOffice\\\\PhpSpreadsheet\\\\Writer\\\\Html;\\nuse PhpOffice\\\\PhpSpreadsheet\\\\Cell\\\\DataType;\\n\\n$spreadsheet = new Spreadsheet();\\n$sheet = $spreadsheet->getActiveSheet();\\n\\n// XSS payload with malicious number format\\n$sheet->setCellValueExplicit('A1', '<img src=x onerror=alert(document.cookie)>', DataType::TYPE_STRING);\\n$sheet->getStyle('A1')->getNumberFormat()->setFormatCode('. @');\\n\\n$writer = new Html($spreadsheet);\\n$writer->save('output.html');\\n```\\n\\nThe generated HTML contains:\\n```html\\n<td>. <img src=x onerror=alert(document.cookie)></td>\\n```\\n\\nThe XSS payload is **completely unescaped**.\\n\\n## Tested Bypass Formats\\n\\n| Format Code | Result | Escaped? |\\n|---|---|---|\\n| `General` (default) | Original value | YES (safe) |\\n| `. @` | `. ` + value | **NO (XSS!)** |\\n| `@ ` (trailing space) | value + ` ` | **NO (XSS!)** |\\n| `x@` | `x` + value | **NO (XSS!)** |\\n\\nThis was tested with PhpSpreadsheet 4.5.0 and confirmed the XSS executes in the browser.\\n\\n## Impact\\n\\nAny application that:\\n1. Accepts uploaded XLSX files from users\\n2. Converts them to HTML using PhpSpreadsheet's HTML writer\\n3. Displays the HTML to other users\\n\\n...is vulnerable to stored XSS. The attacker embeds the payload in a cell value and sets a custom number format in the XLSX file's `xl/styles.xml`.\\n\\n## Suggested Fix\\n\\nAlways apply `htmlspecialchars()` regardless of whether formatting changed the value:\\n\\n```php\\n// Instead of conditional escaping:\\n$cellData = htmlspecialchars($cellData, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');\\n```\\n\\nOr escape AFTER formatting, not conditionally based on equality.\\n\\n## Reporter\\nKeyvan Hardani\", \"epss\": {\"percentage\": 0.00225, \"percentile\": 0.12924}, \"ghsa_id\": \"GHSA-hrmw-qprp-wgmc\", \"github_reviewed_at\": \"2026-04-28T22:57:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-hrmw-qprp-wgmc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hrmw-qprp-wgmc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40296\"}], \"nvd_published_at\": \"2026-05-06T22:16:25Z\", \"published_at\": \"2026-04-28T22:57:13Z\", \"references\": [\"https://github.com/PHPOffice/PhpSpreadsheet/security/advisories/GHSA-hrmw-qprp-wgmc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40296\", \"https://github.com/advisories/GHSA-hrmw-qprp-wgmc\"], \"repository_advisory_url\": \"https://api.github.com/repos/PHPOffice/PhpSpreadsheet/security-advisories/GHSA-hrmw-qprp-wgmc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/PHPOffice/PhpSpreadsheet\", \"summary\": \"PhpSpreadsheet has XSS via number format code with @ text placeholder bypasses htmlspecialchars in HTML writer\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T19:32:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-hrmw-qprp-wgmc\", \"vulnerabilities\": [{\"first_patched_version\": \"5.7.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 5.6.0\"}, {\"first_patched_version\": \"3.10.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.3.0, <= 3.10.4\"}, {\"first_patched_version\": \"2.4.5\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.2.0, <= 2.4.4\"}, {\"first_patched_version\": \"2.1.16\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, <= 2.1.15\"}, {\"first_patched_version\": \"1.30.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.30.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hrmw-qprp-wgmc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpoffice/phpspreadsheet: <= 1.30.3",
+      "phpoffice/phpspreadsheet: >= 2.0.0, <= 2.1.15",
+      "phpoffice/phpspreadsheet: >= 2.2.0, <= 2.4.4",
+      "phpoffice/phpspreadsheet: >= 3.3.0, <= 3.10.4",
+      "phpoffice/phpspreadsheet: >= 4.0.0, <= 5.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-40296"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpoffice/phpspreadsheet"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.272626Z",
+  "provenance": {
+    "content_sha256": "920188bf5edae8d181388765d6295abc76504d6147ece6ece74305a677eef25c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-28T22:57:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hrmw-qprp-wgmc",
+  "status": "active",
+  "title": "PhpSpreadsheet has XSS via number format code with @ text placeholder bypasses htmlspecialchars in HTML writer",
+  "updated_at": "2026-05-08T19:32:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hrmw-qprp-wgmc"
+}

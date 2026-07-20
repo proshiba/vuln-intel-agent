@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/81438128?v=4\", \"events_url\": \"https://api.github.com/users/ildkh/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ildkh/followers\", \"following_url\": \"https://api.github.com/users/ildkh/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ildkh/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ildkh\", \"id\": 81438128, \"login\": \"ildkh\", \"node_id\": \"MDQ6VXNlcjgxNDM4MTI4\", \"organizations_url\": \"https://api.github.com/users/ildkh/orgs\", \"received_events_url\": \"https://api.github.com/users/ildkh/received_events\", \"repos_url\": \"https://api.github.com/users/ildkh/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ildkh/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ildkh/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ildkh\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48788\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-436\", \"name\": \"Interpretation Conflict\"}], \"description\": \"### Summary\\nThe remark42 image proxy fetches an arbitrary remote URL and re-serves the response from remark42's own origin. The download path decides whether the fetched resource is an image by looking only at the `Content-Type` header the remote server claims — it never inspects the actual bytes. The serving path then derives the response `Content-Type` by sniffing those bytes with `http.DetectContentType`.\\n\\nAn attacker hosts a URL that sets `Content-Type` to `image/png` but returns an HTML/JavaScript body:\\n\\n* the download check sees `image/png` → accepts it;\\n* the serve path sniffs the body → emits `Content-Type: text/html`;\\n* the browser renders attacker HTML/JS as a document in remark42's origin.\\n\\n### Details\\n#### Downloader\\n\\n`backend/app/rest/proxy/image.go` — `downloadImage()`, lines 189-206:\\n\\n```go\\ncontentType := resp.Header.Get(\\\"Content-Type\\\")\\nif !strings.HasPrefix(contentType, \\\"image/\\\") {\\n    return nil, fmt.Errorf(\\\"invalid content type %s\\\", contentType)\\n}\\n\\nmaxSize := 5 * 1024 * 1024 // 5MB default\\nif p.ImageService != nil && p.ImageService.MaxSize > 0 {\\n    maxSize = p.ImageService.MaxSize\\n}\\nlr := io.LimitReader(resp.Body, int64(maxSize)+1)\\nimgData, err := io.ReadAll(lr)\\nif err != nil {\\n    return nil, fmt.Errorf(\\\"unable to read image body: %w\\\", err)\\n}\\nif len(imgData) > maxSize {\\n    return nil, fmt.Errorf(\\\"image is too large\\\")\\n}\\nreturn imgData, nil          // <-- bytes never validated, returned as-is\\n```\\n\\nSend `Content-Type: image/png` and the check passes regardless of what the body actually contains.\\n\\n#### Server\\n\\n`backend/app/rest/proxy/image.go` — `Handler()`, line 131:\\n\\n```go\\nw.Header().Add(\\\"Content-Type\\\", p.ImageService.ImgContentType(img))\\n_, err = io.Copy(w, bytes.NewReader(img))\\n```\\n\\n`backend/app/store/image/image.go` — `ImgContentType()`, lines 242-249:\\n\\n```go\\nfunc (s *Service) ImgContentType(img []byte) string {\\n    contentType := http.DetectContentType(img)\\n    if contentType == \\\"application/octet-stream\\\" {\\n        return \\\"image/*\\\"\\n    }\\n    return contentType                 // <-- returns text/html for an HTML body\\n}\\n```\\n\\n### PoC\\n\\n```python\\nself.send_response(200)\\nself.send_header(\\\"Content-Type\\\", \\\"image/png\\\")\\nself.send_header(\\\"Content-Length\\\", str(len(body)))\\nself.end_headers()\\nself.wfile.write(body)            # body = <!DOCTYPE html><script>...</script>\\n```\\n\\nThen have the victim open `https://<remark42-host>/api/v1/img?src=<base64(attacker-host)>` top-level.\\n\\n### Impact\\n* The script can issue authenticated, same-origin API calls with `credentials: 'include'` — the JWT cookie is sent automatically.\\n* The script can read the `XSRF-TOKEN` cookie and re-send it as the `X-XSRF-TOKEN` header, defeating CSRF protection. The attacker acts as the victim: delete/edit their comments, change their settings, and — if the victim is admin — perform admin actions.\\n\\nTriggering requires no remark42 account on the target instance; the attacker only needs to host the malicious upstream URL and deliver the proxy link to a victim by any means (email, DM, link on another site, etc.).\\n\\n### Fix\\n\\n`v1.16.0` adds layered defense to `/api/v1/img` and `/api/v1/picture/{user}/{id}`:\\n\\n* `rest.SafeImgContentType` validates sniffed body bytes against a strict allowlist (`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/bmp`, `image/x-icon`). Non-image content returns `415` with no body echo. SVG is implicitly excluded.\\n* Every response carries `Content-Security-Policy: default-src 'none'; sandbox; frame-ancestors 'none'`, `X-Content-Type Options: nosniff`, and `Content-Disposition: inline; filename=\\\"image\\\"`.\\n* The ETag is bumped to `\\\"v2:<base64(src)>\\\"`. Browsers that revalidate cached pre-fix responses get a fresh validated `200` instead of a `304` against the poisoned cached entry.\\n* The strict `default-src 'none'; sandbox` CSP also applies to all `/api/v1/*` routes as defense-in-depth.\\n\\n#### Residual exposure\\n\\nBrowser-local caches that already hold a pre-fix `text/html` response with `Cache-Control: max-age=2592000` keep serving it from local store until the TTL expires or the cache is evicted under memory pressure. The ETag bump only reaches clients that revalidate during the cached lifetime. Operators running a CDN/edge cache in front of remark42 should purge `/api/v1/img` after deploying `v1.16.0`.\", \"epss\": {\"percentage\": 0.00251, \"percentile\": 0.16122}, \"ghsa_id\": \"GHSA-4c8j-mgm4-qqvp\", \"github_reviewed_at\": \"2026-06-26T19:26:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-4c8j-mgm4-qqvp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4c8j-mgm4-qqvp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48788\"}], \"nvd_published_at\": \"2026-06-17T13:20:43Z\", \"published_at\": \"2026-06-26T19:26:43Z\", \"references\": [\"https://github.com/umputun/remark42/security/advisories/GHSA-4c8j-mgm4-qqvp\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48788\", \"https://github.com/umputun/remark42/commit/78d6de6bce1e961f023969da3ec8a00dd80c9ae8\", \"https://github.com/umputun/remark42/releases/tag/v1.16.0\", \"https://github.com/advisories/GHSA-4c8j-mgm4-qqvp\"], \"repository_advisory_url\": \"https://api.github.com/repos/umputun/remark42/security-advisories/GHSA-4c8j-mgm4-qqvp\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/umputun/remark42\", \"summary\": \"Remark42: Cross-Site Scripting (XSS) on /api/v1/img via content-type spoofing\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T19:26:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-4c8j-mgm4-qqvp\", \"vulnerabilities\": [{\"first_patched_version\": \"1.16.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/umputun/remark42\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.6.0, < 1.16.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4c8j-mgm4-qqvp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/umputun/remark42: >= 1.6.0, < 1.16.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48788"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/umputun/remark42"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.091226Z",
+  "provenance": {
+    "content_sha256": "0ebaa5570e524aa3ec2bb5700492536d7c7cf5af1a722a621cfc0d8cc6fb45b4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T19:26:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4c8j-mgm4-qqvp",
+  "status": "active",
+  "title": "Remark42: Cross-Site Scripting (XSS) on /api/v1/img via content-type spoofing",
+  "updated_at": "2026-06-26T19:26:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4c8j-mgm4-qqvp"
+}

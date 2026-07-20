@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11325101?v=4\", \"events_url\": \"https://api.github.com/users/August829/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/August829/followers\", \"following_url\": \"https://api.github.com/users/August829/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/August829/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/August829\", \"id\": 11325101, \"login\": \"August829\", \"node_id\": \"MDQ6VXNlcjExMzI1MTAx\", \"organizations_url\": \"https://api.github.com/users/August829/orgs\", \"received_events_url\": \"https://api.github.com/users/August829/received_events\", \"repos_url\": \"https://api.github.com/users/August829/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/August829/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/August829/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/August829\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42040\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-116\", \"name\": \"Improper Encoding or Escaping of Output\"}, {\"cwe_id\": \"CWE-626\", \"name\": \"Null Byte Interaction Error (Poison Null Byte)\"}], \"description\": \"# Vulnerability Disclosure: Null Byte Injection via Reverse-Encoding in AxiosURLSearchParams\\n\\n## Summary\\n\\nThe `encode()` function in `lib/helpers/AxiosURLSearchParams.js` contains a character mapping (`charMap`) at line 21 that **reverses** the safe percent-encoding of null bytes. After `encodeURIComponent('\\\\x00')` correctly produces the safe sequence `%00`, the charMap entry `'%00': '\\\\x00'` converts it back to a raw null byte.\\n\\nThis is a clear encoding defect: every other charMap entry encodes in the safe direction (literal → percent-encoded), while this single entry decodes in the opposite (dangerous) direction.\\n\\n**Severity:** Low (CVSS 3.7)\\n**Affected Versions:** All versions containing this charMap entry\\n**Vulnerable Component:** `lib/helpers/AxiosURLSearchParams.js:21`\\n\\n## CWE\\n\\n- **CWE-626:** Null Byte Interaction Error (Poison Null Byte)\\n- **CWE-116:** Improper Encoding or Escaping of Output\\n\\n## CVSS 3.1\\n\\n**Score: 3.7 (Low)**\\n\\nVector: `CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N`\\n\\n| Metric | Value | Justification |\\n|---|---|---|\\n| Attack Vector | Network | Attacker controls input parameters remotely |\\n| Attack Complexity | High | Standard axios request flow (`buildURL`) uses its own `encode` function which does NOT have this bug. Only triggered via direct `AxiosURLSearchParams.toString()` without an encoder, or via custom `paramsSerializer` delegation |\\n| Privileges Required | None | No authentication needed |\\n| User Interaction | None | No user interaction required |\\n| Scope | Unchanged | Impact limited to HTTP request URL |\\n| Confidentiality | None | No confidentiality impact |\\n| Integrity | Low | Null byte in URL can cause truncation in C-based backends, but requires a vulnerable downstream parser |\\n| Availability | None | No availability impact |\\n\\n## Vulnerable Code\\n\\n**File:** `lib/helpers/AxiosURLSearchParams.js`, lines 13-26\\n\\n```javascript\\nfunction encode(str) {\\n  const charMap = {\\n    '!': '%21',     // literal → encoded (SAFE direction)\\n    \\\"'\\\": '%27',     // literal → encoded (SAFE direction)\\n    '(': '%28',     // literal → encoded (SAFE direction)\\n    ')': '%29',     // literal → encoded (SAFE direction)\\n    '~': '%7E',     // literal → encoded (SAFE direction)\\n    '%20': '+',     // standard transformation (SAFE)\\n    '%00': '\\\\x00',  // LINE 21: encoded → raw null byte (UNSAFE direction!)\\n  };\\n  return encodeURIComponent(str).replace(/[!'()~]|%20|%00/g, function replacer(match) {\\n    return charMap[match];\\n  });\\n}\\n```\\n\\n### Why the Standard Flow Is NOT Affected\\n\\n```javascript\\n// buildURL.js:36 — uses its OWN encode function (lines 14-20), not AxiosURLSearchParams's\\nconst _encode = (options && options.encode) || encode;  // buildURL's encode\\n\\n// buildURL.js:53 — passes buildURL's encode to AxiosURLSearchParams\\nnew AxiosURLSearchParams(params, _options).toString(_encode);  // external encoder used\\n\\n// AxiosURLSearchParams.js:48 — when encoder is provided, internal encode is NOT used\\nconst _encode = encoder ? function(value) { return encoder.call(this, value, encode); } : encode;\\n//                                                                              ^^^^^^\\n//                                           internal encode passed as 2nd arg but only used if\\n//                                           the external encoder explicitly delegates to it\\n```\\n\\n## Proof of Concept\\n\\n```javascript\\nimport AxiosURLSearchParams from './lib/helpers/AxiosURLSearchParams.js';\\nimport buildURL from './lib/helpers/buildURL.js';\\n\\n// Test 1: Direct AxiosURLSearchParams (VULNERABLE path)\\nconst params = new AxiosURLSearchParams({ file: 'test\\\\x00.txt' });\\nconst result = params.toString();  // NO encoder → uses internal encode with charMap\\nconsole.log('Direct toString():', JSON.stringify(result));\\n// Output: \\\"file=test\\\\u0000.txt\\\" (contains raw null byte)\\nconsole.log('Hex:', Buffer.from(result).toString('hex'));\\n// Output: 66696c653d74657374002e747874  (00 = null byte)\\n\\n// Test 2: Via buildURL (NOT vulnerable — standard axios flow)\\nconst url = buildURL('http://example.com/api', { file: 'test\\\\x00.txt' });\\nconsole.log('Via buildURL:', url);\\n// Output: http://example.com/api?file=test%00.txt  (%00 preserved safely)\\n```\\n\\n## Verified PoC Output\\n\\n```\\nDirect toString(): \\\"file=test\\\\u0000.txt\\\"\\nContains raw null byte: true\\nHex: 66696c653d74657374002e747874\\n\\nVia buildURL: http://example.com/api?file=test%00.txt\\nContains raw null byte: false\\nContains safe %00: true\\n```\\n\\n## Impact Analysis\\n\\n**Primary impact is limited** because the standard axios request flow is not affected. However:\\n\\n- **Direct API users:** Applications using `AxiosURLSearchParams` directly for custom serialization are affected\\n- **Custom paramsSerializer:** A `paramsSerializer.encode` that delegates to the internal encoder triggers the bug\\n- **Code defect signal:** The directional inconsistency in charMap is a clear coding error with no legitimate use case\\n\\nIf null bytes reach a downstream C-based parser, impacts include URL truncation, WAF bypass, and log injection.\\n\\n## Recommended Fix\\n\\nRemove the `%00` entry from charMap and update the regex:\\n\\n```javascript\\nfunction encode(str) {\\n  const charMap = {\\n    '!': '%21',\\n    \\\"'\\\": '%27',\\n    '(': '%28',\\n    ')': '%29',\\n    '~': '%7E',\\n    '%20': '+',\\n    // REMOVED: '%00': '\\\\x00'\\n  };\\n  return encodeURIComponent(str).replace(/[!'()~]|%20/g, function replacer(match) {\\n    //                                           ^^^^ removed |%00\\n    return charMap[match];\\n  });\\n}\\n```\\n\\n## Resources\\n\\n- [CWE-626: Null Byte Interaction Error](https://cwe.mitre.org/data/definitions/626.html)\\n- [CWE-116: Improper Encoding or Escaping of Output](https://cwe.mitre.org/data/definitions/116.html)\\n- [OWASP: Embedding Null Code](https://owasp.org/www-community/attacks/Embedding_Null_Code)\\n- [Axios GitHub Repository](https://github.com/axios/axios)\\n\\n## Timeline\\n\\n| Date | Event |\\n|---|---|\\n| 2026-04-15 | Vulnerability discovered during source code audit |\\n| 2026-04-16 | Report revised: documented standard-flow limitation, corrected CVSS |\\n| TBD | Report submitted to vendor via GitHub Security Advisory |\", \"epss\": {\"percentage\": 0.00217, \"percentile\": 0.11928}, \"ghsa_id\": \"GHSA-xhjh-pmcv-23jw\", \"github_reviewed_at\": \"2026-05-05T00:18:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-xhjh-pmcv-23jw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xhjh-pmcv-23jw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42040\"}], \"nvd_published_at\": \"2026-04-24T18:16:30Z\", \"published_at\": \"2026-05-05T00:18:03Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-xhjh-pmcv-23jw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42040\", \"https://github.com/advisories/GHSA-xhjh-pmcv-23jw\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-xhjh-pmcv-23jw\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios: Null Byte Injection via Reverse-Encoding in AxiosURLSearchParams\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-05T00:18:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-xhjh-pmcv-23jw\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, < 1.15.1\"}, {\"first_patched_version\": \"0.31.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.31.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xhjh-pmcv-23jw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: <= 0.31.0",
+      "axios: >= 1.0.0, < 1.15.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42040"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.093472Z",
+  "provenance": {
+    "content_sha256": "75347206ee14a82331bc9055c3aca1aca7ac75cacadb89303fb73ff3a262845c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T00:18:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xhjh-pmcv-23jw",
+  "status": "active",
+  "title": "Axios: Null Byte Injection via Reverse-Encoding in AxiosURLSearchParams",
+  "updated_at": "2026-05-05T00:18:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xhjh-pmcv-23jw"
+}

@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35772301?v=4\", \"events_url\": \"https://api.github.com/users/fg0x0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/fg0x0/followers\", \"following_url\": \"https://api.github.com/users/fg0x0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/fg0x0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/fg0x0\", \"id\": 35772301, \"login\": \"fg0x0\", \"node_id\": \"MDQ6VXNlcjM1NzcyMzAx\", \"organizations_url\": \"https://api.github.com/users/fg0x0/orgs\", \"received_events_url\": \"https://api.github.com/users/fg0x0/received_events\", \"repos_url\": \"https://api.github.com/users/fg0x0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/fg0x0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/fg0x0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/fg0x0\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.1, \"vector_string\": \"CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\n`defaultSandboxPrepareStackTrace` in `lib/setup-sandbox.js` (lines 605, 607) appends to a fresh sandbox-realm `lines = []` via `lines[lines.length] = value`. This is the exact invariant-violating pattern that GHSA-9qj6-qjgg-37qq (commit ca195f0, 2026-05-01) just patched in `neutralizeArraySpeciesBatch` and codified as Defense Invariant #11 (\\\"Bridge-internal containers must not invoke sandbox code\\\"). A sandbox-installed `Array.prototype[N]` setter fires during the bridge's safe-default stack-trace formatting and observes / intercepts each appended line.\\n\\n## Details\\n\\nThe post-9qj6 audit note in `docs/ATTACKS.md` (line 2111) states:\\n\\n> Equivalent pattern elsewhere in the bridge: audited; thisFromOtherArguments, otherFromThisArguments, and every other index-write site already use thisReflectDefineProperty or otherReflectDefineProperty. neutralizeArraySpeciesBatch was the lone outlier.\\n\\nThe audit is scoped to `lib/bridge.js`. `lib/setup-sandbox.js` was not covered. `defaultSandboxPrepareStackTrace` (added under post-#563 hardening for GHSA-v27g) constructs a sandbox-realm `[header]` array and appends each frame via the prototype-walking index assignment:\\n\\n```\\n// lib/setup-sandbox.js, lines 601-610\\nconst lines = [header];\\nfor (let i = 0; i < callSites.length; i++) {\\n    try {\\n        lines[lines.length] = '    at ' + callSites[i];\\n    } catch (e) {\\n        lines[lines.length] = '    at <error formatting frame>';\\n    }\\n}\\nreturn lines.join('\\\\n');\\n```\\n\\nThis function runs every time sandbox code reads `error.stack` (or any path that triggers `Error.prepareStackTrace`). At the time it runs, user code has already had the opportunity to install a setter on `Array.prototype[N]`. Because `lines` starts at length 1, the first iteration writes index 1; if `lines[1]` has no own data property, V8 walks the prototype chain and invokes the sandbox-controlled setter.\\n\\nThe currently-assigned value is the string `'    at ' + callSites[i]` (the wrapped `CallSite` class's safe `toString()` returns `'CallSite {}'`), which limits the immediate impact to a side channel, not an RCE pivot. The concern is structural rather than exploit-today:\\n\\n- The just-codified Defense Invariant #11 explicitly requires that any list, set, or map allocated for the bridge's exclusive use must read and write through identity-stable, prototype-bypassing primitives. This site does not.\\n- The `catch` branch at line 607 also uses the same pattern, so a sandbox getter that throws on `callSites[i]` access still routes its retry write through the prototype chain.\\n- A future change that makes the appended slot value an object holding a host-realm reference (for example, an enriched frame record) would re-introduce the exact GHSA-9qj6 attack shape against this codepath.\\n\\nThe fix is mechanical and mirrors the GHSA-9qj6 patch: install entries via `localReflectDefineProperty` so each appended slot is an own data property and the prototype-chain setter is bypassed.\\n\\n```javascript\\n// Suggested patch (sketch)\\nlet linesLen = 1;\\nfunction append(s) {\\n    localReflectDefineProperty(lines, linesLen, {\\n        __proto__: null,\\n        value: s,\\n        writable: true,\\n        enumerable: true,\\n        configurable: true,\\n    });\\n    linesLen++;\\n}\\nfor (let i = 0; i < callSites.length; i++) {\\n    try {\\n        append('    at ' + callSites[i]);\\n    } catch (e) {\\n        append('    at <error formatting frame>');\\n    }\\n}\\n```\\n\\nThe same pattern at `callSiteGetters[callSiteGetters.length] = {...}` (line 649) runs only at sandbox setup, before user code can install setters, so it is safe today. Converting it for symmetry would be cheap and forward-compatible.\\n\\n## PoC\\n\\nvm2 v3.11.2, Node v24.\\n\\n```javascript\\nconst { VM } = require('vm2');\\nconst result = new VM().run(`\\n    var observed = { setterFired: false, capturedValue: null, indexFired: null };\\n    Object.defineProperty(Array.prototype, 1, {\\n        configurable: true,\\n        set(value) {\\n            observed.setterFired = true;\\n            observed.indexFired = 1;\\n            observed.capturedValue =\\n                typeof value === 'string' ? value.slice(0, 40) : typeof value;\\n        },\\n        get() { return undefined; }\\n    });\\n    var e = new Error('x');\\n    e.stack;\\n    observed;\\n`);\\nconsole.log(result);\\n// {\\n//   setterFired: true,\\n//   capturedValue: '    at CallSite {}',\\n//   indexFired: 1\\n// }\\n```\\n\\nSandbox code observed and intercepted the bridge-internal write to `lines[1]`. Repeating the PoC with the setter installed at multiple indices (0, 1, 2, ...) captures every frame the formatter would otherwise return.\\n\\n## Impact\\n\\nHardening / Defense Invariant #11 violation. No direct sandbox escape on the current codebase: the value passed to the setter is a primitive string after the wrapped `CallSite.toString()`, so attacker-controlled code does not gain a host-realm reference from the setter argument alone. The GHSA-9qj6 entry's \\\"Considered Attack Surfaces\\\" note states the audit covered `lib/bridge.js` index-write sites; this filing reports the equivalent pattern in `lib/setup-sandbox.js` so the invariant is uniform across the bridge boundary and future enrichments of the appended record cannot regress into the GHSA-9qj6 shape.\", \"ghsa_id\": \"GHSA-q3fm-4wcw-g57x\", \"github_reviewed_at\": \"2026-05-29T17:38:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-q3fm-4wcw-g57x\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q3fm-4wcw-g57x\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-29T17:38:33Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-q3fm-4wcw-g57x\", \"https://github.com/patriksimek/vm2/commit/ad31adc1fc4a2c163f2f8c11ab4af206074528fd\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.4\", \"https://github.com/advisories/GHSA-q3fm-4wcw-g57x\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-q3fm-4wcw-g57x\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 setup-sandbox.js violates Defense Invariant #11 in stack-trace formatter\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-29T17:38:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-q3fm-4wcw-g57x\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q3fm-4wcw-g57x",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.3"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 2.1,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": false,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.227810Z",
+  "provenance": {
+    "content_sha256": "afc507f20eab799bddce74fcdb6a1ad2c6d6d335ac8481d06eba2ce7a7575c51",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T17:38:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q3fm-4wcw-g57x",
+  "status": "active",
+  "title": "vm2 setup-sandbox.js violates Defense Invariant #11 in stack-trace formatter",
+  "updated_at": "2026-05-29T17:38:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q3fm-4wcw-g57x"
+}

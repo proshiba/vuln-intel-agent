@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/63727500?v=4\", \"events_url\": \"https://api.github.com/users/0xkakash1/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xkakash1/followers\", \"following_url\": \"https://api.github.com/users/0xkakash1/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xkakash1/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xkakash1\", \"id\": 63727500, \"login\": \"0xkakash1\", \"node_id\": \"MDQ6VXNlcjYzNzI3NTAw\", \"organizations_url\": \"https://api.github.com/users/0xkakash1/orgs\", \"received_events_url\": \"https://api.github.com/users/0xkakash1/received_events\", \"repos_url\": \"https://api.github.com/users/0xkakash1/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xkakash1/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xkakash1/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xkakash1\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/56215891?v=4\", \"events_url\": \"https://api.github.com/users/sammiee5311/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sammiee5311/followers\", \"following_url\": \"https://api.github.com/users/sammiee5311/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sammiee5311/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sammiee5311\", \"id\": 56215891, \"login\": \"sammiee5311\", \"node_id\": \"MDQ6VXNlcjU2MjE1ODkx\", \"organizations_url\": \"https://api.github.com/users/sammiee5311/orgs\", \"received_events_url\": \"https://api.github.com/users/sammiee5311/received_events\", \"repos_url\": \"https://api.github.com/users/sammiee5311/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sammiee5311/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sammiee5311/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sammiee5311\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53537\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-436\", \"name\": \"Interpretation Conflict\"}], \"description\": \"### Summary\\n\\n`parse_options_header` parsed `Content-Disposition` (and `Content-Type`) headers with [`email.message.Message`](https://docs.python.org/3/library/email.compat32-message.html#email.message.Message), which transparently applies [RFC 2231](https://datatracker.ietf.org/doc/html/rfc2231)/[5987](https://datatracker.ietf.org/doc/html/rfc5987) decoding. The extended parameter syntax (`filename*=charset'lang'value`, `name*=...`, and the `filename*0`/`filename*1` continuation form) is decoded and surfaced under the bare `filename`/`name` key, and overrides the plain parameter when both are present. [RFC 7578 §4.2](https://datatracker.ietf.org/doc/html/rfc7578#section-4.2) explicitly forbids the `filename*` form in `multipart/form-data`.\\n\\nComponents that follow RFC 7578, or that do not implement RFC 2231/5987 decoding for `multipart/form-data` (WAFs, proxies, gateways), may interpret such a header differently. An attacker can exploit that difference to smuggle a different field name or filename past an upstream inspector to the backend.\\n\\n### Details\\n\\nGiven both a plain and an extended parameter, the extended value won. For example:\\n\\n```\\nContent-Disposition: form-data; name=\\\"comment\\\"; name*=utf-8''role\\n```\\n\\nAn inspector following RFC 7578 sees the field `comment`, while the returned value was `name=role`. The same applies to filenames:\\n\\n```\\nContent-Disposition: form-data; name=\\\"upload\\\"; filename=\\\"safe.txt\\\"; filename*=utf-8''evil.php\\n```\\n\\nThe inspector sees `safe.txt`, while the returned value was `filename=evil.php`. Continuation parameters (`filename*0`, `filename*1`, and so on) were likewise reassembled into a `filename` invisible to a plain `filename=` match, and percent encoded sequences in the extended value were decoded (so `..%2F`, `%00`, and similar appeared in the returned filename).\\n\\nThis affects the high level `parse_options_header`, `FormParser`, `create_form_parser`, and `parse_form` APIs, and reaches Starlette/FastAPI through `request.form()`, where the smuggled value is exposed as the form field name or [`UploadFile.filename`](https://www.starlette.io/requests/#request-files).\\n\\n### Impact\\n\\nThis is an interpretation conflict ([CWE-436](https://cwe.mitre.org/data/definitions/436.html)) with other `multipart/form-data` parsers. An attacker able to submit `multipart/form-data` can present a different field name or filename to an upstream body inspecting component than the one delivered to the application. Concrete consequences depend on how the application uses these values, and may include bypassing a field name or filename based access/upload control, or, for an application that builds filesystem paths from the parsed filename without sanitization, path traversal via decoded `..%2F` sequences. Decoded control bytes such as `%00` can likewise cause confusion between an upstream validator and the backend. The `File` class applies `os.path.basename`, so file writing through it is not directly affected.\\n\\n### Mitigation\\n\\nUpgrade to `python-multipart` `0.0.30` or later, which ignores RFC 2231/5987 extended parameters (`name*`, `filename*`, and their continuations) so the plain `name`/`filename` parameter remains authoritative. RFC 7578 §4.2 forbids `filename*` for `multipart/form-data`; `name*` and the continuation forms are dropped for the same reason, since they are not valid `multipart/form-data` parameters either.\", \"epss\": {\"percentage\": 0.00177, \"percentile\": 0.07444}, \"ghsa_id\": \"GHSA-vffw-93wf-4j4q\", \"github_reviewed_at\": \"2026-06-15T20:20:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-vffw-93wf-4j4q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vffw-93wf-4j4q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53537\"}], \"nvd_published_at\": \"2026-06-22T18:16:44Z\", \"published_at\": \"2026-06-15T20:20:51Z\", \"references\": [\"https://github.com/Kludex/python-multipart/security/advisories/GHSA-vffw-93wf-4j4q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-53537\", \"https://github.com/Kludex/python-multipart\", \"https://github.com/advisories/GHSA-vffw-93wf-4j4q\", \"https://github.com/pypa/advisory-database/blob/main/vulns/python-multipart/PYSEC-2026-3041.yaml\", \"https://pypi.org/project/python-multipart\"], \"repository_advisory_url\": \"https://api.github.com/repos/Kludex/python-multipart/security-advisories/GHSA-vffw-93wf-4j4q\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/Kludex/python-multipart\", \"summary\": \"python-multipart: Content-Disposition parameter smuggling via RFC 2231/5987 extended parameters\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T22:06:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-vffw-93wf-4j4q\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.30\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"python-multipart\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.30\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vffw-93wf-4j4q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "python-multipart: < 0.0.30"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53537"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "python-multipart"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.859408Z",
+  "provenance": {
+    "content_sha256": "ec5b027f6f5c1e364121ffe89811f1a0180598397c59a7389764ef24bd57a3d1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-15T20:20:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vffw-93wf-4j4q",
+  "status": "active",
+  "title": "python-multipart: Content-Disposition parameter smuggling via RFC 2231/5987 extended parameters",
+  "updated_at": "2026-07-15T22:06:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vffw-93wf-4j4q"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/103140982?v=4\", \"events_url\": \"https://api.github.com/users/MaanVader/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MaanVader/followers\", \"following_url\": \"https://api.github.com/users/MaanVader/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MaanVader/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MaanVader\", \"id\": 103140982, \"login\": \"MaanVader\", \"node_id\": \"U_kgDOBiXOdg\", \"organizations_url\": \"https://api.github.com/users/MaanVader/orgs\", \"received_events_url\": \"https://api.github.com/users/MaanVader/received_events\", \"repos_url\": \"https://api.github.com/users/MaanVader/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MaanVader/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MaanVader/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MaanVader\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41680\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}, {\"cwe_id\": \"CWE-835\", \"name\": \"Loop with Unreachable Exit Condition ('Infinite Loop')\"}], \"description\": \"### Summary\\nA critical Denial of Service (DoS) vulnerability exists in `marked@18.0.0`. By providing a specific 3-byte input sequence a tab, a vertical tab, and a newline (`\\\\x09\\\\x0b\\\\n`)—an unauthenticated attacker can trigger an infinite recursion loop during parsing. This leads to unbounded memory allocation, causing the host Node.js application to crash via Memory Exhaustion (OOM). \\n\\n### Details\\nThe vulnerability originates in how `marked`'s block tokenizer handles unexpected whitespace characters. \\n\\n1. **Tab Character (`\\\\x09`) Consumption**: The `space()` tokenizer matches standard whitespace using the regex `/^(?:[ \\\\t]*(?:\\\\n|$))+/`. When parsing the malicious payload (`\\\\x09\\\\x0b\\\\n`), this rule successfully consumes the initial tab character (`\\\\x09`).\\n2. **Vertical Tab (`\\\\x0b`) Bypass**: The remaining input is now `\\\\x0b\\\\n`. The newline block rule explicitly looks for spaces or standard tabs (`[ \\\\t]`) followed by a newline. Because the vertical tab is a legacy ASCII character not accounted for in this rule, it fails to match.\\n3. **Fallback to Text Tokenizer**: None of the standard block tokenizers (blockquote, code, heading, etc.) match `\\\\x0b\\\\n`. As a result, the parser falls through to the `text` tokenizer (`/^[^\\\\n]+/`), which matches any character except a newline.\\n4. **Infinite Recursion**: Inside `blockTokens()`, the `text` tokenizer creates a text token and subsequently calls `inlineTokens()` on the exact same content. Inside `inlineTokens()`, the text rule again matches `\\\\x0b\\\\n` and recursively calls `inlineTokens()`. This creates an inescapable cycle: `blockTokens() → text token → inlineTokens() → text rule matches → inlineTokens() → ...`\\n\\nWith each recursive call allocating new token objects and concatenating strings, memory grows indefinitely until the Node.js heap limit is reached.\\n\\n**Vulnerable Code in `lib/marked.esm.js` (Lexer class, `blockTokens()`):**\\n```javascript\\n// The text tokenizer triggers infinite recursion\\nif(r=this.tokenizer.text(e)) {\\n    e=e.substring(r.raw.length);\\n    let s=t.at(-1);\\n    s?.type===\\\"text\\\"?(s.raw+=(s.raw.endsWith(\\\"\\\\n\\\")?\\\"\\\":\\\"\\\\n\\\")+r.raw, s.text+=\\\"\\\\n\\\"+r.text, this.inlineQueue.pop(), this.inlineQueue.at(-1).src=s.text):t.push(r);\\n    // ↑ This calls inlineTokens() internally via the text tokenizer, causing the OOM loop\\n    continue;\\n}\\n```\\n\\n### PoC\\nThis vulnerability can be reproduced using any standard Node.js environment with `marked@18.0.0` installed.\\n\\n1. Create a file named `poc.js` with the following content:\\n```javascript\\nconst marked = require('marked');\\n\\n// The vulnerable 3-byte pattern: tab + vertical tab + newline\\nconst vulnerableInput = '\\\\x09\\\\x0b\\\\n';\\n\\nconsole.log('Attempting to parse malicious payload...');\\ntry {\\n    marked.parse(vulnerableInput);\\n} catch(e) {\\n    console.log('Error:', e.message);\\n}\\n```\\n2. Run the script: `node poc.js`\\n3. **Result:** The process will hang briefly as memory spikes, ultimately crashing with: `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory`.\\n\\n### Impact\\nThis is a High-Severity Denial of Service (DoS) vulnerability via Memory Exhaustion. \\n\\n**Impacted Parties:** Any application, API, chatbot, or documentation system using `marked@18.0.0` (and potentially earlier versions) to parse untrusted user input is vulnerable. \\n\\nBecause the payload requires zero authentication and only 3 bytes of data, it requires virtually no resources from the attacker to remotely crash the service and achieve a total loss of availability for the targeted application.\", \"epss\": {\"percentage\": 0.00342, \"percentile\": 0.25877}, \"ghsa_id\": \"GHSA-6v9c-7cg6-27q7\", \"github_reviewed_at\": \"2026-04-29T22:12:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-6v9c-7cg6-27q7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6v9c-7cg6-27q7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41680\"}], \"nvd_published_at\": \"2026-04-24T18:16:29Z\", \"published_at\": \"2026-04-29T22:12:20Z\", \"references\": [\"https://github.com/markedjs/marked/security/advisories/GHSA-6v9c-7cg6-27q7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41680\", \"https://github.com/advisories/GHSA-6v9c-7cg6-27q7\"], \"repository_advisory_url\": \"https://api.github.com/repos/markedjs/marked/security-advisories/GHSA-6v9c-7cg6-27q7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/markedjs/marked\", \"summary\": \"Marked Vulnerable to OOM Denial of Service via Infinite Recursion in marked Tokenizer\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-29T22:12:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-6v9c-7cg6-27q7\", \"vulnerabilities\": [{\"first_patched_version\": \"18.0.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"marked\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 18.0.0, <= 18.0.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6v9c-7cg6-27q7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "marked: >= 18.0.0, <= 18.0.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41680"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "marked"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.243567Z",
+  "provenance": {
+    "content_sha256": "9425fee50ba0bdeef4b265cacfa9d7b74f3ebc096eef49de8c31904095a2ac47",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-29T22:12:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6v9c-7cg6-27q7",
+  "status": "active",
+  "title": "Marked Vulnerable to OOM Denial of Service via Infinite Recursion in marked Tokenizer",
+  "updated_at": "2026-04-29T22:12:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6v9c-7cg6-27q7"
+}

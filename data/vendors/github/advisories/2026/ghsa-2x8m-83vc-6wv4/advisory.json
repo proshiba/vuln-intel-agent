@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/136694812?v=4\", \"events_url\": \"https://api.github.com/users/ESPanda666/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ESPanda666/followers\", \"following_url\": \"https://api.github.com/users/ESPanda666/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ESPanda666/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ESPanda666\", \"id\": 136694812, \"login\": \"ESPanda666\", \"node_id\": \"U_kgDOCCXMHA\", \"organizations_url\": \"https://api.github.com/users/ESPanda666/orgs\", \"received_events_url\": \"https://api.github.com/users/ESPanda666/received_events\", \"repos_url\": \"https://api.github.com/users/ESPanda666/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ESPanda666/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ESPanda666/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ESPanda666\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1323708?v=4\", \"events_url\": \"https://api.github.com/users/JLLeitschuh/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JLLeitschuh/followers\", \"following_url\": \"https://api.github.com/users/JLLeitschuh/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JLLeitschuh/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JLLeitschuh\", \"id\": 1323708, \"login\": \"JLLeitschuh\", \"node_id\": \"MDQ6VXNlcjEzMjM3MDg=\", \"organizations_url\": \"https://api.github.com/users/JLLeitschuh/orgs\", \"received_events_url\": \"https://api.github.com/users/JLLeitschuh/received_events\", \"repos_url\": \"https://api.github.com/users/JLLeitschuh/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JLLeitschuh/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JLLeitschuh/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JLLeitschuh\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41272\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.0/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.0/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-367\", \"name\": \"Time-of-check Time-of-use (TOCTOU) Race Condition\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nThe core security wrappers (secureAxiosRequest and secureFetch) intended to prevent Server-Side Request Forgery (SSRF) contain multiple logic flaws. These flaws allow attackers to bypass the allow/deny lists via DNS Rebinding (Time-of-Check Time-of-Use) or by exploiting the default configuration which fails to enforce any deny list.\\n\\n\\n### Details\\nThe flaws exist in `packages/components/src/httpSecurity.ts`.\\n\\nDefault Insecure: If process.env.HTTP_DENY_LIST is undefined, checkDenyList returns immediately, allowing all requests (including localhost).\\n\\nDNS Rebinding (TOCTOU): The function performs a DNS lookup (dns.lookup) to validate the IP, and then the HTTP client performs a new lookup to connect. An attacker can serve a valid IP first, then switch to an internal IP (e.g., `127.0.0.1`) for the second lookup.\\n\\n\\n### PoC\\nEnsure `HTTP_DENY_LIST` is unset (default behavior).\\n\\nUse any node utilizing secureFetch to access `http://127.0.0.1`.\\n\\nResult: Request succeeds.\\n\\n#### Scenario 2: DNS Rebinding\\n\\nAttacker controls domain attacker.com and a custom DNS server.\\n\\nConfigure DNS to return `1.1.1.1` (Safe IP) with TTL=0 for the first query.\\n\\nConfigure DNS to return `127.0.0.1` (Blocked IP) for subsequent queries.\\n\\nFlowise validates `attacker.com` -> `1.1.1.1` (Allowed).\\n\\nFlowise fetches `attacker.com` -> `127.0.0.1` (Bypass).\\n\\nRun the following for manual verification \\n\\n```ts\\n// PoC for httpSecurity.ts Bypasses\\nimport * as dns from 'dns/promises';\\n\\n// Mocking the checkDenyList logic from Flowise\\nasync function checkDenyList(url: string) {\\n    const deniedIPs = ['127.0.0.1', '0.0.0.0']; // Simplified deny list logic\\n\\n    if (!process.env.HTTP_DENY_LIST) {\\n        console.log(\\\\\\\"⚠️  HTTP_DENY_LIST not set. Returning allowed.\\\\\\\");\\n        return; // Vulnerability 1: Default Insecure\\n    }\\n\\n    const { hostname } = new URL(url);\\n    const { address } = await dns.lookup(hostname);\\n\\n    if (deniedIPs.includes(address)) {\\n        throw new Error(`IP ${address} is denied`);\\n    }\\n    console.log(`✅ IP ${address} allowed check.`);\\n}\\n\\nasync function runPoC() {\\n    console.log(\\\\\\\"--- Test 1: Default Configuration (Unset HTTP_DENY_LIST) ---\\\\\\\");\\n    // Ensure env var is unset\\n    delete process.env.HTTP_DENY_LIST;\\n    try {\\n        await checkDenyList('http://127.0.0.1');\\n        console.log(\\\\\\\"[PASS] Default config allowed localhost access.\\\\\\\");\\n    } catch (e) {\\n        console.log(\\\\\\\"[FAIL] Blocked:\\\\\\\", e.message);\\n    }\\n\\n    console.log(\\\\\\\"\\\\\\n--- Test 2: 'private' Keyword Bypass (Logic Flaw) ---\\\\\\\");\\n    process.env.HTTP_DENY_LIST = 'private'; // User expects this to block localhost\\n    try {\\n        await checkDenyList('http://127.0.0.1');\\n        // In real Flowise code, 'private' is not expanded to IPs, so it only blocks the string \\\\\\\"private\\\\\\\"\\n        console.log(\\\\\\\"[PASS] 'private' keyword failed to block localhost (Mock simulation).\\\\\\\");\\n    } catch (e) {\\n        console.log(\\\\\\\"[FAIL] Blocked:\\\\\\\", e.message);\\n    }\\n}\\n\\nrunPoC();\\n```\\n\\n\\n### Impact\\nConfidentiality: High (Access to internal services if protection is bypassed).\\n\\nIntegrity: Low/Medium (If internal services allow state changes via GET).\\n\\nAvailability: Low.\", \"epss\": {\"percentage\": 0.00232, \"percentile\": 0.13852}, \"ghsa_id\": \"GHSA-2x8m-83vc-6wv4\", \"github_reviewed_at\": \"2026-04-16T21:51:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-2x8m-83vc-6wv4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2x8m-83vc-6wv4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41272\"}], \"nvd_published_at\": \"2026-04-23T20:16:15Z\", \"published_at\": \"2026-04-16T21:51:00Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-2x8m-83vc-6wv4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41272\", \"https://github.com/advisories/GHSA-2x8m-83vc-6wv4\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-2x8m-83vc-6wv4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: SSRF Protection Bypass (TOCTOU & Default Insecure)\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T21:01:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-2x8m-83vc-6wv4\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.0.13\"}, {\"first_patched_version\": \"3.1.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise-components\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.0.13\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2x8m-83vc-6wv4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise-components: <= 3.0.13",
+      "flowise: <= 3.0.13"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41272"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.0/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise",
+      "flowise-components"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.605586Z",
+  "provenance": {
+    "content_sha256": "dfea9a7e9a6288578624ca53375dc42011d7a50c8d459f0e2500b887d0606f70",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T21:51:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2x8m-83vc-6wv4",
+  "status": "active",
+  "title": "Flowise: SSRF Protection Bypass (TOCTOU & Default Insecure)",
+  "updated_at": "2026-04-24T21:01:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2x8m-83vc-6wv4"
+}

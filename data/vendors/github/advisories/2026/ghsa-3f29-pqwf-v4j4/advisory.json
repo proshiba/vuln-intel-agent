@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/58629434?v=4\", \"events_url\": \"https://api.github.com/users/Samer666569/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Samer666569/followers\", \"following_url\": \"https://api.github.com/users/Samer666569/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Samer666569/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Samer666569\", \"id\": 58629434, \"login\": \"Samer666569\", \"node_id\": \"MDQ6VXNlcjU4NjI5NDM0\", \"organizations_url\": \"https://api.github.com/users/Samer666569/orgs\", \"received_events_url\": \"https://api.github.com/users/Samer666569/received_events\", \"repos_url\": \"https://api.github.com/users/Samer666569/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Samer666569/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Samer666569/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Samer666569\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42610\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\nInformation disclosure exists in `Grav CMS v1.8.0-beta.29`. Despite previous security patches (notably in `v1.8.0-beta.27/28`) aimed at restricting sensitive object access within the Twig environment, the Accounts Service remains exposed.\\n\\nA low-privileged user (EX: Content Editor with only pages.update permissions) can bypass the existing Twig sandbox restrictions by utilizing the `grav['accounts']` service. Attacker can programmatically load administrative user objects and extract sensitive data, including Bcrypt password hashes and the security salt.\\n\\n## Affected version\\nGrav CMS: `v1.8.0-beta.29` (and earlier 1.8.x beta versions).\\n\\nNote: This vulnerability persists even after the vendor attempted to mitigate similar SSTI vectors in earlier beta releases.\\n\\n## Steps to Reproduce\\n1. Create a low-privileged account (MY CASE IS 'editor_chen') with permissions limited to admin.login and basic page management (create, update, list). Ensure all administrative permissions (Configuration, User Accounts, ...) are explicitly Denied.\\n\\n2. Login to the Admin panel using  `editor_chen`. Navigate to Pages and edit the `Home` page.\\n\\n\\n3. Under the Advanced tab, ensure Process Twig is enabled .\\n\\n4. In the Content tab, inject the following Twig payload designed to bypass the `isDangerousFunction` filter by accessing the internal service container:\\n```\\n---\\ntitle: Information Disclosure Test\\nprocess:\\n    twig: true\\n---\\n# Security Audit Results\\n- Admin Password Hash: {{ grav['accounts'].load('admin').get('hashed_password') }}\\n- Security Salt: {{ grav.config.get('security.salt') }}\\n```\\n<img width=\\\"1176\\\" height=\\\"618\\\" alt=\\\"GRAV\\\" src=\\\"https://github.com/user-attachments/assets/7970216a-2dc6-4d1b-8dfd-b64f3712c9c5\\\" />\\n\\n\\n5. Click Save. And navigate to the public page (`http://localhost:8000/home`). Page will render and display the administrator's Bcrypt hash and the system security salt.\\n<img width=\\\"1278\\\" height=\\\"462\\\" alt=\\\"GRAV2\\\" src=\\\"https://github.com/user-attachments/assets/33b7b894-6ae3-4d29-bd2d-8004e9b343e0\\\" />\\n\\n\\n\\n\\n\\n\\n\\n## PoC\\n```\\n---\\ntitle: Information Disclosure Test\\nprocess:\\n    twig: true\\n---\\n# Security Audit Results\\n- Admin Password Hash: {{ grav['accounts'].load('admin').get('hashed_password') }}\\n- Security Salt: {{ grav.config.get('security.salt') }}\\n```\\n\\n## Impact\\nAttackers can obtain the password hashes of all registered users, including Super Administrators.\\n\\nExtracted hashes can be subjected to offline brute-force or dictionary attacks (EX: USE Hashcat)\\n\\n## Video\\nPls refer to the attached video\\n<video src=\\\"https://github.com/user-attachments/assets/74d5ae41-7911-4099-b2cc-e6c51b27c68c\\\" controls=\\\"controls\\\" style=\\\"max-width: 100%;\\\">\\n</video>\\n\\n\\n\\n---\\n\\n## Maintainer note — fix applied (2026-04-24)\\n\\nFixed in Grav core on the `2.0` branch: commit [`d904efc33`](https://github.com/getgrav/grav/commit/d904efc33) — will ship in **2.0.0-beta.2**.\\n\\n**What changed:** the HMAC key formerly stored as `security.salt` in `user/config/security.yaml` has moved **out of the Config tree** into `user/config/security-private.php`. On upgrade, the existing salt value is migrated into the new file on first request (preserving CSRF nonces and sessions) and the key is scrubbed from both the live `Config` object and the on-disk YAML — so `{{ grav.config.get('security.salt') }}` from a sandboxed Twig template now returns null. The `.php` extension is blocked from web access by the default `user/*.php` htaccess rule; the file contains only a `return` statement, so direct PHP exec produces no output either.\\n\\nThe PoC's password-hash half (`grav['accounts'].load('admin').get('hashed_password')`) was already covered by the new Twig content sandbox in 2.0.0-beta.2 — `UserCollection::load` is not in the sandbox allowlist — see the separate GHSA-58hj-46fw-rcfm advisory.\\n\\n**Files:**\\n- [`system/src/Grav/Common/Security.php`](https://github.com/getgrav/grav/blob/2.0/system/src/Grav/Common/Security.php) — new `Security::getNonceKey()` + migration.\\n- [`system/src/Grav/Common/Utils.php`](https://github.com/getgrav/grav/blob/2.0/system/src/Grav/Common/Utils.php) — `generateNonceString` now uses the new key.\\n- [`system/src/Grav/Common/Service/SessionServiceProvider.php`](https://github.com/getgrav/grav/blob/2.0/system/src/Grav/Common/Service/SessionServiceProvider.php).\\n- [`system/src/Grav/Common/Config/Setup.php`](https://github.com/getgrav/grav/blob/2.0/system/src/Grav/Common/Config/Setup.php) — removed auto-gen of `security.salt`.\\n- [`system/config/security.yaml`](https://github.com/getgrav/grav/blob/2.0/system/config/security.yaml) — removed placeholder `salt:`.\\n- [`tests/unit/Grav/Common/Security/NonceKeySecurityTest.php`](https://github.com/getgrav/grav/blob/2.0/tests/unit/Grav/Common/Security/NonceKeySecurityTest.php) — migration + generation coverage.\", \"epss\": {\"percentage\": 0.0029, \"percentile\": 0.20591}, \"ghsa_id\": \"GHSA-3f29-pqwf-v4j4\", \"github_reviewed_at\": \"2026-05-05T21:26:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-3f29-pqwf-v4j4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3f29-pqwf-v4j4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42610\"}], \"nvd_published_at\": \"2026-05-11T16:17:33Z\", \"published_at\": \"2026-05-05T21:26:45Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-3f29-pqwf-v4j4\", \"https://github.com/getgrav/grav/commit/c66dfeb5ff679a1667678c6335eb9ff3255dfc47\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42610\", \"https://github.com/advisories/GHSA-3f29-pqwf-v4j4\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-3f29-pqwf-v4j4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav Vulnerable to Sensitive Information Disclosure via Accounts Service Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:52:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-3f29-pqwf-v4j4\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.0-beta.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.0-beta.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3f29-pqwf-v4j4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.0-beta.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42610"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.734397Z",
+  "provenance": {
+    "content_sha256": "4540253878f1f7d18c768f697a950bbe4b9bbf04fd03a4377f38c15512feeb84",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T21:26:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3f29-pqwf-v4j4",
+  "status": "active",
+  "title": "Grav Vulnerable to Sensitive Information Disclosure via Accounts Service Bypass",
+  "updated_at": "2026-05-13T13:52:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3f29-pqwf-v4j4"
+}

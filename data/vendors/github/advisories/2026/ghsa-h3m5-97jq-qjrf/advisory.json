@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/118192250?v=4\", \"events_url\": \"https://api.github.com/users/Forklit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Forklit/followers\", \"following_url\": \"https://api.github.com/users/Forklit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Forklit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Forklit\", \"id\": 118192250, \"login\": \"Forklit\", \"node_id\": \"U_kgDOBwt4eg\", \"organizations_url\": \"https://api.github.com/users/Forklit/orgs\", \"received_events_url\": \"https://api.github.com/users/Forklit/received_events\", \"repos_url\": \"https://api.github.com/users/Forklit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Forklit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Forklit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Forklit\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/274230715?v=4\", \"events_url\": \"https://api.github.com/users/vladkoniakhinmob/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vladkoniakhinmob/followers\", \"following_url\": \"https://api.github.com/users/vladkoniakhinmob/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vladkoniakhinmob/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vladkoniakhinmob\", \"id\": 274230715, \"login\": \"vladkoniakhinmob\", \"node_id\": \"U_kgDOEFhtuw\", \"organizations_url\": \"https://api.github.com/users/vladkoniakhinmob/orgs\", \"received_events_url\": \"https://api.github.com/users/vladkoniakhinmob/received_events\", \"repos_url\": \"https://api.github.com/users/vladkoniakhinmob/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vladkoniakhinmob/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vladkoniakhinmob/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vladkoniakhinmob\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-57168\", \"cvss\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\nOpenRemote Manager is vulnerable to a cross-tenant Insecure Direct\\nObject Reference (IDOR) in the bulk alarm deletion endpoint. An\\nauthenticated user in any realm can delete alarms belonging to other\\nrealms (tenants) by supplying arbitrary alarm IDs. The vulnerability\\nexists because the bulk removeAlarms() method only verifies that the\\ncaller's own realm is active and accessible, but never checks whether\\nthe targeted alarm IDs belong to the caller's realm before deleting\\nthem.\\n\\nThis allows any user with alarm write permissions in their own realm\\nto permanently destroy alarm records — including safety-critical and\\nsecurity alerts — belonging to any other tenant on the same OpenRemote\\ninstallation.\\n\\n------------------------------------------\\n\\n[Additional Information]\\nThe singular removeAlarm() method correctly validates that the\\ntarget alarm's realm matches the caller's access:\\n\\n    // CORRECT (singular):\\n    SentAlarm alarm = alarmService.getAlarm(alarmId);\\n    if (!isRealmActiveAndAccessible(alarm.getRealm())) {\\n        throw new ForbiddenException(...);\\n    }\\n\\nThe plural removeAlarms() method is missing this per-alarm realm\\ncheck and only validates the caller's own realm — a check that is\\ntrivially satisfied for any authenticated user:\\n\\n```\\n // VULNERABLE (plural):\\npublic void removeAlarms(RequestParams requestParams, List<Long> alarmIds) {\\n    if (!isRealmActiveAndAccessible(getAuthenticatedRealmName())) {  \\n        throw new ForbiddenException(...);  // always passes for any auth user\\n    }\\n    List<SentAlarm> alarms = alarmService.getAlarms(alarmIds);  // no realm filter\\n    alarmService.removeAlarms(alarms, alarmIds);                // no realm filter\\n}\\n\\n```\\nThe underlying service queries contain no realm scoping:\\n\\n   ```\\n // AlarmService.getAlarms(List<Long>):\\n    \\\"select sa from SentAlarm sa where sa.id in :ids\\\"\\n    // no realm filter\\n\\n    // AlarmService.removeAlarms():\\n    \\\"delete from SentAlarm sa where sa.id in :ids\\\"\\n    // no realm filter\\n\\n```\\nAlarm IDs are sequential auto-increment Long values (JPA\\n@GeneratedValue), making them trivially enumerable.\\n\\n[Vulnerability Type]\\nInsecure Direct Object Reference (IDOR) / Missing Authorization\\nCWE-639: Authorization Bypass Through User-Controlled Key\\nCWE-862: Missing Authorization\\n\\n------------------------------------------\\n\\n[Vendor of Product]\\nOpenRemote Inc. (openremote.io)\\n\\n------------------------------------------\\n\\n[Affected Product Code Base]\\nOpenRemote Manager - current version as of 2026\\n(github.com/openremote/openremote)\\n\\n------------------------------------------\\n\\n[Affected Component]\\norg.openremote.manager.alarm.AlarmResourceImpl#removeAlarms()\\norg.openremote.manager.alarm.AlarmService#getAlarms(List<Long>)\\norg.openremote.manager.alarm.AlarmService#removeAlarms()\\n\\nFile: manager/src/main/java/org/openremote/manager/alarm/AlarmResourceImpl.java\\nFile: manager/src/main/java/org/openremote/manager/alarm/AlarmService.java\\n\\n------------------------------------------\\n\\n[Attack Type]\\nRemote (authenticated)\\n\\n------------------------------------------\\n\\n[CVE Impact Other]\\nCross-tenant permanent destruction of alarm records, including\\nsafety-critical and security alerts in IoT environments. Also enables\\ncross-tenant alarm enumeration (presence disclosure of alarm IDs\\nacross all tenants).\\n\\n------------------------------------------\\n\\n[Attack Vectors]\\n1. Attacker registers or obtains any low-privilege account in any realm\\n   on the target OpenRemote installation (or uses an existing account).\\n2. Attacker enumerates alarm IDs belonging to other realms by sending\\n   bulk delete requests with sequential IDs (presence confirmed by\\n   404 vs 200 response codes).\\n3. Attacker issues a single bulk delete request containing IDs of\\n   alarms belonging to victim realm(s).\\n4. Alarms are permanently deleted with no authorization error.\\n\\nPoC:\\n\\n```\\nTenant A (attacker) : realm = \\\"tenant-a\\\"\\n                      user  = attacker@tenant-a.com\\n                      role  = WRITE_ALARMS_ROLE\\n\\nTenant B (victim)   : realm = \\\"tenant-b\\\"\\n                      alarms with IDs 1174,1173, 1180 exist\\n```\\n\\n\\n\\n```\\nDELETE /api/smartcity/alarm HTTP/2\\nContent-Type: application/json\\n\\n\\n[1174,1173, 1180]  /// <- alarm ID \\n```\\n\\n<img width=\\\"1280\\\" height=\\\"404\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/ffbebea2-2248-42a0-bb22-7a0dc51c78ce\\\" />\", \"ghsa_id\": \"GHSA-h3m5-97jq-qjrf\", \"github_reviewed_at\": \"2026-06-19T21:43:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-h3m5-97jq-qjrf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h3m5-97jq-qjrf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-57168\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T21:43:17Z\", \"references\": [\"https://github.com/openremote/openremote/security/advisories/GHSA-h3m5-97jq-qjrf\", \"https://github.com/openremote/openremote/blob/master/manager/src/main/java/org/openremote/manager/alarm/AlarmResourceImpl.java\", \"https://github.com/openremote/openremote/blob/master/manager/src/main/java/org/openremote/manager/alarm/AlarmService.java\", \"https://github.com/openremote/openremote/commit/9fad55e5a448c82772d241d395826e5d6fe1ce2d\", \"https://github.com/advisories/GHSA-h3m5-97jq-qjrf\"], \"repository_advisory_url\": \"https://api.github.com/repos/openremote/openremote/security-advisories/GHSA-h3m5-97jq-qjrf\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/openremote/openremote\", \"summary\": \"OpenRemote Manager: removeAlarms cross-realm IDOR (bulk delete)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-02T20:12:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-h3m5-97jq-qjrf\", \"vulnerabilities\": [{\"first_patched_version\": \"1.25.0\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"io.openremote:openremote-manager\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.25.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h3m5-97jq-qjrf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "io.openremote:openremote-manager: < 1.25.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-57168"
+    ],
+    "cvss_score": 9.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "io.openremote:openremote-manager"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.149566Z",
+  "provenance": {
+    "content_sha256": "80cfba1df7e1400e587b347cf08f04f5f29172201c9d991d954094e199af4254",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T21:43:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h3m5-97jq-qjrf",
+  "status": "active",
+  "title": "OpenRemote Manager: removeAlarms cross-realm IDOR (bulk delete)",
+  "updated_at": "2026-07-02T20:12:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h3m5-97jq-qjrf"
+}

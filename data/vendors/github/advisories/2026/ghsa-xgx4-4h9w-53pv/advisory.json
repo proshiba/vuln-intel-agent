@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/161784452?v=4\", \"events_url\": \"https://api.github.com/users/N0zoM1z0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/N0zoM1z0/followers\", \"following_url\": \"https://api.github.com/users/N0zoM1z0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/N0zoM1z0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/N0zoM1z0\", \"id\": 161784452, \"login\": \"N0zoM1z0\", \"node_id\": \"U_kgDOCaSihA\", \"organizations_url\": \"https://api.github.com/users/N0zoM1z0/orgs\", \"received_events_url\": \"https://api.github.com/users/N0zoM1z0/received_events\", \"repos_url\": \"https://api.github.com/users/N0zoM1z0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/N0zoM1z0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/N0zoM1z0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/N0zoM1z0\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47703\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-330\", \"name\": \"Use of Insufficiently Random Values\"}, {\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}, {\"cwe_id\": \"CWE-662\", \"name\": \"Improper Synchronization\"}], \"description\": \"## Summary\\n\\nThis report covers the client-triggered DoQ forwarding path in:\\n\\n- `dnsproxy` `v0.81.2` (`adguard/dnsproxy:v0.81.2`)\\n- `AdGuard Home` `v0.107.74` (`adguard/adguardhome:latest`, image version label `v0.107.74`)\\n\\nThe issue was reproduced on `2026-04-25` with the products configured through\\ntheir documented DoQ listener and plain UDP upstream surfaces. The scope is the\\ninternal backend UDP hop created when a DoQ query is forwarded to a `udp://`\\nupstream.\\n\\nOn that path, the backend DNS `ID` is not preserved as an independent source of\\nentropy. For both products, the backend observer saw `dns_id=0` for every\\nsampled client-triggered query on the tested path. Repeated reruns then showed\\nthe same `txid=0` behavior and the same positive source-port oracle on every\\nsampled run. A separate quoted-port ICMP oracle distinguished the correct\\nbackend UDP source port from a wrong one with a stable, client-visible behavior\\nchange.\\n\\nAttached evidence:\\n\\n- `dnsproxy` oracle path on `v0.81.2`: [attachments/artifacts/g03/20260425T141500Z-g03-v0812/summary.txt](attachments/artifacts/g03/20260425T141500Z-g03-v0812/summary.txt)\\n- `dnsproxy` `v0.81.2` repeatability: [attachments/artifacts/g03/repeatability-v0812.md](attachments/artifacts/g03/repeatability-v0812.md)\\n- `dnsproxy` steering follow-up on `v0.81.2`: [attachments/artifacts/g04/20260425T141900Z-g04-v0812/summary.txt](attachments/artifacts/g04/20260425T141900Z-g04-v0812/summary.txt)\\n- `AdGuard Home` oracle path: [attachments/artifacts/g05/20260425T113000Z-g05/summary.txt](attachments/artifacts/g05/20260425T113000Z-g05/summary.txt)\\n\\n## Root Cause Analysis\\n\\nThe observable behavior is consistent across both products:\\n\\n1. A DoQ client query is accepted on the frontend listener.\\n2. The query is forwarded over a backend UDP leg.\\n3. On that backend leg, the forwarded DNS `ID` collapses to `0` on the\\n   client-triggered path instead of remaining a fresh per-query variable.\\n4. The backend UDP source port is still allocated per query.\\n5. When an ICMP error quotes the actual backend source port, the forwarding path\\n   flips behavior in a way that does not occur for a wrong quoted port.\\n\\nThat combination removes `txid` from the backend tuple on the tested path and\\nleaves the UDP source port as the main remaining variable. In practical terms,\\nthe backend hop stops behaving like a fresh `(txid, source-port)` pair per\\nforwarded query and instead becomes a one-variable state exposure.\\n\\nFor `dnsproxy`, the correct quoted port does more than produce a failure signal:\\nit can push resolution away from the primary UDP upstream and into the fallback\\nupstream. For `AdGuard Home`, the same condition produces a fast `SERVFAIL`.\\n\\n## Reproduce\\n\\nPrerequisites:\\n\\n- Docker and Docker Compose\\n- OpenSSL\\n- build the lab helper image used by the attached harness and observer\\n\\nThe attached reproducer bundle contains only the files needed for this report:\\n\\n- scripts: `attachments/scripts/`\\n- helper image build files: `attachments/docker/unbound-doq-attacker/`\\n- compose files: `attachments/docker-compose.g03.yml`,\\n  `attachments/docker-compose.g04.yml`, `attachments/docker-compose.g05.yml`\\n- shipped evidence: `attachments/artifacts/...`\\n\\nBuild the helper image first:\\n\\n1. `cd attachments`\\n2. `docker build -t unbound-doq-attacker:latest -f docker/unbound-doq-attacker/Dockerfile docker/unbound-doq-attacker`\\n\\nTo rerun `dnsproxy`:\\n\\n1. `cd attachments`\\n2. `bash scripts/repro-g03-dnsproxy-oracle.sh`\\n3. Inspect `artifacts/g03/<RUN_ID>/summary.txt`\\n4. Inspect `artifacts/g03/<RUN_ID>/entropy-backend.jsonl`,\\n   `txid_correct-backend.jsonl`, and `port_correct-backend.jsonl`\\n\\nTo rerun the `dnsproxy` fallback-steering case:\\n\\n1. `cd attachments`\\n2. `bash scripts/repro-g04-dnsproxy-steering.sh`\\n3. Inspect `artifacts/g04/<RUN_ID>/summary.txt`\\n4. Inspect `steering_correct-main.jsonl` and `steering_correct-fallback.jsonl`\\n\\nTo rerun `AdGuard Home`:\\n\\n1. `cd attachments`\\n2. `bash scripts/repro-g05-adguardhome-oracle.sh`\\n3. Inspect `artifacts/g05/<RUN_ID>/summary.txt`\\n4. Inspect `entropy-backend.jsonl`, `txid_correct-backend.jsonl`, and\\n   `port_correct-backend.jsonl`\\n\\nThe attached evidence includes fresh `dnsproxy v0.81.2` reruns, one official-\\nprofile `AdGuard Home` run, and the minimal reproducer bundle used by both.\\n\\n## Impact\\n\\nFor both products, the tested DoQ-to-UDP path is no longer a full\\n`(txid, source-port)` search surface:\\n\\n- `dnsproxy`: four of four sampled runs showed `txid=0` on the backend hop and\\n  a positive source-port oracle on `v0.81.2`. The remaining unknown is\\n  `port_only`. Median wrong/correct port latency was `327.99 ms / 40.93 ms`.\\n- `AdGuard Home`: four of four sampled runs showed `txid=0` on the backend hop\\n  and a positive source-port oracle. The aggregate again classifies the\\n  remaining unknown as `port_only`. Median wrong/correct port latency was\\n  `319.14 ms / 37.02 ms`.\\n\\nProduct-specific effects:\\n\\n- `dnsproxy`: a correct port guess produced an empty client-visible answer on\\n  the base oracle path, and in the fallback profile it steered all eight tested\\n  queries away from the main upstream and into the fallback upstream.\\n- `AdGuard Home`: a correct port guess produced fast `SERVFAIL` and an extra\\n  backend query.\\n\\nThis is the security-relevant point. On the tested official profiles, the\\nbackend hop no longer forces an off-path attacker to deal with two fresh random\\nfields per forwarded DNS race. The DNS ID is already known: it is\\ndeterministically `0` on the client-triggered DoQ-to-UDP path. The only\\nremaining backend tuple variable is the UDP source port, and the attached\\nevidence shows a repeatable oracle for that remaining variable.\\n\\nThat places the path in the same threat-model class as oracle-assisted DNS\\nforgery work such as SAD DNS and TUdoor: the attack first uses an oracle to\\nlearn or validate the tuple state that protects an off-path response race, and\\nonly then attempts the forged response. This report stops short of a forgery\\ndemo, but the evidence already shows the crucial precondition on the tested\\nbackend hop: the tuple is not high-entropy anymore. It has been reduced from\\n`(txid, source-port)` to `source-port` only.\\n\\n\\n---\\n\\n**Attachments**\\n[attachments.zip](https://github.com/user-attachments/files/27227054/attachments.zip)\", \"epss\": {\"percentage\": 0.00135, \"percentile\": 0.03382}, \"ghsa_id\": \"GHSA-xgx4-4h9w-53pv\", \"github_reviewed_at\": \"2026-06-04T19:50:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-xgx4-4h9w-53pv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xgx4-4h9w-53pv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47703\"}], \"nvd_published_at\": \"2026-07-15T17:16:48Z\", \"published_at\": \"2026-06-04T19:50:23Z\", \"references\": [\"https://github.com/AdguardTeam/AdGuardHome/security/advisories/GHSA-xgx4-4h9w-53pv\", \"https://github.com/AdguardTeam/dnsproxy/commit/f00d992ce9567a50f596853978ad6500acfdcf1d\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47703\", \"https://pkg.go.dev/vuln/GO-2026-5756\", \"https://github.com/advisories/GHSA-xgx4-4h9w-53pv\"], \"repository_advisory_url\": \"https://api.github.com/repos/AdguardTeam/AdGuardHome/security-advisories/GHSA-xgx4-4h9w-53pv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/AdguardTeam/AdGuardHome\", \"summary\": \"AdGuard Home: DoQ-to-UDP State Reduction and Source-Port Oracle\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T19:05:47Z\", \"url\": \"https://api.github.com/advisories/GHSA-xgx4-4h9w-53pv\", \"vulnerabilities\": [{\"first_patched_version\": \"0.107.75\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/AdguardTeam/AdGuardHome\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.107.74\"}, {\"first_patched_version\": \"0.81.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/AdguardTeam/dnsproxy\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.81.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xgx4-4h9w-53pv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/AdguardTeam/AdGuardHome: <= 0.107.74",
+      "github.com/AdguardTeam/dnsproxy: < 0.81.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47703"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/AdguardTeam/AdGuardHome",
+      "github.com/AdguardTeam/dnsproxy"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.272174Z",
+  "provenance": {
+    "content_sha256": "56bf842169c304b036997ecfe92dcd6c61c3d363dd4b8d9924b74bad8fcfc882",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T19:50:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xgx4-4h9w-53pv",
+  "status": "active",
+  "title": "AdGuard Home: DoQ-to-UDP State Reduction and Source-Port Oracle",
+  "updated_at": "2026-07-20T19:05:47Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xgx4-4h9w-53pv"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16343666?v=4\", \"events_url\": \"https://api.github.com/users/LiamSnow/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LiamSnow/followers\", \"following_url\": \"https://api.github.com/users/LiamSnow/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LiamSnow/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LiamSnow\", \"id\": 16343666, \"login\": \"LiamSnow\", \"node_id\": \"MDQ6VXNlcjE2MzQzNjY2\", \"organizations_url\": \"https://api.github.com/users/LiamSnow/orgs\", \"received_events_url\": \"https://api.github.com/users/LiamSnow/received_events\", \"repos_url\": \"https://api.github.com/users/LiamSnow/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LiamSnow/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LiamSnow/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LiamSnow\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16573496?v=4\", \"events_url\": \"https://api.github.com/users/imorland/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/imorland/followers\", \"following_url\": \"https://api.github.com/users/imorland/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/imorland/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/imorland\", \"id\": 16573496, \"login\": \"imorland\", \"node_id\": \"MDQ6VXNlcjE2NTczNDk2\", \"organizations_url\": \"https://api.github.com/users/imorland/orgs\", \"received_events_url\": \"https://api.github.com/users/imorland/received_events\", \"repos_url\": \"https://api.github.com/users/imorland/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/imorland/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/imorland/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/imorland\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41887\", \"cvss\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nFlarum's patch for [CVE-2023-27577](https://github.com/flarum/framework/security/advisories/GHSA-vhm8-wwrf-3gcw) restricted the `@import` and `data-uri()` LESS features in the `custom_less` setting, but the same restriction was never applied to other settings registered as LESS config variables (for example `theme_primary_color` and `theme_secondary_color`, as well as any key registered via `Extend\\\\Settings::registerLessConfigVar()`).\\n\\nThose values are interpolated verbatim into the LESS source at compile time, allowing an authenticated administrator to craft a theme-color value that injects an arbitrary `@import` directive into the compiled `forum.css`. Because the underlying LESS parser honours `@import (inline) '<path>'`, an attacker can read arbitrary files reachable by the PHP process (local file inclusion) or trigger outbound HTTP(S) requests (server-side request forgery).\\n\\n## Impact\\n\\nAn attacker who has compromised — or legitimately obtained — an administrator account can:\\n\\n- **Read arbitrary local files** reachable by the PHP process (e.g. `/etc/passwd`, `.env`, config files containing database credentials, OAuth secrets, API keys).\\n- **Trigger outbound HTTP/HTTPS requests** from the Flarum host, enabling SSRF against internal services and cloud metadata endpoints such as `http://169.254.169.254/` (AWS IMDSv1, GCP, Azure).\\n\\nThe contents of the attacker-controlled import are embedded into the compiled `forum.css`, which is publicly served — so the attacker can retrieve whatever was read simply by fetching the CSS file.\\n\\nThis is a privilege-escalation vulnerability: a forum administrator is not intended to have host-level file read or access to internal network resources.\\n\\n### Example payload\\n\\nSubmitted via `POST /api/settings` with an admin session:\\n\\n```json\\n{ \\\"theme_primary_color\\\": \\\"#4D698E;@import (inline) '/etc/passwd';\\\" }\\n```\\n\\nThe setting is stored verbatim, interpolated into the LESS source on the next CSS compile, and the target file's contents appear in `/assets/forum.css`.\\n\\n## Patches\\n\\n- **`flarum/core` 1.8.16** — fix for the 1.x branch.\\n- **`flarum/core` 2.0.0-rc.1** — fix for the 2.x branch.\\n\\nThe fix extends the existing `@import` / `data-uri()` validation in `Flarum\\\\Forum\\\\ValidateCustomLess::whenSettingsSaving` to every dirty setting whose key is registered as a LESS config variable, not just `custom_less`.\\n\\n## Workarounds\\n\\nIf upgrading is not immediately possible:\\n\\n- Ensure administrator accounts are protected with strong, unique passwords and (where supported) two-factor authentication.\\n- Restrict administrator access to trusted users only.\\n- Review the forum's public `forum.css` for unexpected content that could indicate prior exploitation.\\n\\nThere is no configuration-level mitigation on affected versions — the fix requires the upgraded code.\\n\\n## Resources\\n\\n- [CVE-2023-27577](https://nvd.nist.gov/vuln/detail/CVE-2023-27577) — the original vulnerability whose patch was incomplete.\\n- [GHSA-vhm8-wwrf-3gcw](https://github.com/flarum/framework/security/advisories/GHSA-vhm8-wwrf-3gcw) — the original advisory.\\n\\n## Credit\\n\\nReported to the Flarum Foundation by **William (Liam) Snow IV** ([@LiamSnow](https://github.com/LiamSnow)), discovered during a graduate-level network security lab at Worcester Polytechnic Institute.\", \"epss\": {\"percentage\": 0.00404, \"percentile\": 0.32523}, \"ghsa_id\": \"GHSA-xjvc-pw2r-6878\", \"github_reviewed_at\": \"2026-04-22T20:34:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-xjvc-pw2r-6878\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xjvc-pw2r-6878\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41887\"}], \"nvd_published_at\": \"2026-05-08T17:16:30Z\", \"published_at\": \"2026-04-22T20:34:52Z\", \"references\": [\"https://github.com/flarum/framework/security/advisories/GHSA-vhm8-wwrf-3gcw\", \"https://github.com/flarum/framework/security/advisories/GHSA-xjvc-pw2r-6878\", \"https://nvd.nist.gov/vuln/detail/CVE-2023-27577\", \"https://github.com/flarum/framework/commit/2d90a1f19f0e46f8c7e1b07c48ba74b5e38f8410\", \"https://github.com/flarum/framework/releases/tag/v1.8.16\", \"https://github.com/flarum/framework/releases/tag/v2.0.0-rc.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41887\", \"https://github.com/advisories/GHSA-xjvc-pw2r-6878\"], \"repository_advisory_url\": \"https://api.github.com/repos/flarum/framework/security-advisories/GHSA-xjvc-pw2r-6878\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/flarum/framework\", \"summary\": \"Flarum: Path traversal in LESS parser via theme color settings (incomplete fix for CVE-2023-27577)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:30:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-xjvc-pw2r-6878\", \"vulnerabilities\": [{\"first_patched_version\": \"1.8.16\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"flarum/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.15\"}, {\"first_patched_version\": \"2.0.0-rc.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"flarum/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0-beta.1, <= 2.0.0-beta.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xjvc-pw2r-6878",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flarum/core: <= 1.8.15",
+      "flarum/core: >= 2.0.0-beta.1, <= 2.0.0-beta.8"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2023-27577",
+      "CVE-2026-41887"
+    ],
+    "cvss_score": 4.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flarum/core"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.847693Z",
+  "provenance": {
+    "content_sha256": "7edb53fdb4e089f9350d6570273a8c37f13eb9e6dafb8a42e295d3a09c53bf83",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T20:34:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xjvc-pw2r-6878",
+  "status": "active",
+  "title": "Flarum: Path traversal in LESS parser via theme color settings (incomplete fix for CVE-2023-27577)",
+  "updated_at": "2026-05-13T13:30:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xjvc-pw2r-6878"
+}

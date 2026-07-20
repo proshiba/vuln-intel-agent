@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/37967690?v=4\", \"events_url\": \"https://api.github.com/users/elliotcourant/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/elliotcourant/followers\", \"following_url\": \"https://api.github.com/users/elliotcourant/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/elliotcourant/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/elliotcourant\", \"id\": 37967690, \"login\": \"elliotcourant\", \"node_id\": \"MDQ6VXNlcjM3OTY3Njkw\", \"organizations_url\": \"https://api.github.com/users/elliotcourant/orgs\", \"received_events_url\": \"https://api.github.com/users/elliotcourant/received_events\", \"repos_url\": \"https://api.github.com/users/elliotcourant/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/elliotcourant/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/elliotcourant/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/elliotcourant\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41644\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:L/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-209\", \"name\": \"Generation of Error Message Containing Sensitive Information\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Impact\\n\\nA server-side request forgery (SSRF) vulnerability in monetr's Lunch Flow integration allowed any authenticated user on\\na self-hosted instance to cause the monetr server to issue HTTP GET requests to arbitrary URLs supplied by the caller,\\nwith the response body from non-200 upstream responses reflected back in the API error message.\\n\\nThe URL validator on `POST /api/lunch_flow/link` only checked the URL scheme and rejected query parameters; it did not\\nfilter loopback, RFC1918, link-local, or cloud-provider metadata addresses. The outbound HTTP client read the response\\nbody via an unbounded `io.ReadAll`, and the controller intentionally surfaced the resulting error (which contained the\\nupstream body) as the JSON `error` field of the API response.\\n\\n**Who is affected:** self-hosted monetr deployments running the default configuration. Out of the box,\\n`LunchFlow.Enabled=true`, `AllowSignUp=true`, and billing is not enforced, so any user who can register on the instance\\ncan reach the vulnerable endpoint. Deployments running in a cloud environment where instance metadata is reachable from\\nthe pod (e.g. AWS EC2 without IMDSv2 enforced) expand the impact to include potential exposure of instance metadata\\nthrough the reflected error body.\\n\\n**Who is NOT affected:** the hosted `my.monetr.app` service, which runs with `LunchFlow.Enabled=false`. Self-hosted\\noperators who had already disabled public sign-up (`MONETR_ALLOW_SIGN_UP=false`) substantially reduce their exposure\\nsince only operator-trusted users can reach the endpoint.\\n\\nA secondary denial-of-service vector also existed: because the outbound response body was read with no size cap, an\\nattacker-influenced upstream could return a multi-GB body that monetr would fully buffer into memory.\\n\\n### Patches\\n\\nFixed in monetr `v1.12.5`. Users should upgrade to this release or later.\\n\\nThe fix introduces a new config field `LunchFlow.AllowedApiUrls` (a list of permitted Lunch Flow API URLs) with a\\ndefault of `[\\\"https://lunchflow.app/api/v1\\\"]`. URLs outside the allowlist are rejected both at link-creation time and at\\nclient-construction time, with a server-side warning log on rejection. Response body reads are capped at 10 MiB for both\\nsuccess and error paths. The UI renders the API URL field as a disabled pre-filled input when a single URL is allowed,\\nor a dropdown when multiple are allowed, so operators who need to use a staging or self-hosted Lunch Flow API opt in\\nexplicitly via config.\\n\\n**Upgrade note for self-hosters with a custom Lunch Flow URL:** if your existing `LunchFlowLink` records point at a URL\\nother than `https://lunchflow.app/api/v1`, set your `lunchFlow.allowedApiUrls` in your yaml config to include your\\ncustom URL before upgrading. Otherwise existing links will fail on next refresh or sync with a `\\\"Rejected Lunch Flow API\\nURL that is not in the configured allowlist\\\"` warning in the server log.\\n\\n### Workarounds\\n\\nFor operators who cannot upgrade immediately, any of the following materially reduces or eliminates exposure:\\n\\n- **Disable public sign-up:** set `MONETR_ALLOW_SIGN_UP=false` so only operator-trusted users can reach the vulnerable\\nendpoint. Recommended in general for internet-exposed self-hosted deployments.\\n- **Disable Lunch Flow entirely:** set `lunchFlow.enabled: false` in your config file. The endpoints will return 404 for\\nall callers.\\n- **Network-level egress restriction:** restrict outbound HTTP egress from the monetr pod/container to only\\n`lunchflow.app` (or whichever legitimate Lunch Flow hosts you use). Blocks the SSRF primitive regardless of\\napplication-layer validation.\\n- **On AWS EC2 specifically:** enforce IMDSv2 on the instance. This eliminates the cloud-metadata exfil path even if the\\nSSRF primitive remains reachable.\", \"epss\": {\"percentage\": 0.00331, \"percentile\": 0.2465}, \"ghsa_id\": \"GHSA-29v9-frvh-c426\", \"github_reviewed_at\": \"2026-04-22T19:57:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-29v9-frvh-c426\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-29v9-frvh-c426\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41644\"}], \"nvd_published_at\": \"2026-05-07T12:16:17Z\", \"published_at\": \"2026-04-22T19:57:54Z\", \"references\": [\"https://github.com/monetr/monetr/security/advisories/GHSA-29v9-frvh-c426\", \"https://github.com/monetr/monetr/pull/3122\", \"https://github.com/monetr/monetr/commit/c260caa3c573a4a396ec2d264c7641a5d958385b\", \"https://github.com/monetr/monetr/releases/tag/v1.12.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41644\", \"https://github.com/advisories/GHSA-29v9-frvh-c426\"], \"repository_advisory_url\": \"https://api.github.com/repos/monetr/monetr/security-advisories/GHSA-29v9-frvh-c426\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/monetr/monetr\", \"summary\": \"monetr: Server-side request forgery in Lunch Flow link creation and refresh\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-08T20:42:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-29v9-frvh-c426\", \"vulnerabilities\": [{\"first_patched_version\": \"1.12.5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/monetr/monetr\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.12.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-29v9-frvh-c426",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/monetr/monetr: < 1.12.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41644"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:L/SC:H/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/monetr/monetr"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.177366Z",
+  "provenance": {
+    "content_sha256": "de05826f65729e8ac1c95d02c321ed28d904bc9e9f268585fd6254662bb39942",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-22T19:57:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-29v9-frvh-c426",
+  "status": "active",
+  "title": "monetr: Server-side request forgery in Lunch Flow link creation and refresh",
+  "updated_at": "2026-05-08T20:42:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-29v9-frvh-c426"
+}

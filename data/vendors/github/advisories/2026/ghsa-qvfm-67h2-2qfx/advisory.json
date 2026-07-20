@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55500\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"## Summary\\n\\nThe `/api/settings/database` endpoint allows full database export (containing all credentials, API keys, OAuth tokens, and settings) and full database import (complete overwrite) without any authentication requirement beyond the `ALWAYS_PROTECTED` middleware check, which only validates JWT or CLI token. Combined with other vulnerabilities (e.g., default password, tunnel exposure), this enables complete database takeover.\\n\\n## Description\\n\\nThe endpoint `/api/settings/database` is listed in `ALWAYS_PROTECTED` in `dashboardGuard.js` (line 42), which requires a valid JWT token or CLI token. However, this protection is insufficient because:\\n\\n1. **GET (Export):** Returns the complete database including API keys (`key` field in `apiKeys` table), OAuth tokens, and all provider credentials. Line 80 in `src/lib/db/index.js`: `apiKeys: db.all(\\\"SELECT * FROM apiKeys\\\").map(...)` — the `key` field contains the plaintext API key value.\\n\\n2. **POST (Import):** Accepts arbitrary JSON and performs a complete database wipe-and-replace in a transaction (lines 102-163 in `src/lib/db/index.js`). This replaces all settings including the password hash, effectively allowing an attacker to set their own password.\\n\\n3. The exported data includes `apiKeys` with their plaintext `key` values, `providerConnections` with all OAuth tokens, and `settings` with OIDC client secrets.\\n\\n### Evidence\\n\\n**File:** `src/app/api/settings/database/route.js`\\n```javascript\\nexport async function GET() {\\n  const payload = await exportDb();\\n  return NextResponse.json(payload);\\n}\\n\\nexport async function POST(request) {\\n  const payload = await request.json();\\n  await importDb(payload);\\n  // ...\\n}\\n```\\n\\n**File:** `src/lib/db/index.js` (lines 96-163)\\n```javascript\\nexport async function importDb(payload) {\\n  db.transaction(() => {\\n    // Wipe all tables\\n    db.run(`DELETE FROM settings`);\\n    db.run(`DELETE FROM providerConnections`);\\n    db.run(`DELETE FROM providerNodes`);\\n    db.run(`DELETE FROM proxyPools`);\\n    db.run(`DELETE FROM apiKeys`);\\n    db.run(`DELETE FROM combos`);\\n    db.run(`DELETE FROM kv WHERE scope IN (...)`);\\n    // Then insert attacker-controlled data\\n    // ...\\n  });\\n}\\n```\\n\\nThe `exportDb` function at line 80 exposes API key plaintext:\\n```javascript\\napiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ \\n  id: r.id, key: r.key, name: r.name, ...\\n})),\\n```\\n\\n## Steps to Reproduce\\n\\n1. Authenticate with any valid JWT (e.g., using the default password \\\"123456\\\")\\n2. Export: `curl -b auth_token=<jwt> http://localhost:20128/api/settings/database`\\n3. Observe: Full database dump with all credentials in plaintext\\n4. Import malicious data: `curl -X POST -b auth_token=<jwt> -H \\\"Content-Type: application/json\\\" -d '<modified-db>' http://localhost:20128/api/settings/database`\\n5. All settings, passwords, API keys are now replaced with attacker-controlled values\\n\\n## Impact\\n\\n- **Confidentiality:** Complete exposure of all stored secrets (API keys, OAuth tokens, OIDC client secrets)\\n- **Integrity:** Complete database replacement with attacker-controlled data\\n- **Availability:** Database wipe is possible by importing an empty database\\n- **Scope Changed:** Importing new settings affects all users and downstream services\\n\\n## Recommended Fix\\n\\n1. Require re-authentication for database export/import (not just an existing session)\\n2. Mask/redact API keys in export (or require explicit opt-in for key export)\\n3. Add confirmation step for import (require current password verification)\\n4. Implement database backup before import\\n5. Log all export/import operations with audit trail\", \"epss\": {\"percentage\": 0.00685, \"percentile\": 0.48284}, \"ghsa_id\": \"GHSA-qvfm-67h2-2qfx\", \"github_reviewed_at\": \"2026-07-06T21:37:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-qvfm-67h2-2qfx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qvfm-67h2-2qfx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55500\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-06T21:37:49Z\", \"references\": [\"https://github.com/decolua/9router/security/advisories/GHSA-qvfm-67h2-2qfx\", \"https://github.com/advisories/GHSA-qvfm-67h2-2qfx\"], \"repository_advisory_url\": \"https://api.github.com/repos/decolua/9router/security-advisories/GHSA-qvfm-67h2-2qfx\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/decolua/9router\", \"summary\": \"9routers has Exposure of Sensitive Information and Unprotected Database Import/Export, Allowing Complete Credential Theft and Database Takeover\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T21:37:49Z\", \"url\": \"https://api.github.com/advisories/GHSA-qvfm-67h2-2qfx\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"9router\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.4.71\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qvfm-67h2-2qfx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "9router: <= 0.4.71"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55500"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "9router"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.827840Z",
+  "provenance": {
+    "content_sha256": "1d0b7ad185f499e2f9f8cabf16df598f522f4c1648b94c6553705befa7d563c7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T21:37:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qvfm-67h2-2qfx",
+  "status": "active",
+  "title": "9routers has Exposure of Sensitive Information and Unprotected Database Import/Export, Allowing Complete Credential Theft and Database Takeover",
+  "updated_at": "2026-07-06T21:37:49Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qvfm-67h2-2qfx"
+}

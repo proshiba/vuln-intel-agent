@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-47409\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\n**Type:** Authorization bypass enabling owner lockout. The `DELETE /workspaces/{workspace_id}/members/{user_id}` endpoint is gated only by `require_workspace_member(workspace_id)` (default `min_role=\\\"member\\\"`). Any member can remove any other member, including the workspace owner, using a single DELETE. There is no caller-role check, no target-role check, no \\\"cannot remove last owner\\\" guard.\\n**File:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 130-140; `services/member_service.py`, lines 71-78.\\n**Root cause:** `MemberService.remove(workspace_id, user_id)` performs the deletion without any caller-permission check or owner-protection logic. The route accepts the URL-supplied `user_id` and dispatches it straight through. The role hierarchy (`MemberService.has_role`) is implemented but never invoked here. A member-tier attacker can issue `DELETE .../members/<owner_user_id>` and immediately lock the legitimate owner out of the workspace.\\n\\n## Affected Code\\n\\n**File 1:** `src/praisonai-platform/praisonai_platform/api/routes/workspaces.py`, lines 130-140.\\n\\n```python\\n@router.delete(\\\"/{workspace_id}/members/{user_id}\\\", status_code=status.HTTP_204_NO_CONTENT)\\nasync def remove_member(\\n    workspace_id: str,\\n    user_id: str,\\n    user: AuthIdentity = Depends(require_workspace_member),         # <-- BUG: defaults to min_role=\\\"member\\\"\\n    session: AsyncSession = Depends(get_db),\\n):\\n    member_svc = MemberService(session)\\n    removed = await member_svc.remove(workspace_id, user_id)        # <-- removes any member, including owner\\n    if not removed:\\n        raise HTTPException(status_code=404, detail=\\\"Member not found\\\")\\n```\\n\\n**File 2:** `src/praisonai-platform/praisonai_platform/services/member_service.py`, lines 71-78.\\n\\n```python\\nasync def remove(self, workspace_id: str, user_id: str) -> bool:\\n    \\\"\\\"\\\"Remove a member from a workspace.\\\"\\\"\\\"\\n    member = await self.get(workspace_id, user_id)\\n    if member is None:\\n        return False\\n    await self._session.delete(member)                               # <-- BUG: no caller-role check, no last-owner protection\\n    await self._session.flush()\\n    return True\\n```\\n\\n**Why it's wrong:** member-removal is the textbook capability that must be gated on owner role. Removing the workspace owner is a permanent denial-of-service against the legitimate owner unless another owner exists. There must be (a) a caller min-role gate of \\\"owner\\\" or \\\"admin\\\", (b) a check that prevents removing a member whose role is higher than the caller's, and (c) a check that the workspace is left with at least one owner. None of these exist.\\n\\n## Exploit Chain\\n\\n1. Attacker is a member of workspace `W` with role \\\"member\\\". State: attacker holds JWT.\\n2. Attacker enumerates the workspace owner's `user_id` via `GET /workspaces/W/members` (list_members has the same default-member gate, separate finding). Owner UUID `O_id` is now known. State: attacker holds `O_id`.\\n3. Attacker sends `DELETE /workspaces/W/members/O_id` with `Authorization: Bearer <attacker_jwt>`. State: control flow enters `remove_member`.\\n4. `require_workspace_member(W, attacker)` passes (attacker is a member). `MemberService.remove(W, O_id)` deletes the owner's member row. State: `Member(workspace_id=W, user_id=O_id, role=\\\"owner\\\")` is gone.\\n5. Owner attempts `GET /workspaces/W/...` and `require_workspace_member(W, O_id)` returns 403. State: legitimate owner is now locked out of their own workspace.\\n6. Combined with the `update_member_role` companion advisory, the attacker first promotes themselves to owner, then removes the legitimate owner, then has uncontested control. Combined with `delete_workspace`, the attacker wipes the workspace after kicking the owner.\\n7. Final state: with one member-level token, the attacker locks the legitimate owner out of their own workspace permanently. The owner has no recourse other than database-level admin intervention.\\n\\n## Security Impact\\n\\n**Severity:** sec-high. CVSS 8.1: network attack, low complexity, low privileges, no user interaction, scope unchanged, no confidentiality, high integrity (membership table corrupted), high availability (legitimate owner cannot access their own workspace).\\n**Attacker capability:** with one workspace-member token plus one DELETE request, the attacker permanently locks any other member (including the workspace owner) out of the workspace.\\n**Preconditions:** `praisonai-platform` is deployed multi-tenant; attacker has any membership token; owner's user_id is reachable via the (unauthenticated-for-member) `list_members` endpoint.\\n**Differential:** source-inspection-verified. The asymmetry between `require_workspace_member`'s tunable `min_role` parameter and this endpoint's use of the default value confirms the gap. With the suggested fix below, member-tier tokens fail the gate, and removing the workspace's last owner triggers the additional guard.\\n\\n## Suggested Fix\\n\\n```diff\\n--- a/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n+++ b/src/praisonai-platform/praisonai_platform/api/routes/workspaces.py\\n@@ -130,11 +130,21 @@\\n @router.delete(\\\"/{workspace_id}/members/{user_id}\\\", status_code=status.HTTP_204_NO_CONTENT)\\n async def remove_member(\\n     workspace_id: str,\\n     user_id: str,\\n-    user: AuthIdentity = Depends(require_workspace_member),\\n+    user: AuthIdentity = Depends(_require_workspace_owner),\\n     session: AsyncSession = Depends(get_db),\\n ):\\n     member_svc = MemberService(session)\\n+    target = await member_svc.get(workspace_id, user_id)\\n+    if target is not None and target.role == \\\"owner\\\":\\n+        # Refuse to remove the last owner.\\n+        owners = [m for m in await member_svc.list_members(workspace_id) if m.role == \\\"owner\\\"]\\n+        if len(owners) <= 1:\\n+            raise HTTPException(status_code=409, detail=\\\"Cannot remove the last workspace owner\\\")\\n     removed = await member_svc.remove(workspace_id, user_id)\\n     if not removed:\\n         raise HTTPException(status_code=404, detail=\\\"Member not found\\\")\\n```\\n\\nThe four companion workspace-mutation endpoints exhibit the same default-min-role gap and are filed as their own advisories.\", \"epss\": {\"percentage\": 0.00041, \"percentile\": 0.12845}, \"ghsa_id\": \"GHSA-w388-2392-px73\", \"github_reviewed_at\": \"2026-05-29T22:57:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-w388-2392-px73\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w388-2392-px73\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47409\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-29T22:57:05Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-w388-2392-px73\", \"https://github.com/advisories/GHSA-w388-2392-px73\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-w388-2392-px73\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"praisonai-platform: Missing authorization on member removal enables full workspace takeover by any user regardless of role\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-29T22:57:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-w388-2392-px73\", \"vulnerabilities\": [{\"first_patched_version\": \"0.1.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai-platform\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w388-2392-px73",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai-platform: <= 0.1.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47409"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai-platform"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.032079Z",
+  "provenance": {
+    "content_sha256": "a13329270e224772a7fa0ced14eb3bd0f15d3e2dce94e992bf4aa9181f098b76",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T22:57:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w388-2392-px73",
+  "status": "active",
+  "title": "praisonai-platform: Missing authorization on member removal enables full workspace takeover by any user regardless of role",
+  "updated_at": "2026-05-29T22:57:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w388-2392-px73"
+}

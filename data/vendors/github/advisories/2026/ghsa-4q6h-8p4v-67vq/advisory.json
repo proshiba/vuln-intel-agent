@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48153\", \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\n`fetchToken` in the OAuth2 SDK makes a POST to a builder-supplied URL with plain node-fetch, skipping the `blacklist.isBlacklisted` check that every other outbound fetch path in the codebase uses. The Joi schema for the OAuth2 URL has no scheme or host restriction. Alice, a builder, points an OAuth2 config at `http://169.254.169.254/...` or `http://127.0.0.1:5984/`; the server connects and returns response-body fragments in the validation result.\\n\\n## Details\\n\\n`packages/server/src/sdk/workspace/oauth2/utils.ts:17-65` defines `fetchToken`. Near the end:\\n\\n```typescript\\nconst resp = await fetch(config.url, fetchConfig)\\n```\\n\\n`config.url` is whatever the builder stored. `fetchConfig` has `redirect: \\\"follow\\\"` (the default), so a public URL that returns 302 to an internal target is also reachable.\\n\\nThe route validation at `packages/server/src/api/routes/oauth2.ts:9` accepts any string:\\n\\n```typescript\\nurl: Joi.string().required(),\\n```\\n\\nThe controller passes the URL into `fetchToken` through `crud.ts`. The `/api/oauth2/validate` endpoint (builder role) is the most direct attack path: it lives on `builderRoutes`, takes the URL from the body, fires the fetch, and returns a validation envelope that includes the upstream error string.\\n\\nCompare with every other outbound fetch in the codebase:\\n\\n- `packages/server/src/integrations/rest.ts:754` calls `blacklist.isBlacklisted(url)` before its fetch (though it does not re-check redirects; see companion advisory for REST-redirect SSRF).\\n- `packages/backend-core/src/utils/outboundFetch.ts:98-100` sets `redirect: \\\"manual\\\"` and re-validates each hop.\\n- `packages/server/src/automations/steps/outgoingWebhook.ts` routes through `fetchWithBlacklist`.\\n\\nThe default blacklist blocks `127.0.0.0/8`, `169.254.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (`packages/backend-core/src/blacklist/blacklist.ts:6-16`). The OAuth2 path never consults it.\\n\\n## Proof of Concept\\n\\nTested against Budibase 3.35.8 (built from master at f960e361).\\n\\nStep 1: Alice, a builder, POSTs an OAuth2 config pointed at CouchDB on the same host as Budibase:\\n\\n```bash\\ncurl -sS -b \\\"$BUILDER_COOKIE\\\" -X POST \\\"$BASE/api/oauth2/validate\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"url\\\":\\\"http://127.0.0.1:5984/\\\",\\\"clientId\\\":\\\"t\\\",\\\"clientSecret\\\":\\\"t\\\",\\n       \\\"method\\\":\\\"BODY\\\",\\\"grantType\\\":\\\"client_credentials\\\"}'\\n```\\n\\nServer response:\\n\\n```json\\n{\\\"valid\\\":false,\\\"message\\\":\\\"Method Not Allowed\\\"}\\n```\\n\\nBudibase reached CouchDB (which rejects POST at `/` with 405). Without the blacklist bypass this request would be blocked at the IP check.\\n\\nStep 2: Probe the cloud metadata range:\\n\\n```bash\\ncurl -sS -b \\\"$BUILDER_COOKIE\\\" -X POST \\\"$BASE/api/oauth2/validate\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"url\\\":\\\"http://169.254.169.254/latest/meta-data/\\\",\\\"clientId\\\":\\\"t\\\",\\\"clientSecret\\\":\\\"t\\\",\\\"method\\\":\\\"BODY\\\",\\\"grantType\\\":\\\"client_credentials\\\"}'\\n```\\n\\nServer response:\\n\\n```json\\n{\\\"valid\\\":false,\\\"message\\\":\\\"invalid json response body at http://169.254.169.254/latest/meta-data/ reason: Unexpected token 'N', \\\\\\\"Not Found\\\\\\\" is not valid JSON\\\"}\\n```\\n\\nThe `\\\"Not Found\\\"` substring is the upstream body; the server reached the link-local metadata endpoint and leaked the first bytes of the response into the validation error.\\n\\n## Impact\\n\\nTwo concrete paths, both reachable from any builder account (free-tier signup on Budibase Cloud is enough):\\n\\n1. **Cross-tenant data read on Cloud.** Budibase Cloud multi-tenants on a shared CouchDB; each tenant gets its own `<tenantId>_global-db` and `app_<id>` databases on the same port 5984. The blacklist is what keeps a builder from talking to CouchDB directly. With that bypassed, Alice can `GET http://127.0.0.1:5984/_all_dbs` via a 302 redirector and enumerate every other tenant's databases, then read their `_users`, app definitions, and datasource configs (which include third-party credentials). None of this traffic goes through Budibase's tenant isolation layer, so standard app-level access controls do not apply.\\n2. **IAM credential exfiltration.** Alice points the URL at `http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>/` and receives the instance role credentials in the validation error path. Those credentials carry whatever AWS permissions the Budibase instance role holds.\\n\\nSelf-hosted deployments face the same CouchDB/Redis/MinIO access plus any other service reachable on the host or pod network. The blacklist was explicitly added to prevent exactly this, and every other outbound fetch path uses it.\\n\\n## Recommended Fix\\n\\nCall `blacklist.isBlacklisted` before the fetch and set `redirect: \\\"manual\\\"` on `fetchConfig`, matching the pattern in `outboundFetch.ts`:\\n\\n```typescript\\nimport { blacklist } from \\\"@budibase/backend-core\\\"\\n\\nasync function fetchToken(config: { url: string; /* ... */ }) {\\n  config = await processEnvironmentVariable(config)\\n  if (await blacklist.isBlacklisted(config.url)) {\\n    throw new Error(\\\"OAuth2 token URL is blocked.\\\")\\n  }\\n  const fetchConfig: RequestInit = {\\n    method: \\\"POST\\\",\\n    headers: { \\\"Content-Type\\\": \\\"application/x-www-form-urlencoded\\\" },\\n    body: new URLSearchParams({ grant_type: \\\"client_credentials\\\" }),\\n    redirect: \\\"manual\\\",\\n  }\\n  // ...\\n}\\n```\\n\\nAlternatively, replace the `fetch` call with `fetchWithBlacklist`, which handles both checks and re-validates redirect targets.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"epss\": {\"percentage\": 0.00174, \"percentile\": 0.07087}, \"ghsa_id\": \"GHSA-4q6h-8p4v-67vq\", \"github_reviewed_at\": \"2026-06-22T22:45:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-4q6h-8p4v-67vq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4q6h-8p4v-67vq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48153\"}], \"nvd_published_at\": \"2026-05-27T18:16:27Z\", \"published_at\": \"2026-06-22T22:45:35Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-4q6h-8p4v-67vq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48153\", \"https://github.com/advisories/GHSA-4q6h-8p4v-67vq\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-4q6h-8p4v-67vq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \"Budibase: SSRF via OAuth2 token endpoint URL reaches internal hosts and cloud metadata\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-22T22:45:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-4q6h-8p4v-67vq\", \"vulnerabilities\": [{\"first_patched_version\": \"3.39.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.39.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4q6h-8p4v-67vq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: < 3.39.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-48153"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.548596Z",
+  "provenance": {
+    "content_sha256": "61b894a1f00b28a95089a12c999b8ebcaf84b8c8143d0014623c075b73f123e7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-22T22:45:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4q6h-8p4v-67vq",
+  "status": "active",
+  "title": "Budibase: SSRF via OAuth2 token endpoint URL reaches internal hosts and cloud metadata",
+  "updated_at": "2026-06-22T22:45:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4q6h-8p4v-67vq"
+}

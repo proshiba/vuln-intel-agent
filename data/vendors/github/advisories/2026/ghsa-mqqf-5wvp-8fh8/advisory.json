@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8928288?v=4\", \"events_url\": \"https://api.github.com/users/thanosgn/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thanosgn/followers\", \"following_url\": \"https://api.github.com/users/thanosgn/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thanosgn/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thanosgn\", \"id\": 8928288, \"login\": \"thanosgn\", \"node_id\": \"MDQ6VXNlcjg5MjgyODg=\", \"organizations_url\": \"https://api.github.com/users/thanosgn/orgs\", \"received_events_url\": \"https://api.github.com/users/thanosgn/received_events\", \"repos_url\": \"https://api.github.com/users/thanosgn/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thanosgn/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thanosgn/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thanosgn\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-69725\", \"cvss\": {\"score\": 4.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"### Summary\\n\\nThe `RedirectSlashes` function in middleware/strip.go does not perform correct input validation and can lead to an open redirect vulnerability.\\n\\n### Details\\n\\nThe `RedirectSlashes` function performs a `Trim` to all forward slash (`/`) characters, while prepending a single one at the begining of the path (Line 52).\\n\\nHowever, it does not trim backslashes (`\\\\`).\\n\\n```go\\nFile: middleware/strip.go\\n41: func RedirectSlashes(next http.Handler) http.Handler {\\n...\\n51: \\t\\t\\t// Trim all leading and trailing slashes (e.g., \\\"//evil.com\\\", \\\"/some/path//\\\")\\n52: \\t\\t\\tpath = \\\"/\\\" + strings.Trim(path, \\\"/\\\")\\n...\\n62: }\\n```\\n\\nAlso, from version 5.2.2 onwards the `RedirectSlashes` function does not take into consideration the `Host` Header in the redirect response returned. This was done in order to combat another [[vulnerability](https://github.com/go-chi/chi/security/advisories/GHSA-vrw8-fxc6-2r93)](https://github.com/go-chi/chi/security/advisories/GHSA-vrw8-fxc6-2r93).\\n\\nThe above make it possible for a response in the following form:\\n\\n```\\nHTTP/1.1 301 Moved Permanently\\nLocation: /\\\\evil.com\\n```\\n\\nThe `/\\\\evil.com` will be transformed by most browsers (Chrome, Firefox, etc. not Safari) into `//evil.com` which is a protocol relative URL and will result in a redirect to `evil.com`, essentially making it an open redirect vulnerability.\\n\\n### PoC\\n\\nA minimal working example can be seen below.\\n\\n```go\\npackage main\\n\\nimport (\\n\\t\\\"fmt\\\"\\n\\t\\\"net/http\\\"\\n\\n\\t\\\"github.com/go-chi/chi/v5\\\"\\n\\t\\\"github.com/go-chi/chi/v5/middleware\\\"\\n)\\n\\n\\n\\nfunc main() {\\n\\tr := chi.NewRouter()\\n\\n\\tr.Use(middleware.RedirectSlashes)\\n\\n\\tr.Get(\\\"/*\\\", func(w http.ResponseWriter, r *http.Request) {\\n\\t\\tw.WriteHeader(http.StatusOK)\\n\\t})\\n\\n\\tfmt.Println(\\\"Server starting on port 8081...\\\")\\n\\tif err := http.ListenAndServe(\\\":8081\\\", r); err != nil {\\n\\t\\tfmt.Printf(\\\"Error starting server: %v\\\\n\\\", err)\\n\\t}\\n}\\n\\n```\\n\\nAnd when we request the path `/\\\\evil.com` (needs a second backslash or URL encoding in the terminal), the HTTP Redirect Location is just `/\\\\evil.com` without any domain/Host information.\\n\\n```bash\\n$ curl -I  localhost:8081/\\\\\\\\evil.com/\\nHTTP/1.1 301 Moved Permanently\\nContent-Type: text/html; charset=utf-8\\nLocation: /\\\\evil.com\\n```\\n\\n```bash\\n$ curl -I  localhost:8081/%5Cevil.com/\\nHTTP/1.1 301 Moved Permanently\\nContent-Type: text/html; charset=utf-8\\nLocation: /\\\\evil.com\\n```\\n\\nThis opened in a browser (Chrome, Firefox) will result in a transformation to `//evil.com` which in turn will result in a redirect to `evil.com`.\\n<img width=\\\"200\\\" alt=\\\"image-20250829115619807\\\" src=\\\"https://github.com/user-attachments/assets/44aedad1-64b6-4660-8b26-fad9b4eca036\\\" />\\n\\n\\n<img width=\\\"200\\\" alt=\\\"image-20250829115632067\\\" src=\\\"https://github.com/user-attachments/assets/b976d47d-1975-469c-abd3-deb907a68db2\\\" />\\n\\n\\n### Impact\\n\\nThis essentially consists of an open redirect vulnerability, provided that victim users use the most popular browsers (Chrome, Firefox, etc. It does not work in e.g. Safari).\\n\\nThe attacker can construct a malicious URL on a domain of a legitimate website and send it to the victim user. The victim users thinking that they will click on a legitimate website's URL, they will unknowingly be reidrected to an attacker controlled website.\\n\\nThis can lead to credential theft if the victim gets redirected to a phishing website, to malware that is hosted on the attacker controlled website etc. Also, it has a greate reputation / business impact for the affected legitimate website.\\n\\nIn order to exploit this vulnerability the attacker does not need to be authenticated or have ay other priviledge / knowledge regarding the affected application.\\n\\nCVSS Score: [4.7 (Medium)](https://www.first.org/cvss/calculator/3-0#CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N)\", \"epss\": {\"percentage\": 0.00215, \"percentile\": 0.11883}, \"ghsa_id\": \"GHSA-mqqf-5wvp-8fh8\", \"github_reviewed_at\": \"2026-01-14T21:18:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-mqqf-5wvp-8fh8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mqqf-5wvp-8fh8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-69725\"}], \"nvd_published_at\": null, \"published_at\": \"2026-01-14T21:18:06Z\", \"references\": [\"https://github.com/go-chi/chi/security/advisories/GHSA-mqqf-5wvp-8fh8\", \"https://github.com/go-chi/chi/issues/1037\", \"https://github.com/go-chi/chi/commit/6eb35881c0e438ffb663ddbad3a61babaa5e5d8a\", \"https://nvd.nist.gov/vuln/detail/CVE-2025-69725\", \"http://go-chichi.com\", \"https://github.com/advisories/GHSA-mqqf-5wvp-8fh8\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-chi/chi/security-advisories/GHSA-mqqf-5wvp-8fh8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-chi/chi\", \"summary\": \"chi has an open redirect vulnerability in the RedirectSlashes middleware\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-18T13:02:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-mqqf-5wvp-8fh8\", \"vulnerabilities\": [{\"first_patched_version\": \"5.2.4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/go-chi/chi/v5\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.2.2, < 5.2.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mqqf-5wvp-8fh8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/go-chi/chi/v5: >= 5.2.2, < 5.2.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-69725"
+    ],
+    "cvss_score": 4.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/go-chi/chi/v5"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.462985Z",
+  "provenance": {
+    "content_sha256": "e11865c53790e832006f543860c46bed7740cd55d99450fc6ea380eff14afd50",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-01-14T21:18:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mqqf-5wvp-8fh8",
+  "status": "active",
+  "title": "chi has an open redirect vulnerability in the RedirectSlashes middleware",
+  "updated_at": "2026-06-18T13:02:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mqqf-5wvp-8fh8"
+}

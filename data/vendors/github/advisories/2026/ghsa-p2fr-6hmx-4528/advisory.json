@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/15009722?v=4\", \"events_url\": \"https://api.github.com/users/dvanmali/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dvanmali/followers\", \"following_url\": \"https://api.github.com/users/dvanmali/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dvanmali/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dvanmali\", \"id\": 15009722, \"login\": \"dvanmali\", \"node_id\": \"MDQ6VXNlcjE1MDA5NzIy\", \"organizations_url\": \"https://api.github.com/users/dvanmali/orgs\", \"received_events_url\": \"https://api.github.com/users/dvanmali/received_events\", \"repos_url\": \"https://api.github.com/users/dvanmali/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dvanmali/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dvanmali/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dvanmali\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"### Am I affected?\\n\\nUsers are affected if all of the following hold:\\n\\n-  Their application depends on `@better-auth/oauth-provider` on any stable `1.6.x` release (the stable line is not patched) or on a pre-release before `1.7.0-beta.4`.\\n- Their application either configures validAudiences` with more than one audience, or it issues JWT access tokens whose `aud`  (resource) claim is consumed by their resource servers.\\n- Their resource servers make authorization decisions based on that `aud` or resource value.\\n\\nA deployment with a single `validAudiences` entry (or the default, their server's base URL) cannot mint a token for a different audience. The provider rejects any resource outside the allowlist. Such a deployment still does not bind the resource to the authorization grant, so the spec-compliance gap remains even where cross-audience escalation does not apply.\\n\\nFix:\\n\\n1. Upgrade to `@better-auth/oauth-provider@1.7.0-beta.4` (then `1.7.0`), then run the schema migration (`npx auth migrate`). This is a breaking change: a token or refresh request may only narrow the authorized `resource`, an uncovered resource returns `invalid_target`, and `customAccessTokenClaims` receives a `resources` array in place of `resource`.\\n2. The `1.6.x` stable line is not patched. If an application stays on it, developers should apply the workarounds below.\\n\\n### Summary\\n\\n`@better-auth/oauth-provider` lets an OAuth client choose the access-token audience through the RFC 8707 `resource` parameter at the token endpoint. It does not bind that choice to the authorization grant. A client that completes a normal authorization flow can request a JWT access token whose audience targets a resource server the authorization never covered. The only constraint is that the resource appears in the server's `validAudiences` allowlist. The same gap applies to the refresh grant: a refresh token issued in a flow targeting one resource can be redeemed for an access token bound to a different allow-listed resource.\\n\\n### Details\\n\\nThe provider accepts `resource` only at the token endpoint, never at the authorization endpoint. At `/oauth2/token` it validates each requested resource against the server-wide `validAudiences` allowlist and writes the result into the JWT `aud` claim. It does not record the requested resources on the authorization code, and it does not store them on the refresh-token row.\\n\\nTwo consequences follow. For the authorization-code grant, the resource a client states at `/oauth2/authorize` is discarded, and the resource it sends at `/oauth2/token` is honored on its own, checked only against the allowlist. For the refresh grant, the audience is re-derived from the refresh request body alone, because no resource from the original grant is retained to constrain it. In both cases the audience becomes a per-request, client-chosen value rather than a property of the authorization.\\n\\nThis diverges from RFC 8707. The specification expects the authorization server to record the resources requested at authorization, then let the token endpoint narrow them but never widen them. A refresh token should stay bound to the resources of the original grant.\\n\\n### Patches\\n\\nFixed in `@better-auth/oauth-provider@1.7.0-beta.4` (then `1.7.0`). The fix records the requested resources at authorization, stores them with the authorization code, enforces subset narrowing at the token endpoint, retains the original resource set across refresh, and exposes `aud` at introspection. The `1.6.x` stable line is not patched.\\n\\nThe fix is a breaking change. It replaces `customAccessTokenClaims.resource` with a `resources` array, returns `invalid_target` for a resource the authorization did not cover, and adds a schema field that requires a migration. After upgrading, run `npx auth migrate` (or `npx auth generate` if developers manage the schema themselves).\\n\\n### Workarounds\\n\\nIf developers cannot upgrade their applications:\\n\\n- Set `validAudiences` to a single audience, or leave it unset so it defaults to their application's base URL. The provider then rejects any other requested resource, which removes cross-audience selection.\\n- Configure each resource server to accept a token only when its own identifier is the expected audience, and to reject tokens whose `aud` is an array that also lists other audiences.\\n- Do not rely on the `resource` indicator as an authorization boundary until developers run a release that contains the fix.\\n\\n### Impact\\n\\nAn attacker who can complete an OAuth flow for a registered client can obtain an access token whose audience points at a resource server that the user's authorization never covered. Where resource servers enforce the `aud` or resource value for authorization, a token granted for one resource becomes usable at another. The reachable data and operations stay limited to the scopes granted to that client, since the provider checks scopes independently of the resource.\\n\\n### Credit\\n\\nReported and fixed by @dvanmali.\\n\\n### Resources\\n\\n- RFC 8707, \\\"Resource Indicators for OAuth 2.0\\\", Section 2.2 \\\"Access Token Request\\\": https://www.rfc-editor.org/rfc/rfc8707#section-2.2\\n- RFC 9068, \\\"JSON Web Token (JWT) Profile for OAuth 2.0 Access Tokens\\\", Section 2.2 \\\"Data Structure\\\": https://www.rfc-editor.org/rfc/rfc9068#section-2.2\\n- CWE-863, \\\"Incorrect Authorization\\\": https://cwe.mitre.org/data/definitions/863.html\\n- CWE-285, \\\"Improper Authorization\\\": https://cwe.mitre.org/data/definitions/285.html\", \"ghsa_id\": \"GHSA-p2fr-6hmx-4528\", \"github_reviewed_at\": \"2026-07-07T20:54:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-p2fr-6hmx-4528\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p2fr-6hmx-4528\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-07T20:54:32Z\", \"references\": [\"https://github.com/better-auth/better-auth/security/advisories/GHSA-p2fr-6hmx-4528\", \"https://github.com/better-auth/better-auth/releases/tag/v1.7.0-beta.4\", \"https://github.com/advisories/GHSA-p2fr-6hmx-4528\"], \"repository_advisory_url\": \"https://api.github.com/repos/better-auth/better-auth/security-advisories/GHSA-p2fr-6hmx-4528\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/better-auth/better-auth\", \"summary\": \"@better-auth/oauth-provider may provide access tokens for unauthorized audiences via unbound resource indicators\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-07T20:54:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-p2fr-6hmx-4528\", \"vulnerabilities\": [{\"first_patched_version\": \"1.7.0-beta.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@better-auth/oauth-provider\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.4.8, < 1.7.0-beta.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p2fr-6hmx-4528",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@better-auth/oauth-provider: >= 1.4.8, < 1.7.0-beta.4"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@better-auth/oauth-provider"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.741348Z",
+  "provenance": {
+    "content_sha256": "01f11fd106f831b1cd01ff4cf06850d1a02a319610c0f18e9380cda4d3113c70",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-07T20:54:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p2fr-6hmx-4528",
+  "status": "active",
+  "title": "@better-auth/oauth-provider may provide access tokens for unauthorized audiences via unbound resource indicators",
+  "updated_at": "2026-07-07T20:54:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p2fr-6hmx-4528"
+}

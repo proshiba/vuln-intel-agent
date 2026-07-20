@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/69238780?v=4\", \"events_url\": \"https://api.github.com/users/udaypali/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/udaypali/followers\", \"following_url\": \"https://api.github.com/users/udaypali/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/udaypali/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/udaypali\", \"id\": 69238780, \"login\": \"udaypali\", \"node_id\": \"MDQ6VXNlcjY5MjM4Nzgw\", \"organizations_url\": \"https://api.github.com/users/udaypali/orgs\", \"received_events_url\": \"https://api.github.com/users/udaypali/received_events\", \"repos_url\": \"https://api.github.com/users/udaypali/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/udaypali/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/udaypali/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/udaypali\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-40486\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-915\", \"name\": \"Improperly Controlled Modification of Dynamically-Determined Object Attributes\"}], \"description\": \"### Summary\\nA Mass Assignment / Broken Object Property Level Authorization (BOPA) vulnerability in the User Preferences API allows any authenticated user (even those with the lowest privileges) to arbitrarily modify restricted financial attributes on their profile, specifically their `hourly_rate` and `internal_rate`.\\n\\n### Details\\nKimai restrictively protects the `hourly_rate` and `internal_rate` parameters during standard GUI flow. Users lacking the `hourly-rate` role permissions cannot see or edit these fields via the standard Web Form (`UserApiEditForm` / `UserEditType`). \\n\\nThe vulnerability exists in the dedicated preferences API endpoint: `src/API/UserController.php::updateUserPreference`.\\n\\nWhen a `PATCH` request is sent to `/api/users/{id}/preferences`, the endpoint iterates through the submitted JSON array and blindly applies the new values:\\n```php\\nforeach ($request->request->all() as $preference) {\\n    // ... validation omitted ...\\n    if (null === ($meta = $profile->getPreference($name))) {\\n        throw $this->createNotFoundException(\\\\sprintf('Unknown custom-field \\\"%s\\\" requested', $name));\\n    }\\n\\n    $meta->setValue($value); // <-- VULNERABILITY\\n}\\n```\\n\\nThe underlying Role-Based Access Control logic (`UserPreferenceSubscriber::getDefaultPreferences`) accurately identifies that standard users lack the `hourly-rate` role, and flags the dynamically generated preference object as disabled (`$preference->setEnabled(false)`). \\n\\nHowever, the `updateUserPreference` API endpoint entirely ignores this `isEnabled()` flag and forcefully saves the mutated object to the database natively via Doctrine ORM. This allows unauthorized accounts to manipulate the business-logic variables calculating their own financial earnings.\\n\\n### PoC\\n1. Log into Kimai as an unprivileged, standard employee account (a user with absolutely no `roles` array privileges). \\n2. Capture the `cookie` or Session cookies. (In this example, the user's ID is `2`).\\n3. Send the following cURL request (or intercept via Burp Suite) targeting your own user ID:\\n\\n```bash\\ncurl -i -X PATCH \\\"http://localhost:8001/api/users/2/preferences\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"cookie: <YOUR_STANDARD_USER_TOKEN>\\\" \\\\\\n  -d '[\\n  {\\n    \\\"name\\\": \\\"hourly_rate\\\",\\n    \\\"value\\\": \\\"1337\\\"\\n  },\\n  {\\n    \\\"name\\\": \\\"internal_rate\\\",\\n    \\\"value\\\": \\\"1337\\\"\\n  }\\n]'\\n```\\n\\n4. The server responds with `HTTP/1.1 200 OK`. (Note: The `hourly_rate` will intentionally NOT appear in the JSON echo due to `User::getVisiblePreferences` sanitizing output based on the same disabled flag).\\n5. If an Administrator organically views User 2's profile within Kimai, or if the user logs any new timesheets, the active and billed `hourly_rate` applied to their account will be confirmed as `1337`.\\n<img width=\\\"1542\\\" height=\\\"1039\\\" alt=\\\"user_account\\\" src=\\\"https://github.com/user-attachments/assets/fff5e2da-d598-408d-8a01-784499ade844\\\" />\\n<img width=\\\"1539\\\" height=\\\"1037\\\" alt=\\\"admin_account\\\" src=\\\"https://github.com/user-attachments/assets/86a6e8c3-a97f-4be3-9f9f-2e23fad1d8a0\\\" />\\n\\n### Impact\\nThis is a Privilege Escalation and Business Logic Flaw impacting the core financial calculations of the application. An attacker with a standard user account can manipulate their own billing rate multipliers unbeknownst to administrators, resulting in fraudulent invoices, distorted timesheet exports, and unauthorized financial tampering.\", \"epss\": {\"percentage\": 0.00267, \"percentile\": 0.18084}, \"ghsa_id\": \"GHSA-qh43-xrjm-4ggp\", \"github_reviewed_at\": \"2026-04-15T19:46:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-qh43-xrjm-4ggp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qh43-xrjm-4ggp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-40486\"}], \"nvd_published_at\": \"2026-04-17T23:16:12Z\", \"published_at\": \"2026-04-15T19:46:45Z\", \"references\": [\"https://github.com/kimai/kimai/security/advisories/GHSA-qh43-xrjm-4ggp\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-40486\", \"https://github.com/kimai/kimai/releases/tag/2.53.0\", \"https://github.com/advisories/GHSA-qh43-xrjm-4ggp\"], \"repository_advisory_url\": \"https://api.github.com/repos/kimai/kimai/security-advisories/GHSA-qh43-xrjm-4ggp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kimai/kimai\", \"summary\": \"Kimai's User Preferences API allows standard users to modify restricted attributes: hourly_rate, internal_rate\", \"type\": \"reviewed\", \"updated_at\": \"2026-04-27T15:20:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-qh43-xrjm-4ggp\", \"vulnerabilities\": [{\"first_patched_version\": \"2.53.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"kimai/kimai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.52.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qh43-xrjm-4ggp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "kimai/kimai: <= 2.52.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-40486"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "kimai/kimai"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.487893Z",
+  "provenance": {
+    "content_sha256": "a33c65785ce9b97bb1b92be6f9b76f2be290437401ca2270866011f5a5b678d7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-15T19:46:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qh43-xrjm-4ggp",
+  "status": "active",
+  "title": "Kimai's User Preferences API allows standard users to modify restricted attributes: hourly_rate, internal_rate",
+  "updated_at": "2026-04-27T15:20:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qh43-xrjm-4ggp"
+}

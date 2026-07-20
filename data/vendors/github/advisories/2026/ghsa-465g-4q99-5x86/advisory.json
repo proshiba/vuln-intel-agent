@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2421714?v=4\", \"events_url\": \"https://api.github.com/users/hoaquynhtim99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hoaquynhtim99/followers\", \"following_url\": \"https://api.github.com/users/hoaquynhtim99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hoaquynhtim99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hoaquynhtim99\", \"id\": 2421714, \"login\": \"hoaquynhtim99\", \"node_id\": \"MDQ6VXNlcjI0MjE3MTQ=\", \"organizations_url\": \"https://api.github.com/users/hoaquynhtim99/orgs\", \"received_events_url\": \"https://api.github.com/users/hoaquynhtim99/received_events\", \"repos_url\": \"https://api.github.com/users/hoaquynhtim99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hoaquynhtim99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hoaquynhtim99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hoaquynhtim99\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/130943529?v=4\", \"events_url\": \"https://api.github.com/users/g03m0n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/g03m0n/followers\", \"following_url\": \"https://api.github.com/users/g03m0n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/g03m0n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/g03m0n\", \"id\": 130943529, \"login\": \"g03m0n\", \"node_id\": \"U_kgDOB84KKQ\", \"organizations_url\": \"https://api.github.com/users/g03m0n/orgs\", \"received_events_url\": \"https://api.github.com/users/g03m0n/received_events\", \"repos_url\": \"https://api.github.com/users/g03m0n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/g03m0n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/g03m0n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/g03m0n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54064\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nTwo filter-bypass techniques in `NukeViet\\\\Core\\\\Request::filterAttr()` and `NukeViet\\\\Core\\\\Request::unhtmlentities()` allow a low-privileged user (any account with news post permission) to store and serve arbitrary JavaScript to any visitor of the affected page.\\n\\n## Affected Component\\n\\n`vendor/vinades/nukeviet/Core/Request.php` — class `NukeViet\\\\Core\\\\Request`\\n\\n## Vulnerability Details\\n\\n### Bypass 1 — Form Feed character prefix (`\\\\x0C`) before event handler name\\n\\nThe `filterAttr()` method blocks event-handler attributes using:\\n```php\\npreg_match('/^on/i', $attrSubSet[0])\\n```\\nPHP's `trim()` does **not** strip the ASCII Form Feed character (`\\\\x0C`, U+000C). An attacker can prefix the attribute name with `\\\\x0C` so that `\\\\x0Conerror` does not match `/^on/`. The HTML5 browser parser treats `\\\\x0C` as a valid whitespace separator and correctly activates the event handler.\\n\\n**Proof-of-concept payload (URL-encoded POST body field `bodyhtml`):**\\n```\\n<img src=\\\"x\\\" %0Conerror=\\\"alert('XSS')\\\">\\n```\\n\\n### Bypass 2 — Decimal HTML entity tab (`&#9;`) inside `javascript:` URI\\n\\n`unhtmlentities()` strips the hex-encoded tab `&#x09;` via `str_ireplace`, but did **not** strip its decimal equivalent `&#9;`. The keyword-blocking regex `/j\\\\s*a\\\\s*v\\\\s*a\\\\s*s\\\\s*c\\\\s*r\\\\s*i\\\\s*p\\\\s*t/si` uses `\\\\s*` which does not match HTML entities. The value `jav&#9;ascript:alert()` passes the filter, is stored in the database, and is decoded by the browser into a working `javascript:` URI.\\n\\n**Proof-of-concept payload (inside a Markdown-style link):**\\n```\\n[Click me](jav&#9;ascript:alert('XSS'))\\n```\\n\\n## Impact\\n\\nAn authenticated attacker with news-posting permission can inject persistent JavaScript that executes in the browser of **any user** (including administrators) who views the affected article. This enables session cookie theft, credential harvesting, defacement, and further privilege escalation.\\n\\n## Patches\\n\\nFixed in commit `<commit-sha>` by modifying `vendor/vinades/nukeviet/Core/Request.php`:\\n\\n1. **`filterAttr()`** — strip all ASCII control characters (`\\\\x00`–`\\\\x20`) from the attribute name before the `/^on/` check:\\n   ```php\\n   $attrSubSet[0] = preg_replace('/[\\\\x00-\\\\x20]/', '', strtolower($attrSubSet[0]));\\n   ```\\n\\n2. **`unhtmlentities()`** — strip decimal HTML entities for all ASCII control characters (0–31) before the keyword checks:\\n   ```php\\n   $value = preg_replace('/&#0*(?:3[01]|[12][0-9]|[0-9]);/', '', $value);\\n   ```\\n\\n## Workarounds\\n\\nNone. Update to the patched version.\\n\\n## Resources\\n\\n- CWE-79: Improper Neutralization of Input During Web Page Generation (Cross-site Scripting)\\n- OWASP WSTG-INPV-02: Testing for Stored Cross Site Scripting\\n- [OWASP Top 10 A03:2021 – Injection](https://owasp.org/Top10/A03_2021-Injection/)\", \"ghsa_id\": \"GHSA-465g-4q99-5x86\", \"github_reviewed_at\": \"2026-07-13T17:54:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-465g-4q99-5x86\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-465g-4q99-5x86\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54064\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-13T17:54:08Z\", \"references\": [\"https://github.com/nukeviet/nukeviet/security/advisories/GHSA-465g-4q99-5x86\", \"https://github.com/advisories/GHSA-465g-4q99-5x86\"], \"repository_advisory_url\": \"https://api.github.com/repos/nukeviet/nukeviet/security-advisories/GHSA-465g-4q99-5x86\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nukeviet/nukeviet\", \"summary\": \"NukeViet: Multiple Anti-XSS Filter Bypasses Leading to Stored XSS in News Module\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-13T17:54:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-465g-4q99-5x86\", \"vulnerabilities\": [{\"first_patched_version\": \"4.6.00\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"nukeviet/nukeviet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.6.00\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-465g-4q99-5x86",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nukeviet/nukeviet: < 4.6.00"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54064"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nukeviet/nukeviet"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.158856Z",
+  "provenance": {
+    "content_sha256": "ed4aa1eab477cb2f18f55cecc0cb6489156898e8d5b3724fc1973abc6aea18df",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-13T17:54:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-465g-4q99-5x86",
+  "status": "active",
+  "title": "NukeViet: Multiple Anti-XSS Filter Bypasses Leading to Stored XSS in News Module",
+  "updated_at": "2026-07-13T17:54:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-465g-4q99-5x86"
+}

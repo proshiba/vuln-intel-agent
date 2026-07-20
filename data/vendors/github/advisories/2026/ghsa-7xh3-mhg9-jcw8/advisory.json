@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/106453563?v=4\", \"events_url\": \"https://api.github.com/users/kejcao/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kejcao/followers\", \"following_url\": \"https://api.github.com/users/kejcao/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kejcao/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kejcao\", \"id\": 106453563, \"login\": \"kejcao\", \"node_id\": \"U_kgDOBlhaOw\", \"organizations_url\": \"https://api.github.com/users/kejcao/orgs\", \"received_events_url\": \"https://api.github.com/users/kejcao/received_events\", \"repos_url\": \"https://api.github.com/users/kejcao/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kejcao/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kejcao/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kejcao\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49402\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"## Summary\\n\\nDeno's `node:child_process` implementation provided an `escapeShellArg()` helper used when callers passed `shell: true` to `spawn` / `spawnSync` / `exec` and friends. On Windows, the helper failed to quote arguments that contained `cmd.exe` metacharacters such as `&`, `|`, `<`, `>`, `^`, `!`, `(`, `)`, and did not neutralize `%` (which `cmd.exe` expands even inside double-quoted strings). An attacker who controlled any portion of an argument passed to such a call could inject arbitrary additional commands into the spawned `cmd.exe` invocation.\\n\\nThis was the Windows counterpart to CVE-2026-27190, which fixed the same class of bug in the Unix branch of `escapeShellArg`.\\n\\n## Details\\n\\nOn Windows, `child_process` with `shell: true` ran the command via `cmd.exe /d /s /c \\\"<command line>\\\"`. Deno assembled that command line by joining the program name and each argument through `escapeShellArg()`.\\n\\nThe vulnerable check was:\\n\\n```ts\\n// If no special characters, return as-is\\nif (!/[\\\\s\\\"\\\\\\\\]/.test(arg)) {\\n  return arg;\\n}\\n```\\n\\nThe regex covered only whitespace, double-quote, and backslash. Any argument containing `cmd.exe`-significant characters but none of those three was returned unquoted and therefore interpreted by the shell. The most straightforward exploit chained commands with `&`:\\n\\n```js\\nimport { spawnSync } from \\\"node:child_process\\\";\\n\\nspawnSync(\\\"echo\\\", [\\\"test&calc.exe\\\"], { shell: true, encoding: \\\"utf-8\\\" });\\n```\\n\\nThe reporter confirmed this launched `calc.exe` on Windows 11 with Deno 2.7.5. The same shape worked for `|`, `<`, `>`, `^`, `!`, `(`, and `)`.\\n\\nA secondary defect existed even when arguments were quoted: `cmd.exe` expands `%FOO%` environment-variable references inside double-quoted strings. Without either doubling `%` or rejecting it, an argument like `\\\"%USERPROFILE%\\\"` leaked environment data into the command line.\\n\\n## Proof of concept\\n\\nFrom the report, run on Windows with Deno `< 2.7.10`:\\n\\n```js\\nimport { spawnSync } from \\\"node:child_process\\\";\\n\\nconst maliciousInput = \\\"test&calc.exe\\\";\\nconst result = spawnSync(\\\"echo\\\", [maliciousInput], {\\n  shell: true,\\n  encoding: \\\"utf-8\\\",\\n});\\nconsole.log(result);\\n```\\n\\nObserved: `calc.exe` launched as a side effect of the `echo` call.\\n\\n## Impact\\n\\nAny Deno program on Windows that called `child_process.spawn` / `spawnSync` / `exec` (or any shell helper that funneled through `escapeShellArg`) with `shell: true` and incorporated untrusted input into an argument was exposed to arbitrary command execution in the context of the Deno process. The CVSS vector treated this as network-reachable / high-complexity because the typical exposure path was a Deno service accepting external input and forwarding it to a shelled-out subprocess.\\n\\nNot affected:\\n\\n- Calls without `shell: true` (the default), which executed the program directly via `CreateProcess` without `cmd.exe` interpretation.\\n- Unix platforms, which used the single-quote branch of `escapeShellArg` and were already fixed under CVE-2026-27190.\\n- Callers that built command strings themselves and passed them as a single string with `shell: true` — those were the caller's responsibility and were never sanitized by Deno.\\n\\n## Workarounds\\n\\nUsers on unpatched versions could mitigate by:\\n\\n- Avoiding `shell: true` in `node:child_process` calls on Windows.\\n- Building the argv directly and invoking the program without a shell.\\n- Filtering or rejecting any externally-supplied argument values that contained `cmd.exe` metacharacters (`& | < > ^ ! ( ) %`) before passing them to `spawn` / `spawnSync` / `exec`.\", \"epss\": {\"percentage\": 0.00283, \"percentile\": 0.20056}, \"ghsa_id\": \"GHSA-7xh3-mhg9-jcw8\", \"github_reviewed_at\": \"2026-06-16T19:07:44Z\", \"html_url\": \"https://github.com/advisories/GHSA-7xh3-mhg9-jcw8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7xh3-mhg9-jcw8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49402\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-16T19:07:44Z\", \"references\": [\"https://github.com/denoland/deno/security/advisories/GHSA-7xh3-mhg9-jcw8\", \"https://github.com/advisories/GHSA-7xh3-mhg9-jcw8\"], \"repository_advisory_url\": \"https://api.github.com/repos/denoland/deno/security-advisories/GHSA-7xh3-mhg9-jcw8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/denoland/deno\", \"summary\": \"Deno: Command Injection via spawnSync & spawn on Windows\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-16T19:07:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-7xh3-mhg9-jcw8\", \"vulnerabilities\": [{\"first_patched_version\": \"2.7.10\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"deno\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.7.10\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7xh3-mhg9-jcw8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "deno: < 2.7.10"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-27190",
+      "CVE-2026-49402"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "deno"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.668266Z",
+  "provenance": {
+    "content_sha256": "428b17ad46e42d1babe0fec57e7e063e81f8d4a5cd9afc5fefe6f45461a8f316",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-16T19:07:44Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7xh3-mhg9-jcw8",
+  "status": "active",
+  "title": "Deno: Command Injection via spawnSync & spawn on Windows",
+  "updated_at": "2026-06-16T19:07:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7xh3-mhg9-jcw8"
+}

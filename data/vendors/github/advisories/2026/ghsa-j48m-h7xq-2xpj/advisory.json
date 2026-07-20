@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/205796698?v=4\", \"events_url\": \"https://api.github.com/users/black-shadow-007/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/black-shadow-007/followers\", \"following_url\": \"https://api.github.com/users/black-shadow-007/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/black-shadow-007/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/black-shadow-007\", \"id\": 205796698, \"login\": \"black-shadow-007\", \"node_id\": \"U_kgDODEQ1Wg\", \"organizations_url\": \"https://api.github.com/users/black-shadow-007/orgs\", \"received_events_url\": \"https://api.github.com/users/black-shadow-007/received_events\", \"repos_url\": \"https://api.github.com/users/black-shadow-007/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/black-shadow-007/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/black-shadow-007/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/black-shadow-007\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50139\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}], \"description\": \"# Share-link `?token=…` redemption races past download limit\\n\\n**Ecosystem:** Go\\n**Package:** `goshs.de/goshs/v2` (`github.com/patrickhener/goshs`)\\n**Affected:** `<= v2.0.9` (every release that shipped the share-link feature)\\n\\n## Summary\\n\\n`ShareHandler` reads the share token's `DownloadLimit` under `RLock`, releases the lock, serves the file, then re-acquires the lock to increment the counter. Concurrent requests all read the same `Downloaded`/`DownloadLimit` snapshot, all pass the check, and all are served — exceeding the operator's intended cap.\\n\\n## Details\\n\\n[`httpserver/handler.go:968-1018`](https://github.com/patrickhener/goshs/blob/v2.0.9/httpserver/handler.go#L968-L1018):\\n\\n```go\\nfs.sharedLinksMu.RLock()\\nentry, ok := fs.SharedLinks[token]\\nfs.sharedLinksMu.RUnlock()                       // <-- released here\\n\\nif entry.DownloadLimit > 0 || entry.DownloadLimit == -1 {\\n    // ...serve file...                          // <-- whole transfer happens unlocked\\n}\\n\\nfs.sharedLinksMu.Lock()                          // <-- re-acquired only now\\ncurrent.Downloaded++\\nif current.Downloaded >= current.DownloadLimit { delete(fs.SharedLinks, token) }\\nfs.sharedLinksMu.Unlock()\\n```\\n\\nBetween line 978 (`RUnlock`) and line 1008 (`Lock`), any number of goroutines can interleave and each observes the same pre-increment limit.\\n\\n## Proof of concept\\n\\n```bash\\ngoshs -p 18000 -d /tmp/r -b admin:pw &\\necho data > /tmp/r/f.txt\\n\\n# operator issues a one-shot share\\nSHARE=$(curl -su admin:pw \\\"http://localhost:18000/f.txt?share&limit=1\\\")\\nTK=$(echo \\\"$SHARE\\\" | sed -n 's/.*token=\\\\([^\\\"]*\\\\)\\\".*/\\\\1/p')\\n\\n# attacker races two redemptions\\ncurl -so /dev/null -w \\\"%{http_code}\\\\n\\\" \\\"http://localhost:18000/?token=$TK\\\" & \\\\\\ncurl -so /dev/null -w \\\"%{http_code}\\\\n\\\" \\\"http://localhost:18000/?token=$TK\\\" & \\\\\\nwait\\n# observed: 200 / 200 (both succeed) -> limit=1 redeemed twice\\n```\\n\\nReproduced 5/5 times in a row on a 2026-era M-series Mac during verification.\\n\\n## Impact\\n\\nA \\\"single-use\\\" share intended to deliver a one-shot secret can be redeemed N times by N concurrent clients. Combined with any token-leak vector (mail forwarding, browser history, intercepted link, etc.) this multiplies the exfiltration window.\\n\\n## Suggested fix\\n\\nReserve under the write lock *before* serving — refund only if the serve fails:\\n\\n```go\\nfs.sharedLinksMu.Lock()\\nentry, ok := fs.SharedLinks[token]\\nif !ok || time.Now().After(entry.Expires) ||\\n   (entry.DownloadLimit != -1 && entry.Downloaded >= entry.DownloadLimit) {\\n    fs.sharedLinksMu.Unlock(); http.NotFound(w, r); return\\n}\\nentry.Downloaded++\\nif entry.DownloadLimit != -1 && entry.Downloaded >= entry.DownloadLimit {\\n    delete(fs.SharedLinks, token)\\n} else {\\n    fs.SharedLinks[token] = entry\\n}\\nfs.sharedLinksMu.Unlock()\\n// ...serve...\\n```\\n\\nAdd a regression test that races two requests against a `limit=1` token and asserts exactly one `200`.\\n\\nReporter: Nishant Verma. Reproduced against `goshs v2.0.9` (commit `8fc1e91`) on 2026-05-27.\", \"ghsa_id\": \"GHSA-j48m-h7xq-2xpj\", \"github_reviewed_at\": \"2026-07-01T21:59:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-j48m-h7xq-2xpj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j48m-h7xq-2xpj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50139\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-01T21:59:08Z\", \"references\": [\"https://github.com/patrickhener/goshs/security/advisories/GHSA-j48m-h7xq-2xpj\", \"https://github.com/advisories/GHSA-j48m-h7xq-2xpj\"], \"repository_advisory_url\": \"https://api.github.com/repos/goshs-labs/goshs/security-advisories/GHSA-j48m-h7xq-2xpj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/patrickhener/goshs\", \"summary\": \"goshs: Share-link ?token=… redemption races past download limit\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-01T21:59:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-j48m-h7xq-2xpj\", \"vulnerabilities\": [{\"first_patched_version\": \"2.1.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"goshs.de/goshs/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j48m-h7xq-2xpj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "goshs.de/goshs/v2: <= 2.0.9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50139"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "goshs.de/goshs/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.372054Z",
+  "provenance": {
+    "content_sha256": "042c47d068f8127b9d62a3d57c11c5b8849f650097aa94e7970d44ffab238c2c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-01T21:59:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j48m-h7xq-2xpj",
+  "status": "active",
+  "title": "goshs: Share-link ?token=… redemption races past download limit",
+  "updated_at": "2026-07-01T21:59:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j48m-h7xq-2xpj"
+}

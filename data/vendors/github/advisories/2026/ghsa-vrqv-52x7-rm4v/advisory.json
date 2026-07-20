@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35772301?v=4\", \"events_url\": \"https://api.github.com/users/fg0x0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/fg0x0/followers\", \"following_url\": \"https://api.github.com/users/fg0x0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/fg0x0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/fg0x0\", \"id\": 35772301, \"login\": \"fg0x0\", \"node_id\": \"MDQ6VXNlcjM1NzcyMzAx\", \"organizations_url\": \"https://api.github.com/users/fg0x0/orgs\", \"received_events_url\": \"https://api.github.com/users/fg0x0/received_events\", \"repos_url\": \"https://api.github.com/users/fg0x0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/fg0x0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/fg0x0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/fg0x0\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"### Summary\\n\\nKimai's Twig sandbox (`StrictPolicy`, used for admin-uploaded invoice and export templates) allow-lists the `config()` Twig function with no key filtering. `config(name)` delegates to `App\\\\Configuration\\\\SystemConfiguration::find($name)`, which returns arbitrary entries from the flattened `kimai.config` container parameter built in `App\\\\DependencyInjection\\\\AppExtension::loadInternal()`. Any admin who can upload a Twig template can therefore render server-wide secrets - the LDAP bind password, the SAML SP private key, and any other dotted configuration key populated from `kimai.yaml` - into the invoice or export output, which is then delivered to whoever generates an invoice or export from that template (including lower-privileged users such as teamleads with invoice permissions). This is a second, uncovered class of the same defense-in-depth issue patched in GHSA-rh42-6rj2-xwmc: the previous fix added a User-method blocklist but left the `config()` function unrestricted.\\n\\n### Details\\n\\n`src/Twig/SecurityPolicy/StrictPolicy.php:40-55` explicitly allow-lists `'config'`:\\n\\n```php\\nprivate array $allowedFunctions = [\\n    'max', 'min', 'range', 'constant', 'cycle', 'random', 'date',\\n    't',\\n    'encore_entry_css_source', 'encore_entry_link_tags', 'encore_entry_script_tags',\\n    'is_granted',\\n    'qr_code_data_uri',\\n    'config',                       // <-- sink, no key filter\\n    'create_date', 'month_names', 'locale_format',\\n    'class_name'\\n];\\n```\\n\\n`src/Twig/Configuration.php:22-45` is the Twig function implementation:\\n\\n```php\\npublic function getFunctions(): array\\n{\\n    return [new TwigFunction('config', [$this, 'get'])];\\n}\\n\\npublic function get(string $name)\\n{\\n    switch ($name) {\\n        case 'chart-class':                     return '';\\n        case 'theme.chart.background_color':    return '#3c8dbc';\\n        // ... 4 more theme constants\\n    }\\n    return $this->configuration->find($name);   // <-- arbitrary key lookup\\n}\\n```\\n\\n`App\\\\Configuration\\\\SystemConfiguration::find()` at `src/Configuration/SystemConfiguration.php:54-62` is a direct dictionary lookup. The dictionary `$this->settings` is initialised from the `kimai.config` container parameter, which the `AppExtension` flattens from `kimai.yaml` into dotted-notation keys.\\n```\\n\\nThe LDAP and SAML schemas declared in `src/DependencyInjection/Configuration.php` define secret-valued scalar nodes that survive the flattening and become reachable keys:\\n\\n```php\\n// getLdapNode()\\n->arrayNode('connection')\\n    ->children()\\n        ->scalarNode('host')->defaultNull()->end()\\n        ->scalarNode('username')->end()\\n        ->scalarNode('password')->end()       // -> settings['ldap.connection.password']\\n        ...\\n\\n// getSamlNode()\\n->arrayNode('sp')\\n    ->children()\\n        ->scalarNode('x509cert')->end()\\n        ->scalarNode('privateKey')->end()     // -> settings['saml.connection.sp.privateKey']\\n        ...\\n```\\n\\nThe invoice and export renderers both enable the sandbox against `StrictPolicy` and pass the shared Twig environment - the one with the `config` function registered - into sandboxed rendering: `src/Invoice/Renderer/AbstractTwigRenderer.php:66-74` and `src/Export/Base/{PDFRenderer,HtmlRenderer}.php`. An admin who uploads a malicious invoice or export template therefore gets an unrestricted read primitive against `kimai.config`.\\n\\nIn a real deployment the attacker template is uploaded through the admin UI (ROLE_SUPER_ADMIN, permission `upload_invoice_template`), saved by `src/Invoice/InvoiceTemplate*` and later rendered by whoever generates an invoice or export for that template. The rendering user is typically a teamlead or admin with invoice permission (`INVOICE` permission set: `['view_invoice','create_invoice','manage_invoice_template']`, granted to ROLE_ADMIN and ROLE_TEAMLEAD in `config/packages/kimai.yaml`). The rendered output is returned as the invoice PDF/HTML or as a CSV/XLSX export, so the secrets land in a document that is routinely downloaded and emailed.\\n\\n### Impact\\n\\nAny Kimai deployment that (a) has SAML or LDAP configured in `kimai.yaml`, and (b) has at least one user (other than the current SUPER_ADMIN) who will render a template-based invoice or export in the future, is affected. A malicious or compromised SUPER_ADMIN can upload a template once, leave, and subsequent invoice or export generations by teamleads or other admins silently exfiltrate `ldap.connection.password`, `saml.connection.sp.privateKey`, `saml.connection.sp.x509cert`, and any other dotted configuration key into an attacker-readable artifact. The LDAP bind password gives domain-credential access to the company directory and often to every downstream system that trusts the same directory; the SAML SP private key allows an attacker to forge signed SAML assertions to any service provider that trusts the same key pair. This is the same class of defense-in-depth leak that GHSA-rh42-6rj2-xwmc patched for user-level secrets, at a broader impact because the keys leaked here are system-wide rather than per-user, and the current StrictPolicy does not intercept the `config()` call path. \\n\\n### Solution\\n\\nThe `config()` function was patched to only return a pre-configured list of settings in sandboxed mode. \\n\\nAdditional checks were added to prevent access to configs that start with `saml.` or `ldap.`.\\n\\nKimai will not issue a CVE, because this requires a SUPER_ADMIN account and it only affects system with activated LDAP or SAML, which also uses the invoice system.\", \"ghsa_id\": \"GHSA-vrqv-52x7-rm4v\", \"github_reviewed_at\": \"2026-05-06T18:42:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-vrqv-52x7-rm4v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vrqv-52x7-rm4v\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-06T18:42:30Z\", \"references\": [\"https://github.com/kimai/kimai/security/advisories/GHSA-vrqv-52x7-rm4v\", \"https://github.com/advisories/GHSA-vrqv-52x7-rm4v\"], \"repository_advisory_url\": \"https://api.github.com/repos/kimai/kimai/security-advisories/GHSA-vrqv-52x7-rm4v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/kimai/kimai\", \"summary\": \"Kimai's Twig function config() leaks server-wide secrets (LDAP bind password, SAML SP private key) via invoice/export templates\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-06T18:42:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-vrqv-52x7-rm4v\", \"vulnerabilities\": [{\"first_patched_version\": \"2.56.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"kimai/kimai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.55.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vrqv-52x7-rm4v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "kimai/kimai: <= 2.55.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "kimai/kimai"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:03.792912Z",
+  "provenance": {
+    "content_sha256": "21cfafc80db88dc4d26e5ed61e4070d17e3292fc1f63f2af9c7bda085d2e7f2b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T18:42:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vrqv-52x7-rm4v",
+  "status": "active",
+  "title": "Kimai's Twig function config() leaks server-wide secrets (LDAP bind password, SAML SP private key) via invoice/export templates",
+  "updated_at": "2026-05-06T18:42:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vrqv-52x7-rm4v"
+}

@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7631043?v=4\", \"events_url\": \"https://api.github.com/users/Ganbagana/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Ganbagana/followers\", \"following_url\": \"https://api.github.com/users/Ganbagana/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Ganbagana/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Ganbagana\", \"id\": 7631043, \"login\": \"Ganbagana\", \"node_id\": \"MDQ6VXNlcjc2MzEwNDM=\", \"organizations_url\": \"https://api.github.com/users/Ganbagana/orgs\", \"received_events_url\": \"https://api.github.com/users/Ganbagana/received_events\", \"repos_url\": \"https://api.github.com/users/Ganbagana/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Ganbagana/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Ganbagana/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Ganbagana\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47076\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-436\", \"name\": \"Interpretation Conflict\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\n`hackney_url:normalize/2` URL-decodes the host component of a parsed URL, but the caller's SSRF allowlist runs before normalization using OTP's `uri_string:parse/1` and `inet:parse_address/1`, neither of which decodes percent-escapes in hostnames. A URL like `http://%31%32%37%2E%30%2E%30%2E%31/` presents an encoded, non-IP-looking host to the validator, which passes the allowlist check; hackney's normalizer then decodes it to `127.0.0.1` and connects to loopback. Because `hackney:request/5` always calls `normalize/2` with no opt-out, every request path that accepts a binary or list URL is affected. This is a parser-differential SSRF in the same class as CVE-2025-1211, but in a different function.\\n\\n### Details\\n\\nIn `src/hackney_url.erl` (lines 161–186), `normalize/2` checks whether the parsed host is already a dotted-quad or IPv6 literal via `inet_parse:address/1`. Percent-encoded forms like `%31%32%37%2E%30%2E%30%2E%31` fail that check and fall into the catch-all branch, where `urldecode/1` decodes the host before passing it to IDNA conversion:\\n\\n```erlang\\nHost1 = binary_to_list(\\n           urldecode(unicode:characters_to_binary(Host0))\\n         ),\\n```\\n\\nThe decoded host (`\\\"127.0.0.1\\\"`) replaces the original in the returned `#hackney_url{}` record. `hackney:request/5` at `src/hackney.erl:463` always calls `normalize/2`, so the decoded host is what `do_dispatch/1` and `add_host_header/2` ultimately use. The on-wire `Host:` header and the TCP connect target both reflect the decoded value.\\n\\nThe same payload pattern reaches the AWS/GCP/Azure IMDS (`169.254.169.254`), RFC1918 ranges, and any `localhost` admin endpoint. The 1.21.0 patch for CVE-2025-1211 fixed a separate differential in `parse_url/1` and did not touch `normalize/2`.\\n\\n### PoC\\n\\n1. Validate the URL with the canonical Erlang SSRF allowlist: `uri_string:parse/1` returns host `<<\\\"%31%32%37%2E%30%2E%30%2E%31\\\">>`, `inet:parse_address/1` returns `{error, einval}`, so the allowlist accepts it.\\n2. Pass the same URL to `hackney:get/1`.\\n3. hackney's `normalize/2` decodes the host to `\\\"127.0.0.1\\\"` and connects to `127.0.0.1:80`. The internal service receives the request with `Host: 127.0.0.1`.\\n\\n### Impact\\n\\nUnauthenticated SSRF bypassing the canonical Erlang allowlist pattern. Affects hackney 0.13.0 through 4.0.0 for any application that accepts attacker-supplied URLs. Targets include cloud IMDS endpoints, `localhost` admin interfaces, and RFC1918 backends. CVSS v4.0: **6.9 (MEDIUM)**.\\n\\n## Resources\\n\\n* Introduction commit: https://github.com/benoitc/hackney/commit/4d725507588942fd00efca15b86da3273656510a\\n* Patch commit: https://github.com/benoitc/hackney/commit/452620a92ec1da2e6b4862a049a2a4f04b42068f\", \"epss\": {\"percentage\": 0.00201, \"percentile\": 0.09994}, \"ghsa_id\": \"GHSA-pj7v-xfvx-wmjq\", \"github_reviewed_at\": \"2026-06-26T21:54:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-pj7v-xfvx-wmjq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pj7v-xfvx-wmjq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47076\"}], \"nvd_published_at\": \"2026-05-25T15:16:22Z\", \"published_at\": \"2026-06-26T21:54:55Z\", \"references\": [\"https://github.com/benoitc/hackney/security/advisories/GHSA-pj7v-xfvx-wmjq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47076\", \"https://github.com/benoitc/hackney/commit/452620a92ec1da2e6b4862a049a2a4f04b42068f\", \"https://cna.erlef.org/cves/CVE-2026-47076.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-47076\", \"https://github.com/advisories/GHSA-pj7v-xfvx-wmjq\"], \"repository_advisory_url\": \"https://api.github.com/repos/benoitc/hackney/security-advisories/GHSA-pj7v-xfvx-wmjq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/benoitc/hackney\", \"summary\": \"Hackney has SSRF allowlist bypass in hackney_url:normalize/2 via percent-encoded host\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T21:54:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-pj7v-xfvx-wmjq\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.1\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"hackney\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.13.0, < 4.0.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pj7v-xfvx-wmjq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "hackney: >= 0.13.0, < 4.0.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-1211",
+      "CVE-2026-47076"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "hackney"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.949737Z",
+  "provenance": {
+    "content_sha256": "e5a70835c4b4e889e6deaa8b3a95d35f44e46e9a56dc0bb9c5d15edf524f23d3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T21:54:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pj7v-xfvx-wmjq",
+  "status": "active",
+  "title": "Hackney has SSRF allowlist bypass in hackney_url:normalize/2 via percent-encoded host",
+  "updated_at": "2026-06-26T21:54:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pj7v-xfvx-wmjq"
+}

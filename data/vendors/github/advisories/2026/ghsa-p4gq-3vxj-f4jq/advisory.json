@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/151374244?v=4\", \"events_url\": \"https://api.github.com/users/Wernerina/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Wernerina/followers\", \"following_url\": \"https://api.github.com/users/Wernerina/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Wernerina/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Wernerina\", \"id\": 151374244, \"login\": \"Wernerina\", \"node_id\": \"U_kgDOCQXJpA\", \"organizations_url\": \"https://api.github.com/users/Wernerina/orgs\", \"received_events_url\": \"https://api.github.com/users/Wernerina/received_events\", \"repos_url\": \"https://api.github.com/users/Wernerina/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Wernerina/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Wernerina/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Wernerina\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1827156?v=4\", \"events_url\": \"https://api.github.com/users/Joibel/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Joibel/followers\", \"following_url\": \"https://api.github.com/users/Joibel/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Joibel/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Joibel\", \"id\": 1827156, \"login\": \"Joibel\", \"node_id\": \"MDQ6VXNlcjE4MjcxNTY=\", \"organizations_url\": \"https://api.github.com/users/Joibel/orgs\", \"received_events_url\": \"https://api.github.com/users/Joibel/received_events\", \"repos_url\": \"https://api.github.com/users/Joibel/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Joibel/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Joibel/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Joibel\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28187128?v=4\", \"events_url\": \"https://api.github.com/users/isubasinghe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/isubasinghe/followers\", \"following_url\": \"https://api.github.com/users/isubasinghe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/isubasinghe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/isubasinghe\", \"id\": 28187128, \"login\": \"isubasinghe\", \"node_id\": \"MDQ6VXNlcjI4MTg3MTI4\", \"organizations_url\": \"https://api.github.com/users/isubasinghe/orgs\", \"received_events_url\": \"https://api.github.com/users/isubasinghe/received_events\", \"repos_url\": \"https://api.github.com/users/isubasinghe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/isubasinghe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/isubasinghe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/isubasinghe\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42183\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-476\", \"name\": \"NULL Pointer Dereference\"}], \"description\": \"### Summary\\nA nil pointer dereference in `server/auth/gatekeeper.go` `rbacAuthorization()` causes a panic (denial of service) for SSO users whose claims match a namespace-level RBAC rule but not an SSO-namespace rule, when `SSO_DELEGATE_RBAC_TO_NAMESPACE=true`.\\n\\n### Details\\nWhen `getServiceAccount(claims, ssoNamespace)` returns nil (no matching rule), the error is suppressed and `loginAccount` remains nil. If RBAC delegation finds a matching `namespaceAccount`, line 304 calls `precedence(loginAccount)` which unconditionally accesses `serviceAccount.Annotations` — nil pointer dereference.\\n\\n**Affected code (v4.0.4):**\\n\\n```go\\n// gatekeeper.go:304\\n} else if precedence(namespaceAccount) > precedence(loginAccount) {\\n    // loginAccount is nil here -> precedence(nil) -> PANIC\\n\\n// gatekeeper.go:232-234\\nfunc precedence(serviceAccount *corev1.ServiceAccount) int {\\n    i, _ := strconv.Atoi(serviceAccount.Annotations[common.AnnotationKeyRBACRulePrecedence])\\n    return i\\n}\\n```\\n\\n### PoC\\n**Live-tested 2026-04-17:** kind cluster, Argo Workflows v4.0.4, Dex v2.43.1 OIDC provider.\\n\\n1. Deploy Argo Workflows with `--auth-mode=sso --auth-mode=client`, SSO pointing to Dex, RBAC enabled.\\n2. Set `SSO_DELEGATE_RBAC_TO_NAMESPACE=true` on the argo-server deployment.\\n3. Create an RBAC ServiceAccount with `workflows.argoproj.io/rbac-rule: \\\"true\\\"` annotation in a target namespace (e.g., `target-ns`).\\n4. Do **not** create a matching RBAC rule in the SSO namespace (`argo`).\\n5. Authenticate via the Dex SSO flow.\\n6. Request `GET /api/v1/workflows/target-ns` with the SSO session cookie.\\n7. Server returns HTTP 500: `{\\\"code\\\":13,\\\"message\\\":\\\"runtime error: invalid memory address or nil pointer dereference\\\"}`\\n8. Server logs: `Recovered from panic` with stack trace at `gatekeeper.go:233` (`precedence()`) called from `gatekeeper.go:304`.\\n\\nEvery subsequent API request from affected SSO users triggers the same panic.\\n\\n### Impact\\nPermanent denial of service for any SSO user whose claims don't match SSO-namespace RBAC but do match a target namespace rule. Realistic in multi-tenant deployments with per-namespace RBAC. The gRPC recovery interceptor catches the panic so the server process survives, but the affected user gets HTTP 500 on every request.\\n\\n### Suggested Fix\\nAdd nil check: `if loginAccount == nil || precedence(namespaceAccount) > precedence(loginAccount)`\\n\\n### AI Disclosure\\nThis advisory was prepared with AI assistance (Claude Code, Anthropic).\", \"epss\": {\"percentage\": 0.00377, \"percentile\": 0.29534}, \"ghsa_id\": \"GHSA-p4gq-3vxj-f4jq\", \"github_reviewed_at\": \"2026-05-04T20:01:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-p4gq-3vxj-f4jq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p4gq-3vxj-f4jq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42183\"}], \"nvd_published_at\": \"2026-05-09T04:16:23Z\", \"published_at\": \"2026-05-04T20:01:13Z\", \"references\": [\"https://github.com/argoproj/argo-workflows/security/advisories/GHSA-p4gq-3vxj-f4jq\", \"https://github.com/argoproj/argo-workflows/commit/c4cc17d0c034fa9a9cc01ef1af6c8016c93071d4\", \"https://github.com/argoproj/argo-workflows/releases/tag/v4.0.5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42183\", \"https://github.com/advisories/GHSA-p4gq-3vxj-f4jq\"], \"repository_advisory_url\": \"https://api.github.com/repos/argoproj/argo-workflows/security-advisories/GHSA-p4gq-3vxj-f4jq\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/argoproj/argo-workflows\", \"summary\": \"Argo Affected by SSO RBAC Delegation Nil Pointer Dereference DoS (gatekeeper.go)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T13:39:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-p4gq-3vxj-f4jq\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/argoproj/argo-workflows/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 4.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p4gq-3vxj-f4jq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/argoproj/argo-workflows/v4: >= 4.0.0, <= 4.0.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42183"
+    ],
+    "cvss_score": 2.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/argoproj/argo-workflows/v4"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.787770Z",
+  "provenance": {
+    "content_sha256": "7ce3bf9a53fe7497730e4739d24cc6978b9843ca5035e78e6f8d05f2bd4855af",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T20:01:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p4gq-3vxj-f4jq",
+  "status": "active",
+  "title": "Argo Affected by SSO RBAC Delegation Nil Pointer Dereference DoS (gatekeeper.go)",
+  "updated_at": "2026-05-13T13:39:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p4gq-3vxj-f4jq"
+}

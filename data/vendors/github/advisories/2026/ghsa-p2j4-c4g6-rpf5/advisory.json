@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7663857?v=4\", \"events_url\": \"https://api.github.com/users/NeuroWinter/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/NeuroWinter/followers\", \"following_url\": \"https://api.github.com/users/NeuroWinter/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/NeuroWinter/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/NeuroWinter\", \"id\": 7663857, \"login\": \"NeuroWinter\", \"node_id\": \"MDQ6VXNlcjc2NjM4NTc=\", \"organizations_url\": \"https://api.github.com/users/NeuroWinter/orgs\", \"received_events_url\": \"https://api.github.com/users/NeuroWinter/received_events\", \"repos_url\": \"https://api.github.com/users/NeuroWinter/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/NeuroWinter/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/NeuroWinter/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/NeuroWinter\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47735\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nArc's user-SQL validator (`internal/api/query.go:ValidateSQLRequest`) blocked only `read_parquet(` and `arc_partition_agg(` via regex denylist. The broader DuckDB I/O function family — `read_csv_auto`, `read_csv`, `read_json`, `read_json_auto`, `read_text`, `read_blob`, `glob`, `parquet_metadata`, `parquet_schema`, `read_xlsx`, etc. — was not blocked. RBAC table-reference extraction inspected only `FROM`/`JOIN` clauses, so scalar table functions in the `SELECT` list slipped past both layers.\\n\\n### Impact\\n\\nAny authenticated user, including a token with `permissions: []`, can read arbitrary local files via:\\n\\n```\\nPOST /api/v1/query\\nAuthorization: Bearer <token>\\n{\\\"sql\\\": \\\"SELECT * FROM read_csv_auto('/etc/passwd', header=false, columns={'l':'VARCHAR'}) LIMIT 5\\\"}\\n```\\n\\nConfirmed reachable targets:\\n\\n- `auth.db` — bcrypt hashes for every API token, plus legacy SHA-256 rows.\\n- `arc.toml` — S3 secrets, TLS keys.\\n- `/proc/self/environ` — environment-variable secrets.\\n- Cross-tenant Parquet files — bypasses RBAC because the tenant scope is enforced at the table layer, not on raw file paths.\\n- SSRF when `httpfs` is loaded (any S3-backed deployment) — `read_csv_auto('http://169.254.169.254/latest/meta-data/...')` reaches instance metadata IPs.\\n\\n### Patches\\n\\nFixed in 2026.06.1 (PR #442) via a structural sandbox at the DuckDB layer:\\n\\n1. `SET GLOBAL allowed_directories = [...]` enumerates Arc's legitimate filesystem prefixes (storage roots + tier prefixes + import upload dir + compaction temp).\\n2. `SET GLOBAL enable_external_access = false` (one-way at runtime).\\n3. Verified by reading back the flag.\\n\\nAfter lockdown, DuckDB refuses to open any file outside the allowlist and refuses further `INSTALL`/`LOAD`. Already-loaded extensions remain callable.\\n\\n### Workarounds\\n\\n- Restrict API access to known-trusted networks via firewall rules.\\n- Temporary mitigation: add `read_csv*`/`read_json*`/`glob` etc. to `dangerousSQLPattern` in `internal/api/query.go` pending 2026.06.1.\\n\\n### Credits\\n\\nReported by Alex Manson ([@NeuroWinter](https://github.com/NeuroWinter), https://neurowinter.com/) on 2026-05-19.\", \"epss\": {\"percentage\": 0.00029, \"percentile\": 0.08757}, \"ghsa_id\": \"GHSA-p2j4-c4g6-rpf5\", \"github_reviewed_at\": \"2026-06-08T23:51:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-p2j4-c4g6-rpf5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p2j4-c4g6-rpf5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47735\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-08T23:51:19Z\", \"references\": [\"https://github.com/Basekick-Labs/arc/security/advisories/GHSA-p2j4-c4g6-rpf5\", \"https://github.com/Basekick-Labs/arc/pull/442\", \"https://github.com/Basekick-Labs/arc/commit/91bdc29d1a02178ccf8c66375eccf85203108dfb\", \"https://github.com/advisories/GHSA-p2j4-c4g6-rpf5\"], \"repository_advisory_url\": \"https://api.github.com/repos/Basekick-Labs/arc/security-advisories/GHSA-p2j4-c4g6-rpf5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Basekick-Labs/arc\", \"summary\": \"Arc has an authenticated arbitrary local-file read via DuckDB I/O functions that bypasses RBAC table-level checks\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:51:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-p2j4-c4g6-rpf5\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260520141557-91bdc29d1a02\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/basekick-labs/arc\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260520141557-91bdc29d1a02\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p2j4-c4g6-rpf5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/basekick-labs/arc: < 0.0.0-20260520141557-91bdc29d1a02"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47735"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/basekick-labs/arc"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.987454Z",
+  "provenance": {
+    "content_sha256": "1d802ceee661300428efea8889044146b476f998635a6e2ea6b7c5046921ce08",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-08T23:51:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p2j4-c4g6-rpf5",
+  "status": "active",
+  "title": "Arc has an authenticated arbitrary local-file read via DuckDB I/O functions that bypasses RBAC table-level checks",
+  "updated_at": "2026-06-08T23:51:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p2j4-c4g6-rpf5"
+}

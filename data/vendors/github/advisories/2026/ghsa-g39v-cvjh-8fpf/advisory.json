@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/54570?v=4\", \"events_url\": \"https://api.github.com/users/bharat/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bharat/followers\", \"following_url\": \"https://api.github.com/users/bharat/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bharat/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bharat\", \"id\": 54570, \"login\": \"bharat\", \"node_id\": \"MDQ6VXNlcjU0NTcw\", \"organizations_url\": \"https://api.github.com/users/bharat/orgs\", \"received_events_url\": \"https://api.github.com/users/bharat/received_events\", \"repos_url\": \"https://api.github.com/users/bharat/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bharat/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bharat/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bharat\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-552\", \"name\": \"Files or Directories Accessible to External Parties\"}], \"description\": \"### Summary\\n\\nWhen `ENABLE_YAML_CONFIG_EDITING=true`, every `ha_config_set_yaml` call backs up the pre-edit file to `<config>/www/yaml_backups/`, which Home Assistant serves at `/local/` with **no authentication**. Anyone who can reach the HA web interface can download the most recent pre-edit `configuration.yaml` (or other YAML file) — typically containing plaintext MQTT passwords, REST credentials, webhook IDs, geofence coordinates, and `shell_command` definitions — with zero credentials.\\n\\n### Details\\n\\nThe backup feature is good — `do_backup` defaults to `True` and protects users from a bad edit. The issue is the location:\\n\\n- `custom_components/ha_mcp_tools/__init__.py:596` — `backup_dir = config_dir / \\\"www\\\" / \\\"yaml_backups\\\"`\\n- `custom_components/ha_mcp_tools/__init__.py:602` — `backup_file = backup_dir / f\\\"{safe_name}.{timestamp}.bak\\\"`\\n- `custom_components/ha_mcp_tools/__init__.py:606-607,692-693` — backup path returned to caller and logged at INFO\\n\\n`<config>/www/` is `/local/` and HA serves it unauthenticated by design (intended for static dashboard assets). An attacker discovers the path three ways: (1) it's returned to the MCP client in `result[\\\"backup_path\\\"]`; (2) it's logged at INFO and recoverable via `ha_get_logs`; (3) the timestamp format is `%Y%m%d_%H%M%S` — 86,400 candidates per day, enumerable. Backups accumulate (no rotation), so a long-running install holds a chronological history.\\n\\n**Preconditions:** `ENABLE_YAML_CONFIG_EDITING=true` (off by default), at least one YAML edit made, and the attacker can reach HA's port 8123 (LAN, or internet via Nabu Casa / reverse proxy).\\n\\n### PoC\\n\\nA pytest E2E test against a fresh Docker HA container with the custom component installed (using the project's existing `ha_container_with_fresh_config` fixture):\\n\\n```\\n[1] ha_config_set_yaml(yaml_path=\\\"template\\\", action=\\\"add\\\", ...) → success=True\\n[1] backup_path = 'www/yaml_backups/configuration.yaml.20260505_171335.bak'\\n[2] GET http://<ha>:8123/local/yaml_backups/configuration.yaml.20260505_171335.bak\\n    (no Authorization header)\\n[2] HTTP 200, 440 bytes — the full pre-edit configuration.yaml\\n[control] GET /api/config without auth → HTTP 401\\n```\\n\\nThe control proves the result is meaningful: the same instance returns 401 for an authenticated endpoint; only `/local/` is unauthenticated by HA design.\\n\\n### Impact\\n\\nCWE-552 (Files or Directories Accessible to External Parties). Affects users with `ENABLE_YAML_CONFIG_EDITING=true` who have made at least one YAML edit. Anyone who can reach HA port 8123 reads the most recent pre-edit config without credentials. CVSS 6.5 medium (`AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`); 7.5 high if HA is internet-exposed.\\n\\n### Resolution\\n\\nFixed in `7.4.1.dev456` (PR #1180). The fix relocates new backups to `<config>/.ha_mcp_tools_backups/` (config root, not served by `/local/`) and adds a one-time migration on integration setup that moves any pre-existing exposed backups, surfaces a persistent notification telling the user to rotate exposed secrets, and removes the legacy directory if empty.\\n\\nThe fix ships in the next biweekly stable release and is available immediately on the dev channel. Updating to a release containing the fix is sufficient — no manual action required for users who upgrade.\\n\\n### Manual cleanup (for users who cannot upgrade yet)\\n\\nIf you used `ha_config_set_yaml` on a vulnerable version and cannot wait for the next stable release, manually remove the exposed backups:\\n\\n```\\nrm -rf <config>/www/yaml_backups/\\n```\\n\\nThen rotate any secrets that may have been in the YAML files those backups captured (MQTT/REST credentials, webhook IDs, `shell_command` definitions, geofence coordinates). The directory is reachable at `http(s)://<ha-host>:8123/local/yaml_backups/` until removed. After the next addon/package upgrade containing the fix, the integration will run this cleanup automatically and surface a persistent notification with the same rotation guidance.\", \"ghsa_id\": \"GHSA-g39v-cvjh-8fpf\", \"github_reviewed_at\": \"2026-05-14T20:17:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-g39v-cvjh-8fpf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g39v-cvjh-8fpf\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-14T20:17:23Z\", \"references\": [\"https://github.com/homeassistant-ai/ha-mcp/security/advisories/GHSA-g39v-cvjh-8fpf\", \"https://github.com/homeassistant-ai/ha-mcp/pull/1180\", \"https://github.com/homeassistant-ai/ha-mcp/commit/09c524526b5f945638aa97de6218fadcd233023c\", \"https://github.com/homeassistant-ai/ha-mcp/releases/tag/v7.4.1.dev456\", \"https://github.com/homeassistant-ai/ha-mcp/releases/tag/v7.5.0\", \"https://github.com/advisories/GHSA-g39v-cvjh-8fpf\"], \"repository_advisory_url\": \"https://api.github.com/repos/homeassistant-ai/ha-mcp/security-advisories/GHSA-g39v-cvjh-8fpf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/homeassistant-ai/ha-mcp\", \"summary\": \"Home Assistant MCP Server: YAML config backups written under www/ are served unauthenticated at /local/\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-14T20:17:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-g39v-cvjh-8fpf\", \"vulnerabilities\": [{\"first_patched_version\": \"7.5.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"ha-mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g39v-cvjh-8fpf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ha-mcp: < 7.5.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ha-mcp"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.408932Z",
+  "provenance": {
+    "content_sha256": "209dc2c94dae7c73323927ea345be18d4d0c01433863c0329e360584df62e060",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:17:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g39v-cvjh-8fpf",
+  "status": "active",
+  "title": "Home Assistant MCP Server: YAML config backups written under www/ are served unauthenticated at /local/",
+  "updated_at": "2026-05-14T20:17:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g39v-cvjh-8fpf"
+}

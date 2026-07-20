@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/12751872?v=4\", \"events_url\": \"https://api.github.com/users/Crypto-Cat/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Crypto-Cat/followers\", \"following_url\": \"https://api.github.com/users/Crypto-Cat/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Crypto-Cat/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Crypto-Cat\", \"id\": 12751872, \"login\": \"Crypto-Cat\", \"node_id\": \"MDQ6VXNlcjEyNzUxODcy\", \"organizations_url\": \"https://api.github.com/users/Crypto-Cat/orgs\", \"received_events_url\": \"https://api.github.com/users/Crypto-Cat/received_events\", \"repos_url\": \"https://api.github.com/users/Crypto-Cat/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Crypto-Cat/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Crypto-Cat/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Crypto-Cat\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55793\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:P/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"# Stored XSS via Structure entry title in table view\\n\\n## Summary\\n\\nAn Author-level control panel user can store a JavaScript payload in an entry title. When an admin, or any control panel user with `saveEntries` for the same Structure section, drags another entry under the poisoned entry in table view, the payload executes in the victim’s session.\\n\\nThe issue is exploitable because the title is escaped into `data-title` by the server, decoded again by the browser, read with jQuery `.data('title')`, and then concatenated into a new HTML string without attribute escaping.\\n\\nExecution was verified with `alert(document.domain)`. Impact was verified against an elevated admin session by changing the admin user’s email through `users/save-user`, then using the password-reset flow to take over the account.\\n\\n## Preconditions\\n\\n- Attacker has `createEntries` + `saveEntries` on a Structure-type section (Author-style CP account; no admin permission required).\\n- Victim has `saveEntries` on the same section. Craft only renders drag handles when `structureEditable` is true, which requires this permission, so any admin qualifies.\\n- Section must be type Structure. Channel and Single sections are unaffected.\\n- Poisoned entry must have no children at the time of the drag (fires on the 0-to-1 descendant transition).\\n- For the email-change account-takeover path, the victim must currently have an elevated session. The stored XSS itself does not require elevation.\\n\\n## Root cause\\n\\n`ElementTableSorter.js` lines 643-652:\\n\\n```js\\nconst ancestorTitle = this._updateAncestors._$ancestor.data('title');\\n$(\\n  '<button … aria-label=\\\"' +\\n    Craft.t('app', 'Show {title} children', {title: ancestorTitle}) +\\n  '\\\"></button>'\\n).insertAfter(…);\\n```\\n\\n`Craft.t` with a `{title}` token calls `_parseToken`, reaches `case 'none': return arg` (`Craft.js:193-194`), and returns the title verbatim. The result is handed to jQuery's `$()` and parsed as HTML.\\n\\nThe server-side template correctly encodes the entry title into `data-title`, but the browser decodes that attribute before jQuery returns it from `.data('title')`. At that point the value is attacker-controlled HTML, and it is inserted into the `aria-label` attribute without `Craft.escapeHtml()`.\\n\\n## Steps to reproduce\\n\\n**Plant (attacker - Author account):**\\n\\n```bash\\npython3 poc.py --url http://target --cp admin \\\\\\n  --user author@example.com --pass secret --section mySection\\n```\\n\\n**Trigger (victim - any control panel user with `saveEntries`, e.g. admin):**\\n\\n1. Open the section index in Table view.\\n2. Drag the \\\"Drag me\\\" entry and drop it as the first child of the poisoned entry.\\n\\n`alert(document.domain)` fires in the victim’s session.\\n\\n**Impact payload tested in an elevated admin session (249 chars, within the 255-char title limit):**\\n\\n```html\\n\\\"><img src=x onerror=\\\"fetch(Craft.actionUrl+'users/save-user',{method:'POST',body:Craft.csrfTokenName+'='+encodeURIComponent(Craft.csrfTokenValue)+'&userId=1&email=attacker%40evil.com',headers:{'Content-Type':'application/x-www-form-urlencoded'}})\\\">\\n```\\n\\nWhen triggered during an elevated admin session, the admin’s email is changed to the attacker-controlled address. The attacker can then request a password reset and receive the reset link.\\n\\n## Impact\\n\\nStored XSS in the control panel from an Author-level account. The payload runs as the victim control panel user and can use `Craft.csrfTokenName` / `Craft.csrfTokenValue` to send same-origin action requests as that user.\\n\\nIn my test environment, triggering the payload in an elevated admin session allowed Author-to-admin account takeover via admin email change and password reset.\\n\\n## Mitigating factors\\n\\n- Requires an existing control panel account (Author role minimum).\\n- Victim must perform a drag operation, not just visit the page.\\n- The demonstrated email-change takeover requires the victim’s session to be elevated at trigger time.\\n\\n## Resources\\n\\nhttps://github.com/craftcms/cms/commit/162321e899cc97517fb6f5a02b5528f549d0c6cc\", \"epss\": {\"percentage\": 0.00412, \"percentile\": 0.33044}, \"ghsa_id\": \"GHSA-xrqc-p465-2xvg\", \"github_reviewed_at\": \"2026-07-06T21:35:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-xrqc-p465-2xvg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xrqc-p465-2xvg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55793\"}], \"nvd_published_at\": \"2026-07-01T22:16:50Z\", \"published_at\": \"2026-07-06T21:35:02Z\", \"references\": [\"https://github.com/craftcms/cms/security/advisories/GHSA-xrqc-p465-2xvg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55793\", \"https://github.com/craftcms/cms/commit/162321e899cc97517fb6f5a02b5528f549d0c6cc\", \"https://github.com/advisories/GHSA-xrqc-p465-2xvg\"], \"repository_advisory_url\": \"https://api.github.com/repos/craftcms/cms/security-advisories/GHSA-xrqc-p465-2xvg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/craftcms/cms\", \"summary\": \"Craft CMS: Stored XSS via Structure entry title in table view\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-06T21:35:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-xrqc-p465-2xvg\", \"vulnerabilities\": [{\"first_patched_version\": \"5.9.53\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"craftcms/cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.0-RC1, < 5.9.22\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xrqc-p465-2xvg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "craftcms/cms: >= 5.0.0-RC1, < 5.9.22"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55793"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:P/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "craftcms/cms"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:55.831714Z",
+  "provenance": {
+    "content_sha256": "e6848897cd3f08e6d407d09503ac571b7be5a3740c87cb28b8cc8b77f63e4fa3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-06T21:35:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xrqc-p465-2xvg",
+  "status": "active",
+  "title": "Craft CMS: Stored XSS via Structure entry title in table view",
+  "updated_at": "2026-07-06T21:35:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xrqc-p465-2xvg"
+}

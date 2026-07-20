@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/44903767?v=4\", \"events_url\": \"https://api.github.com/users/PinkDraconian/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PinkDraconian/followers\", \"following_url\": \"https://api.github.com/users/PinkDraconian/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PinkDraconian/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PinkDraconian\", \"id\": 44903767, \"login\": \"PinkDraconian\", \"node_id\": \"MDQ6VXNlcjQ0OTAzNzY3\", \"organizations_url\": \"https://api.github.com/users/PinkDraconian/orgs\", \"received_events_url\": \"https://api.github.com/users/PinkDraconian/received_events\", \"repos_url\": \"https://api.github.com/users/PinkDraconian/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PinkDraconian/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PinkDraconian/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PinkDraconian\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2023-48238\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}], \"description\": \"### Summary\\nThe json-web-token library is vulnerable to a JWT algorithm confusion attack.\\n\\n### Details\\nOn line 86 of the 'index.js' file, the algorithm to use for verifying the signature of the JWT token is taken from the JWT token, which at that point is still unverified and thus shouldn't be trusted. To exploit this vulnerability, an attacker needs to craft a malicious JWT token containing the HS256 algorithm, signed with the public RSA key of the victim application. This attack will only work against this library is the RS256 algorithm is in use, however it is a best practice to use that algorithm.\\n\\n### PoC\\nTake a server running the following code:\\n```javascript\\nconst express = require('express');\\nconst jwt = require('json-web-token');\\nconst fs = require('fs');\\nconst path = require('path');\\n\\nconst app = express();\\nconst port = 3000;\\n\\n// Load the keys from the file\\nconst publicKeyPath = path.join(__dirname, 'public-key.pem');\\nconst publicKey = fs.readFileSync(publicKeyPath, 'utf8');\\nconst privateKeyPath = path.join(__dirname, 'private-key.pem');\\nconst privateKey = fs.readFileSync(privateKeyPath, 'utf8');\\n\\napp.use(express.json());\\n\\n// Endpoint to generate a JWT token with admin: False\\napp.get('/generateToken', async (req, res) => {\\n  const payload = { admin: false, name: req.query.name };\\n  const token = await jwt.encode(privateKey, payload, 'RS256', function (err, token) {\\n    res.json({ token });\\n  });\\n});\\n\\n// Middleware to verify the JWT token\\nfunction verifyToken(req, res, next) {\\n  const token = req.query.token;\\n\\n  jwt.decode(publicKey, token, (err, decoded) => {\\n    if (err) {\\n      console.log(err)\\n      return res.status(401).json({ message: 'Token authentication failed' });\\n    }\\n\\n    req.decoded = decoded;\\n    next();\\n  });\\n}\\n\\n// Endpoint to check if you are the admin or not\\napp.get('/checkAdmin', verifyToken, (req, res) => {\\n  res.json(req.decoded);\\n});\\n\\napp.listen(port, () => {\\n  console.log(`Server is running on port ${port}`);\\n});\\n```\\n\\n**Public key recovery**\\nFirst, an attacker needs to recover the public key from the server in any way possible. It is possible to extract this from just two JWT tokens as shown below.\\nGrab two different JWT tokens and utilize the following tool: `https://github.com/silentsignal/rsa_sign2n/blob/release/standalone/jwt_forgery.py`\\n```\\npython3 jwt_forgery.py token1 token2\\n```\\nThe tool will generate 4 different public keys, all in different formats. Try the following for all 4 formats.\\n\\n**Algorithm confusion**\\nChange the JWT to the HS256 algorithm and modify any of the contents to your liking at `https://jwt.io/`.\\nCopy the resulting JWT token and use with the following tool: `https://github.com/ticarpi/jwt_tool`.\\n```\\npython /opt/jwt_tool/jwt_tool.py --exploit k -pk public_key token\\n```\\nYou will now get a resulting JWT token that is validly signed.\\n\\n### Impact\\nApplications using the RS256 algorithm, are vulnerable to this algorithm confusion attack which allows attackers to sign arbitrary payloads that the verifier will accept.\\n\\n### Solution\\nEither one of the following solutions will work.\\n1. Change the signature of the `decode` function to ensure that the algorithm is set in that call\\n2. Check whether or not the secret could be a public key in the decode function and in that case, set the key to be a public key.\\n\\n\\n> Fixed in 4.0.0. Both encode and decode now reject combinations where the key type (PEM vs plain secret) doesn't match the algorithm family. Upgrade with npm install json-web-token@^4.\", \"epss\": {\"percentage\": 0.00304, \"percentile\": 0.22196}, \"ghsa_id\": \"GHSA-4xw9-cx39-r355\", \"github_reviewed_at\": \"2023-11-17T22:48:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-4xw9-cx39-r355\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4xw9-cx39-r355\"}, {\"type\": \"CVE\", \"value\": \"CVE-2023-48238\"}], \"nvd_published_at\": \"2023-11-17T22:15:07Z\", \"published_at\": \"2023-11-17T22:48:15Z\", \"references\": [\"https://github.com/joaquimserafim/json-web-token/security/advisories/GHSA-4xw9-cx39-r355\", \"https://github.com/joaquimserafim/json-web-token/blob/acf6a462471e1b14187eb77414e9161b8b7bff7e/index.js#L86\", \"https://nvd.nist.gov/vuln/detail/CVE-2023-48238\", \"https://github.com/joaquimserafim/json-web-token/commit/b6e56b1346f48432d29133c76b65222ad93956b7\", \"https://github.com/advisories/GHSA-4xw9-cx39-r355\"], \"repository_advisory_url\": \"https://api.github.com/repos/joaquimserafim/json-web-token/security-advisories/GHSA-4xw9-cx39-r355\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/joaquimserafim/json-web-token\", \"summary\": \"json-web-token library is vulnerable to a JWT algorithm confusion attack\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:38:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-4xw9-cx39-r355\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"json-web-token\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4xw9-cx39-r355",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "json-web-token: <= 3.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2023-48238"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "json-web-token"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.111841Z",
+  "provenance": {
+    "content_sha256": "60b1d7666b5d62e14b07c9b1e05780b530e6df46a6fbdde180bfc1f1154d7e50",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2023-11-17T22:48:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4xw9-cx39-r355",
+  "status": "active",
+  "title": "json-web-token library is vulnerable to a JWT algorithm confusion attack",
+  "updated_at": "2026-06-08T23:38:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4xw9-cx39-r355"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/48850892?v=4\", \"events_url\": \"https://api.github.com/users/hibrian827/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hibrian827/followers\", \"following_url\": \"https://api.github.com/users/hibrian827/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hibrian827/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hibrian827\", \"id\": 48850892, \"login\": \"hibrian827\", \"node_id\": \"MDQ6VXNlcjQ4ODUwODky\", \"organizations_url\": \"https://api.github.com/users/hibrian827/orgs\", \"received_events_url\": \"https://api.github.com/users/hibrian827/received_events\", \"repos_url\": \"https://api.github.com/users/hibrian827/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hibrian827/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hibrian827/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hibrian827\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-49342\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\nYARD's static cache lookup reads a request path before the router's path cleanup runs. When a server is configured with a document root, a traversal path such as `/../yard-cache-secret.html` is joined against that root and can return a readable sibling `.html` file outside the intended static tree. \\n\\nThe potential security risk seems low, as only html-ending files can be read, but still the risk of reading arbitrary html files is a confiendtiality issue in itself, which is why we decided to report. Please let us know if this is out of your project's scope.\\n\\n### Details\\nThe `--docroot` CLI option stores the configured directory in `server_options[:DocumentRoot]` at `lib/yard/cli/server.rb:198`, and adapter initialization copies that value into `adapter.document_root` at `lib/yard/server/adapter.rb:76`. For Rack requests, `RackAdapter#call` builds a request object from the Rack environment at `lib/yard/server/rack_adapter.rb:58` and passes it to `router.call(request)` at `lib/yard/server/rack_adapter.rb:60`. `Router#call` then stores the incoming request at `lib/yard/server/router.rb:55` and invokes `check_static_cache` before normal routing at `lib/yard/server/router.rb:56`. Inside `check_static_cache`, the only initial guard is that `adapter.document_root` is present at `lib/yard/server/static_caching.rb:35`; the cache path is built from `File.join(adapter.document_root, request.path.sub(/\\\\.html$/, '') + '.html')` at `lib/yard/server/static_caching.rb:36`, without cleaning `..` components first. If that resolved path is a regular file, `File.file?` accepts it at `lib/yard/server/static_caching.rb:38` and the file bytes are returned as a `200` HTML response at `lib/yard/server/static_caching.rb:40`. The later route sanitizer in `final_options` uses `File.cleanpath(...).gsub(...)` at `lib/yard/server/router.rb:181` and `lib/yard/server/router.rb:182`, but a static-cache hit returns before that code is reached.\\n\\n### PoC\\n[poc.zip](https://github.com/user-attachments/files/28185421/poc.zip)\\n\\n```bash\\nbash ./poc/run.sh\\n```\\nexpected output:\\n```text\\nrun 1: exit=0 timed_out=False duration=0.08s matched=True phase=oracle fingerprint='YARD_STATIC_CACHE_PATH_TRAVERSAL'\\nrun 2: exit=0 timed_out=False duration=0.08s matched=True phase=oracle fingerprint='YARD_STATIC_CACHE_PATH_TRAVERSAL'\\nrun 3: exit=0 timed_out=False duration=0.08s matched=True phase=oracle fingerprint='YARD_STATIC_CACHE_PATH_TRAVERSAL'\\n```\\n\\nThe `YARD_STATIC_CACHE_PATH_TRAVERSAL` fingerprint is emitted only after the PoC observes a `200` static-cache response whose body contains the sibling file outside the configured document root. A setup failure, syntax failure, or cache miss would not print this oracle and would not demonstrate this traversal read.\\n\\n### Impact\\nA remote unauthenticated HTTP client who can reach a YARD documentation server with `DocumentRoot`/`--docroot` enabled can request `.html` paths containing parent-directory components and receive readable matching files outside the configured document root. The required guards are narrow: `adapter.document_root` must be set, the traversed target must exist as a regular readable file, and the target must be reachable through the implementation's forced `.html` suffix. Those requests bypass the later `final_options` path cleanup because the cache check runs first. The resulting severity class is information disclosure: response bodies can contain off-root `.html` file contents, but this path does not show write access, code execution, or arbitrary files without the `.html` constraint.\", \"epss\": {\"percentage\": 0.00273, \"percentile\": 0.18886}, \"ghsa_id\": \"GHSA-pxcc-8665-phx8\", \"github_reviewed_at\": \"2026-06-26T22:29:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-pxcc-8665-phx8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pxcc-8665-phx8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-49342\"}], \"nvd_published_at\": \"2026-06-19T20:16:18Z\", \"published_at\": \"2026-06-26T22:29:29Z\", \"references\": [\"https://github.com/lsegal/yard/security/advisories/GHSA-pxcc-8665-phx8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-49342\", \"https://github.com/lsegal/yard/commit/f78c19f0dd33a407085b4ed181bb60c0aa0078b4\", \"https://github.com/advisories/GHSA-pxcc-8665-phx8\"], \"repository_advisory_url\": \"https://api.github.com/repos/lsegal/yard/security-advisories/GHSA-pxcc-8665-phx8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/lsegal/yard\", \"summary\": \"YARD static cache reads raw traversal paths before router sanitization\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-26T22:29:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-pxcc-8665-phx8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.44\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"yard\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.9.44\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pxcc-8665-phx8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "yard: < 0.9.44"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-49342"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "yard"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:56.915608Z",
+  "provenance": {
+    "content_sha256": "8d4b2b130c75b480a71ae2c3b2e9f27cada23e80e9e72cf96f960f44931f6a4b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-26T22:29:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pxcc-8665-phx8",
+  "status": "active",
+  "title": "YARD static cache reads raw traversal paths before router sanitization",
+  "updated_at": "2026-06-26T22:29:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pxcc-8665-phx8"
+}

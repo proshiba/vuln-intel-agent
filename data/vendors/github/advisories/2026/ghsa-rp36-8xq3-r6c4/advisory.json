@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/84507631?v=4\", \"events_url\": \"https://api.github.com/users/spbavarva/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/spbavarva/followers\", \"following_url\": \"https://api.github.com/users/spbavarva/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/spbavarva/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/spbavarva\", \"id\": 84507631, \"login\": \"spbavarva\", \"node_id\": \"MDQ6VXNlcjg0NTA3NjMx\", \"organizations_url\": \"https://api.github.com/users/spbavarva/orgs\", \"received_events_url\": \"https://api.github.com/users/spbavarva/received_events\", \"repos_url\": \"https://api.github.com/users/spbavarva/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/spbavarva/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/spbavarva/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/spbavarva\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/58337987?v=4\", \"events_url\": \"https://api.github.com/users/VladimirEliTokarev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/VladimirEliTokarev/followers\", \"following_url\": \"https://api.github.com/users/VladimirEliTokarev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/VladimirEliTokarev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/VladimirEliTokarev\", \"id\": 58337987, \"login\": \"VladimirEliTokarev\", \"node_id\": \"MDQ6VXNlcjU4MzM3OTg3\", \"organizations_url\": \"https://api.github.com/users/VladimirEliTokarev/orgs\", \"received_events_url\": \"https://api.github.com/users/VladimirEliTokarev/received_events\", \"repos_url\": \"https://api.github.com/users/VladimirEliTokarev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/VladimirEliTokarev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/VladimirEliTokarev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/VladimirEliTokarev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47140\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\n`NodeVM` blocks several dangerous Node.js builtins such as `module`, `worker_threads`, `cluster`, `vm`, `repl`, and `inspector`.\\n\\nHowever, the denylist misses `process` and `inspector/promises`. Both can be used from sandboxed code to reach host-side execution primitives.\\n\\nThis allows sandboxed code to bypass the intended builtin restrictions and execute code in the host process.\\n\\n## Details\\n\\nThe dangerous builtin denylist is defined in `lib/builtin.js`. This list does not include:\\n\\n```text\\nprocess\\ninspector/promises\\n```\\n\\nNon-denied builtins are exposed to the sandbox through:\\n\\n```js\\nbuiltins.set(key, special ? special : vm => vm.readonly(hostRequire(key)));\\n```\\n\\nBecause of this, sandboxed code can bypass the expected restrictions in two ways:\\n\\n1. `require('process').getBuiltinModule('child_process')` reloads `child_process`, even when `child_process` is excluded.\\n2. `require('inspector/promises')` exposes the Inspector protocol and can call `Runtime.evaluate` in the host process.\\n\\n## PoC\\n\\nTested on:\\n\\n```text\\nvm2: 3.11.2\\nNode.js: v25.9.0\\n```\\n\\nRun from the vm2 repository root:\\n\\n```bash\\nnode poc/dangerous-builtin-denylist-rce.js\\n```\\n[dangerous-builtin-denylist-rce.js](https://github.com/user-attachments/files/27570113/dangerous-builtin-denylist-rce.js)\\n\\n\\nThe PoC first confirms the intended restrictions work:\\n\\n```text\\nrequire(\\\"inspector\\\"): BLOCKED\\nrequire(\\\"child_process\\\"): BLOCKED\\n```\\n\\nThen it bypasses them:\\n\\n```text\\nrequire(\\\"process\\\").getBuiltinModule(\\\"child_process\\\").execFileSync(...)\\n```\\n\\nThis spawns a host child process. It also confirms:\\n\\n```text\\nrequire(\\\"inspector/promises\\\").Session().post(\\\"Runtime.evaluate\\\", ...)\\n```\\n\\nThis evaluates JavaScript in the host process.\\n\\n<img width=\\\"858\\\" height=\\\"766\\\" alt=\\\"Screenshot 2026-05-10 at 11 53 33 AM\\\" src=\\\"https://github.com/user-attachments/assets/7614aecb-5ffd-4c41-bfe8-e1fcb3b1bb59\\\" />\\n\\n## Impact\\n\\nAn attacker who can run untrusted JavaScript inside `NodeVM` with affected builtin settings can escape the sandbox and execute arbitrary code in the host process.\\n\\nThis can lead to full compromise of the application process, including reading files, writing files, spawning processes, and accessing host environment secrets.\\n\\n(This is not reachable with the default NodeVM configuration where require is disabled or no affected builtins are allowed. It affects applications that allow process, inspector/promises, or the wildcard \\\"*\\\" in require.builtin.)\\n\\n## Suggested fix\\n\\nAdd `process` and `inspector/promises` to the dangerous builtin blocklist.\\n\\nAlso consider blocking dangerous builtin families by prefix, for example blocking both:\\n\\n```text\\ninspector\\ninspector/*\\n```\\n\\ninstead of only exact module names.\", \"epss\": {\"percentage\": 0.00536, \"percentile\": 0.41528}, \"ghsa_id\": \"GHSA-rp36-8xq3-r6c4\", \"github_reviewed_at\": \"2026-05-29T17:59:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-rp36-8xq3-r6c4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rp36-8xq3-r6c4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47140\"}], \"nvd_published_at\": \"2026-06-12T15:16:28Z\", \"published_at\": \"2026-05-29T17:59:23Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-rp36-8xq3-r6c4\", \"https://github.com/patriksimek/vm2/commit/a1ed47a98d1cc36cb48c0d566d55889688e0b59b\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-47140\", \"https://github.com/advisories/GHSA-rp36-8xq3-r6c4\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-rp36-8xq3-r6c4\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"NodeVM builtin denylist bypass via process and inspector/promises allows host code execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T20:56:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-rp36-8xq3-r6c4\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rp36-8xq3-r6c4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-47140"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-20T19:51:58.934832Z",
+  "provenance": {
+    "content_sha256": "b3889163e22217d9eeb9a60833bb1183313d2db3bf6919e29df6a87be41694f1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-29T17:59:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rp36-8xq3-r6c4",
+  "status": "active",
+  "title": "NodeVM builtin denylist bypass via process and inspector/promises allows host code execution",
+  "updated_at": "2026-06-12T20:56:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rp36-8xq3-r6c4"
+}

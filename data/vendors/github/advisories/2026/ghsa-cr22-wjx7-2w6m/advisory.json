@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/37188444?v=4\", \"events_url\": \"https://api.github.com/users/axsharma/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/axsharma/followers\", \"following_url\": \"https://api.github.com/users/axsharma/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/axsharma/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/axsharma\", \"id\": 37188444, \"login\": \"axsharma\", \"node_id\": \"MDQ6VXNlcjM3MTg4NDQ0\", \"organizations_url\": \"https://api.github.com/users/axsharma/orgs\", \"received_events_url\": \"https://api.github.com/users/axsharma/received_events\", \"repos_url\": \"https://api.github.com/users/axsharma/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/axsharma/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/axsharma/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/axsharma\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/102229946?v=4\", \"events_url\": \"https://api.github.com/users/0xmagic0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xmagic0/followers\", \"following_url\": \"https://api.github.com/users/0xmagic0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xmagic0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xmagic0\", \"id\": 102229946, \"login\": \"0xmagic0\", \"node_id\": \"U_kgDOBhfnug\", \"organizations_url\": \"https://api.github.com/users/0xmagic0/orgs\", \"received_events_url\": \"https://api.github.com/users/0xmagic0/received_events\", \"repos_url\": \"https://api.github.com/users/0xmagic0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xmagic0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xmagic0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xmagic0\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46519\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\n`mcp-server-kubernetes` exposes three environment variables (`ALLOW_ONLY_READONLY_TOOLS`, `ALLOW_ONLY_NON_DESTRUCTIVE_TOOLS`, `ALLOWED_TOOLS`) documented as access controls for restricting which Kubernetes operations are available. These controls are enforced at the tool discovery layer (`tools/list`) but not at the execution layer (`tools/call`). Any client that knows a tool name can invoke it directly regardless of the configured restriction mode. The access control was effectively cosmetic.\\n\\nFixed in v3.6.0.\\n\\n## Impact\\n\\nAn attacker or misconfigured AI agent with network access to the MCP server's HTTP endpoint could invoke any Kubernetes tool regardless of the restriction mode configured by the operator -- including `kubectl_delete`, `exec_in_pod`, `kubectl_generic`, and `node_management`.\\n\\nThe project explicitly supports and documents multi-client HTTP deployment scenarios (Streamable HTTP and SSE transports, in-cluster deployments, Codex CLI and Gemini CLI integrations). In these deployments, operators relied on the tool restriction env vars to enforce least-privilege access across users or roles. The bypass invalidated that model entirely.\\n\\nSeverity scales with the Kubernetes service account's permissions. In environments where the MCP server runs with `cluster-admin` (common in dev/staging), this is equivalent to full cluster compromise for any client that can reach the endpoint.\\n\\nThe `MCP_AUTH_TOKEN` / `X-MCP-AUTH` mechanism controls who can reach the endpoint but provides no per-tool authorization. An authenticated client restricted to `ALLOWED_TOOLS=kubectl_get` could still invoke `kubectl_delete` after authentication.\\n\\n## Root Cause\\n\\nIn `src/index.ts`, the `ListToolsRequestSchema` handler applied the configured filtering logic before returning available tools. The `CallToolRequestSchema` handler dispatched directly by tool name with no equivalent check -- every tool was reachable unconditionally.\\n\\n## Proof of Concept\\n\\nTested across all three restriction modes against a live kind cluster. In each case, `kubectl_delete` was absent from `tools/list` but executed successfully via a direct `tools/call` request:\\n\\n```shell\\ncurl -s http://<HOST>:3003/mcp \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -H 'Accept: application/json, text/event-stream' \\\\\\n  -d '{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"kubectl_delete\\\",\\\"arguments\\\":{\\\"resourceType\\\":\\\"pod\\\",\\\"name\\\":\\\"test-pod\\\",\\\"namespace\\\":\\\"default\\\"}}}'\\n```\\n\\nResult: `{\\\"result\\\":{\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"pod \\\\\\\"test-pod\\\\\\\" deleted\\\\n\\\"}]}}`\\n\\nConfirmed across `ALLOW_ONLY_READONLY_TOOLS=true`, `ALLOW_ONLY_NON_DESTRUCTIVE_TOOLS=true`, and `ALLOWED_TOOLS=kubectl_get`.\\n\\n## Remediation\\n\\nThe fix applies the same filtering logic from `ListToolsRequestSchema` at the start of the `CallToolRequestSchema` handler, returning an error for any tool call outside the active allowed set. Fixed in v3.6.0.\\n\\n## Credit\\n\\nDiscovered by [Francisco Rosales](https://www.linkedin.com/in/francisco-rosales-celis/) of [Manifold Security](https://manifold.security), coordinated by [Ax Sharma](https://www.linkedin.com/in/axsharma/), Head of Research at Manifold Security.\", \"epss\": {\"percentage\": 0.00376, \"percentile\": 0.29528}, \"ghsa_id\": \"GHSA-cr22-wjx7-2w6m\", \"github_reviewed_at\": \"2026-05-21T20:33:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-cr22-wjx7-2w6m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cr22-wjx7-2w6m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46519\"}], \"nvd_published_at\": \"2026-06-11T19:16:42Z\", \"published_at\": \"2026-05-21T20:33:46Z\", \"references\": [\"https://github.com/Flux159/mcp-server-kubernetes/security/advisories/GHSA-cr22-wjx7-2w6m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46519\", \"https://github.com/Flux159/mcp-server-kubernetes/releases/tag/v3.6.0\", \"https://github.com/advisories/GHSA-cr22-wjx7-2w6m\"], \"repository_advisory_url\": \"https://api.github.com/repos/Flux159/mcp-server-kubernetes/security-advisories/GHSA-cr22-wjx7-2w6m\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Flux159/mcp-server-kubernetes\", \"summary\": \"MCP Server Kubernetes: Tool Access Control Bypass via Presentation-Layer Filtering Without Execution-Layer Enforcement\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-12T19:26:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-cr22-wjx7-2w6m\", \"vulnerabilities\": [{\"first_patched_version\": \"3.6.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"mcp-server-kubernetes\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cr22-wjx7-2w6m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-server-kubernetes: < 3.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-46519"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-server-kubernetes"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.014689Z",
+  "provenance": {
+    "content_sha256": "e1b9c9e69f8415f68673bd20c87e1d4732fe92692e8c9213f8fb888c9a1e52c4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-21T20:33:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cr22-wjx7-2w6m",
+  "status": "active",
+  "title": "MCP Server Kubernetes: Tool Access Control Bypass via Presentation-Layer Filtering Without Execution-Layer Enforcement",
+  "updated_at": "2026-06-12T19:26:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cr22-wjx7-2w6m"
+}

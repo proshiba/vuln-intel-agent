@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/128927952?v=4\", \"events_url\": \"https://api.github.com/users/sfwani/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sfwani/followers\", \"following_url\": \"https://api.github.com/users/sfwani/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sfwani/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sfwani\", \"id\": 128927952, \"login\": \"sfwani\", \"node_id\": \"U_kgDOB69I0A\", \"organizations_url\": \"https://api.github.com/users/sfwani/orgs\", \"received_events_url\": \"https://api.github.com/users/sfwani/received_events\", \"repos_url\": \"https://api.github.com/users/sfwani/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sfwani/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sfwani/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sfwani\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45675\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}], \"description\": \"## Summary\\n\\nThe LDAP and OAuth authentication flows use a TOCTOU (Time-of-Check-Time-of-Use) pattern for first-user admin role assignment. The regular signup handler (`signup_handler` in auths.py, line 663) was explicitly patched to prevent this race with the comment *\\\"Insert with default role first to avoid TOCTOU race\\\"*, but the LDAP and OAuth code paths were never updated with the same fix.\\n\\n## Vulnerable Code\\n\\n### LDAP (auths.py, lines 479-490)\\n```python\\n# Line 482 - CHECK: is the user table empty?\\nrole = 'admin' if not Users.has_users(db=db) else request.app.state.config.DEFAULT_USER_ROLE\\n\\n# Lines 484-490 - USE: create user with the role determined above\\nuser = Auths.insert_new_auth(\\n    email=email,\\n    password=str(uuid.uuid4()),\\n    name=cn,\\n    role=role,   # <-- role was determined BEFORE insert, race window exists\\n    db=db,\\n)\\n```\\n\\n### OAuth (oauth.py, lines 1103-1112, 1566-1574)\\n```python\\n# Line 1104 - CHECK: count users\\ndef get_user_role(self, user, user_data):\\n    user_count = Users.get_num_users()\\n    if not user and user_count == 0:\\n        return 'admin'    # Line 1112\\n\\n# Lines 1566-1574 - USE: create user with pre-determined role\\nuser = Auths.insert_new_auth(\\n    ...\\n    role=self.get_user_role(None, user_data),  # Line 1571\\n    ...\\n)\\n```\\n\\nBoth paths determine the role BEFORE inserting the user, creating a race window where multiple concurrent requests on a fresh instance can all observe an empty database and all receive the `admin` role.\\n\\n## Comparison with Patched Signup\\n\\nThe `signup_handler` (auths.py, line 663) was explicitly fixed:\\n```python\\n# Insert with default role first to avoid TOCTOU race\\nuser = Auths.insert_new_auth(..., role=DEFAULT_USER_ROLE, ...)\\n# Then check if this is the only user and upgrade\\nif Users.get_num_users() == 1:\\n    Users.update_user_role_by_id(user.id, 'admin')\\n```\\n\\nThe LDAP and OAuth paths did NOT receive this fix.\\n\\n## Exploitation\\n\\n1. Deploy Open WebUI with LDAP or OAuth enabled on a fresh instance (no existing users)\\n2. Send multiple concurrent authentication requests from different users\\n3. Multiple requests pass the `has_users()` / `get_num_users() == 0` check simultaneously\\n4. All concurrent users become administrators\\n\\n`DATABASE_ENABLE_SESSION_SHARING` defaults to `False` (env.py:387), so each call uses its own database session, widening the race window.\\n\\n## Impact\\n\\nAny LDAP/OAuth user who times their first login concurrently with the legitimate first admin can escalate to full admin privileges, gaining access to all user data, system configuration, API keys, and connected LLM backends.\\n\\n## Suggested Fix\\n\\nApply the same insert-then-check pattern used in `signup_handler`: insert the user with `DEFAULT_USER_ROLE` first, then atomically check if this is the only user and upgrade to admin only if so.\\n\\n## Resolution\\n\\nFixed in PR [#23626](https://github.com/open-webui/open-webui/pull/23626) (commit [96a0b3239](https://github.com/open-webui/open-webui/commit/96a0b3239b1aadb23fc359bf10849c9ba12fd6ec)), first released in **v0.9.0** (Apr 2026). Both LDAP (`routers/auths.py`) and OAuth (`utils/oauth.py`) registration paths now use the same insert-first-check-after pattern that `signup_handler` already had:\\n\\n1. Insert the new user with `DEFAULT_USER_ROLE` unconditionally — no pre-insert role decision based on user count.\\n2. After the insert commits, atomically call `Users.get_num_users() == 1` to check whether this is the sole user.\\n3. Only the sole user gets promoted to `admin` via `Users.update_user_role_by_id`.\\n\\n`OAuthManager.get_user_role` was also updated to return `DEFAULT_USER_ROLE` (not `admin`) for first-user bootstrap; admin promotion is deferred to the post-insert check above. With this ordering, two concurrent first-user registrations that both observe an empty table can both insert, but only one will see `get_num_users() == 1` afterward — the other will see `== 2` and not be promoted.\\n\\nUsers on `>= 0.9.0` are not affected.\", \"epss\": {\"percentage\": 0.00354, \"percentile\": 0.27503}, \"ghsa_id\": \"GHSA-h3ww-q6xx-w7x3\", \"github_reviewed_at\": \"2026-05-14T20:28:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-h3ww-q6xx-w7x3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h3ww-q6xx-w7x3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45675\"}], \"nvd_published_at\": \"2026-05-15T20:16:49Z\", \"published_at\": \"2026-05-14T20:28:46Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-h3ww-q6xx-w7x3\", \"https://github.com/open-webui/open-webui/pull/23626\", \"https://github.com/open-webui/open-webui/commit/96a0b3239b1aadb23fc359bf10849c9ba12fd6ec\", \"https://github.com/open-webui/open-webui/releases/tag/v0.9.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45675\", \"https://github.com/pypa/advisory-database/tree/main/vulns/open-webui/PYSEC-2026-2730.yaml\", \"https://github.com/advisories/GHSA-h3ww-q6xx-w7x3\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-h3ww-q6xx-w7x3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: LDAP and OAuth First-User Race Condition Allows Multiple Admin Accounts\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-15T21:50:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-h3ww-q6xx-w7x3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.12\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h3ww-q6xx-w7x3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.8.12"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45675"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:54.943794Z",
+  "provenance": {
+    "content_sha256": "eb13ce1b7eded7c8bfb549dc524fc15f67aa44c3b9c7d738c37c4c5883bc004f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-14T20:28:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h3ww-q6xx-w7x3",
+  "status": "active",
+  "title": "Open WebUI: LDAP and OAuth First-User Race Condition Allows Multiple Admin Accounts",
+  "updated_at": "2026-07-15T21:50:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h3ww-q6xx-w7x3"
+}

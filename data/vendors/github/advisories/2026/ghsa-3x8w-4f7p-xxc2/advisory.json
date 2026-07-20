@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-44552\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-668\", \"name\": \"Exposure of Resource to Wrong Sphere\"}], \"description\": \"# Redis Cache Keys tool_servers and terminal_servers Missing Instance Prefix Enable Cross-Instance Cache Poisoning\\n\\n## Affected Component\\n\\nTool server and terminal server Redis cache:\\n- `backend/open_webui/utils/tools.py` (line 841, tool_servers SET)\\n- `backend/open_webui/utils/tools.py` (line 850, tool_servers GET)\\n- `backend/open_webui/utils/tools.py` (line 976, terminal_servers SET)\\n- `backend/open_webui/utils/tools.py` (line 986, terminal_servers GET)\\n\\n## Affected Versions\\n\\nCurrent main branch (commit `6fdd19bf1`) and likely all versions since the tool server / terminal server Redis cache was introduced.\\n\\n## Description\\n\\nOpen WebUI uses a `REDIS_KEY_PREFIX` (default `open-webui`) to namespace Redis keys, allowing multiple instances to safely share a single Redis backend. Every Redis key in the codebase uses this prefix — except the `tool_servers` and `terminal_servers` keys in `utils/tools.py`, which use bare key names.\\n\\nWhen two or more Open WebUI instances share a Redis database (a supported and documented deployment pattern, e.g., for multi-region deployments, blue-green setups, or cluster topologies), the unprefixed keys collide. An admin on Instance A writing to `tool_servers` overwrites the value read by Instance B — causing Instance B's users to receive Instance A's tool server configuration.\\n\\n```python\\n# utils/tools.py — unprefixed keys (problem)\\nawait request.app.state.redis.set('tool_servers', ...)        # line 841\\njson.loads(await request.app.state.redis.get('tool_servers')) # line 850\\nawait request.app.state.redis.set('terminal_servers', ...)    # line 976\\njson.loads(await request.app.state.redis.get('terminal_servers'))  # line 986\\n\\n# Every other Redis key in the codebase — prefixed (correct pattern)\\nf'{REDIS_KEY_PREFIX}:auth:token:{jti}:revoked'\\nf'{REDIS_KEY_PREFIX}:ratelimit:{email}:{bucket}'\\nf'{REDIS_KEY_PREFIX}:tasks:commands'\\n```\\n\\n## Attack Scenario\\n\\nTwo Open WebUI instances (A and B) share a Redis backend — a supported deployment for multi-region setups, blue-green deployments, or hot-standby. Both instances have their own admin accounts; the shared Redis was chosen for coordinated session handling, rate limiting, and task management.\\n\\n1. Attacker is an admin on Instance A (a legitimately provisioned admin, or one that escalated via any available path including the LDAP empty-password or stale-admin-role findings).\\n2. Attacker on Instance A configures a tool server pointing to `https://attacker-controlled.example.com/openapi.json`. This triggers `utils/tools.py:841` to write the new tool server list under the bare key `tool_servers`.\\n3. Instance B's users query tools. Instance B reads from `tool_servers` (line 850) — gets Instance A's poisoned list, which now includes the attacker's server alongside or instead of Instance B's legitimate tool servers.\\n4. Instance B's users invoke tools through the model's context. The attacker's server receives tool call payloads containing: chat content, user identity, OAuth tokens scoped to the tool server (if the user has bound their external account), and in-flight conversation context.\\n5. The attacker's server returns arbitrary tool responses, which are fed back into Instance B's LLM context as \\\"trusted tool output\\\" — enabling prompt injection, misinformation delivery, and further data exfiltration cascades.\\n\\nThe same cross-instance poisoning applies to `terminal_servers`.\\n\\n## Impact\\n\\n- Cross-instance cache poisoning: an admin on one instance affects all users of another instance sharing the Redis backend\\n- Data exfiltration: tool call payloads contain chat content and user identity, delivered to the attacker's server\\n- Prompt injection delivery: attacker-returned tool responses enter the victim instance's LLM context as trusted data\\n- Undermines the multi-instance isolation guarantee that `REDIS_KEY_PREFIX` was introduced to provide\\n- Silent failure mode: no error is raised; the victim instance sees a valid, signed cache entry and has no way to detect it came from a different instance\\n\\n## Preconditions\\n\\n- Multiple Open WebUI instances share a single Redis backend (a supported and documented deployment)\\n- Attacker has admin access on one of the instances (or escalates to admin via any available path)\", \"epss\": {\"percentage\": 0.00305, \"percentile\": 0.22502}, \"ghsa_id\": \"GHSA-3x8w-4f7p-xxc2\", \"github_reviewed_at\": \"2026-05-08T19:44:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-3x8w-4f7p-xxc2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3x8w-4f7p-xxc2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-44552\"}], \"nvd_published_at\": \"2026-05-15T20:16:46Z\", \"published_at\": \"2026-05-08T19:44:40Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-3x8w-4f7p-xxc2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-44552\", \"https://github.com/advisories/GHSA-3x8w-4f7p-xxc2\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-3x8w-4f7p-xxc2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Redis Cache Keys tool_servers and terminal_servers Missing Instance Prefix Enable Cross-Instance Cache Poisoning\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-15T23:52:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-3x8w-4f7p-xxc2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.9.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.8.12\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3x8w-4f7p-xxc2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: <= 0.8.12"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-44552"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.024164Z",
+  "provenance": {
+    "content_sha256": "4a891b097890ab9b1315d376eb1ff431e7d93fc84be9cc4bb4eec03c4486adac",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-08T19:44:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3x8w-4f7p-xxc2",
+  "status": "active",
+  "title": "Open WebUI: Redis Cache Keys tool_servers and terminal_servers Missing Instance Prefix Enable Cross-Instance Cache Poisoning",
+  "updated_at": "2026-05-15T23:52:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3x8w-4f7p-xxc2"
+}

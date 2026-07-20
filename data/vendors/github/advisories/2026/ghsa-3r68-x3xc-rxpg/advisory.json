@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/138348615?v=4\", \"events_url\": \"https://api.github.com/users/bx33661/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bx33661/followers\", \"following_url\": \"https://api.github.com/users/bx33661/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bx33661/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bx33661\", \"id\": 138348615, \"login\": \"bx33661\", \"node_id\": \"U_kgDOCD8IRw\", \"organizations_url\": \"https://api.github.com/users/bx33661/orgs\", \"received_events_url\": \"https://api.github.com/users/bx33661/received_events\", \"repos_url\": \"https://api.github.com/users/bx33661/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bx33661/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bx33661/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bx33661\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-43901\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Description\\n\\n### Impact\\n\\n`wireshark-mcp` exposes a `wireshark_export_objects` MCP tool that accepts an attacker-controlled `dest_dir` parameter and passes it to tshark's `--export-objects` flag with **no mandatory path restriction**.\\n\\nThe path sandbox (`_allowed_dirs`) is `None` by default and only activates when the environment variable `WIRESHARK_MCP_ALLOWED_DIRS` is explicitly set. In a default installation, any directory on the filesystem can be used as the export destination.\\n\\n**Affected code** (`src/wireshark_mcp/tshark/client.py:531-543`):\\n\\n```python\\n\\noutput_validation = self._validate_output_path(dest_dir)\\n\\n# _validate_output_path only enforces the sandbox when _allowed_dirs is set.\\n\\n# Default: _allowed_dirs = None → no restriction.\\n\\nos.makedirs(dest_dir, exist_ok=True)   # creates arbitrary directories\\n\\ncmd = [..., \\\"--export-objects\\\", f\\\"{protocol},{dest_dir}\\\"]\\n\\n```\\n\\n### Attack Scenario\\n\\nAn attacker embeds a crafted HTTP response in a pcap file (e.g. `Content-Disposition: filename=authorized_keys`). Via prompt injection in the pcap payload, an AI model using this MCP server is manipulated into calling `wireshark_export_objects` with:\\n\\n```bash\\n\\ndest_dir=/home/user/.ssh/\\n\\n```\\n\\n`tshark` then extracts and writes the HTTP object to that path, granting the attacker SSH access.\\n\\nThe same technique can target:\\n\\n- `/etc/cron.d/`\\n\\n- Writable web roots\\n\\n- Other sensitive filesystem locations\\n\\n### Additional Affected Operations\\n\\nThe same missing sandbox affects:\\n\\n- `merge_pcap_files`\\n\\n- `editcap_trim`\\n\\n- `editcap_split`\\n\\n- `editcap_time_shift`\\n\\n- `editcap_deduplicate`\\n\\n- `text2pcap_import`\\n\\n### Proof of Concept\\n\\nConfirmed on **wireshark-mcp v1.1.5** with **tshark 4.6.4**.\\n\\nA crafted pcap’s HTTP object was successfully written to an arbitrary filesystem path when:\\n\\n```python\\n\\n_allowed_dirs = None\\n\\n```\\n\\n---\\n\\n## Patches\\n\\nNot yet patched.\\n\\nA fix should make the path sandbox **mandatory** for all file-write operations rather than optional:\\n\\n```python\\n\\n# Reject all write operations when no sandbox is configured\\n\\nif not self._allowed_dirs:\\n\\n    return json.dumps({\\n\\n        \\\"success\\\": False,\\n\\n        \\\"error\\\": {\\n\\n            \\\"type\\\": \\\"SecurityError\\\",\\n\\n            \\\"message\\\": \\\"Set WIRESHARK_MCP_ALLOWED_DIRS before using file-write operations\\\"\\n\\n        }\\n\\n    })\\n\\n```\\n\\n---\\n\\n## Workarounds\\n\\nSet `WIRESHARK_MCP_ALLOWED_DIRS` to a restricted safe directory before starting the server:\\n\\n```bash\\n\\nexport WIRESHARK_MCP_ALLOWED_DIRS=/tmp/wireshark_mcp_safe\\n\\n```\\n\\nThis activates the existing sandbox and blocks writes outside the allowed path.\\n\\n---\\n\\n## Resources\\n\\n- Vulnerable code:\\n\\n  - `src/wireshark_mcp/tshark/client.py` lines 521–543\\n\\n  - `src/wireshark_mcp/tshark/client.py` lines 685–839\\n\\n- CWE-22: Improper Limitation of a Pathname to a Restricted Directory\\n\\n- CWE-73: External Control of File Name or Path\", \"epss\": {\"percentage\": 0.00281, \"percentile\": 0.19677}, \"ghsa_id\": \"GHSA-3r68-x3xc-rxpg\", \"github_reviewed_at\": \"2026-05-05T20:15:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-3r68-x3xc-rxpg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3r68-x3xc-rxpg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-43901\"}], \"nvd_published_at\": \"2026-05-11T23:20:21Z\", \"published_at\": \"2026-05-05T20:15:12Z\", \"references\": [\"https://github.com/bx33661/Wireshark-MCP/security/advisories/GHSA-3r68-x3xc-rxpg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-43901\", \"https://github.com/advisories/GHSA-3r68-x3xc-rxpg\"], \"repository_advisory_url\": \"https://api.github.com/repos/bx33661/Wireshark-MCP/security-advisories/GHSA-3r68-x3xc-rxpg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/bx33661/Wireshark-MCP\", \"summary\": \"wireshark-mcp vulnerable to arbitrary file write via export_objects when WIRESHARK_MCP_ALLOWED_DIRS is not configured\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-13T15:20:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-3r68-x3xc-rxpg\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"pip\", \"name\": \"wireshark-mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3r68-x3xc-rxpg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wireshark-mcp: <= 1.1.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-43901"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wireshark-mcp"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:02.631215Z",
+  "provenance": {
+    "content_sha256": "5cf04d62e1b7d6cf08bca812882c91217266e5bb03cf6c25a074a928b8e1a8a0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-05T20:15:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3r68-x3xc-rxpg",
+  "status": "active",
+  "title": "wireshark-mcp vulnerable to arbitrary file write via export_objects when WIRESHARK_MCP_ALLOWED_DIRS is not configured",
+  "updated_at": "2026-05-13T15:20:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3r68-x3xc-rxpg"
+}

