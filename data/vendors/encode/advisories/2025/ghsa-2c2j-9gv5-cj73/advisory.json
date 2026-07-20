@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "### Summary\nWhen parsing a multi-part form with large files (greater than the [default max spool size](https://github.com/encode/starlette/blob/fa5355442753f794965ae1af0f87f9fec1b9a3de/starlette/formparsers.py#L126)) `starlette` will block the main thread to roll the file over to disk. This blocks the event thread which means we can't accept new connections.\n\n### Details\nPlease see this discussion for details: https://github.com/encode/starlette/discussions/2927#discussioncomment-13721403. In summary the following UploadFile code (copied from [here](https://github.com/encode/starlette/blob/fa5355442753f794965ae1af0f87f9fec1b9a3de/starlette/datastructures.py#L436C5-L447C14)) has a minor bug. Instead of just checking for `self._in_memory` we should also check if the additional bytes will cause a rollover.\n\n```python\n\n    @property\n    def _in_memory(self) -> bool:\n        # check for SpooledTemporaryFile._rolled\n        rolled_to_disk = getattr(self.file, \"_rolled\", True)\n        return not rolled_to_disk\n\n    async def write(self, data: bytes) -> None:\n        if self.size is not None:\n            self.size += len(data)\n\n        if self._in_memory:\n            self.file.write(data)\n        else:\n            await run_in_threadpool(self.file.write, data)\n```\n\nI have already created a PR which fixes the problem: https://github.com/encode/starlette/pull/2962\n\n\n### PoC\nSee the discussion [here](https://github.com/encode/starlette/discussions/2927#discussioncomment-13721403) for steps on how to reproduce.\n\n### Impact\nTo be honest, very low and not many users will be impacted. Parsing large forms is already CPU intensive so the additional IO block doesn't slow down `starlette` that much on systems with modern HDDs/SSDs. If someone is running on tape they might see a greater impact.",
+  "canonical_id": "encode:ghsa-2c2j-9gv5-cj73",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-54121"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [
+      "starlette: 0.47.2"
+    ],
+    "mitigations": [],
+    "products": [
+      "starlette"
+    ],
+    "remote": true,
+    "vendor_severity": "MODERATE"
+  },
+  "first_seen_at": "2026-07-20T03:34:29.214216Z",
+  "provenance": {
+    "content_sha256": "35a1d01aa7b450019effcfd920fe110b16ff41ca65590e818e03d3ec758f8f60",
+    "extractor_version": "0.1.0",
+    "source_type": "osv"
+  },
+  "published_at": "2025-07-21T19:34:23Z",
+  "schema_version": 1,
+  "source_id": "starlette_github",
+  "source_url": "https://github.com/encode/starlette/security/advisories/GHSA-2c2j-9gv5-cj73",
+  "status": "active",
+  "title": "Starlette has possible denial-of-service vector when parsing large files in multipart forms",
+  "updated_at": "2026-07-07T17:57:05.760766Z",
+  "vendor": "Encode",
+  "vendor_advisory_id": "GHSA-2c2j-9gv5-cj73"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "## Impact\n\nThere is a potential vulnerability in Traefik NGINX provider managing the `nginx.ingress.kubernetes.io/proxy-ssl-verify` annotation.\n\nThe provider inverts the semantics of the `nginx.ingress.kubernetes.io/proxy-ssl-verify` annotation. Setting the annotation to `\"on\"` (intending to enable backend TLS certificate verification) actually disables verification, allowing man-in-the-middle attacks against HTTPS backends when operators believe they are protected.\n\n## Patches\n\n- https://github.com/traefik/traefik/releases/tag/v3.6.3\n\n## For more information\n\nIf you have any questions or comments about this advisory, please [open an issue](https://github.com/traefik/traefik/issues).\n\n<details>\n<summary>Original Description</summary>\n\n### Summary\n\nA logic error in Traefik's experimental ingress-nginx provider inverts the semantics of the `nginx.ingress.kubernetes.io/proxy-ssl-verify` annotation. Setting the annotation to `\"on\"` (intending to enable backend TLS certificate verification) actually disables verification, allowing man-in-the-middle attacks against HTTPS backends when operators believe they are protected.\n\n### Details\n\nIn `pkg/provider/kubernetes/ingress-nginx/kubernetes.go` at line 512, the `InsecureSkipVerify` field is set using inverted logic:\n\n```go\nnst := &namedServersTransport{\n    Name: provider.Normalize(namespace + \"-\" + name),\n    ServersTransport: &dynamic.ServersTransport{\n        ServerName:         ptr.Deref(cfg.ProxySSLName, ptr.Deref(cfg.ProxySSLServerName, \"\")),\n        InsecureSkipVerify: strings.ToLower(ptr.Deref(cfg.ProxySSLVerify, \"off\")) == \"on\",\n    },\n}\n```\n\nThe expression `== \"on\"` evaluates to `true` when the annotation is `\"on\"`, setting `InsecureSkipVerify: true`. In Go's `crypto/tls`, `InsecureSkipVerify: true` means \"do not verify the server's certificate\" — the opposite of what `proxy-ssl-verify: \"on\"` should do according to NGINX semantics.\n\n**Current behavior:**\n| Annotation Value | InsecureSkipVerify | Actual Result |\n|------------------|-------------------|---------------|\n| `\"on\"` | `true` | Verification **disabled** ❌ |\n| `\"off\"` (default) | `false` | Verification **enabled** |\n\n**Expected behavior (per NGINX semantics):**\n| Annotation Value | InsecureSkipVerify | Expected Result |\n|------------------|-------------------|-----------------|\n| `\"on\"` | `false` | Verification **enabled** |\n| `\"off\"` (default) | `true` | Verification **disabled** |\n\nThe test in `pkg/provider/kubernetes/ingress-nginx/kubernetes_test.go` lines 397-403 confirms this inverted behavior is codified as \"expected\":\n\n```go\nServersTransports: map[string]*dynamic.ServersTransport{\n    \"default-ingress-with-proxy-ssl\": {\n        ServerName:         \"whoami.localhost\",\n        InsecureSkipVerify: true,  // Wrong: should be false when annotation is \"on\"\n        RootCAs:            []types.FileOrContent{\"-----BEGIN CERTIFICATE-----\"},\n    },\n},\n```\n\n**Affected versions:** v3.5.0 through current master (introduced in commit `9bd5c617820f2a8d23b50b68d114bb7bc464eccd`)\n\nPavel Kohout\nAisle Research\n</details>\n\n-",
+  "canonical_id": "traefik-labs:ghsa-7vww-mvcr-x6vj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-66491"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [
+      "github.com/traefik/traefik/v3: 3.6.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/traefik/traefik/v3"
+    ],
+    "remote": true,
+    "vendor_severity": "MODERATE"
+  },
+  "first_seen_at": "2026-07-20T03:29:49.272171Z",
+  "provenance": {
+    "content_sha256": "c3d0ec945adcb92d66776f19cc9ce5763a43ee8e3f29bb56209db4f4c3760848",
+    "extractor_version": "0.1.0",
+    "source_type": "osv"
+  },
+  "published_at": "2025-12-08T16:43:06Z",
+  "schema_version": 1,
+  "source_id": "traefik_github",
+  "source_url": "https://github.com/traefik/traefik/security/advisories/GHSA-7vww-mvcr-x6vj",
+  "status": "active",
+  "title": "Traefik Inverted TLS Verification Logic in ingress-nginx Provider",
+  "updated_at": "2026-07-02T14:44:23.840812Z",
+  "vendor": "Traefik Labs",
+  "vendor_advisory_id": "GHSA-7vww-mvcr-x6vj"
+}

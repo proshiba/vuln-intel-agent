@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "### Summary\nWhen using `StaticFiles`, if there's a file or directory that starts with the same name as the `StaticFiles` directory, that file or directory is also exposed via `StaticFiles` which is a path traversal vulnerability.\n\n### Details\nThe root cause of this issue is the usage of `os.path.commonprefix()`:\nhttps://github.com/encode/starlette/blob/4bab981d9e870f6cee1bd4cd59b87ddaf355b2dc/starlette/staticfiles.py#L172-L174\n\nAs stated in the Python documentation (https://docs.python.org/3/library/os.path.html#os.path.commonprefix) this function returns the longest prefix common to paths.\n\nWhen passing a path like `/static/../static1.txt`, `os.path.commonprefix([full_path, directory])` returns `./static` which is the common part of `./static1.txt` and `./static`, It refers to `/static/../static1.txt` because it is considered in the staticfiles directory. As a result, it becomes possible to view files that should not be open to the public.\n\nThe solution is to use `os.path.commonpath` as the Python documentation explains that `os.path.commonprefix` works a character at a time, it does not treat the arguments as paths.\n\n### PoC\nIn order to reproduce the issue, you need to create the following structure:\n\n```\n├── static\n│   ├── index.html\n├── static_disallow\n│   ├── index.html\n└── static1.txt\n```\n\nAnd run the `Starlette` app with:\n\n```py\nimport uvicorn\nfrom starlette.applications import Starlette\nfrom starlette.routing import Mount\nfrom starlette.staticfiles import StaticFiles\n\n\nroutes = [\n    Mount(\"/static\", app=StaticFiles(directory=\"static\", html=True), name=\"static\"),\n]\n\napp = Starlette(routes=routes)\n\n\nif __name__ == \"__main__\":\n    uvicorn.run(app, host=\"0.0.0.0\", port=8000)\n```\n\nAnd running the commands:\n\n```shell\ncurl --path-as-is 'localhost:8000/static/../static_disallow/'\ncurl --path-as-is 'localhost:8000/static/../static1.txt'\n```\nThe `static1.txt` and the directory `static_disallow` are exposed.\n\n### Impact\nConfidentiality is breached: An attacker may obtain files that should not be open to the public.\n\n### Credits\nSecurity researcher **Masashi Yamane of LAC Co., Ltd** reported this vulnerability to **JPCERT/CC Vulnerability Coordination Group** and they contacted us to coordinate a patch for the security issue.",
+  "canonical_id": "encode:ghsa-v5gw-mw7f-84px",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2023-29159"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [
+      "starlette: 0.27.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "starlette"
+    ],
+    "remote": true,
+    "vendor_severity": "MODERATE"
+  },
+  "first_seen_at": "2026-07-20T03:34:29.298701Z",
+  "provenance": {
+    "content_sha256": "e5c82adb10f269d88cf5a036a6904a8f344c8e5c71e0fd47a8606f2f24298177",
+    "extractor_version": "0.1.0",
+    "source_type": "osv"
+  },
+  "published_at": "2023-05-17T03:49:14Z",
+  "schema_version": 1,
+  "source_id": "starlette_github",
+  "source_url": "https://github.com/encode/starlette/security/advisories/GHSA-v5gw-mw7f-84px",
+  "status": "active",
+  "title": "Starlette has Path Traversal vulnerability in StaticFiles",
+  "updated_at": "2026-07-08T06:53:10.504182Z",
+  "vendor": "Encode",
+  "vendor_advisory_id": "GHSA-v5gw-mw7f-84px"
+}
