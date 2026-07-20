@@ -105,8 +105,7 @@ class JsonApiCollector:
                 )
                 if len(records) > source.max_items:
                     raise CollectorError(
-                        f"{source.id}: JSON exceeds configured limit of "
-                        f"{source.max_items} items"
+                        f"{source.id}: JSON exceeds configured limit of {source.max_items} items"
                     )
 
             next_url = (
@@ -118,8 +117,7 @@ class JsonApiCollector:
                 break
             if page_count >= _MAX_PAGES:
                 raise CollectorError(
-                    f"{source.id}: JSON pagination exceeds configured limit of "
-                    f"{_MAX_PAGES} pages"
+                    f"{source.id}: JSON pagination exceeds configured limit of {_MAX_PAGES} pages"
                 )
             if next_url in seen_pages:
                 raise CollectorError(f"{source.id}: JSON pagination loop detected")
@@ -179,10 +177,9 @@ class JsonApiCollector:
     def _collection_url(url: str, since: datetime) -> str:
         parsed = urlsplit(url)
         since_utc = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
-        if (
-            (parsed.hostname or "").casefold() == _NETAPP_API_HOST
-            and parsed.path.rstrip("/") == _NETAPP_API_PATH
-        ):
+        if (parsed.hostname or "").casefold() == _NETAPP_API_HOST and parsed.path.rstrip(
+            "/"
+        ) == _NETAPP_API_PATH:
             netapp_query = dict(parse_qsl(parsed.query, keep_blank_values=True))
             netapp_query["limit"] = netapp_query.get("limit", "100")
             netapp_query["skip"] = "0"
@@ -195,10 +192,9 @@ class JsonApiCollector:
             return urlunsplit(
                 (parsed.scheme, parsed.netloc, parsed.path, urlencode(netapp_query), "")
             )
-        if (
-            (parsed.hostname or "").casefold() != "api.github.com"
-            or parsed.path.rstrip("/") != "/advisories"
-        ):
+        if (parsed.hostname or "").casefold() != "api.github.com" or parsed.path.rstrip(
+            "/"
+        ) != "/advisories":
             return url
         updated = f">={since_utc.isoformat(timespec='seconds').replace('+00:00', 'Z')}"
         query = [
@@ -207,9 +203,7 @@ class JsonApiCollector:
             if key != "updated"
         ]
         query.append(("updated", updated))
-        return urlunsplit(
-            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), "")
-        )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
     @staticmethod
     def _item_url(
@@ -252,19 +246,14 @@ class JsonApiCollector:
         page_item_count: int,
     ) -> str | None:
         parsed = urlsplit(current_url)
-        if (
-            (parsed.hostname or "").casefold() != _NETAPP_API_HOST
-            or parsed.path.rstrip("/") != _NETAPP_API_PATH
-        ):
+        if (parsed.hostname or "").casefold() != _NETAPP_API_HOST or parsed.path.rstrip(
+            "/"
+        ) != _NETAPP_API_PATH:
             return None
         if not isinstance(payload, dict):
             raise ParserChangedError(f"{source.id}: invalid NetApp API response")
         total_count = payload.get("total_count")
-        if (
-            isinstance(total_count, bool)
-            or not isinstance(total_count, int)
-            or total_count < 0
-        ):
+        if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
             raise ParserChangedError(f"{source.id}: NetApp API omitted total_count")
         if total_count > source.max_index_items:
             raise CollectorError(
@@ -287,9 +276,7 @@ class JsonApiCollector:
                 f"{source.id}: NetApp API returned an empty page before total_count"
             )
         query["skip"] = str(consumed)
-        return urlunsplit(
-            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), "")
-        )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
     @staticmethod
     def _manageengine_next_url(
@@ -313,12 +300,8 @@ class JsonApiCollector:
                 f"{source.id}: invalid ManageEngine pagination parameters"
             ) from exc
         if start < 1 or limit <= 0 or limit > 100:
-            raise CollectorError(
-                f"{source.id}: invalid ManageEngine pagination parameters"
-            )
+            raise CollectorError(f"{source.id}: invalid ManageEngine pagination parameters")
         if page_item_count < limit:
             return None
         query["from"] = str(start + page_item_count)
-        return urlunsplit(
-            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), "")
-        )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))

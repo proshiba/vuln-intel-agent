@@ -133,9 +133,7 @@ def test_validate_tree_rejects_incomplete_or_unexpected_source_outcomes(
         validation.validate_tree(tmp_path)
 
 
-@pytest.mark.parametrize(
-    "status", [SourceOutcomeStatus.FAILED, SourceOutcomeStatus.PARTIAL]
-)
+@pytest.mark.parametrize("status", [SourceOutcomeStatus.FAILED, SourceOutcomeStatus.PARTIAL])
 def test_validate_tree_rejects_unsuccessful_source_outcomes(
     tmp_path: Path, status: SourceOutcomeStatus
 ) -> None:

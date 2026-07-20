@@ -76,9 +76,7 @@ async def test_osv_global_filters_on_newest_state_boundary(
                 headers={"content-type": "application/json"},
             )
         )
-    boundary = respx.get(_detail_url("npm/GHSA-boundary")).mock(
-        return_value=httpx.Response(500)
-    )
+    boundary = respx.get(_detail_url("npm/GHSA-boundary")).mock(return_value=httpx.Response(500))
 
     result = await OsvGlobalCollector().collect(
         _source(),
@@ -183,9 +181,7 @@ async def test_osv_global_filters_object_identifiers_before_detail_fetch() -> No
             ]
         )
     )
-    skipped = respx.get(_detail_url("Go/GO-2026-1")).mock(
-        return_value=httpx.Response(500)
-    )
+    skipped = respx.get(_detail_url("Go/GO-2026-1")).mock(return_value=httpx.Response(500))
     respx.get(_detail_url("Go/GHSA-new")).mock(
         return_value=httpx.Response(
             200,

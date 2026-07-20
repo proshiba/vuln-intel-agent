@@ -63,9 +63,7 @@ def apply_backend(source: SourceDefinition, backend: str) -> SourceDefinition:
                 "fallback_collectors": [],
                 "parser": "osv",
                 "url": OSV_MODIFIED_INDEX_URL,
-                "allowed_hosts": sorted(
-                    set(source.allowed_hosts) | {OSV_STORAGE_HOST}
-                ),
+                "allowed_hosts": sorted(set(source.allowed_hosts) | {OSV_STORAGE_HOST}),
                 "content_types": ["text/csv", "text/plain", "application/json"],
                 "max_items": 5_000,
                 "max_response_bytes": 60_000_000,
@@ -100,10 +98,7 @@ def apply_backend(source: SourceDefinition, backend: str) -> SourceDefinition:
             }
         )
 
-    if (
-        source.osv_ecosystem
-        and source.osv_packages
-    ):
+    if source.osv_ecosystem and source.osv_packages:
         return source.model_copy(
             update={
                 "collector": CollectorKind.OSV,

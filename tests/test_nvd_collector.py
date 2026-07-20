@@ -121,8 +121,7 @@ async def test_fortra_uses_modified_window_and_keeps_only_product_advisories(
                     ),
                     _fortra_item(
                         "CVE-2026-9863",
-                        "https://www.fortra.com/security/advisories/"
-                        "product-security/fi-2026-008/",
+                        "https://www.fortra.com/security/advisories/product-security/fi-2026-008/",
                     ),
                 ],
             },
@@ -170,8 +169,7 @@ async def test_fortra_rejects_an_item_from_an_unexpected_cna(
                 "vulnerabilities": [
                     _fortra_item(
                         "CVE-2026-12164",
-                        "https://www.fortra.com/security/advisories/"
-                        "product-security/fi-2026-010",
+                        "https://www.fortra.com/security/advisories/product-security/fi-2026-010",
                         source_identifier="unexpected-cna",
                     )
                 ],
@@ -247,9 +245,7 @@ async def test_nvd_paginates_maps_cves_and_deduplicates_ids(
         "id": "CVE-2026-1001",
         "published": "2026-07-01T00:00:00.000",
     }
-    assert first.content == (
-        '{"id": "CVE-2026-1001", "published": "2026-07-01T00:00:00.000"}'
-    )
+    assert first.content == ('{"id": "CVE-2026-1001", "published": "2026-07-01T00:00:00.000"}')
     assert first.fetched_at == fixed_now
 
     assert route.call_count == 2

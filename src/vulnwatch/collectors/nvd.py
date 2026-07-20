@@ -47,8 +47,10 @@ def _millisecond_precision(value: datetime) -> datetime:
 
 
 def _nvd_datetime(value: datetime) -> str:
-    return _millisecond_precision(_as_utc(value)).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
+    return (
+        _millisecond_precision(_as_utc(value))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -167,9 +169,7 @@ class NvdCollector:
             payload = self._load_payload(source.id, fetched.body)
             vulnerabilities = payload.get("vulnerabilities")
             if not isinstance(vulnerabilities, list):
-                raise ParserChangedError(
-                    f"{source.id}: NVD response has no vulnerabilities array"
-                )
+                raise ParserChangedError(f"{source.id}: NVD response has no vulnerabilities array")
 
             response_start = _integer(payload, "startIndex", source.id)
             response_page_size = _integer(payload, "resultsPerPage", source.id)
@@ -179,13 +179,9 @@ class NvdCollector:
             if response_page_size <= 0 and total_results:
                 raise ParserChangedError(f"{source.id}: NVD response has invalid resultsPerPage")
             if response_page_size > requested_page_size:
-                raise CollectorError(
-                    f"{source.id}: NVD response exceeded the requested page size"
-                )
+                raise CollectorError(f"{source.id}: NVD response exceeded the requested page size")
             if len(vulnerabilities) > response_page_size:
-                raise ParserChangedError(
-                    f"{source.id}: NVD vulnerabilities exceed resultsPerPage"
-                )
+                raise ParserChangedError(f"{source.id}: NVD vulnerabilities exceed resultsPerPage")
 
             declared_total = max(declared_total or 0, total_results)
             if indexed_items + declared_total > source.max_index_items:
@@ -205,9 +201,7 @@ class NvdCollector:
                     )
                 return declared_total
             if not vulnerabilities:
-                raise ParserChangedError(
-                    f"{source.id}: NVD pagination stopped before totalResults"
-                )
+                raise ParserChangedError(f"{source.id}: NVD pagination stopped before totalResults")
 
             next_index = response_start + response_page_size
             if next_index < total_results and len(vulnerabilities) != response_page_size:
@@ -248,8 +242,7 @@ class NvdCollector:
                 )
                 if len(records) > source.max_items:
                     raise CollectorError(
-                        f"{source.id}: NVD exceeds configured limit of "
-                        f"{source.max_items} records"
+                        f"{source.id}: NVD exceeds configured limit of {source.max_items} records"
                     )
 
             if next_index >= declared_total:
@@ -278,8 +271,7 @@ class NvdCollector:
             query = parse_qsl(parsed.query, keep_blank_values=True)
             if query != [("sourceIdentifier", FORTRA_SOURCE_IDENTIFIER)]:
                 raise CollectorError(
-                    "fortra: NVD endpoint must contain only the configured "
-                    "Fortra sourceIdentifier"
+                    "fortra: NVD endpoint must contain only the configured Fortra sourceIdentifier"
                 )
 
     @staticmethod

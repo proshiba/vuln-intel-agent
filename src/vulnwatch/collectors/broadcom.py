@@ -14,9 +14,7 @@ _MAX_PAGES = 100
 
 def _integer(value: object, field: str, source_id: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ParserChangedError(
-            f"{source_id}: Broadcom response contains invalid {field}"
-        )
+        raise ParserChangedError(f"{source_id}: Broadcom response contains invalid {field}")
     return value
 
 
@@ -125,8 +123,7 @@ class BroadcomCollector:
             page_number = next_page
         else:
             raise CollectorError(
-                f"{source.id}: Broadcom pagination exceeds configured limit of "
-                f"{_MAX_PAGES} pages"
+                f"{source.id}: Broadcom pagination exceeds configured limit of {_MAX_PAGES} pages"
             )
 
         if not records:
@@ -138,9 +135,7 @@ class BroadcomCollector:
         )
 
     @staticmethod
-    def _parse_page(
-        source_id: str, body: bytes
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def _parse_page(source_id: str, body: bytes) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -153,9 +148,7 @@ class BroadcomCollector:
         items = data.get("list")
         page_info = data.get("pageInfo")
         if not isinstance(items, list) or not isinstance(page_info, dict):
-            raise ParserChangedError(
-                f"{source_id}: Broadcom response is missing list or pageInfo"
-            )
+            raise ParserChangedError(f"{source_id}: Broadcom response is missing list or pageInfo")
         if not all(isinstance(item, dict) for item in items):
             raise ParserChangedError(f"{source_id}: Broadcom list contains an invalid item")
         return items, page_info
@@ -184,9 +177,7 @@ class BroadcomCollector:
             parsed = urlsplit(candidate)
             hostname = (parsed.hostname or "").casefold()
         except ValueError as exc:
-            raise CollectorError(
-                f"{source.id}: invalid Broadcom advisory URL"
-            ) from exc
+            raise CollectorError(f"{source.id}: invalid Broadcom advisory URL") from exc
         allowed_hosts = {host.casefold() for host in source.allowed_hosts}
         if (
             parsed.scheme != "https"
@@ -194,7 +185,5 @@ class BroadcomCollector:
             or parsed.username is not None
             or parsed.password is not None
         ):
-            raise CollectorError(
-                f"{source.id}: unsafe Broadcom advisory URL rejected: {candidate}"
-            )
+            raise CollectorError(f"{source.id}: unsafe Broadcom advisory URL rejected: {candidate}")
         return candidate

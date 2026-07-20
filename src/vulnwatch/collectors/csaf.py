@@ -277,10 +277,7 @@ class CsafCollector:
             reverse=True,
         )
         links = [
-            _IndexLink(
-                f"https://raw.githubusercontent.com/{owner}/{repository}/"
-                f"{reference}/{path}"
-            )
+            _IndexLink(f"https://raw.githubusercontent.com/{owner}/{repository}/{reference}/{path}")
             for path in paths
         ]
         return links, len(paths)

@@ -252,9 +252,10 @@ def _parse_apache_httpd(source: SourceDefinition, raw: RawRecord) -> AdvisoryDra
         or current_meta.get("datePublished")
         or current_meta.get("dateUpdated")
     ) or _apache_timeline_date(item)
-    withdrawn = str(
-        legacy_meta.get("STATE") or current_meta.get("state") or ""
-    ).casefold() in {"rejected", "withdrawn"}
+    withdrawn = str(legacy_meta.get("STATE") or current_meta.get("state") or "").casefold() in {
+        "rejected",
+        "withdrawn",
+    }
     return AdvisoryDraft(
         source_id=source.id,
         vendor=source.vendor,
@@ -407,8 +408,7 @@ def _parse_nvd(source: SourceDefinition, raw: RawRecord) -> AdvisoryDraft:
                     (
                         float(data["baseScore"]),
                         str(data.get("vectorString")) if data.get("vectorString") else None,
-                        str(data.get("baseSeverity") or value.get("baseSeverity") or "")
-                        or None,
+                        str(data.get("baseSeverity") or value.get("baseSeverity") or "") or None,
                     )
                 )
         if candidates:

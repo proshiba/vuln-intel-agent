@@ -84,9 +84,7 @@ class WebCollector:
         if records is None:
             records = await self._html_records(source, client, fetched.url, fetched.body, since)
         if not records:
-            raise ParserChangedError(
-                f"{source.id}: source returned zero concrete advisory records"
-            )
+            raise ParserChangedError(f"{source.id}: source returned zero concrete advisory records")
 
         return CollectionResult(
             source_id=source.id,
@@ -128,9 +126,7 @@ class WebCollector:
             ]
 
         parsed = feedparser.parse(body)
-        feed_content = any(
-            value in content_type for value in ("xml", "rss", "atom")
-        )
+        feed_content = any(value in content_type for value in ("xml", "rss", "atom"))
         if parsed.entries and (not parsed.get("bozo") or feed_content):
             return cls._feed_records(source, parsed.entries, url, content_type, since)
         return None
@@ -219,15 +215,11 @@ class WebCollector:
                 else ""
             )
             if not script_url or not self._allowed_url(source, script_url):
-                raise ParserChangedError(
-                    f"{source.id}: configured content script was not found"
-                )
+                raise ParserChangedError(f"{source.id}: configured content script was not found")
             fetched_script = await client.fetch(script_url)
             embedded_html = self._embedded_html(fetched_script.body)
             if embedded_html is None:
-                raise ParserChangedError(
-                    f"{source.id}: configured content script format changed"
-                )
+                raise ParserChangedError(f"{source.id}: configured content script format changed")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
                 soup = BeautifulSoup(embedded_html, "lxml")
@@ -409,9 +401,7 @@ class WebCollector:
         for node in soup.select(item_selector)[: source.max_items]:
             link_selector = source.selectors.get("link", "a[href]")
             link_node = (
-                node
-                if node.name == "a" and node.get("href")
-                else node.select_one(link_selector)
+                node if node.name == "a" and node.get("href") else node.select_one(link_selector)
             )
             if link_node is None or not link_node.get("href"):
                 continue
@@ -488,9 +478,7 @@ class WebCollector:
             # candidate link itself to carry a CVE or concrete advisory identifier.
             # Sources without such identifiers must provide an explicit selector.
             candidate_evidence = f"{title}\n{url}"
-            if _IGNORED_URL_PATTERN.search(url) and not _CVE_PATTERN.search(
-                candidate_evidence
-            ):
+            if _IGNORED_URL_PATTERN.search(url) and not _CVE_PATTERN.search(candidate_evidence):
                 continue
             relevant = _CVE_PATTERN.search(candidate_evidence) or (
                 _ADVISORY_PATTERN.search(candidate_evidence)

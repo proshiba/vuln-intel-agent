@@ -247,8 +247,7 @@ async def test_json_api_follows_next_links_without_reusing_conditionals_and_dedu
     )
 
     identifiers = [
-        record.metadata.get("id") or record.metadata.get("ghsa_id")
-        for record in result.records
+        record.metadata.get("id") or record.metadata.get("ghsa_id") for record in result.records
     ]
     assert identifiers == [
         "ADV-1",
@@ -363,9 +362,7 @@ async def test_manageengine_public_api_uses_required_origin_and_paginates() -> N
         "https://securitycontact.manageengine.com/publiccve?host=me&from=1&"
         "limit=2&criteria=%28For_product_search%3D%3D0%29"
     )
-    route = respx.get(
-        re.compile(r"https://securitycontact\.manageengine\.com/publiccve\?.+")
-    ).mock(
+    route = respx.get(re.compile(r"https://securitycontact\.manageengine\.com/publiccve\?.+")).mock(
         side_effect=[
             httpx.Response(
                 200,
@@ -428,8 +425,7 @@ async def test_manageengine_public_api_uses_required_origin_and_paginates() -> N
     assert route.calls[1].request.url.params["from"] == "3"
     assert all(
         call.request.headers["origin"] == "https://www.manageengine.com"
-        and call.request.headers["referer"]
-        == "https://www.manageengine.com/security/advisory/"
+        and call.request.headers["referer"] == "https://www.manageengine.com/security/advisory/"
         for call in route.calls
     )
     assert [record.url for record in result.records] == [
