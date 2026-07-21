@@ -51,16 +51,34 @@ jobs:
             exit 1
           fi
           vulnwatch collect --profile daily --since "$SINCE" --output staging
-      - name: Verify complete source coverage
+      - name: Verify source coverage
         run: |
           expected=$(python -c 'from vulnwatch.config import load_sources; print(sum(source.enabled for source in load_sources().sources))')
           observed=$(jq '.source_outcomes | length' staging/run-manifest.json)
           unsuccessful=$(jq '[.source_outcomes[] | select(.status == "failed" or .status == "partial")] | length' staging/run-manifest.json)
-          if [ "$observed" -ne "$expected" ] || [ "$unsuccessful" -ne 0 ]; then
-            jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "\(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
-            echo "::error::complete collection required: expected=$expected observed=$observed unsuccessful=$unsuccessful"
+          allowed=$(python -c "from vulnwatch.validation import max_unsuccessful_sources; print(max_unsuccessful_sources($expected))")
+          # Always record which sources were unsuccessful. Full detail (with per-source counts
+          # and errors) also persists in staging/run-manifest.json and staging/run-summary.md.
+          if [ "$unsuccessful" -ne 0 ]; then
+            echo "Unsuccessful sources ($unsuccessful of $expected; allowed <= $allowed):"
+            jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "  \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            {
+              echo "### Unsuccessful sources ($unsuccessful of $expected; allowed <= $allowed)"
+              echo
+              jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "- \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # A source that produced no outcome at all is a real coverage gap.
+          if [ "$observed" -ne "$expected" ]; then
+            echo "::error::incomplete source coverage: expected=$expected observed=$observed"
             exit 1
           fi
+          # Tolerate a small number of transient source failures; abort only on systemic failure.
+          if [ "$unsuccessful" -gt "$allowed" ]; then
+            echo "::error::too many unsuccessful sources: $unsuccessful > $allowed allowed (systemic failure)"
+            exit 1
+          fi
+          echo "Source coverage OK: expected=$expected observed=$observed unsuccessful=$unsuccessful (allowed <= $allowed)."
       - name: Detect changes
         id: detect
         run: |

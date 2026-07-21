@@ -147,6 +147,40 @@ def test_validate_tree_rejects_unsuccessful_source_outcomes(
         validation.validate_tree(tmp_path)
 
 
+def _large_registry(count: int) -> SourceRegistry:
+    return SourceRegistry(
+        as_of="2026-07-19",
+        categories=[Category(id="example", name="Example")],
+        sources=[_source(f"s{index}", tier=Tier.DAILY) for index in range(count)],
+    )
+
+
+def test_validate_tree_tolerates_a_small_number_of_unsuccessful_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validation, "load_sources", lambda *_: _large_registry(20))
+    outcomes = [_outcome(f"s{index}") for index in range(20)]
+    outcomes[0] = _outcome("s0", SourceOutcomeStatus.FAILED)  # 1 of 20; allowed = 1
+
+    _write_manifest(tmp_path, profile=Tier.DAILY, outcomes=outcomes)
+
+    assert validation.validate_tree(tmp_path) == (0, 0)
+
+
+def test_validate_tree_rejects_too_many_unsuccessful_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validation, "load_sources", lambda *_: _large_registry(20))
+    outcomes = [_outcome(f"s{index}") for index in range(20)]
+    outcomes[0] = _outcome("s0", SourceOutcomeStatus.FAILED)
+    outcomes[1] = _outcome("s1", SourceOutcomeStatus.PARTIAL)  # 2 of 20; allowed = 1
+
+    _write_manifest(tmp_path, profile=Tier.DAILY, outcomes=outcomes)
+
+    with pytest.raises(ValueError, match="too many unsuccessful"):
+        validation.validate_tree(tmp_path)
+
+
 def test_validate_tree_accepts_legacy_manifest_without_source_outcomes(
     tmp_path: Path,
 ) -> None:
