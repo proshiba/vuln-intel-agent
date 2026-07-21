@@ -16,6 +16,12 @@ from dateutil.parser import parse as parse_date
 from vulnwatch.collectors.base import CollectorError, ParserChangedError, SafeHttpClient
 from vulnwatch.models import CollectionResult, RawRecord, SourceDefinition, SourceState
 
+# CSAF詳細取得は最新の抽出サンプルであり、単発の404・タイムアウト・不正ドキュメントは
+# 次回の更新リストで再取得される。バッチに対する失敗割合がこの値以下なら取得済み分で成功と
+# みなし、これを超えた場合のみ系統的失敗としてソースを失敗させ次回再試行に回す。小バッチでは
+# 切り捨てにより実質0件許容（1件でも失敗）となり、従来どおり厳格に扱う。
+_CSAF_DETAIL_FAILURE_FRACTION = 0.1
+
 
 @dataclass(frozen=True)
 class _IndexLink:
@@ -113,7 +119,7 @@ class CsafCollector:
                 records.append(self._record(source, detail.url, payload, detail.content_type))
             else:
                 failed_details += 1
-        if failed_details:
+        if failed_details > int(len(selected_links) * _CSAF_DETAIL_FAILURE_FRACTION):
             raise CollectorError(
                 f"{source.id}: {failed_details} of {len(selected_links)} "
                 "CSAF detail documents failed"
