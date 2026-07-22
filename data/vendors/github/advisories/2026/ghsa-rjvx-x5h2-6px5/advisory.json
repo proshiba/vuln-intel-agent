@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/268664750?v=4\", \"events_url\": \"https://api.github.com/users/martijnperdaan52/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/martijnperdaan52/followers\", \"following_url\": \"https://api.github.com/users/martijnperdaan52/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/martijnperdaan52/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/martijnperdaan52\", \"id\": 268664750, \"login\": \"martijnperdaan52\", \"node_id\": \"U_kgDOEAN_rg\", \"organizations_url\": \"https://api.github.com/users/martijnperdaan52/orgs\", \"received_events_url\": \"https://api.github.com/users/martijnperdaan52/received_events\", \"repos_url\": \"https://api.github.com/users/martijnperdaan52/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/martijnperdaan52/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/martijnperdaan52/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/martijnperdaan52\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"### Summary\\n\\nThe API endpoint used to fork repositories into organizations performs a weaker authorization check than the corresponding web UI and other repository creation endpoints.\\n\\nWhen a repository is forked into an organization through the API, the endpoint only verifies that the user is an organization member (`IsOrgMember()`), but does not verify whether the user is allowed to create repositories in that organization (`CanCreateOrgRepo()`).\\n\\nAs a result, organization members belonging to teams with `can_create_org_repo=false` can still create repositories inside the organization by using the fork API.\\n\\n### Details\\n\\nAffected endpoint:\\n\\n```\\nPOST /api/v1/repos/{owner}/{repo}/forks\\n```\\n\\nIn `routers/api/v1/repo/fork.go`, the endpoint performs the following authorization check:\\n\\n```go\\nif !ctx.Doer.IsAdmin {\\n    isMember, err := org.IsOrgMember(ctx, ctx.Doer.ID)\\n    if !isMember {\\n        ctx.APIError(http.StatusForbidden, ...)\\n        return\\n    }\\n}\\n```\\n\\nThe equivalent web UI implementation uses the stronger permission check:\\n\\n```go\\nisAllowedToFork, err := organization.OrgFromUser(ctxUser).\\n    CanCreateOrgRepo(ctx, ctx.Doer.ID)\\n```\\n\\nThe same `CanCreateOrgRepo()` authorization check is also used by:\\n\\n* CreateOrgRepo API endpoint\\n* GenerateRepository API endpoint\\n\\nThe fork endpoint appears to be the only repository creation path that relies solely on organization membership.\\n\\n### Proof of Concept\\n\\nTested on Gitea 1.23.7.\\n\\n1. Create an organization.\\n2. Create a team with `can_create_org_repo=false`.\\n3. Add a test user to that team.\\n4. Verify that normal repository creation is denied:\\n\\n```http\\nPOST /api/v1/orgs/target-org/repos\\n```\\n\\nResult:\\n\\n```http\\n403 Forbidden\\n```\\n\\n5. Fork a repository into the organization:\\n\\n```http\\nPOST /api/v1/repos/admin/public-repo/forks\\nContent-Type: application/json\\n\\n{\\n  \\\"organization\\\": \\\"target-org\\\"\\n}\\n```\\n\\nResult:\\n\\n```http\\n202 Accepted\\n```\\n\\nThe repository is successfully created despite repository creation permissions being disabled.\\n\\n### Impact\\n\\nUsers who are organization members but are intentionally prevented from creating repositories can bypass that restriction through the API.\\n\\nThis allows unauthorized repository creation inside the organization and may expose additional attack surface depending on the organization's Actions, runner, and workflow configuration.\\n\\nThe vulnerability represents an authorization bypass because API behavior is less restrictive than both the web UI and other repository creation endpoints.\", \"ghsa_id\": \"GHSA-rjvx-x5h2-6px5\", \"github_reviewed_at\": \"2026-07-21T20:26:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-rjvx-x5h2-6px5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rjvx-x5h2-6px5\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-21T20:26:37Z\", \"references\": [\"https://github.com/go-gitea/gitea/security/advisories/GHSA-rjvx-x5h2-6px5\", \"https://github.com/go-gitea/gitea/pull/36950\", \"https://github.com/go-gitea/gitea/commit/686d10b7f0c26baf91171124b382cbcdfa7bf025\", \"https://github.com/go-gitea/gitea/releases/tag/v1.26.0\", \"https://github.com/advisories/GHSA-rjvx-x5h2-6px5\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-rjvx-x5h2-6px5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-gitea/gitea\", \"summary\": \"Gitea: API Fork Endpoint Authorization Bypass Allows Organization Members to Bypass Repository Creation Restrictions\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T20:26:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-rjvx-x5h2-6px5\", \"vulnerabilities\": [{\"first_patched_version\": \"1.26.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.26.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rjvx-x5h2-6px5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: < 1.26.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.800699Z",
+  "provenance": {
+    "content_sha256": "08977d915d8e922990f029cccffe01a304462a4fa7ebca27a99789aeb4237bbd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T20:26:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rjvx-x5h2-6px5",
+  "status": "active",
+  "title": "Gitea: API Fork Endpoint Authorization Bypass Allows Organization Members to Bypass Repository Creation Restrictions",
+  "updated_at": "2026-07-21T20:26:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rjvx-x5h2-6px5"
+}

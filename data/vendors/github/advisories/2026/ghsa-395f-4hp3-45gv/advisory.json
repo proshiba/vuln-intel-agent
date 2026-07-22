@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91076575?v=4\", \"events_url\": \"https://api.github.com/users/bibu123456/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bibu123456/followers\", \"following_url\": \"https://api.github.com/users/bibu123456/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bibu123456/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bibu123456\", \"id\": 91076575, \"login\": \"bibu123456\", \"node_id\": \"MDQ6VXNlcjkxMDc2NTc1\", \"organizations_url\": \"https://api.github.com/users/bibu123456/orgs\", \"received_events_url\": \"https://api.github.com/users/bibu123456/received_events\", \"repos_url\": \"https://api.github.com/users/bibu123456/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bibu123456/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bibu123456/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bibu123456\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74753555?v=4\", \"events_url\": \"https://api.github.com/users/Kayiz-PT/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kayiz-PT/followers\", \"following_url\": \"https://api.github.com/users/Kayiz-PT/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kayiz-PT/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kayiz-PT\", \"id\": 74753555, \"login\": \"Kayiz-PT\", \"node_id\": \"MDQ6VXNlcjc0NzUzNTU1\", \"organizations_url\": \"https://api.github.com/users/Kayiz-PT/orgs\", \"received_events_url\": \"https://api.github.com/users/Kayiz-PT/received_events\", \"repos_url\": \"https://api.github.com/users/Kayiz-PT/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kayiz-PT/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kayiz-PT/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kayiz-PT\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/45469?v=4\", \"events_url\": \"https://api.github.com/users/ljharb/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ljharb/followers\", \"following_url\": \"https://api.github.com/users/ljharb/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ljharb/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ljharb\", \"id\": 45469, \"login\": \"ljharb\", \"node_id\": \"MDQ6VXNlcjQ1NDY5\", \"organizations_url\": \"https://api.github.com/users/ljharb/orgs\", \"received_events_url\": \"https://api.github.com/users/ljharb/received_events\", \"repos_url\": \"https://api.github.com/users/ljharb/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ljharb/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ljharb/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ljharb\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-13311\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\n`shell-quote`'s `parse()` finalizes its token list with a `reduce` that uses\\n`Array.prototype.concat` as the accumulator. Each `prev.concat(arg)` copies the entire growing\\narray, so `parse()` runs in **O(n²)** in the number of tokens. An unauthenticated attacker who\\ncan submit a string to any code path that calls `parse()` on it can block the single-threaded\\nNode.js event loop for tens of seconds with a small input — a denial of service. The trigger\\nneeds **no shell metacharacters** (plain space-separated words suffice), so input filters that\\nonly screen for `;`, `|`, `$`, or backticks do not help.\\n\\n### Root cause\\n`parse.js` (lines 200–203), in `parseInternal` — this path runs on **every** `parse()` call:\\n\\n```js\\n}).reduce(function (prev, arg) { // finalize parsed arguments\\n    // TODO: replace this whole reduce with a concat\\n    return typeof arg === 'undefined' ? prev : prev.concat(arg);\\n}, []);\\n```\\n\\n`prev.concat(arg)` allocates a new array and copies all of `prev` on every iteration, so\\nproducing an N-token result costs `1 + 2 + … + N = O(N²)` copies. A second `acc.concat(s)`\\nreduce in the `module.exports` wrapper (lines 211–224, reached only when `env` is a function)\\nhas the same shape. The maintainer's own `// TODO: replace this whole reduce with a concat`\\nalready flags the construct.\\n\\n### Proof of Concept\\n```js\\nconst { parse } = require('shell-quote');\\nconst ms = fn => { const t = process.hrtime.bigint(); fn(); return Number(process.hrtime.bigint()-t)/1e6; };\\nfor (const N of [16000, 32000, 64000, 128000]) {\\n  console.log(N, 'tokens ->', ms(() => parse('x '.repeat(N))).toFixed(0), 'ms');\\n}\\n```\\n\\nMeasured on `shell-quote@1.8.4`, Node v24:\\n\\n| input (N tokens) | bytes  | `parse()` | ratio vs prev (2× input) |\\n|-----------------:|-------:|----------:|:------------------------:|\\n| 16 000           | 32 KB  |    678 ms | —                        |\\n| 32 000           | 64 KB  |  4 169 ms | ×6.2                     |\\n| 64 000           | 128 KB | 14 914 ms | ×3.6                     |\\n| 128 000          | 256 KB | **57 319 ms** | ×3.8                 |\\n\\nTime grows ~×4 per 2× input → confirmed O(n²). A ~128 KB input blocks the event loop ~15 s;\\n~256 KB → ~57 s; a few hundred KB more → minutes.\\n<img width=\\\"656\\\" height=\\\"214\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/e8955b0e-0527-45ca-94b7-c3a2d8c0c82e\\\" />\\n[poc.js](https://github.com/user-attachments/files/29255995/poc.js)\\n\\n### Impact\\n`parse()` is synchronous on the main thread; while it copies arrays quadratically the entire\\nevent loop is blocked and the process serves no other requests. Any service that calls `parse()`\\non attacker-influenced input (command parsers, chat-ops / bot command handlers, REPLs,\\nbuild-script / arg-string splitters) can be driven to a sustained DoS with a single small\\nrequest. No code execution and no data disclosure — availability only.\\n\\nEnd-to-end confirmation: a minimal HTTP server that calls `parse()` on the request body, hit\\nwith **one** `POST` of `'x '.repeat(32000)` (~63 KB), froze for ~4.5 s. An out-of-process probe\\nclient issuing harmless `GET /ping` requests (normally ~1 ms) observed **27 consecutive pings\\nstalled by up to 4374 ms** during that single request — i.e. every concurrent client was denied\\nservice for the whole parse. Scaling the body to a few hundred KB extends the outage to minutes.\\n\\nThis is the same class as several accepted 2026 advisories for quadratic-parser DoS on\\nuntrusted input (e.g. markdown-it CVE-2026-48988, js-yaml CVE-2026-53550,\\npython-multipart CVE-2026-53539). It is **distinct** from the known `shell-quote`\\ncommand-injection issues (CVE-2021-42740, CVE-2016-10541, CVE-2026-9277), which are all in\\n`quote()`, not `parse()`.\\n\\n### Suggested remediation\\nReplace the O(n²) concat-in-reduce with a linear flatten that **pushes into the\\naccumulator** instead of reallocating and copying it on every iteration. Apply the\\nsame shape to the wrapper's `acc.concat(s)` reduce. A defensive input-length cap on\\n`parse()` is a cheap additional stop-gap.\\n\\n> **Maintainer note (edit):** the originally-suggested `Array.prototype.flat()` is\\n> ES2019 / Node 11+, but `shell-quote` declares `engines: node >= 0.4`, so `.flat()`\\n> would silently drop support for older runtimes. The fix instead flattens one-level\\n> array tokens with `forEach`/`push` — and deliberately not `push.apply(...)`, since\\n> spreading a large array into function arguments can exceed the engine's argument\\n> count limit. Output is byte-identical to the current code across strings, `undefined`\\n> holes, one-level array tokens, and `{op}`/`{comment}`/`{op:'glob'}` objects, and\\n> finalizing is now linear (1,024,000 tokens in ~150 ms vs ~57 s for 128,000 before).\\n> Thanks for the clear report and PoC — the analysis and reproduction were spot on.\\n\\n### Disclosure\\nFound by source audit + wall-clock confirmation against 1.8.4 (and verified the same code is\\npresent on `main`). Reported privately here; no public disclosure until a fix is available.\", \"epss\": {\"percentage\": 0.0036, \"percentile\": 0.27845}, \"ghsa_id\": \"GHSA-395f-4hp3-45gv\", \"github_reviewed_at\": \"2026-07-20T21:49:34Z\", \"html_url\": \"https://github.com/advisories/GHSA-395f-4hp3-45gv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-395f-4hp3-45gv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-13311\"}], \"nvd_published_at\": \"2026-06-25T05:16:52Z\", \"published_at\": \"2026-07-20T21:49:34Z\", \"references\": [\"https://github.com/ljharb/shell-quote/security/advisories/GHSA-395f-4hp3-45gv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-13311\", \"https://github.com/ljharb/shell-quote/commit/7ff5488599d01c323514f02f5efb74088dd134ec\", \"https://github.com/ljharb/shell-quote/releases/tag/v1.9.0\", \"https://www.npmjs.com/package/shell-quote\", \"https://github.com/advisories/GHSA-395f-4hp3-45gv\"], \"repository_advisory_url\": \"https://api.github.com/repos/ljharb/shell-quote/security-advisories/GHSA-395f-4hp3-45gv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/ljharb/shell-quote\", \"summary\": \"shell-quote: Quadratic-complexity Denial of Service in `parse()` (CWE-407)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:49:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-395f-4hp3-45gv\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"shell-quote\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-395f-4hp3-45gv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "shell-quote: <= 1.8.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2016-10541",
+      "CVE-2021-42740",
+      "CVE-2026-13311",
+      "CVE-2026-48988",
+      "CVE-2026-53539",
+      "CVE-2026-53550",
+      "CVE-2026-9277"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "shell-quote"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.243376Z",
+  "provenance": {
+    "content_sha256": "427593e12370e1bb17049ee89a333194b29bfd13e2da51ff548b64711cad8171",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:49:34Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-395f-4hp3-45gv",
+  "status": "active",
+  "title": "shell-quote: Quadratic-complexity Denial of Service in `parse()` (CWE-407)",
+  "updated_at": "2026-07-20T21:49:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-395f-4hp3-45gv"
+}

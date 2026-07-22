@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/147225560?v=4\", \"events_url\": \"https://api.github.com/users/tomasilluminati/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tomasilluminati/followers\", \"following_url\": \"https://api.github.com/users/tomasilluminati/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tomasilluminati/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tomasilluminati\", \"id\": 147225560, \"login\": \"tomasilluminati\", \"node_id\": \"U_kgDOCMZ72A\", \"organizations_url\": \"https://api.github.com/users/tomasilluminati/orgs\", \"received_events_url\": \"https://api.github.com/users/tomasilluminati/received_events\", \"repos_url\": \"https://api.github.com/users/tomasilluminati/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tomasilluminati/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tomasilluminati/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tomasilluminati\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/33037086?v=4\", \"events_url\": \"https://api.github.com/users/laurie-tyz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/laurie-tyz/followers\", \"following_url\": \"https://api.github.com/users/laurie-tyz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/laurie-tyz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/laurie-tyz\", \"id\": 33037086, \"login\": \"laurie-tyz\", \"node_id\": \"MDQ6VXNlcjMzMDM3MDg2\", \"organizations_url\": \"https://api.github.com/users/laurie-tyz/orgs\", \"received_events_url\": \"https://api.github.com/users/laurie-tyz/received_events\", \"repos_url\": \"https://api.github.com/users/laurie-tyz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/laurie-tyz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/laurie-tyz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/laurie-tyz\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59890\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-176\", \"name\": \"Improper Handling of Unicode Encoding\"}, {\"cwe_id\": \"CWE-697\", \"name\": \"Incorrect Comparison\"}], \"description\": \"## Summary\\n\\nWhen building a source distribution (`python -m build --sdist` / `setup.py sdist`), setuptools' `FileList` applies `MANIFEST.in` directives (`exclude`, `global-exclude`, `recursive-exclude`, `prune`) by matching a compiled glob against on-disk file names **byte-for-byte, with no Unicode normalization**. On normalization-preserving filesystems (notably macOS APFS and HFS+), a file written in NFD and a `MANIFEST.in` rule written in NFC refer to the same file but are byte-distinct, so the exclusion silently fails to match. A file the maintainer intended to exclude is then packed into the `.tar.gz` and, if published, uploaded to the public, immutable PyPI index.\\n\\n## Details\\n\\nFile names in `FileList.files` come from `os.walk` (`setuptools/_distutils/filelist.py`, `_find_all_simple`), so on APFS a file written NFD is offered to the matcher in NFD, while the `MANIFEST.in` pattern carries the author's editor form (typically NFC). The matching path performs no canonicalization:\\n\\n```python\\n# setuptools/command/egg_info.py  (FileList.global_exclude)\\ndef global_exclude(self, pattern):\\n    match = translate_pattern(os.path.join('**', pattern))   # fnmatch.translate -> regex, no NFC/NFD\\n    return self._remove_files(match.match)                   # byte-level regex over raw os.walk names\\n```\\n\\nA rule written NFC (`café` = `63 61 66 c3 a9`) does not match an on-disk name written NFD (`café` = `63 61 66 65 cc 81`), even though the filesystem treats the two as one file.\\n\\nA `unicodedata.normalize('NFD', ...)` helper exists in `setuptools/unicode_utils.py` (`decompose()`), but it is **never called in the manifest matching path**, so neither the pattern nor the walked path is normalized before matching. The only normalization in this area, `EggInfoCommand._manifest_normalize`, uses `filesys_decode` (bytes→str decode only, no NFC/NFD) and runs when writing `SOURCES.txt`, after matching has already occurred.\\n\\n## Impact\\n\\n`MANIFEST.in` exclusions are the documented mechanism maintainers use to keep secrets, local configs, and private fixtures out of the published sdist. A non-ASCII excluded file may be published to the public, immutable PyPI index despite the rule — an irreversible disclosure with no visual cue (NFC and NFD forms render identically). Exposure is filesystem-dependent and most relevant on macOS APFS/HFS+, where many maintainers build and publish. Pure-ASCII rules are unaffected.\\n\\n## Proof of concept\\n\\nWith a project containing `MANIFEST.in`:\\n\\n```\\nglobal-include *.txt *.json\\nglobal-exclude secret_café.txt    # rule saved NFC\\n```\\n\\nand an on-disk file `secret_café.txt` written in NFD, `python -m build --sdist` packs the secret file into the resulting `.tar.gz`, while an ASCII control file excluded by the same directive is correctly dropped — isolating the bypass to the NFC-pattern vs. NFD-name mismatch. Reproduced on macOS APFS with setuptools 82.0.1.\\n\\n## Remediation\\n\\nNormalize both the walked path and each `MANIFEST.in` pattern to a single canonical form before matching, in both `setuptools/command/egg_info.py` (`FileList`) and the vendored `setuptools/_distutils/filelist.py`. For an exclusion list, err toward excluding more, and document that `MANIFEST.in` matching is normalization-insensitive on macOS.\\n\\n## Credit\\n\\nReported by Tomas Illuminati. Coordinated via CERT/CC VINCE VU#604762.\", \"epss\": {\"percentage\": 0.0029, \"percentile\": 0.20909}, \"ghsa_id\": \"GHSA-h35f-9h28-mq5c\", \"github_reviewed_at\": \"2026-07-21T19:09:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-h35f-9h28-mq5c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h35f-9h28-mq5c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59890\"}], \"nvd_published_at\": \"2026-07-08T17:17:27Z\", \"published_at\": \"2026-07-21T19:09:21Z\", \"references\": [\"https://github.com/pypa/setuptools/security/advisories/GHSA-h35f-9h28-mq5c\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59890\", \"https://github.com/pypa/setuptools/commit/dd9f436a36486b4cb8a4c70a2321548b0be09b8f\", \"https://github.com/pypa/advisory-database/tree/main/vulns/setuptools/PYSEC-2026-3447.yaml\", \"https://github.com/pypa/setuptools/releases/tag/v83.0.0\", \"https://github.com/advisories/GHSA-h35f-9h28-mq5c\"], \"repository_advisory_url\": \"https://api.github.com/repos/pypa/setuptools/security-advisories/GHSA-h35f-9h28-mq5c\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pypa/setuptools\", \"summary\": \"setuptools: MANIFEST.in exclusion bypass in sdist via Unicode normalization collision (NFC/NFD) on macOS APFS/HFS+\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T19:09:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-h35f-9h28-mq5c\", \"vulnerabilities\": [{\"first_patched_version\": \"83.0.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"setuptools\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 83.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h35f-9h28-mq5c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "setuptools: < 83.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59890"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "setuptools"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.889042Z",
+  "provenance": {
+    "content_sha256": "43972f65534f11b6b50a61a9338ad149ecdb31966ff540985b5344dfb8cdfdc3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T19:09:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h35f-9h28-mq5c",
+  "status": "active",
+  "title": "setuptools: MANIFEST.in exclusion bypass in sdist via Unicode normalization collision (NFC/NFD) on macOS APFS/HFS+",
+  "updated_at": "2026-07-21T19:09:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h35f-9h28-mq5c"
+}

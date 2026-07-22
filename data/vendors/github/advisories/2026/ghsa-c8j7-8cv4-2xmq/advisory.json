@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-59922\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}, {\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"## Summary\\n\\n**Type:** Algorithmic-complexity denial of service. A run of N closed pairs `~~x~~~~x~~...` (or the analogous `==x==` for `mark`, `^^x^^` for `insert`) causes O(N²) work in the formatting parser. With the `strikethrough`, `mark`, or `insert` plugin enabled, an 8 KB input pegs the CPU for ~4 seconds; 16 KB → ~17 seconds. \\n**File:** `src/mistune/plugins/formatting.py`, lines 13-15 (the `_STRIKE_END` / `_MARK_END` / `_INSERT_END` patterns and their per-position scan).\\n**Root cause:** for each opening `~~`/`==`/`^^` the parser scans forward for the matching close pattern. The scan itself uses a bounded regex, but the parser tries the close-scan at every potential start position. For input shaped like `~~x~~` repeated N times, every `~~` is examined as a possible start, each scan covers up to the end of input. Total work is O(N²). Default config without these plugins handles the same input in linear time (4 ms for 4000 reps), confirming the cost is in the formatting plugin's per-marker scan, not in core parsing.\\n\\n## Affected Code\\n\\n**File:** `src/mistune/plugins/formatting.py`, lines 12-16.\\n\\n```python\\n_STRIKE_END = re.compile(r\\\"(?:\\\" + PREVENT_BACKSLASH + r\\\"\\\\\\\\~|[^\\\\s~])~~(?!~)\\\")\\n_MARK_END = re.compile(r\\\"(?:\\\" + PREVENT_BACKSLASH + r\\\"\\\\\\\\=|[^\\\\s=])==(?!=)\\\")\\n_INSERT_END = re.compile(r\\\"(?:\\\" + PREVENT_BACKSLASH + r\\\"\\\\\\\\\\\\^|[^\\\\s^])\\\\^\\\\^(?!\\\\^)\\\")\\n# Each pattern is scanned forward from every start position fired by the\\n# corresponding inline rule. The end-pattern itself is bounded; the cost\\n# comes from the surrounding parser invoking the scan at every '~~' / '==' / '^^'\\n# token in the input, giving N starts × O(N) per scan = O(N^2) total.\\n```\\n\\n**Why it's wrong:** the same algorithmic-complexity flaw class as `[` / `[a` parsing in core: a per-token retry loop without memoisation of failed positions. Each formatting marker is tried as both a potential start and as a continuation. A linear-pass delimiter-stack algorithm (matching how `commonmark-py` and `markdown-it-py` handle emphasis) would do this work in O(N) total. The bounded regex on each individual scan does not bound the parser-level repetition.\\n\\n## Exploit Chain\\n\\n1. Application uses mistune to render user-supplied markdown and has any of the formatting plugins enabled (`plugins=['strikethrough']`, `['mark']`, `['insert']`, or any superset). These plugins are commonly enabled because GitHub-flavoured-Markdown compatibility requires `~~strikethrough~~` and many editors emit `==highlighting==` and `^^underline^^` shortcuts.\\n2. Attacker submits an 8 KB markdown payload of the form `~~x~~~~x~~~~x~~...` (40 000 characters of `~~x~~` repeated 8000 times, or the analogous shape with `==` / `^^`).\\n3. Server calls `mistune.create_markdown(plugins=['strikethrough'])(payload)`. CPU pegs for ~4 seconds; 16 KB → ~17 seconds; 32 KB → ~70 seconds. Pure CPU cost, no significant memory growth.\\n4. Repeating the request floods the worker pool. On a single-thread WSGI handler this is one request per outage; on a thread pool, a small number of concurrent attackers exhausts capacity.\\n\\n## Security Impact\\n\\n**Severity:** sec-high. Network-reachable, no authentication, predictable scaling, single-payload primitive. Only requires a user-supplied markdown sink and a formatting plugin enabled — both are common.\\n**Attacker capability:** small input → large CPU. Doubling input size quadruples CPU time. Sustained requests deny service to other users.\\n**Preconditions:** application uses mistune with any of `strikethrough`, `mark`, or `insert` plugins enabled. Default config does NOT enable these (so the attack only fires against the substantial deployed population that turns them on for GFM/markdown-extra compatibility).\\n**Differential:** PoC-verified against mistune@3.2.1:\\n\\n```python\\nimport mistune, time\\nmd = mistune.create_markdown(plugins=['strikethrough'])\\nfor n in [500, 1000, 2000, 4000, 8000]:\\n    s = '~~x~~' * n\\n    t = time.time()\\n    md(s)\\n    print(f'  ~~x~~ * {n} ({len(s)}b): {(time.time() - t) * 1000:.0f}ms')\\n\\n# Output (Python 3.13, Linux, 2.5GHz CPU):\\n#   ~~x~~ *  500  (2500b):    19ms\\n#   ~~x~~ * 1000  (5000b):    71ms\\n#   ~~x~~ * 2000 (10000b):   272ms\\n#   ~~x~~ * 4000 (20000b):  1090ms\\n#   ~~x~~ * 8000 (40000b):  4302ms\\n\\n# Identical scaling for `==x==` (mark) and `^^x^^` (insert):\\nmd = mistune.create_markdown(plugins=['mark'])\\nmd('==x==' * 4000)   # ~1100ms\\nmd = mistune.create_markdown(plugins=['insert'])\\nmd('^^x^^' * 4000)   # ~1080ms\\n\\n# Without the plugin, the same input parses in linear time:\\nmd = mistune.create_markdown()  # no plugins\\nmd('~~x~~' * 4000)               # 4ms (1000x faster)\\n```\\n\\nThe patched build (with the suggested fix below — either a delimiter-stack rewrite or a hard cap on the number of unmatched markers tracked) keeps the time linear in N.\\n\\n## Suggested Fix\\n\\nThe minimal fix is to cap the number of simultaneously-tracked unmatched markers, treating extras as literal text. The proper fix is a single-pass delimiter-stack algorithm matching the CommonMark reference implementation. Surgical patch:\\n\\n```diff\\n--- a/src/mistune/plugins/formatting.py\\n+++ b/src/mistune/plugins/formatting.py\\n@@ ... in the parse_strikethrough / parse_mark / parse_insert functions\\n+    # Bound the number of open markers the parser will track concurrently.\\n+    # Inputs with more than this many open ~~ / == / ^^ in flight are\\n+    # almost certainly adversarial; CommonMark gives no semantics to\\n+    # deeply nested unmatched markers.\\n+    MAX_OPEN_MARKERS = 100\\n+    if open_marker_count > MAX_OPEN_MARKERS:\\n+        # treat remaining markers as literal text, do not invoke the\\n+        # forward-scan to find a close\\n+        ...\\n```\\n\\nA regression test should assert that `md('~~x~~' * 50_000)` completes in under 1 second. The same fix shape applies to `_MARK_END` and `_INSERT_END`.\", \"epss\": {\"percentage\": 0.00366, \"percentile\": 0.28653}, \"ghsa_id\": \"GHSA-c8j7-8cv4-2xmq\", \"github_reviewed_at\": \"2026-07-20T21:34:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-c8j7-8cv4-2xmq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c8j7-8cv4-2xmq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59922\"}], \"nvd_published_at\": \"2026-07-08T17:17:27Z\", \"published_at\": \"2026-07-20T21:34:37Z\", \"references\": [\"https://github.com/lepture/mistune/security/advisories/GHSA-c8j7-8cv4-2xmq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59922\", \"https://github.com/lepture/mistune/commit/96d0f57f8fe9eeb06bb4cff521962a27d7c402e7\", \"https://github.com/lepture/mistune/releases/tag/v3.3.0\", \"https://github.com/pypa/advisory-database/tree/main/vulns/mistune/PYSEC-2026-2210.yaml\", \"https://github.com/advisories/GHSA-c8j7-8cv4-2xmq\"], \"repository_advisory_url\": \"https://api.github.com/repos/lepture/mistune/security-advisories/GHSA-c8j7-8cv4-2xmq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/lepture/mistune\", \"summary\": \"Mistune plugins/formatting: quadratic-time parsing on long runs of `~~x~~`, `==x==`, and `^^x^^` markers (strikethrough / mark / insert)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:34:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-c8j7-8cv4-2xmq\", \"vulnerabilities\": [{\"first_patched_version\": \"3.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mistune\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c8j7-8cv4-2xmq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mistune: < 3.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59922"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mistune"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.266021Z",
+  "provenance": {
+    "content_sha256": "267d593c8593a594ba4f4f2634a6bb153c12b9c20ffcc1d3e30b68ce86362465",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:34:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c8j7-8cv4-2xmq",
+  "status": "active",
+  "title": "Mistune plugins/formatting: quadratic-time parsing on long runs of `~~x~~`, `==x==`, and `^^x^^` markers (strikethrough / mark / insert)",
+  "updated_at": "2026-07-20T21:34:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c8j7-8cv4-2xmq"
+}

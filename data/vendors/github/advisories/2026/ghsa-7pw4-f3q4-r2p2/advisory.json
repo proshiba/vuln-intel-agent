@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/8580514?v=4\", \"events_url\": \"https://api.github.com/users/jlgore/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jlgore/followers\", \"following_url\": \"https://api.github.com/users/jlgore/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jlgore/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jlgore\", \"id\": 8580514, \"login\": \"jlgore\", \"node_id\": \"MDQ6VXNlcjg1ODA1MTQ=\", \"organizations_url\": \"https://api.github.com/users/jlgore/orgs\", \"received_events_url\": \"https://api.github.com/users/jlgore/received_events\", \"repos_url\": \"https://api.github.com/users/jlgore/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jlgore/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jlgore/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jlgore\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59727\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-83\", \"name\": \"Improper Neutralization of Script in Attributes in a Web Page\"}, {\"cwe_id\": \"CWE-116\", \"name\": \"Improper Encoding or Escaping of Output\"}], \"description\": \"### Summary\\n\\nWhen a `transition:persist`, `transition:scope`, or `transition:persist-props` directive is applied to a client-hydrated (`client:*`) component, Astro copied the directive value onto the rendered `<astro-island>` element **without HTML-escaping it**. If a developer reflects attacker-controlled input into one of these directives, an attacker can break out of the attribute and inject arbitrary HTML/JavaScript into the server-rendered output, resulting in reflected cross-site scripting (XSS).\\n\\n### Severity\\n\\nAlthough a generic reflected XSS scores in the Medium range, exploitation here requires the application developer to have written a non-idiomatic pattern — passing untrusted, request-derived input directly into a transition directive. Astro applications that do not route untrusted input into these directives are unaffected. This mitigating precondition places the real-world severity at Low.\\n\\n### Details\\n\\nIn `generateHydrateScript()` (`packages/astro/src/runtime/server/hydration.ts`), every island property is HTML-escaped before serialization — the `attrs`, `props`, and `opts` assignments all pass through `escapeHTML()`. The transition directives, however, were copied verbatim:\\n\\n```ts\\ntransitionDirectivesToCopyOnIsland.forEach((name) => {\\n  if (typeof props[name] !== 'undefined') {\\n    island.props[name] = props[name]; // not escaped\\n  }\\n});\\n```\\n\\nThe `<astro-island>` element is serialized via `renderElement('astro-island', island, false)` with `shouldEscape=false`, and `toAttributeString()` returns the value unchanged in that mode. As a result there is no downstream re-escaping, and the raw directive value reaches the HTML response. This is the same output sink previously addressed for slot names in GHSA-8hv8-536x-4wqp.\\n\\nThe affected directives are:\\n\\n- `data-astro-transition-scope` (`transition:scope`)\\n- `data-astro-transition-persist` (`transition:persist`)\\n- `data-astro-transition-persist-props` (`transition:persist-props`)\\n\\nNote that `transition:persist` is typed `boolean | string`, so passing a string value is a supported use of the API.\\n\\n### Proof of Concept\\n\\nA component that reflects a query parameter into a transition directive:\\n\\n```astro\\n---\\nconst persist = Astro.url.searchParams.get('persist') ?? 'default';\\n---\\n<Island client:load transition:persist={persist} />\\n```\\n\\nRequest:\\n\\n```\\nhttps://example.com/?persist=\\\"><img src=x onerror=alert(document.domain)>\\n```\\n\\nRendered output (before the fix):\\n\\n```html\\n<astro-island … data-astro-transition-persist=\\\"\\\"><img src=x onerror=alert(document.domain)>></astro-island>\\n```\\n\\nThe `\\\"` closes the attribute and the injected `<img onerror=…>` executes in the victim's browser.\\n\\n### Impact\\n\\nReflected XSS. An attacker who can induce a victim to visit a crafted URL can execute arbitrary script in the victim's session on the origin, subject to the requirement that the target application reflects untrusted input into one of the affected transition directives.\\n\\n### Affected Versions\\n\\n`astro >= 3.10.0, < 7.0.4` (introduced in 3.10.0, PR #7861).\\n\\n### Patched Versions\\n\\n`astro >= 7.0.4`. Fixed in PR #17212 by HTML-escaping transition directive values before they are rendered onto the island element.\\n\\n### Workarounds\\n\\nDo not pass untrusted or request-derived input into `transition:persist`, `transition:scope`, or `transition:persist-props`. If such input is required, HTML-escape or strictly validate it before passing it to the directive. Upgrading to `astro@7.0.4` or later removes the need for manual mitigation.\\n\\n### Credits\\n\\nReported by @jlgore.\", \"ghsa_id\": \"GHSA-7pw4-f3q4-r2p2\", \"github_reviewed_at\": \"2026-07-20T23:21:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-7pw4-f3q4-r2p2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7pw4-f3q4-r2p2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59727\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-20T23:21:02Z\", \"references\": [\"https://github.com/withastro/astro/security/advisories/GHSA-7pw4-f3q4-r2p2\", \"https://github.com/withastro/astro/pull/17212\", \"https://github.com/withastro/astro/commit/7ba0bb1dc7516e88caff9abd7767322af44b0294\", \"https://github.com/withastro/astro/releases/tag/astro@7.0.4\", \"https://github.com/advisories/GHSA-7pw4-f3q4-r2p2\"], \"repository_advisory_url\": \"https://api.github.com/repos/withastro/astro/security-advisories/GHSA-7pw4-f3q4-r2p2\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/withastro/astro\", \"summary\": \"Astro: Cross-site scripting via unescaped transition:* directive values on hydrated islands\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T23:21:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-7pw4-f3q4-r2p2\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"astro\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.10.0, < 7.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7pw4-f3q4-r2p2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "astro: >= 3.10.0, < 7.0.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59727"
+    ],
+    "cvss_score": 2.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "astro"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.139828Z",
+  "provenance": {
+    "content_sha256": "7804e4178401d0f4b2986dcb1c0c5c941230b262d35f4d7c14e3673f134c9fd5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T23:21:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7pw4-f3q4-r2p2",
+  "status": "active",
+  "title": "Astro: Cross-site scripting via unescaped transition:* directive values on hydrated islands",
+  "updated_at": "2026-07-20T23:21:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7pw4-f3q4-r2p2"
+}

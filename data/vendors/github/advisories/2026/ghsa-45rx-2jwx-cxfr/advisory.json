@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/148991397?v=4\", \"events_url\": \"https://api.github.com/users/EQSTLab/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EQSTLab/followers\", \"following_url\": \"https://api.github.com/users/EQSTLab/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EQSTLab/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EQSTLab\", \"id\": 148991397, \"login\": \"EQSTLab\", \"node_id\": \"U_kgDOCOFtpQ\", \"organizations_url\": \"https://api.github.com/users/EQSTLab/orgs\", \"received_events_url\": \"https://api.github.com/users/EQSTLab/received_events\", \"repos_url\": \"https://api.github.com/users/EQSTLab/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EQSTLab/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EQSTLab/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EQSTLab\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/22105064?v=4\", \"events_url\": \"https://api.github.com/users/pichlermarc/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/pichlermarc/followers\", \"following_url\": \"https://api.github.com/users/pichlermarc/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/pichlermarc/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/pichlermarc\", \"id\": 22105064, \"login\": \"pichlermarc\", \"node_id\": \"MDQ6VXNlcjIyMTA1MDY0\", \"organizations_url\": \"https://api.github.com/users/pichlermarc/orgs\", \"received_events_url\": \"https://api.github.com/users/pichlermarc/received_events\", \"repos_url\": \"https://api.github.com/users/pichlermarc/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/pichlermarc/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/pichlermarc/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/pichlermarc\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59892\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}], \"description\": \"## Summary\\n\\n`@opentelemetry/propagator-jaeger` decodes incoming HTTP header values with `decodeURIComponent()` without handling decode errors. A single request carrying a malformed percent-encoded value (for example a bare `%`) in an `uber-trace-id` or `uberctx-*` header throws an uncaught `URIError`, terminating any Node.js process that uses `JaegerPropagator` as its active propagator.\\n\\n\\n## Impact\\n\\n**Denial of Service:** Any unauthenticated remote attacker who can send an HTTP request to a service that has `JaegerPropagator` registered as the global propagator (e.g. via `OTEL_PROPAGATORS=jaeger` or `propagation.setGlobalPropagator(new JaegerPropagator())`) can terminate the process with a single request. Confidentiality and integrity are not affected.\\n\\n## Am I affected?\\n\\nThis issue affects only a specific, opt-in configuration. If you use OpenTelemetry's default propagators (W3C TraceContext and Baggage), you are **not** affected.          \\n\\nYou are affected only if you have registered `JaegerPropagator` as the active propagator. Check for:\\n\\n- `@opentelemetry/propagator-jaeger` in your dependency tree, **and**\\n- `OTEL_PROPAGATORS` set to `jaeger` (Jaeger only), **or** a direct `propagation.setGlobalPropagator(new JaegerPropagator())` call in your code.\\n\\nNote: if `JaegerPropagator` is combined with other propagators through a `CompositePropagator` (for example `OTEL_PROPAGATORS=jaeger,tracecontext`), the process does not terminate - the composite propagator catches the error - but affected requests silently fail to extract context. You should still upgrade.\\n\\n\\n## Patched versions\\n\\n- `@opentelemetry/propagator-jaeger` 2.9.0\\n\\n## Remediation\\n\\nUpdate `@opentelemetry/propagator-jaeger` to 2.9.0 or later. The propagator now ignores header values it cannot decode instead of throwing.\\n\\n**Interim mitigation (if you cannot update):** Trace-context headers should never be accepted unfiltered from untrusted callers. Until you can upgrade, strip or validate the `uber-trace-id` and `uberctx-*` headers on inbound requests at your edge - for example with a reverse proxy, API gateway, or load balancer (nginx, Envoy, etc.) - so that only trusted upstream services can set them.\\n\\n## Details\\n\\n`JaegerPropagator.extract()` calls `decodeURIComponent()` on raw header values at two unguarded call sites: the `uber-trace-id` trace header and each `uberctx-*` baggage value. `decodeURIComponent()` throws `URIError: URI malformed` on invalid percent-encoding. Because the HTTP instrumentation extracts context before its request-handler error wrapper, and a single configured propagator is not wrapped in a `CompositePropagator` (which would otherwise catch the error), the exception propagates as an `uncaughtException` and terminates the process.\\n\\n## Proof of concept\\n\\nAgainst a service using `JaegerPropagator`:\\n\\n```bash\\ncurl -H 'uberctx-user: %' http://target/\\n# or\\ncurl -H 'uber-trace-id: %' http://target/\\n```\\n\\nThe Node.js process exits with `URIError: URI malformed` and subsequent requests are refused.\", \"epss\": {\"percentage\": 0.00436, \"percentile\": 0.35125}, \"ghsa_id\": \"GHSA-45rx-2jwx-cxfr\", \"github_reviewed_at\": \"2026-07-21T19:07:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-45rx-2jwx-cxfr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-45rx-2jwx-cxfr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59892\"}], \"nvd_published_at\": \"2026-07-08T17:17:27Z\", \"published_at\": \"2026-07-21T19:07:28Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-js/security/advisories/GHSA-45rx-2jwx-cxfr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59892\", \"https://github.com/open-telemetry/opentelemetry-js/commit/b1c196d49d54caae59741cca0a9d57d101d7ea88\", \"https://github.com/open-telemetry/opentelemetry-js/releases/tag/v2.9.0\", \"https://github.com/advisories/GHSA-45rx-2jwx-cxfr\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-js/security-advisories/GHSA-45rx-2jwx-cxfr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-js\", \"summary\": \"OpenTelemetry JavaScript: Denial of service in `JaegerPropagator` via unhandled exception on a malformed header\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T19:07:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-45rx-2jwx-cxfr\", \"vulnerabilities\": [{\"first_patched_version\": \"2.9.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@opentelemetry/propagator-jaeger\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-45rx-2jwx-cxfr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@opentelemetry/propagator-jaeger: < 2.9.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59892"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@opentelemetry/propagator-jaeger"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.890861Z",
+  "provenance": {
+    "content_sha256": "0faecc04cc6e4fc8ac4cd1136f309d62b7caf61c07c90b29e0415efc06769388",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T19:07:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-45rx-2jwx-cxfr",
+  "status": "active",
+  "title": "OpenTelemetry JavaScript: Denial of service in `JaegerPropagator` via unhandled exception on a malformed header",
+  "updated_at": "2026-07-21T19:07:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-45rx-2jwx-cxfr"
+}
