@@ -1,154 +1,61 @@
-# vulnwatch コードガイド
+# vulnwatch 利用ガイド補足
 
-## 目的
+この文書は、README の補足として、設定と処理の流れを利用者向けに説明します。
 
-vulnwatchは、公式ベンダーの脆弱性情報を収集・正規化し、CISA KEVと組織の製品台帳で
-補強して、対応優先度、構造化JSON、任意の日本語AI要約、日次レポートを生成します。
-
-## 処理フロー
+## 処理の流れ
 
 ```text
-sources.yaml -> Collector -> RawRecord -> Parser -> AdvisoryDraft
-                                                     |
-products.yaml -> asset matching ---------------------+
-CISA KEV -----> exploitation enrichment -------------+
-                                                     v
-                                             Advisory + Priority
-                                                     |
-                 +-------------------+--------------------+-------------+
-                 v                   v                    v             v
-          advisory.json          vulndb ledger      AI summary     daily report
-
-all selected sources -> source_outcomes -> completeness gate
+config/sources.yaml  ->  collect  ->  staging/data・staging/state・staging/run-manifest.json
+                                   ->  summarize  ->  日本語要約
+                                   ->  report     ->  日次レポート
+                                   ->  validate   ->  公開前検証
+                                   ->  publish    ->  リポジトリ直下へ反映
+config/products.yaml ->  優先度判定
+CISA KEV / OSV / NVD ->  補強情報・coverage
 ```
 
-`vulnwatch collect`は次の順番で処理します。
+## 収集ソース設定
 
-1. 既存の公開データと状態をstagingへコピーする。
-2. profileと`enabled`設定から対象を選び、最大6ソースを並行収集する。
-3. ETagとLast-Modifiedを利用して条件付き取得を行う。
-4. 取得結果をソース別パーサーで`AdvisoryDraft`へ変換する。
-5. CVE、製品、深刻度、修正版、悪用状況を`Advisory`へ正規化する。
-6. CISA KEVと製品台帳の一致結果を付加し、優先度を決定する。
-7. 既存アドバイザリのメモリ索引を使い、semantic hashで変更状態を判定する。
-8. coverageソースも保存データとvulndbへ反映するが、重複防止のためレポート変更行からは除く。
-9. 全対象ソースのstatus、Collector、endpoint、件数、エラーを`source_outcomes`へ記録する。
-10. JSON、状態、索引、run manifest、run summaryをstagingへ出力する。
+`config/sources.yaml` には、収集対象、取得方式、parser、許可ホスト、取得上限などが定義されています。
 
-## モジュール
+代表的な取得方式は次のとおりです。
 
-| モジュール | 責務 |
+| 種類 | 内容 |
 |---|---|
-| `cli.py` | Typer CLIと引数検証 |
-| `pipeline.py` | 収集、正規化、差分判定、隔離、保存、取り込み元切り替えの統括 |
-| `models.py` | 設定、収集結果、アドバイザリ、実行結果のPydanticモデル |
-| `config.py` | YAML設定の読み込みと検証 |
-| `collectors/` | CSAF、JSON API、feed、HTML、browser、Broadcom、PDF、NVD、OSV/OSV globalからの取得 |
-| `parsers/` | ベンダー形式から共通の`AdvisoryDraft`への変換（OSVスキーマ含む） |
-| `identity.py` | canonical ID、slug、semantic hashの生成 |
-| `priority.py` | 製品台帳との照合と優先度判定 |
-| `exploitation.py` | 明示表現から悪用・公開PoC状態を推定 |
-| `risk.py` | CVSS・悪用/PoC・修正経過・攻撃経路・機器分類・資産一致を合成した日次レポート用リスク評価 |
-| `vulndb.py` | CVE単位の脆弱性台帳（`index.csv`＋`vulns/<vendor>/<year>/<month>/*.yaml`）の生成・増分更新・検証 |
-| `storage/filesystem.py` | atomic write、状態管理、索引再構築、公開ツリー同期 |
-| `summarizers/` | 個別・日次セクションのOpenAI日本語要約と構造化出力検証 |
-| `report.py` | リスク評価・AIサマリsidecar・Markdown日次レポート生成 |
-| `validation.py` | 設定、生成ツリー、日次AIサマリ、vulndbの公開前検証 |
+| JSON API | ベンダーやサービスが提供する JSON endpoint から取得します。 |
+| RSS / Atom | フィードから更新情報を取得します。 |
+| HTML | 公式ページを取得し、アドバイザリ情報を抽出します。 |
+| Browser | JavaScript 実行が必要なページを Playwright で取得します。 |
+| CSAF | CSAF 形式のセキュリティアドバイザリを取得します。 |
+| NVD / OSV | 横断データベースから coverage 情報を取得します。 |
 
-## データモデル
+## 製品台帳設定
 
-- `SourceDefinition`: URL、collector、許可ホスト、制限値、parserなどの設定
-- `RawRecord`: Collectorが返す未正規化レコード
-- `AdvisoryDraft`: Parserが抽出した共通の中間形式
-- `Advisory`: 保存・公開する正規化済み形式
-- `SourceState`: ETag、成功時刻、件数、既知ID、消失回数などの状態
-- `SourceOutcome`: ソースごとのstatus、使用Collector、endpoint、取得・parse件数、エラー
-- `RunManifest`: 1回の収集における変更と結果
+`config/products.yaml` は、自組織で利用する製品を記録し、日次レポートの優先度判定に使います。
 
-ソースの`role`は、レポート対象の`advisory`、悪用情報を付加する`enrichment`、横断情報を
-保存データとvulndbへ補う`coverage`に分かれます。現行設定は160件すべてが有効で、
-`advisory` 155件、`coverage` 4件、`enrichment` 1件です。
+保存してよい情報は次のような機密性の低い情報に限定してください。
 
-ベンダー由来の情報は`facts`、外部・組織情報は`enrichment`、判定結果は`decision`に
-分離されます。AI出力は`ai`に隔離され、原典由来の事実を上書きしません。
+- 製品名
+- 公開区分
+- 担当部署
 
-## 優先度
+IP アドレス、ホスト名、認証情報、内部 URL、個人情報は保存しないでください。
 
-| 優先度 | 条件 |
+## 優先度の見方
+
+日次レポートや個別アドバイザリには、対応優先度が付与されます。
+
+| 優先度 | 目安 |
 |---|---|
-| P1 | 資産一致かつCISA KEV掲載または悪用確認済み |
-| P1 | 公開資産に一致し、認証不要のリモート攻撃が可能 |
-| P2 | 資産一致、高深刻度、修正版あり |
-| P3 | 資産一致だが追加確認が必要 |
-| INFO | 資産不一致または判定情報不足 |
+| P1 | 資産一致があり、悪用確認済み、CISA KEV 掲載、または認証不要リモート攻撃など緊急性が高いもの。 |
+| P2 | 資産一致があり、高深刻度または修正版ありなど、早期確認が必要なもの。 |
+| P3 | 資産一致はあるが、追加確認が必要なもの。 |
+| INFO | 資産不一致、または判断材料が不足しているもの。 |
 
-`config/products.yaml`が空の場合、原則としてINFOです。製品台帳には製品名、公開区分、
-担当部署のみを保存し、IPアドレス、ホスト名、認証情報を保存しないでください。
+`config/products.yaml` が空の場合、多くのアドバイザリは `INFO` として扱われます。
 
-## 安全性と障害処理
+## coverage ソースの扱い
 
-- HTTPSのみ許可し、redirect先を含めて`allowed_hosts`と照合する。
-- GitHub tokenは`api.github.com`へのrequestだけに付与し、redirect先へ転送しない。
-- response size、Content-Type、timeout、rate limit、redirect回数を制限する。
-- network error、HTTP 429、5xxを制限付きでretryする。
-- 完全スナップショットの異常な0件、設定上限を超える増加、85%以上の急減を拒否する。
-- 収集・parse失敗はソース単位で`quarantine`へ記録する。
-- Pipelineは他ソースの診断情報を残すため収集を継続し、各結果を`source_outcomes`へ記録する。
-- 定期daily実行は有効ソース数とoutcome数の一致を確認し、`failed`または`partial`が1件でも
-  あれば生ツリーのhandoff前に停止する。`not_modified`は正常な条件付き取得結果として許可する。
-- `vulnwatch validate`もprofileから期待するsource IDを算出し、outcomeの欠落・余分・重複と
-  `failed`/`partial`を拒否するため、不完全なツリーは公開できない。
-- withdrawn判定には3回以上かつ24時間以上の欠落を必要とする。
-- CSAFの上限制御とローリングfeedは部分取得として既知IDを和集合で保持し、未取得レコードを
-  withdrawn判定しない。
-- 一時ファイルと`os.replace()`を使ってatomicに更新する。
-- AI要約の失敗で収集全体を失敗させない。
+NVD、OSV、GitHub Advisory Database、JVN iPedia などの横断 coverage ソースは、保存データと `vulndb/` の網羅性を補うために使われます。同じ脆弱性を重複して日次レポートに出さないよう、coverage ソースだけで観測された情報はレポートの変更行に直接出ない場合があります。
 
-## 保存レイアウト
-
-```text
-data/vendors/<vendor>/index.json
-data/vendors/<vendor>/advisories/<year>/<id>/advisory.json
-state/sources/<source-id>.json
-reports/daily/<year>/<month>/<date>.md
-reports/daily/<year>/<month>/<date>.summary.json
-quarantine/<source-id>/latest.json
-vulndb/index.csv
-vulndb/registry.json
-vulndb/vulns/<vendor>/<year>/<month>/<内部ID>.yaml
-run-manifest.json
-run-summary.md
-```
-
-結果はstagingに生成し、検証成功後に`vulnwatch publish`で上記の全パスをリポジトリ直下へ
-同期します。定期実行ではGitHub Actionsが収集した生ツリーを`bot/collected-raw`へcommitし、
-Webhookで起動したClaude Code routineが要約・レポート・検証・公開を行って`bot/vulnwatch-daily`
-へpushし、auto-mergeワークフローが検証のうえ`main`へマージします。重複する一時領域
-`staging/`だけはGit対象外です。
-
-## ソース追加
-
-1. `config/sources.yaml`に公式URL、collector、parser、許可ホストを追加する。
-   `catalog_runtime.enabled`が有効なため、`enabled`を省略したカタログ項目も上限付きHTML/generic
-   runtimeとして次回daily実行から自動的に収集対象になる。機械可読endpointがある場合は、
-   ソース固有のruntime設定を明示する。
-2. 必要なら`collectors/`または`parsers/`を拡張する。
-3. `tests/fixtures/vendors/`に外部接続不要の最小fixtureを追加する。
-4. `tests/fixtures/expected.json`とparser testへ期待値を追加する。
-5. 品質チェックをすべて通す。
-
-## 開発と検証
-
-```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e '.[dev,browser]'
-.venv/bin/python -m playwright install chromium
-.venv/bin/vulnwatch config validate
-.venv/bin/ruff check src tests
-.venv/bin/ruff format --check src tests
-.venv/bin/mypy src
-.venv/bin/pytest
-```
-
-AI要約には`ai` extraも追加します。browser extraとChromiumは9件の有効ソースを含むfull daily
-収集には必須です。PDF extraは現行設定では任意です。通常のテストは外部ネットワークへ接続しません。
+収集できたかどうかは、レポートの行数ではなく `run-manifest.json.source_outcomes` で確認してください。
