@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3240571?v=4\", \"events_url\": \"https://api.github.com/users/thientd/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thientd/followers\", \"following_url\": \"https://api.github.com/users/thientd/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thientd/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thientd\", \"id\": 3240571, \"login\": \"thientd\", \"node_id\": \"MDQ6VXNlcjMyNDA1NzE=\", \"organizations_url\": \"https://api.github.com/users/thientd/orgs\", \"received_events_url\": \"https://api.github.com/users/thientd/received_events\", \"repos_url\": \"https://api.github.com/users/thientd/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thientd/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thientd/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thientd\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59729\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nThe fix for CVE-2026-54298 (GHSA-jrpj-wcv7-9fh9) added an `INVALID_ATTR_NAME_CHAR` guard to `addAttribute()` so that spread-prop attribute names containing `\\\"' >/=` or whitespace are dropped. A second attribute-rendering path, `renderHTMLElement()` in `packages/astro/src/runtime/server/render/dom.ts`, has its own inline attribute loop that does not go through `addAttribute()` and was not updated. It interpolates the attribute name unescaped and only escapes the value, so untrusted prop keys spread onto a native-`HTMLElement`-subclass component can still break out of the attribute context, resulting in XSS.\\n\\n## Details\\n\\n`renderHTMLElement` builds attributes directly:\\n\\n```js\\nfor (const attr in props) {\\n  attrHTML += ` ${attr}=\\\"${toAttributeString(await props[attr])}\\\"`;\\n}\\n```\\n\\nThe attribute name (`attr`) is interpolated raw; only the value is escaped via `toAttributeString`. By contrast, the hardened `addAttribute` in `util.ts` rejects invalid names:\\n\\n```js\\nif (INVALID_ATTR_NAME_CHAR.test(key)) { return ''; } // /[\\\\s\\\"'>/=]/\\n```\\n\\n`renderHTMLElement` is reached from `component.ts` when the component is a native `HTMLElement` subclass:\\n\\n```js\\nif (!renderer && typeof HTMLElement === 'function' && componentIsHTMLElement(Component)) {\\n  const output = await renderHTMLElement(result, Component, _props, slots);\\n}\\n```\\n\\nwhere `_props` carries spread props verbatim.\\n\\n### Reachability\\n\\nThe branch only runs when `typeof HTMLElement === 'function'` at SSR time. In default Node SSR `HTMLElement` is `undefined`, so the branch is dead. It becomes reachable when the SSR runtime exposes a global `HTMLElement` (Deno, Bun with a DOM shim, or jsdom/happy-dom in Node) **and** a class extending `HTMLElement` is used directly as an Astro component that receives untrusted-keyed spread props.\\n\\n## Proof of Concept\\n\\nGiven malicious spread props:\\n\\n```js\\nconst maliciousProps = {\\n  'onmouseover=alert(document.domain) x': 'y',\\n  'x><script>alert(1)</script>': 'z',\\n};\\n```\\n\\n- `addAttribute` (post-fix) → `<my-el></my-el>` (key stripped — safe)\\n- `renderHTMLElement` → `<my-el onmouseover=alert(document.domain) x=\\\"y\\\" x><script>alert(1)</script>=\\\"z\\\"></my-el>` (handler + `<script>` injected — XSS)\\n\\nEquivalent Astro template, served by an SSR runtime that defines a global `HTMLElement`:\\n\\n```astro\\n---\\nimport MyElement from '../MyElement.js'; // class MyElement extends HTMLElement {}\\nconst userInput = Astro.url.searchParams;  // untrusted keys\\n---\\n<MyElement {...Object.fromEntries(userInput)} />\\n```\\n\\n## Impact\\n\\nCross-site scripting (CWE-79) via attribute-name breakout — the same vulnerability class as CVE-2026-54298, in a code path its fix did not cover. An attacker who controls the keys of an object spread onto a native-`HTMLElement`-subclass component can inject arbitrary event-handler attributes or sibling elements (including `<script>`) into the SSR output. Reachability is constrained by the runtime and component preconditions described above.\", \"ghsa_id\": \"GHSA-f48w-9m4c-m7f5\", \"github_reviewed_at\": \"2026-07-20T23:21:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-f48w-9m4c-m7f5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f48w-9m4c-m7f5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59729\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-20T23:21:58Z\", \"references\": [\"https://github.com/withastro/astro/security/advisories/GHSA-f48w-9m4c-m7f5\", \"https://github.com/withastro/astro/pull/17251\", \"https://github.com/withastro/astro/commit/5240e26c9dd91f9bc7140dcfacdb48d5a132830d\", \"https://github.com/withastro/astro/releases/tag/astro@7.0.6\", \"https://github.com/advisories/GHSA-f48w-9m4c-m7f5\"], \"repository_advisory_url\": \"https://api.github.com/repos/withastro/astro/security-advisories/GHSA-f48w-9m4c-m7f5\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/withastro/astro\", \"summary\": \"Astro: XSS via unescaped spread attribute names in renderHTMLElement (incomplete fix for CVE-2026-54298)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T23:22:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-f48w-9m4c-m7f5\", \"vulnerabilities\": [{\"first_patched_version\": \"7.0.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"astro\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 7.0.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f48w-9m4c-m7f5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "astro: < 7.0.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54298",
+      "CVE-2026-59729"
+    ],
+    "cvss_score": 5.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "astro"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.135274Z",
+  "provenance": {
+    "content_sha256": "45ef44344c226421204f66d4c30dde6c5b3eae9852c7bb8538395ecd5f689a1a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T23:21:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f48w-9m4c-m7f5",
+  "status": "active",
+  "title": "Astro: XSS via unescaped spread attribute names in renderHTMLElement (incomplete fix for CVE-2026-54298)",
+  "updated_at": "2026-07-20T23:22:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f48w-9m4c-m7f5"
+}

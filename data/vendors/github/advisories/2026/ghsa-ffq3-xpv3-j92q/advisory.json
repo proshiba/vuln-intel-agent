@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59928\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}, {\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"## Summary\\n\\n**Type:** Algorithmic-complexity DoS in reference-link definition handling. A markdown document with N reference-link definitions of the same key (or many distinct keys) takes O(N²) parser time. 5000 repeated `[a]: u\\\\n` definitions take ~1.1 second; 10000 → ~4.5 seconds.\\n**File:** `src/mistune/block_parser.py` (reference-link def parsing) and the surrounding `ref_links` env-dictionary handling.\\n**Root cause:** every reference definition is parsed by scanning forward from each candidate position. The `unikey` normalisation runs per-def, the dictionary insert is per-def, and the lookup-by-label-then-iterate-defs path is linear in the number of stored defs. For input with N defs, the total work is O(N²).\\n\\n## Affected Code\\n\\n`src/mistune/block_parser.py` — reference-definition rule fires on every line that matches `[label]: url`. For each one:\\n- `unikey(label)` is called (linear scan of the label).\\n- The def is appended to `state.env['ref_links']`.\\n- Later inline-link resolution looks up by `unikey(label)` in the dict (O(1)) but the surrounding parser revisits the def list for paragraph-vs-def disambiguation.\\n\\nThe cumulative parse time grows as the square of the number of defs.\\n\\n**Why it's wrong:** the parser does not amortise the def-list scan. A single forward pass with a hash-keyed dict (already in place) plus a per-line classifier should make this O(N).\\n\\n## Exploit Chain\\n\\n1. Application uses mistune to render attacker-supplied markdown. No plugins required.\\n2. Attacker submits a 35 KB document of `[a]: u\\\\n` repeated 5000 times followed by `[click][a]`.\\n3. CPU pegs for ~1.1 seconds. 10000 defs → ~4.5 s. 20000 → ~18 s. Doubling input quadruples time.\\n\\n## Security Impact\\n\\n**Attacker capability:** small input → large CPU. Predictable scaling. Can be repeated.\\n**Preconditions:** application uses `mistune.create_markdown()` (default config) on attacker-supplied markdown. Worth noting: the `ref_links` dictionary persists for the lifetime of the parse, so a long document with many defs builds up memory; with N defs of attacker-chosen length, the per-def normalisation cost compounds.\\n**Differential:** PoC-verified against mistune@3.2.1, default config:\\n\\n```python\\nimport mistune, time\\nmd = mistune.create_markdown()\\nfor n in [1000, 2000, 5000, 10000]:\\n    s = '[a]: u\\\\n' * n + '[click][a]'\\n    t = time.time()\\n    md(s)\\n    print(f'  ref defs * {n} ({len(s)}b): {(time.time() - t) * 1000:.0f}ms')\\n\\n# Output (Python 3.13, Linux, 2.5GHz CPU):\\n#   ref defs *  1000  ( 7012b):    46ms\\n#   ref defs *  2000 (14012b):   186ms\\n#   ref defs *  5000 (35012b):  1121ms\\n#   ref defs * 10000 (70012b):  4400ms\\n```\\n\\nThe patched build (with the surrounding parser amortised to O(N)) keeps the time linear.\\n\\n## Suggested Fix\\n\\nReplace the per-def re-scan with a single forward pass that classifies each line into `ref_def | paragraph | other` once and only inserts into `ref_links` once per def. The dict already exists; the wasted work is in the surrounding scan loop, not in the dict operations.\\n\\nA regression test asserting that `md('[a]: u\\\\n' * 50_000 + '[click][a]')` completes in under 1 second would catch any regression.\", \"epss\": {\"percentage\": 0.00366, \"percentile\": 0.28652}, \"ghsa_id\": \"GHSA-ffq3-xpv3-j92q\", \"github_reviewed_at\": \"2026-07-20T21:24:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-ffq3-xpv3-j92q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ffq3-xpv3-j92q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59928\"}], \"nvd_published_at\": \"2026-07-08T17:17:28Z\", \"published_at\": \"2026-07-20T21:24:18Z\", \"references\": [\"https://github.com/lepture/mistune/security/advisories/GHSA-ffq3-xpv3-j92q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59928\", \"https://github.com/lepture/mistune/commit/2b04d7ba341c16ac78fe82d3076bdd5c3de87c69\", \"https://github.com/lepture/mistune/releases/tag/v3.3.0\", \"https://github.com/pypa/advisory-database/tree/main/vulns/mistune/PYSEC-2026-2216.yaml\", \"https://github.com/advisories/GHSA-ffq3-xpv3-j92q\"], \"repository_advisory_url\": \"https://api.github.com/repos/lepture/mistune/security-advisories/GHSA-ffq3-xpv3-j92q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/lepture/mistune\", \"summary\": \"Mistune block_parser: quadratic-time parsing on long lists of repeated reference-link definitions\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:24:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-ffq3-xpv3-j92q\", \"vulnerabilities\": [{\"first_patched_version\": \"3.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mistune\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ffq3-xpv3-j92q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mistune: < 3.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59928"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mistune"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.396664Z",
+  "provenance": {
+    "content_sha256": "eff95ff40e9ddaba3a0d59d05ded4f3128a3b54b8b80fcf3739579e33ac7af50",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:24:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ffq3-xpv3-j92q",
+  "status": "active",
+  "title": "Mistune block_parser: quadratic-time parsing on long lists of repeated reference-link definitions",
+  "updated_at": "2026-07-20T21:24:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ffq3-xpv3-j92q"
+}

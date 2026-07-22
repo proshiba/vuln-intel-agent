@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/49950206?v=4\", \"events_url\": \"https://api.github.com/users/Ryoga-exe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Ryoga-exe/followers\", \"following_url\": \"https://api.github.com/users/Ryoga-exe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Ryoga-exe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Ryoga-exe\", \"id\": 49950206, \"login\": \"Ryoga-exe\", \"node_id\": \"MDQ6VXNlcjQ5OTUwMjA2\", \"organizations_url\": \"https://api.github.com/users/Ryoga-exe/orgs\", \"received_events_url\": \"https://api.github.com/users/Ryoga-exe/received_events\", \"repos_url\": \"https://api.github.com/users/Ryoga-exe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Ryoga-exe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Ryoga-exe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Ryoga-exe\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nAstro's server-side View Transition CSS generator interpolates animation properties into an inline `<style>` element without escaping them for the CSS and HTML contexts.\\n\\nAn attacker-controlled value passed to an animation property such as `duration` can contain a `</style>` sequence, terminate the generated style element, and inject arbitrary HTML or JavaScript.\\n\\nThis is similar to GHSA-8hv8-536x-4wqp, but exploits a different injection point: unescaped View Transition animation values in a server-generated `<style>` element rather than an unescaped slot name in a hydration template.\\n\\nLike GHSA-8hv8-536x-4wqp, exploitation requires an application to pass attacker-controlled data to an Astro API. However, the value is subsequently inserted into the HTML response without context-appropriate escaping by Astro.\\n\\n\\n## Details\\n\\n\\n`packages/astro/src/runtime/server/transition.ts`\\n\\nThe generated stylesheet is wrapped in a `<style>` element and marked as HTML-safe:\\n\\n```ts\\nconst css = sheet.toString();\\nresult._metadata.extraHead.push(markHTMLString(`<style>${css}</style>`));\\n```\\n\\nAnimation properties are added to the stylesheet without escaping:\\n\\n```ts\\nif (anim.duration) {\\n  addAnimationProperty(builder, 'animation-duration', toTimeValue(anim.duration));\\n}\\n```\\n\\nFor string values, `toTimeValue()` returns the input unchanged:\\n\\n```ts\\nexport function toTimeValue(num: number | string) {\\n  return typeof num === 'number' ? num + 'ms' : num;\\n}\\n```\\n\\nAs a result, a `duration` value containing `</style>` can escape from the generated style element.\\n\\nOther `TransitionAnimation` properties, including `easing`, `direction`, `delay`, `fillMode`, and `name`, are serialized by the same animation builder. The following PoC only relies on the official `fade()` helper and its `duration` option.\\n\\n\\n## PoC\\n\\nUsing:\\n\\n- `astro@7.0.9`\\n- `@astrojs/node@11.0.2`\\n\\n### `astro.config.mjs`\\n\\n```js\\nimport node from '@astrojs/node';\\nimport { defineConfig } from 'astro/config';\\n\\nexport default defineConfig({\\n  output: 'server',\\n  adapter: node({ mode: 'standalone' }),\\n});\\n```\\n\\n### `src/pages/index.astro`\\n\\n```astro\\n---\\nimport { fade } from 'astro:transitions';\\n\\nconst duration = Astro.url.searchParams.get('duration') ?? '300ms';\\n---\\n\\n<html lang=\\\"en\\\">\\n  <head>\\n    <meta charset=\\\"utf-8\\\" />\\n    <title>PoC</title>\\n  </head>\\n  <body>\\n    <div transition:animate={fade({ duration })}>\\n      Animated content\\n    </div>\\n  </body>\\n</html>\\n```\\n\\n### Payload:\\n\\nopen:\\n\\n```text\\nhttp://localhost:4321/?duration=%3C%2Fstyle%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E%3C!--\\n```\\n\\nThe browser interprets `</style>` as the end of the generated style element and executes the injected script. An alert dialog is displayed when the page is opened.\\n\\n<img width=\\\"1307\\\" height=\\\"681\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/0834236d-008f-415f-9f23-db509ab6f8f6\\\" />\\n\\n## Impact\\n\\nAn attacker who can control a View Transition animation value can execute arbitrary JavaScript in the origin of the affected Astro application.\\n\\nThe query-based reflected XSS scenario affects on-demand/server-rendered routes, such as:\\n\\n- projects configured with `output: \\\"server\\\"`;\\n- pages using `export const prerender = false`;\\n- other server-side data flows that pass attacker-controlled values into a View Transition animation definition.\\n\\nSuccessful exploitation may allow access to sensitive page data and authenticated actions available to the victim.\\n\\n## Suggested Fix\\n\\nAnimation values should be serialized using context-appropriate CSS escaping or validation before being added to the generated stylesheet.\\n\\nAdditionally, content inserted into a raw `<style>` element must not be able to contain an HTML end-tag sequence such as `</style>`. The final generated CSS should be made safe for the HTML raw-text context before it is passed to `markHTMLString()`.\", \"ghsa_id\": \"GHSA-4g3v-8h47-v7g6\", \"github_reviewed_at\": \"2026-07-20T21:08:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-4g3v-8h47-v7g6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4g3v-8h47-v7g6\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-20T21:08:16Z\", \"references\": [\"https://github.com/withastro/astro/security/advisories/GHSA-4g3v-8h47-v7g6\", \"https://github.com/withastro/astro/pull/17393\", \"https://github.com/withastro/astro/commit/092da560eea77ee63a3e2c583c80d8238544e42b\", \"https://github.com/withastro/astro/releases/tag/astro@7.1.0\", \"https://github.com/advisories/GHSA-4g3v-8h47-v7g6\"], \"repository_advisory_url\": \"https://api.github.com/repos/withastro/astro/security-advisories/GHSA-4g3v-8h47-v7g6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/withastro/astro\", \"summary\": \"Astro: Reflected XSS via unescaped View Transition animation properties\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:08:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-4g3v-8h47-v7g6\", \"vulnerabilities\": [{\"first_patched_version\": \"7.1.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"astro\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.9.0, <= 7.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4g3v-8h47-v7g6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "astro: >= 2.9.0, <= 7.0.9"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "astro"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.545167Z",
+  "provenance": {
+    "content_sha256": "fd57328af033e03031fdded88e843fb6f1a94e96c74ee0aa6a2e5da72b9e0d29",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:08:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4g3v-8h47-v7g6",
+  "status": "active",
+  "title": "Astro: Reflected XSS via unescaped View Transition animation properties",
+  "updated_at": "2026-07-20T21:08:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4g3v-8h47-v7g6"
+}

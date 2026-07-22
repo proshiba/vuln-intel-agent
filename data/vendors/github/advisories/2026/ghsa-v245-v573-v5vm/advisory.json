@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91076575?v=4\", \"events_url\": \"https://api.github.com/users/bibu123456/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bibu123456/followers\", \"following_url\": \"https://api.github.com/users/bibu123456/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bibu123456/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bibu123456\", \"id\": 91076575, \"login\": \"bibu123456\", \"node_id\": \"MDQ6VXNlcjkxMDc2NTc1\", \"organizations_url\": \"https://api.github.com/users/bibu123456/orgs\", \"received_events_url\": \"https://api.github.com/users/bibu123456/received_events\", \"repos_url\": \"https://api.github.com/users/bibu123456/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bibu123456/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bibu123456/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bibu123456\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74753555?v=4\", \"events_url\": \"https://api.github.com/users/Kayiz-PT/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kayiz-PT/followers\", \"following_url\": \"https://api.github.com/users/Kayiz-PT/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kayiz-PT/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kayiz-PT\", \"id\": 74753555, \"login\": \"Kayiz-PT\", \"node_id\": \"MDQ6VXNlcjc0NzUzNTU1\", \"organizations_url\": \"https://api.github.com/users/Kayiz-PT/orgs\", \"received_events_url\": \"https://api.github.com/users/Kayiz-PT/received_events\", \"repos_url\": \"https://api.github.com/users/Kayiz-PT/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kayiz-PT/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kayiz-PT/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kayiz-PT\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59887\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\n`linkify-it`'s schema-scan loop (`.test()` / `.match()`, the documented public API) invokes the `mailto:`\\nschema validator at **every** `mailto:` occurrence in the input text. For each occurrence the validator does\\n`text.slice(pos)` (an O(n) copy) and runs an email regex whose local-part class `src_email_name` greedily\\nscans the **entire remaining tail** (O(n)) before failing. With N `mailto:` occurrences that is\\n**N × O(n) = O(n²)**. Because linkify-it runs on arbitrary user text (markdown-it feeds it whole documents\\nwhen `linkify:true`), an unauthenticated attacker can block the single-threaded event loop for many seconds\\nwith a small input. No length bound (unlike an HTTP header).\\n\\n### Root cause — `index.mjs` + `lib/re.mjs`\\n```js\\n// index.mjs (mailto validator) — runs at every \\\"mailto:\\\" hit\\n'mailto:': { validate: function (text, pos, self) {\\n  const tail = text.slice(pos)                                  // O(n) copy per hit\\n  if (!self.re.mailto) self.re.mailto = new RegExp('^' + self.re.src_email_name + '@' + self.re.src_host_strict, 'i')\\n  if (self.re.mailto.test(tail)) { ... }                        // scans the whole O(n) tail\\n  return 0\\n}}\\n// lib/re.mjs:91-93 — every char of \\\"mailto:\\\" (incl. ':','-',';') is in this class:\\nre.src_email_name = '[\\\\\\\\-;:&=\\\\\\\\+\\\\\\\\$,\\\\\\\\.a-zA-Z0-9_][\\\\\\\\-;:&=\\\\\\\\+\\\\\\\\$,\\\\\\\\\\\"\\\\\\\\.a-zA-Z0-9_]*'\\n```\\nThe `while ((m = re.exec(text)) !== null) { …testSchemaAt… }` scan loop calls the validator at each\\n`mailto:` hit; `src_email_name` greedily consumes the whole tail (all chars are in its class) then fails for\\nlack of `@`. `http:`/`https:` do NOT blow up — their validator requires the tail to start with `//`, failing\\nin O(1) per hit.\\n\\n### Proof of Concept (confirmed, linkify-it 5.0.1, Node v24)\\n```js\\nconst LinkifyIt = require('linkify-it');\\nconst lf = new LinkifyIt();\\nlf.match('mailto:'.repeat(48000));   // ~336 KB of \\\"mailto:mailto:…\\\" -> seconds of blocked event loop\\n```\\n| input (same bytes) | 56 KB | 112 KB | 224 KB | 336 KB |\\n|---|---:|---:|---:|---:|\\n| **`mailto:` contiguous** | 97 ms | 357 ms | 1438 ms | 3272 ms |\\n| `mailto:` space-separated | 2 ms | 3 ms | 5 ms | 8 ms |\\n| `http://` contiguous | 12 ms | 17 ms | 33 ms | 49 ms |\\n\\n×~4 per 2× input ⇒ O(n²); equal-byte controls stay flat ⇒ algorithmic, not a GC/allocation artifact.\\nReal-world via markdown-it 14.x (`{linkify:true}`), `md.render('mailto:'.repeat(n))`: 219 KB ≈ ~5 s.\\n<img width=\\\"737\\\" height=\\\"161\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/b5d390f3-68d0-4861-9c47-ad8aff0203d5\\\" />\\n\\n### Impact\\nReachable on arbitrary user text via the documented `.test()`/`.match()` API and through markdown-it's\\nlinkifier — comment systems, chat, forums, wikis, note apps that render user markdown with linkify enabled.\\nA ~220 KB post hangs the event loop ~5 s; a few hundred KB → tens of seconds. Availability only.\\n\\n### Suggested remediation\\nBound the email local-part per RFC 5321 (≤64) so per-hit work is O(1), and avoid the full-tail slice:\\n```js\\n// lib/re.mjs — cap the greedy run:\\nre.src_email_name = '[\\\\\\\\-;:&=\\\\\\\\+\\\\\\\\$,\\\\\\\\.a-zA-Z0-9_][\\\\\\\\-;:&=\\\\\\\\+\\\\\\\\$,\\\\\\\\\\\"\\\\\\\\.a-zA-Z0-9_]{0,63}'\\n// index.mjs — prefer a sticky regex anchored at `pos` over text.slice(pos).\\n```\\n\\n### Affected / disclosure\\nAll versions through 5.0.1 (latest); same code on `master`. cve-mcp/OSV report no known vulnerability for\\nlinkify-it. Distinct from markdown-it's own `*`-run ReDoS (CVE-2026-2327, different package/path) and the\\nrecent markdown-it DoS. Reported privately; happy to test a patch against the PoC.\", \"epss\": {\"percentage\": 0.00346, \"percentile\": 0.26644}, \"ghsa_id\": \"GHSA-v245-v573-v5vm\", \"github_reviewed_at\": \"2026-07-21T19:06:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-v245-v573-v5vm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v245-v573-v5vm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59887\"}], \"nvd_published_at\": \"2026-07-08T17:17:26Z\", \"published_at\": \"2026-07-21T19:06:09Z\", \"references\": [\"https://github.com/markdown-it/linkify-it/security/advisories/GHSA-v245-v573-v5vm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59887\", \"https://github.com/markdown-it/linkify-it/commit/105e5d77f7d119871d2b2d86ed208568eb3e7ffe\", \"https://github.com/markdown-it/linkify-it/releases/tag/5.0.2\", \"https://github.com/advisories/GHSA-v245-v573-v5vm\"], \"repository_advisory_url\": \"https://api.github.com/repos/markdown-it/linkify-it/security-advisories/GHSA-v245-v573-v5vm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/markdown-it/linkify-it\", \"summary\": \"linkify-it: Quadratic-complexity DoS via the `mailto:` validator scan-loop on attacker text\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T19:06:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-v245-v573-v5vm\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"linkify-it\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.0.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v245-v573-v5vm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "linkify-it: <= 5.0.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-2327",
+      "CVE-2026-59887"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "linkify-it"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.893051Z",
+  "provenance": {
+    "content_sha256": "2d13774a29bbc011ae6c65b9b8228a92b3c31819eaf65dc6a69a1a01edf39c59",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T19:06:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v245-v573-v5vm",
+  "status": "active",
+  "title": "linkify-it: Quadratic-complexity DoS via the `mailto:` validator scan-loop on attacker text",
+  "updated_at": "2026-07-21T19:06:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v245-v573-v5vm"
+}

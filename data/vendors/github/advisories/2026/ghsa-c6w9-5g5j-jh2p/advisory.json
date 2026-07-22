@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/118045916?v=4\", \"events_url\": \"https://api.github.com/users/tr4ce-ju/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tr4ce-ju/followers\", \"following_url\": \"https://api.github.com/users/tr4ce-ju/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tr4ce-ju/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tr4ce-ju\", \"id\": 118045916, \"login\": \"tr4ce-ju\", \"node_id\": \"U_kgDOBwk83A\", \"organizations_url\": \"https://api.github.com/users/tr4ce-ju/orgs\", \"received_events_url\": \"https://api.github.com/users/tr4ce-ju/received_events\", \"repos_url\": \"https://api.github.com/users/tr4ce-ju/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tr4ce-ju/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tr4ce-ju/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tr4ce-ju\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61836\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-524\", \"name\": \"Use of Cache Containing Sensitive Information\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n\\nWhen response caching is enabled (`CACHE_ENABLED=true`), the cache-key derivation in `api/src/utils/get-cache-key.ts` includes only `version`, `path`, `query`, and `accountability.user` (plus a conditional `ip`). Authorization context beyond `user` (`share`, `role`, `roles`, `admin`, `app`, `policies`) is not part of the key.\\n\\nFor share tokens this is load-bearing. Directus's share-authentication flow (`api/src/services/shares.ts:100-105`) issues a JWT without an `id` claim, so `api/src/utils/get-accountability-for-token.ts` never assigns `accountability.user`, leaving it `null` (the default from `create-default-accountability.ts`). Every share token, and every anonymous request, therefore reduces to `user: null` in the cache-key input. Two different shares (or an anonymous request and a share token) requesting the same URL with the same query produce identical cache keys. The first request populates the bucket with a permission-filtered response; subsequent hits from unrelated shares or anonymous clients receive that payload without any permission re-evaluation.\\n\\nThis is the web-cache pattern \\\"authorization-dependent response cached under an unsegmented key\\\" (cache key collision / missing authorization context in cache key, CWE-524 and CWE-639). Two adjacent read populations collide:\\n\\n- **Share to share:** `Share A` populates the cache, `Share B` reads `Share A`'s scoped response.\\n- **Share to anonymous** (and the reverse): any unauthenticated client hitting the same URL retrieves cached share-scoped data without presenting any token.\\n\\n## Affected\\n\\n- Config required: `CACHE_ENABLED=true` (any store: memory, redis, memcached) plus at least one active `directus_shares` row. This is not a default-on bug: `CACHE_ENABLED` ships as `false`. The cache is documented as a production performance setting, so operators who enable it are the ones affected.\\n\\n## Vulnerability class\\n\\n- **CWE-524:** Use of Cache Containing Sensitive Information\\n- **CWE-639:** Authorization Bypass Through User-Controlled Key (the key here is the derived cache key, not the URL)\\n- **OWASP API3:2023:** Broken Object Property Level Authorization\\n\\n## Impact\\n\\n- **Cross-share confidentiality breach.** Any share's filtered response can be served to a holder of a different share token, or to an anonymous request, that hits the same URL and query. Shares are advertised as a mechanism to distribute scoped, read-only access to specific items; this bug makes every cached share response readable by any other share-token holder who can reach the URL (the item-detail admin UI uses a predictable pattern).\\n- **Anonymous request can read share data.** Anonymous requests also compute `user=null`. An anonymous client hitting `/items/articles?fields=*` after a share request has populated the cache receives the share's scoped payload with zero authentication.\\n- **Password-protected share, derivative effect.** Password protection lives only at `shares.login` (JWT issuance). Once any share has populated the cache for a URL, an anonymous or alternate-share request to that URL retrieves the cached payload without exchanging the share password. This is the same cache-key collision surfacing as a password-protection bypass symptom, not a distinct mechanism.\\n- **Persistence.** The leak persists for the `CACHE_TTL` window (commonly 5 to 30 minutes). `CACHE_AUTO_PURGE` clears on mutating writes to cached collections but does not purge per-user or per-share. With `CACHE_STORE=redis` (common in production) the poisoned bucket survives server restarts.\\n- **No write impact.** The bypass is read-only.\\n\\nScope of the leak depends on the share's permission surface. A share with no backing role (`directus_shares.role = null`, the default) collapses visibility to the primary key, so the cache leaks only PKs. A share backed by a role with broader field access (the intended production setup for distributing useful content) leaks the full content that role can see on the scoped item.\", \"epss\": {\"percentage\": 0.00277, \"percentile\": 0.1963}, \"ghsa_id\": \"GHSA-c6w9-5g5j-jh2p\", \"github_reviewed_at\": \"2026-07-20T21:48:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-c6w9-5g5j-jh2p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c6w9-5g5j-jh2p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61836\"}], \"nvd_published_at\": \"2026-07-15T15:16:48Z\", \"published_at\": \"2026-07-20T21:48:15Z\", \"references\": [\"https://github.com/directus/directus/security/advisories/GHSA-c6w9-5g5j-jh2p\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61836\", \"https://github.com/directus/directus/pull/27707\", \"https://github.com/directus/directus/commit/7ba4efb97525d3af33570537c76e44baea767f13\", \"https://github.com/directus/directus/releases/tag/v12.0.0\", \"https://github.com/advisories/GHSA-c6w9-5g5j-jh2p\"], \"repository_advisory_url\": \"https://api.github.com/repos/directus/directus/security-advisories/GHSA-c6w9-5g5j-jh2p\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/directus/directus\", \"summary\": \"Directus: Authorization-dependent response served from unsegmented cache key\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-20T21:48:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-c6w9-5g5j-jh2p\", \"vulnerabilities\": [{\"first_patched_version\": \"12.0.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"directus\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 12.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c6w9-5g5j-jh2p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "directus: < 12.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61836"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "directus"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:30.245501Z",
+  "provenance": {
+    "content_sha256": "f90563aebb00f0a9e0dab6ddda08a6e074953c4413f1c67e813e3ad287ec0308",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-20T21:48:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c6w9-5g5j-jh2p",
+  "status": "active",
+  "title": "Directus: Authorization-dependent response served from unsegmented cache key",
+  "updated_at": "2026-07-20T21:48:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c6w9-5g5j-jh2p"
+}

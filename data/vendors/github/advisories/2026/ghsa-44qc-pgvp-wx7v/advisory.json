@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/48913347?v=4\", \"events_url\": \"https://api.github.com/users/ybsun0215/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ybsun0215/followers\", \"following_url\": \"https://api.github.com/users/ybsun0215/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ybsun0215/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ybsun0215\", \"id\": 48913347, \"login\": \"ybsun0215\", \"node_id\": \"MDQ6VXNlcjQ4OTEzMzQ3\", \"organizations_url\": \"https://api.github.com/users/ybsun0215/orgs\", \"received_events_url\": \"https://api.github.com/users/ybsun0215/received_events\", \"repos_url\": \"https://api.github.com/users/ybsun0215/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ybsun0215/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ybsun0215/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ybsun0215\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58419\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"# Summary\\n\\nAn information disclosure issue in the Gitea Notification API allows users who have lost access to a private repository to continue accessing private issue or pull request information through existing notification threads. Although repository information is hidden after access revocation, the `subject` field remains accessible and continues to expose private metadata.\\n\\n# Details\\n\\nCVE-2026-20800 was fixed in v1.25.4 to prevent users from accessing private repository information through notification APIs after their repository access had been revoked.\\n\\nDuring testing on Gitea v1.26.2, the `repository` field in `NotificationThread` responses is correctly set to `null` after access revocation. However, the associated `subject` field remains available.\\n\\nThe exposed `subject` object may contain:\\n\\n* Private issue or pull request titles\\n* Repository-related API and HTML URLs\\n* Issue or pull request state\\n* Latest comment URLs and comment identifiers\\n\\nAdditionally, the exposed notification data is not limited to historical information. If new comments are added to the issue or pull request while the notification remains unread, fields such as `latest_comment_url` and `updated_at` continue to change. As a result, a user whose repository access has been revoked can still observe ongoing issue or pull request activity through notification APIs.\\n\\nThe observed behavior suggests that access control is applied to the `repository` field but not consistently applied to the associated `subject` information.\\n\\n# PoC\\n\\n## Environment\\n\\n* Gitea v1.26.2\\n* Private repository\\n\\n## Steps to Reproduce\\n\\n1. User `sun` creates a private repository and grants read access to user `li`.\\n\\n2. User `li` subscribes to repository notifications.\\n\\n3. User `sun` creates a private issue and adds a comment.\\n\\n4. User `li` receives a notification (`thread_id = 14`).\\n\\n5. User `sun` revokes `li`'s repository access.\\n\\n6. User `li` requests:\\n\\n   ```http\\n   GET /api/v1/repos/sun/{repo}/issues/1\\n   ```\\n\\n   Response:\\n\\n   ```text\\n   404 Not Found\\n   ```\\n\\n7. User `li` requests:\\n\\n   ```http\\n   GET /api/v1/notifications?all=true\\n   ```\\n\\n8. User `li` requests:\\n\\n   ```http\\n   GET /api/v1/notifications/threads/14\\n   ```\\n\\n## Observed Result\\n\\nThe notification is returned successfully. The `repository` field is `null`, but the `subject` field still contains private issue metadata.\\n\\nExample:\\n\\n```json\\n{\\n  \\\"id\\\": 14,\\n  \\\"repository\\\": null,\\n  \\\"subject\\\": {\\n    \\\"title\\\": \\\"private issue title\\\",\\n    \\\"url\\\": \\\"http://localhost:3000/api/v1/repos/sun/private-repo/issues/1\\\",\\n    \\\"latest_comment_url\\\": \\\"http://localhost:3000/api/v1/repos/sun/private-repo/issues/comments/24\\\",\\n    \\\"html_url\\\": \\\"http://localhost:3000/sun/private-repo/issues/1\\\",\\n    \\\"state\\\": \\\"open\\\"\\n  }\\n}\\n```\\n\\n## Expected Result\\n\\nUsers who no longer have access to a repository should not receive private issue or pull request information through notification APIs. The `subject` field should be removed, redacted, or otherwise protected by the same access controls applied to the `repository` field.\\n\\n## Detailed PoC\\n\\nhttps://anonymous.4open.science/r/Gitea_PoC-EC93/1_poc_notification_leak\\n\\n# Impact\\n\\n**Affected Endpoints**\\n\\n* `GET /api/v1/notifications`\\n* `GET /api/v1/notifications/threads/{id}`\\n\\n**Prerequisites**\\n\\n* The user previously had legitimate access to the private repository.\\n* The notification was received before repository access was revoked.\\n\\n**Impact**\\n\\n* Disclosure of private issue or pull request titles.\\n* Disclosure of repository information through notification URLs.\\n* Disclosure of issue or pull request state.\\n* Disclosure of comment activity metadata.\\n* Continued visibility into issue or pull request activity after repository access has been revoked.\\n\\n**Tested Version**\\n\\n* Confirmed on v1.26.2.\", \"epss\": {\"percentage\": 0.00298, \"percentile\": 0.21564}, \"ghsa_id\": \"GHSA-44qc-pgvp-wx7v\", \"github_reviewed_at\": \"2026-07-21T21:48:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-44qc-pgvp-wx7v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-44qc-pgvp-wx7v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58419\"}], \"nvd_published_at\": \"2026-07-03T21:17:05Z\", \"published_at\": \"2026-07-21T21:48:05Z\", \"references\": [\"https://github.com/go-gitea/gitea/security/advisories/GHSA-44qc-pgvp-wx7v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-58419\", \"https://github.com/go-gitea/gitea/pull/38108\", \"https://github.com/go-gitea/gitea/commit/9e84deb969aff5c1115c2984e41250f28c78451f\", \"https://blog.gitea.com/release-of-1.26.3-and-1.26.4\", \"https://github.com/go-gitea/gitea/releases/tag/v1.26.4\", \"https://github.com/advisories/GHSA-44qc-pgvp-wx7v\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-44qc-pgvp-wx7v\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/go-gitea/gitea\", \"summary\": \"Gitea: Notification API leaks private issue metadata after access revocation\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T21:48:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-44qc-pgvp-wx7v\", \"vulnerabilities\": [{\"first_patched_version\": \"1.26.4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.26.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-44qc-pgvp-wx7v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: < 1.26.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-58419"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.701325Z",
+  "provenance": {
+    "content_sha256": "06d32236374d02af3f0b7cda90d801627a0db56a1b40a313fd060b0d508d6b76",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T21:48:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-44qc-pgvp-wx7v",
+  "status": "active",
+  "title": "Gitea: Notification API leaks private issue metadata after access revocation",
+  "updated_at": "2026-07-21T21:48:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-44qc-pgvp-wx7v"
+}

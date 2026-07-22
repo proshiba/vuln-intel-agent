@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/170581725?v=4\", \"events_url\": \"https://api.github.com/users/babakizo420/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/babakizo420/followers\", \"following_url\": \"https://api.github.com/users/babakizo420/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/babakizo420/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/babakizo420\", \"id\": 170581725, \"login\": \"babakizo420\", \"node_id\": \"U_kgDOCire3Q\", \"organizations_url\": \"https://api.github.com/users/babakizo420/orgs\", \"received_events_url\": \"https://api.github.com/users/babakizo420/received_events\", \"repos_url\": \"https://api.github.com/users/babakizo420/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/babakizo420/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/babakizo420/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/babakizo420\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-27761\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"### Summary\\nA Gitea personal access token (PAT) restricted to a non-repository scope (e.g. `read:issue`) can read the commit history of any private repository the token owner can access, via the repository RSS/Atom feed endpoints. The same token is correctly denied (403) on `/raw`, `/media`, `/archive`, and the contents API. It leaks commit SHAs, full commit messages (which frequently contain secrets and internal context), and committer name + email.\\n\\n### Details\\nGitea enforces PAT scope on repository-content endpoints via `checkDownloadTokenScope()` (added in PR #37698, extended to the archive endpoint by the CVE-2026-20706 fix in 1.26.2). The RSS/Atom feed handlers were never included: they (a) opt into PAT auth via `webAuth.AllowBasic`, (b) serve private-repo content, but (c) never call `checkDownloadTokenScope()`.\\n\\nAffected handlers (all carry `AllowBasic`, none call the scope check):\\n- `RenderBranchFeedRSS/Atom` - `routers/web/feed/render.go` (last 10 commits: SHA, title, full message, committer name + email)\\n- `ShowFileFeed` - `routers/web/feed/file.go` (per-file commit history)\\n- repo activity feed `/{owner}/{repo}.rss` / `.atom`\\n- `TagsListFeedRSS/Atom`, `ReleasesFeedRSS/Atom` - `routers/web/repo/release.go`\\n\\nRoot cause: `routers/web/web.go` registers the feed routes with `webAuth.AllowBasic` so a PAT authenticates, but the unit-permission middleware only checks the user's access, not the token's scope. `checkDownloadTokenScope` (`routers/web/repo/download.go` and the archive `Download` in `repo.go`) exists to close exactly that gap and is absent from the feed handlers. Same class as the recently fixed download/archive bypasses (GHSA-cr4g-f395-h25h / CVE-2026-20706); the feeds are the surface those fixes missed.\\n\\n### PoC\\nTested on `gitea/gitea:1.26.2-rootless`, confirmed present at `main` HEAD (9608cc2, 2026-06-13).\\n1. User `carol` owns private repo `carol/priv` with a commit (message: \\\"add confidential secret\\\").\\n2. Create a PAT scoped to issues only, no repository scope:\\n   `curl -u carol:PASS -X POST $HOST/api/v1/users/carol/tokens -d '{\\\"name\\\":\\\"t\\\",\\\"scopes\\\":[\\\"read:issue\\\"]}'`\\n3. Scope-enforcing sibling correctly denies it:\\n   `curl -u carol:$TOK $HOST/carol/priv/raw/branch/main/secret.txt`  ->  403\\n4. The feed leaks private data with the same token:\\n   `curl -u carol:$TOK $HOST/carol/priv/rss/branch/main`  ->  200, returns\\n   `<description>add confidential secret ... this commit message itself is sensitive</description>`\\n\\n| Auth (same read:issue token) | /raw/branch/main/secret.txt | /rss/branch/main |\\n|---|---|---|\\n| anonymous | - | 404 (private repo hidden) |\\n| invalid token | - | 401 |\\n| read:issue token (no repo scope) | 403 (scope enforced) | 200 + private commit data |\\n| full-scope token | 200 | 200 (legitimate) |\\n\\n### Impact\\nPATs are routinely issued narrowly and handed to third-party bots, CI jobs, or chat integrations that are meant to have no code access. This bypass lets such a token exfiltrate private-repository commit history (messages often hold secrets, ticket refs, internal context) and committer emails for every repository the owner can read. Confidentiality only; no integrity or availability impact. Preconditions: a valid PAT of any non-repository scope owned by a user with read access to the target private repo, and feeds enabled (`Other.EnableFeed`, default ON).\\n\\nSuggested fix: call `checkDownloadTokenScope(ctx)` at the start of each feed handler (mirroring `download.go`). Longer-term, enforce repository token scope in a single route-group middleware wherever `AllowBasic` / `AllowOAuth2` is set on a repo-content route, so the next added endpoint cannot miss it.\", \"epss\": {\"percentage\": 0.00367, \"percentile\": 0.28723}, \"ghsa_id\": \"GHSA-3pww-vcvm-3gmj\", \"github_reviewed_at\": \"2026-07-21T20:30:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-3pww-vcvm-3gmj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3pww-vcvm-3gmj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-27761\"}], \"nvd_published_at\": \"2026-07-03T21:16:58Z\", \"published_at\": \"2026-07-21T20:30:11Z\", \"references\": [\"https://github.com/go-gitea/gitea/security/advisories/GHSA-3pww-vcvm-3gmj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-27761\", \"https://github.com/go-gitea/gitea/pull/38147\", \"https://github.com/go-gitea/gitea/commit/9e84deb969aff5c1115c2984e41250f28c78451f\", \"https://blog.gitea.com/release-of-1.26.3-and-1.26.4\", \"https://github.com/go-gitea/gitea/releases/tag/v1.26.3\", \"https://github.com/advisories/GHSA-3pww-vcvm-3gmj\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-3pww-vcvm-3gmj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-gitea/gitea\", \"summary\": \"Gitea: API access token scope enforcement bypass on repository RSS/Atom feed endpoints leaks private repository commit data\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-21T20:30:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-3pww-vcvm-3gmj\", \"vulnerabilities\": [{\"first_patched_version\": \"1.26.3\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.gitea.io/gitea\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.26.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3pww-vcvm-3gmj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.gitea.io/gitea: <= 1.26.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-20706",
+      "CVE-2026-27761"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.gitea.io/gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-22T00:50:29.791140Z",
+  "provenance": {
+    "content_sha256": "ddb7e48e1f43a83b731a0c4c41c688d81fa2ba4934fc7ad7c68f4d3f010566d7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-21T20:30:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3pww-vcvm-3gmj",
+  "status": "active",
+  "title": "Gitea: API access token scope enforcement bypass on repository RSS/Atom feed endpoints leaks private repository commit data",
+  "updated_at": "2026-07-21T20:30:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3pww-vcvm-3gmj"
+}
