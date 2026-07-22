@@ -1,27 +1,28 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-07-22T00:43:06.343784+00:00
-- Completed: 2026-07-22T00:53:17.124939+00:00
+- Started: 2026-07-22T19:31:52.071217+00:00
+- Completed: 2026-07-22T19:39:25.106184+00:00
 
 ## Changes
 
-- new: 218
-- quarantined: 1
-- unchanged: 2041
-- updated: 257
+- new: 138
+- quarantined: 2
+- unchanged: 2028
+- updated: 165
 
 ## Priorities
 
-- INFO: 2517
+- INFO: 2333
 
 ## Source outcomes
 
-- failed: 1
-- not_modified: 74
+- failed: 2
+- not_modified: 77
 - partial: 0
-- success: 85
+- success: 81
 
 ## Unsuccessful sources
 
-- osv (failed, osv_global): records=0, parse_failures=0 — osv_global: osv: OSV modified index is not sorted newest-first
+- nutanix (failed, json_api): records=0, parse_failures=0 — peer closed connection without sending complete message body (incomplete chunked read)
+- osv (failed, osv_global): records=0, parse_failures=0 — osv_global: osv: OSV delta exceeds configured detail fetch limit of 20000 items
