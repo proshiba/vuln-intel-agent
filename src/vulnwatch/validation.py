@@ -13,6 +13,18 @@ from vulnwatch.report import (
 )
 from vulnwatch.vulndb import validate_vulndb
 
+# 有効ソース数に対して、この割合（切り捨て）までの不成功（failed/partial）を許容する。
+# 一過性の単発失敗で日次全体を止めない一方、系統的失敗（例: token失効で多数のGitHubソースが
+# 失敗）は依然として検知する。個々の失敗内容は run-manifest.json の source_outcomes と
+# run-summary.md に必ず記録される。小さなソース集合では切り捨てにより実質0件許容となる。
+_UNSUCCESSFUL_SOURCE_FRACTION = 0.05
+
+
+def max_unsuccessful_sources(expected_source_count: int) -> int:
+    """許容する不成功ソースの上限数。workflowの検証ステップからも参照される。"""
+
+    return int(expected_source_count * _UNSUCCESSFUL_SOURCE_FRACTION)
+
 
 def validate_config(
     sources_path: Path = Path("config/sources.yaml"),
@@ -90,10 +102,12 @@ def _validate_source_outcomes(manifest: RunManifest) -> None:
         for outcome in manifest.source_outcomes
         if outcome.status in {SourceOutcomeStatus.FAILED, SourceOutcomeStatus.PARTIAL}
     ]
-    if unsuccessful:
+    allowed = max_unsuccessful_sources(len(expected_ids))
+    if len(unsuccessful) > allowed:
         unsuccessful_details = ", ".join(
             f"{outcome.source_id}={outcome.status}" for outcome in unsuccessful
         )
         raise ValueError(
-            f"source outcomes include unsuccessful collection results: {unsuccessful_details}"
+            "source outcomes include too many unsuccessful collection results "
+            f"({len(unsuccessful)} > {allowed} allowed): {unsuccessful_details}"
         )

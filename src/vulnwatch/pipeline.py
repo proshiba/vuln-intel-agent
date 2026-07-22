@@ -557,6 +557,29 @@ class Pipeline:
             *[f"- {key}: {value}" for key, value in sorted(source_statuses.items())],
             "",
         ]
+        unsuccessful = sorted(
+            (
+                outcome
+                for outcome in manifest.source_outcomes
+                if outcome.status in {SourceOutcomeStatus.FAILED, SourceOutcomeStatus.PARTIAL}
+            ),
+            key=lambda outcome: outcome.source_id,
+        )
+        if unsuccessful:
+            lines.extend(
+                [
+                    "## Unsuccessful sources",
+                    "",
+                    *[
+                        f"- {outcome.source_id} ({outcome.status}, {outcome.collector}): "
+                        f"records={outcome.record_count}, "
+                        f"parse_failures={outcome.parse_failure_count}"
+                        + (f" — {outcome.error}" if outcome.error else "")
+                        for outcome in unsuccessful
+                    ],
+                    "",
+                ]
+            )
         (self.output_root / "run-summary.md").write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod

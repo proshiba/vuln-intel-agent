@@ -486,3 +486,52 @@ async def test_csaf_rejects_partial_detail_batch_for_retry(
             SourceState(source_id="example", etag='"old-index"'),
             datetime(2026, 4, 1, tzinfo=UTC),
         )
+
+
+@respx.mock
+async def test_csaf_tolerates_a_small_fraction_of_detail_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vulnwatch.collectors.base.asyncio.sleep", AsyncMock())
+    index_url = "https://api.example.com/csaf/advisories/changes.csv"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://api.example.com/csaf",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["api.example.com"],
+        parser="csaf",
+        content_types=["text/csv", "application/json"],
+    )
+    total = 20
+    rows = "".join(f'"doc-{i}.json","2026-07-02T00:00:00Z"\n' for i in range(total))
+    respx.get(index_url).mock(
+        return_value=httpx.Response(
+            200, text=rows, headers={"content-type": "text/csv", "etag": '"new-index"'}
+        )
+    )
+    for i in range(total):
+        url = f"https://api.example.com/csaf/advisories/doc-{i}.json"
+        # One transient failure out of twenty is below the 10% tolerance.
+        if i == 0:
+            respx.get(url).mock(return_value=httpx.Response(503))
+        else:
+            respx.get(url).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"document": {"title": f"Doc {i}", "tracking": {"id": f"ADV-{i}"}}},
+                    headers={"content-type": "application/json"},
+                )
+            )
+
+    result = await CsafCollector().collect(
+        source,
+        SourceState(source_id="example", etag='"old-index"'),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert len(result.records) == total - 1
+    assert result.complete_snapshot is False
