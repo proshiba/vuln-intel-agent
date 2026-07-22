@@ -1,77 +1,72 @@
-# 収集成果物のGit管理方針
+# 収集データとレポートの見方
 
-最終更新: 2026-07-19
+この文書は、vulnwatch が生成・保存するデータの種類と確認方法をまとめた利用者向けガイドです。
 
-## Gitで管理するもの
+## 生成される主なファイル
 
-- `data/vendors/<vendor>/advisories/<year>/<id>/advisory.json`: 個別アドバイザリJSON
-- `data/vendors/<vendor>/advisories/<year>/<id>/summary.ja.md`: 任意のAI要約
-- `data/vendors/<vendor>/index.json`: ベンダー別アドバイザリ一覧
-- `state/sources/<source-id>.json`: ETag、最終取得時刻、既知IDなどの収集状態
-- `reports/daily/<year>/<month>/<date>.md`: 日次レポート
-- `reports/daily/<year>/<month>/<date>.summary.json`: 2つの表のAIサマリと生成メタデータ
-- `quarantine/<source-id>/latest.json`: 収集・解析失敗の詳細
-- `vulndb/index.csv`: CVE単位の脆弱性台帳の全体索引
-- `vulndb/vulns/<vendor>/<year>/<month>/<内部ID>.yaml`: 脆弱性ごとの台帳エントリ（年・月は最初に観測した`created_at`）
-- `vulndb/registry.json`: 台帳の採番・索引状態
-- `run-manifest.json`: 最新収集の変更記録と全対象ソースの`source_outcomes`
-- `run-summary.md`: 最新収集の実行サマリ
+| パス | 内容 |
+|---|---|
+| `data/vendors/<vendor>/advisories/<year>/<id>/advisory.json` | ベンダーや公的機関の情報を共通形式に正規化した個別アドバイザリです。 |
+| `data/vendors/<vendor>/advisories/<year>/<id>/summary.ja.md` | AI による個別アドバイザリの日本語要約です。生成設定がない場合は存在しないことがあります。 |
+| `data/vendors/<vendor>/index.json` | ベンダー別のアドバイザリ一覧です。 |
+| `reports/daily/<year>/<month>/<date>.md` | 日本語の日次レポートです。新規、更新、取り下げ、注目すべき脆弱性を確認できます。 |
+| `reports/daily/<year>/<month>/<date>.summary.json` | 日次レポート内の Critical 表と悪用・PoC 表に使う AI サマリのメタデータです。 |
+| `vulndb/index.csv` | CVE または内部 ID 単位に集約した脆弱性台帳の一覧です。 |
+| `vulndb/vulns/<vendor>/<year>/<month>/<id>.yaml` | 台帳の詳細エントリです。公開、修正、PoC、悪用確認の状態を保持します。 |
+| `vulndb/registry.json` | CVE 未採番脆弱性の内部 ID 採番状態と索引です。 |
+| `run-manifest.json` | 最新収集の変更記録と、ソースごとの収集結果です。 |
+| `run-summary.md` | 最新収集の概要です。 |
+| `state/sources/<source-id>.json` | ETag、Last-Modified、最終成功時刻など、増分収集に使う状態です。 |
+| `quarantine/<source-id>/latest.json` | 収集・解析失敗時の診断情報です。 |
 
-検証済みの生成成果物はすべてGitで管理し、最終的に定期実行で`main`へ反映されます。`staging/`
-だけは同じ成果物の複製とローカル開発履歴を含む一時作業領域なので、Git管理対象外です。
-`.env`、仮想環境、テスト・解析ツールのcacheも従来どおり除外します。
+`staging/` は収集直後の一時生成先です。公開用のデータは、`vulnwatch publish --root staging --repository .` の後にリポジトリ直下へ同期されます。
 
-## 定期実行のフロー（Actions収集 → routine処理 → 自動マージ）
+## 日次レポートで確認すること
 
-定期収集はAI処理を持たない収集と、後続処理を分担します。
+`reports/daily/<year>/<month>/<date>.md` を開き、次の順に確認します。
 
-1. `.github/workflows/collect-advisories.yml`（毎朝04:00 JST）が全ソースを収集し、生ツリー
-   （`data`、`state`、`quarantine`、`vulndb`、manifest、summary）を `bot/collected-raw` へ
-   commitする。現行daily profileでは160ソースが対象で、workflowはhandoff前にoutcomeが
-   160件そろい、`failed`と`partial`が0件であることを確認する。不完全ならcommitせず停止する。
-   `vulnwatch publish`は使わず、レポート生成前の生ツリーをそのまま渡す。
-2. 同workflowがWebhookで Claude Code の routine を起動し、収集ブランチとコミットSHAを渡す。
-3. routine が収集ツリーをstagingへ展開し、`summarize`（Claudeが日本語サマリを代筆）→
-   `report` → `validate` → `publish` を実行し、`bot/vulnwatch-daily` へpushする。
-4. `.github/workflows/auto-merge-daily.yml` が構文チェック・ユニットテスト・`vulnwatch validate`
-   を通したうえで、`bot/vulnwatch-daily → main` のPRを作成してマージする。
+1. 冒頭の実行概要で、収集日、対象期間、変更件数を確認します。
+2. リスク件数で、緊急・高・中・低の分布を確認します。
+3. 要対応セクションで、優先して確認すべきアドバイザリを確認します。
+4. Critical 表で、Critical 判定のアドバイザリを確認します。
+5. 悪用済み・PoC 公開済み表で、実際の悪用確認と PoC 公開を区別して確認します。
+6. 各アドバイザリの出典 URL から、ベンダーや公的機関の原文を確認します。
 
-## ローカルでの更新
+## 個別アドバイザリ JSON の主な項目
 
-```bash
-.venv/bin/vulnwatch config validate
-.venv/bin/vulnwatch collect --profile daily --since 90d --output staging
-.venv/bin/vulnwatch summarize --root staging
-.venv/bin/vulnwatch report --root staging \
-  --critical-summary '<Critical全件の日本語AIサマリ>' \
-  --exploitation-summary '<悪用済み・PoC公開済みの日本語AIサマリ>'
-.venv/bin/vulnwatch validate --root staging
-.venv/bin/vulnwatch publish --root staging --repository .
-git add -A -- data reports state quarantine vulndb run-manifest.json run-summary.md
-```
+| 項目 | 見方 |
+|---|---|
+| `canonical_id` | vulnwatch 内で一意に扱うための識別子です。 |
+| `cves` | 関連する CVE ID です。 |
+| `title` / `description` | 原典から取得・正規化したタイトルと説明です。 |
+| `vendor` / `products` | 影響を受けるベンダーと製品です。 |
+| `severity` / `cvss` | ベンダー深刻度や CVSS 情報です。 |
+| `published_at` / `updated_at` | 公開日と更新日です。 |
+| `fixed_versions` | 修正版や修正状況です。 |
+| `references` | 原典や関連情報へのリンクです。 |
+| `exploitation` | 悪用確認、PoC 公開、CISA KEV などの補強情報です。 |
+| `priority` | 資産台帳、深刻度、悪用状況などを加味した対応優先度です。 |
 
-`collect`後は`staging/run-manifest.json`の`source_outcomes`を確認します。dailyでは有効な全160
-ソースに1件ずつ必要で、許容statusは`success`と`not_modified`です。欠落、`failed`、`partial`
-がある場合は`quarantine/<source-id>/latest.json`とoutcomeのendpoint・件数・errorを調べ、
-再収集が完了するまで`report`と`publish`へ進みません。`vulnwatch validate`自体もoutcomeの
-欠落・余分・重複と`failed`/`partial`を拒否します。
+## 脆弱性台帳（vulndb）
 
-新規・更新・取り下げ変更が0件の場合は、2つのサマリオプションを付けずに定型的な変更なし
-レポートを生成し、日次サマリsidecarは不要です。
+`vulndb/` は、アドバイザリ単位ではなく CVE または内部 ID 単位で脆弱性を追跡するための台帳です。
 
-`publish`は必要な生成パスが欠けている場合やsymbolic linkを含む場合は失敗します。全ファイルを
-一時領域へコピーしてから入れ替え、途中で失敗した場合は既存成果物へ戻します。
-`staging/history/`などallowlist外のローカルファイルは公開しません。
+- `vulndb/index.csv` は全体一覧です。
+- 詳細は `vulndb/vulns/<vendor>/<year>/<month>/<id>.yaml` にあります。
+- CVE がある脆弱性は CVE 単位で集約されます。
+- CVE 未採番の脆弱性は `VW-YYYY-NNNN...` 形式の内部 ID で管理されます。
+- 同じ CVE が複数ソースで見つかった場合は、出典情報が同じ台帳エントリに集約されます。
+- 一度観測された「修正あり」「PoC 公開」「悪用確認」は、観測日時とともに保持されます。
 
-## 収集成果物の規模
+## 収集成否の確認
 
-件数は日次収集のたびに増えます。現行160ソース構成で固定または増分となる単位は次のとおりです。
+収集の成功・失敗は `run-manifest.json` の `source_outcomes` で確認します。
 
-- ベンダー別一覧と個別アドバイザリJSON: 収集・正規化の成功に応じて増加
-- 収集状態: 160ファイル（full daily実行後、有効ソース数と一致）
-- `run-manifest.json.source_outcomes`: full daily実行ごとに160件
-- vulndb台帳エントリ: `vulns/<vendor>/<year>/<month>/`配下で増加
-- 日次レポートと対象変更ありの日のAIサマリsidecar
+| status | 意味 |
+|---|---|
+| `success` | 取得と解析が成功しました。 |
+| `not_modified` | 条件付き取得の結果、前回から変更がありませんでした。 |
+| `failed` | 収集または解析に失敗しました。 |
+| `partial` | 一部だけ取得または解析できました。 |
 
-vulndbはベンダー・年・月でフォルダ分けするため、1フォルダあたりのファイル数はGitHubの
-一覧表示上限（1,000）を下回るよう分散します。
+公開前に期待する状態は、対象ソースすべてに outcome があり、`failed` と `partial` が 0 件であることです。失敗がある場合は、`quarantine/<source-id>/latest.json` と `run-manifest.json` の `endpoint`、`count`、`error` を確認します。
