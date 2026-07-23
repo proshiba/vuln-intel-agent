@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-6790\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"#### Summary\\n\\nJetty currently accepts HTTP/2 and HTTP/3 requests where the regular\\nHost header and the pseudo-header :authority\\ndo not match. As a result, the same request can carry two different host identities\\nthrough Jetty:\\n\\n- logic based on `HttpURI` / `Request.getServerName(request)` uses `:authority`\\n- logic based on raw request headers continues to use `Host`\\n\\nThis creates a host/authority confusion condition that can break\\nsecurity assumptions in higher layers.\\n\\nJetty already performs an explicit authority/Host consistency check on\\nthe HTTP/1.1 path, but equivalent validation is missing on the HTTP/2\\nand HTTP/3 paths.\\n\\n#### Security Impact\\n\\nThis issue is not inherently remote code execution, but it can become\\nsecurity-relevant in deployments that rely on the request host for\\nsecurity-sensitive decisions, including:\\n\\n- host-based access control\\n- virtual host isolation\\n- multi-tenant routing by hostname\\n- login/logout/callback URL construction\\n- reverse proxy and forwarded-header trust chains\\n- auditing, cache keys, and absolute URL generation\\n\\nPotential consequences include:\\n\\n- bypass of host-based ACLs\\n- virtual host or tenant isolation failures\\n- incorrect or attacker-influenced redirect/callback targets\\n- inconsistent proxy/downstream interpretation of the original target host\\n- misleading logs and audit records\\n\\n#### Technical Root Cause\\n\\n1. On the HTTP/2 and HTTP/3 metadata builder paths:\\n\\n- `:authority` is parsed separately into authority/URI state\\n- `Host` is preserved as a normal request header\\n- the two values are not compared for consistency\\n\\n2. On the HTTP/2 and HTTP/3 server entry paths:\\n\\n- Jetty calls `ComplianceUtils.verify(httpCompliance, requestMetaData, listener)`\\n- this verification does not enforce `MISMATCHED_AUTHORITY`\\n\\n3. On the HTTP/1.1 path:\\n\\n- Jetty explicitly checks whether authority and `Host` match\\n- mismatches are rejected by default\\n\\n#### Relevant Code Locations\\n\\nHTTP/2 metadata builder:\\n\\n- `jetty-core/jetty-http2/jetty-http2-hpack/src/main/java/org/eclipse/jetty/http2/hpack/internal/MetaDataBuilder.java`\\n\\nHTTP/3 metadata builder:\\n\\n- `jetty-core/jetty-http3/jetty-http3-qpack/src/main/java/org/eclipse/jetty/http3/qpack/internal/metadata/MetaDataBuilder.java`\\n\\nHTTP/2 server entry:\\n\\n- `jetty-core/jetty-http2/jetty-http2-server/src/main/java/org/eclipse/jetty/http2/server/internal/HttpStreamOverHTTP2.java`\\n\\nHTTP/3 server entry:\\n\\n- `jetty-core/jetty-http3/jetty-http3-server/src/main/java/org/eclipse/jetty/http3/server/internal/HttpStreamOverHTTP3.java`\\n\\nShared HTTP compliance verification:\\n\\n- `jetty-core/jetty-http/src/main/java/org/eclipse/jetty/http/ComplianceUtils.java`\\n\\nHTTP/1.1 authority/Host consistency check:\\n\\n- `jetty-core/jetty-server/src/main/java/org/eclipse/jetty/server/internal/HttpConnection.java`\\n\\nDefined but not enforced on H2/H3:\\n\\n- `jetty-core/jetty-http/src/main/java/org/eclipse/jetty/http/HttpCompliance.java`\\n- violation: MISMATCHED_AUTHORITY\\n\\n#### Reproduction\\n\\nI reproduced this on local Jetty 12.1.9-SNAPSHOT source.\\n\\nMinimal reproduction steps:\\n\\n1. Start a Jetty HTTP/2 or HTTP/3 test server.\\n2. Send a request with:\\n    - :authority = localhost:<port>\\n    - Host = evil.example:<port>\\n3. In the request handler, inspect both:\\n    - Request.getServerName(request)\\n    - request.getHeaders().get(HttpHeader.HOST)\\n4. Observe whether Jetty rejects the request or allows both values to remain visible.\\nObserved result:\\n    - HTTP/2: request is accepted and returns 200\\n    - HTTP/3: request is accepted and returns 200\\n    - the server can observe both:\\n        - serverName=localhost\\n        - hostHeader=evil.example:<port>\\n\\nThis shows that a single attacker-controlled request can preserve two conflicting host interpretations inside Jetty.\\n\\n#### Tests Used\\n\\n\\nHTTP/2 rejection test:\\n\\n- `org.eclipse.jetty.http2.tests.HTTP2Test#testRejectMismatchedHostHeaderAndAuthority`\\n\\nHTTP/2 exploitability test:\\n\\n- `org.eclipse.jetty.http2.tests.HTTP2Test#testMismatchedHostHeaderAndAuthoritySplitsAuthorityFromHostHeader`\\n\\nHTTP/3 rejection test:\\n\\n- `org.eclipse.jetty.http3.tests.HandlerClientServerTest#testRejectMismatchedHostHeaderAndAuthority`\\n\\nHTTP/3 exploitability test:\\n\\n- `org.eclipse.jetty.http3.tests.HandlerClientServerTest#testMismatchedHostHeaderAndAuthoritySplitsAuthorityFromHostHeader`\\n\\n\\nObserved behavior:\\n\\n- both rejection tests fail because Jetty returns 200 instead of 400\\n- both exploitability tests pass, confirming that Jetty exposes different host values to different layers\\n\\n#### Project-Internal Evidence of Real Impact\\n\\nExamples:\\n\\n- `jetty-openid` uses `Request.getServerName(request)` to construct redirect URLs\\n- `jetty-ee11-proxy` uses the raw `Host` header when building `Forwarded`\\n\\nThis indicates that the issue is not merely theoretical: Jetty’s own\\necosystem already contains code paths where different host sources are\\nused for different purposes.\\n\\n#### Affected Version\\n\\nConfirmed affected version:\\n\\n- 12.1.9-SNAPSHOT\\n\\nOther versions may also be affected if they share the same HTTP/2 /\\nHTTP/3 request construction and compliance-validation logic. I have\\nnot yet completed a historical version matrix and would recommend\\nconfirming exact affected ranges from Jetty’s branch history.\\n\\n\\n#### Suggested Fix\\n\\nRecommend adding HTTP/2 and HTTP/3 validation equivalent to the\\nexisting HTTP/1.1 authority/Host consistency check:\\n\\n- if both :authority and regular Host are present\\n    - normalize and compare them\\n    - if they do not match, reject the request with 400 Bad Request\\n    - route the failure through the existing MISMATCHED_AUTHORITY compliance mechanism\\n\\nAlso adding explicit HTTP/2 and HTTP/3 regression coverage for this case.\\n\\n#### Disclosure Status\\n\\n- not publicly disclosed\\n- no public issue filed\\n- shared only privately with the Jetty security contacts\", \"epss\": {\"percentage\": 0.00196, \"percentile\": 0.09519}, \"ghsa_id\": \"GHSA-7p3p-8qv8-m2vh\", \"github_reviewed_at\": \"2026-07-22T22:56:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-7p3p-8qv8-m2vh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7p3p-8qv8-m2vh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-6790\"}], \"nvd_published_at\": \"2026-07-14T09:16:41Z\", \"published_at\": \"2026-07-22T22:56:43Z\", \"references\": [\"https://github.com/jetty/jetty.project/security/advisories/GHSA-7p3p-8qv8-m2vh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-6790\", \"https://github.com/jetty/jetty.project/issues/14870\", \"https://github.com/jetty/jetty.project/pull/14871\", \"https://github.com/jetty/jetty.project/pull/14897\", \"https://github.com/jetty/jetty.project/pull/14970\", \"https://github.com/jetty/jetty.project/commit/3e5a4daec196859b8886b6f67b1157dab47cdb6f\", \"https://github.com/jetty/jetty.project/commit/67ba9e6b39661810123680d9c894e99a7940c73d\", \"https://github.com/jetty/jetty.project/commit/cbca3076f7c914a232e7a8b22fa95fbf7e67a6cc\", \"https://github.com/jetty/jetty.project/releases/tag/jetty-12.0.35\", \"https://github.com/jetty/jetty.project/releases/tag/jetty-12.1.9\", \"https://gitlab.eclipse.org/security/cve-assignment/-/work_items/99\", \"https://github.com/advisories/GHSA-7p3p-8qv8-m2vh\"], \"repository_advisory_url\": \"https://api.github.com/repos/jetty/jetty.project/security-advisories/GHSA-7p3p-8qv8-m2vh\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jetty/jetty.project\", \"summary\": \"Eclipse Jetty: HTTP Authority/Host mismatch\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-22T22:56:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-7p3p-8qv8-m2vh\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 9.4.0.v20161208, <= 9.4.58.v20250814\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 10.0.0, <= 10.0.26\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 11.0.0, <= 11.0.26\"}, {\"first_patched_version\": \"12.0.35\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 12.0.0, <= 12.0.34\"}, {\"first_patched_version\": \"12.1.9\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 12.1.0, <= 12.1.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7p3p-8qv8-m2vh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.eclipse.jetty:jetty-server: >= 10.0.0, <= 10.0.26",
+      "org.eclipse.jetty:jetty-server: >= 11.0.0, <= 11.0.26",
+      "org.eclipse.jetty:jetty-server: >= 12.0.0, <= 12.0.34",
+      "org.eclipse.jetty:jetty-server: >= 12.1.0, <= 12.1.8",
+      "org.eclipse.jetty:jetty-server: >= 9.4.0.v20161208, <= 9.4.58.v20250814"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-6790"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.eclipse.jetty:jetty-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-23T19:37:33.074936Z",
+  "provenance": {
+    "content_sha256": "e309286f0c54e913913e860ec948c943d483a98d7d9feb4aac2ba6c7bc562afc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-22T22:56:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7p3p-8qv8-m2vh",
+  "status": "active",
+  "title": "Eclipse Jetty: HTTP Authority/Host mismatch",
+  "updated_at": "2026-07-22T22:56:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7p3p-8qv8-m2vh"
+}

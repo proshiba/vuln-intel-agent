@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/128495132?v=4\", \"events_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/followers\", \"following_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/marc-zollingkoffer-syzygy\", \"id\": 128495132, \"login\": \"marc-zollingkoffer-syzygy\", \"node_id\": \"U_kgDOB6iuHA\", \"organizations_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/orgs\", \"received_events_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/received_events\", \"repos_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/marc-zollingkoffer-syzygy\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}, {\"cwe_id\": \"CWE-636\", \"name\": \"Not Failing Securely ('Failing Open')\"}], \"description\": \"### Impact\\n\\n`next-auth` (Auth.js) v5 applications that gate access by checking only for the **existence** of the `auth` object — the pattern shown in the official [session management / protecting resources guide](https://authjs.dev/getting-started/session-management/protecting) — are affected.\\n\\nWhen the Auth.js configuration produces a server-side error, the `auth` object exposed by the `auth()` wrapper (in middleware, Route Handlers, etc.) is **populated with an error object instead of being `null`**:\\n\\n```json\\n{ \\\"message\\\": \\\"There was a problem with the server configuration. Check the server logs for more information.\\\" }\\n```\\n\\nBecause this object is truthy, any authorization check of the form `!!auth` (or `if (req.auth)`) evaluates to `true` for **every** request, including unauthenticated ones. The application *fails open*: instead of denying access when the auth layer is broken, it grants access to everyone.\\n\\n```ts\\n// middleware.ts — affected pattern\\nexport default auth((req) => {\\n  const { nextUrl, auth } = req\\n  const isLoggedIn = !!auth // <-- always true when the configuration is broken\\n  // ...\\n})\\n```\\n\\nA representative trigger is a provider that is missing required configuration. For example, a Keycloak provider with neither `issuer` nor `authorization` endpoint set logs:\\n\\n```\\n[auth][error] InvalidEndpoints: Provider \\\"keycloak\\\" is missing both `issuer` and `authorization` endpoint config. At least one of them is required.\\n```\\n\\n…and from that point on `auth` is the error object above, so `!!auth` is permanently `true`. The same fail-open behavior occurs for other server-configuration errors (for example, an unset `AUTH_SECRET`).\\n\\nThere is **no impact while the configuration is valid**. The risk materializes when a previously-working deployment becomes misconfigured — e.g. an environment variable is changed or removed during a deploy — at which point existence-based auth checks silently stop protecting routes and all visitors are treated as authenticated. Because the failure mode is silent and grants access to everyone, the consequences can be severe.\\n\\nThis is an instance of CWE-636 (Not Failing Securely / \\\"Failing Open\\\") leading to improper authorization (CWE-285).\\n\\n### Patches\\n\\nThe fix ensures that a server-configuration error no longer surfaces as a truthy `auth` object: existence checks fail **closed** rather than open. This is released in `next-auth@<!-- TODO: set patched version on publish -->`.\\n\\nTo upgrade:\\n\\n```sh\\nnpm i next-auth@beta\\n```\\n```sh\\nyarn add next-auth@beta\\n```\\n```sh\\npnpm add next-auth@beta\\n```\\n\\n### Workarounds\\n\\nIf you cannot upgrade immediately, check for a concrete user/session property rather than the bare object, so a configuration-error object is not treated as an authenticated session:\\n\\n```ts\\n// middleware.ts\\nexport default auth((req) => {\\n  // `auth.user` is only present on a real session; resilient to config-error objects\\n  const isLoggedIn = !!req.auth?.user\\n  // ...\\n})\\n```\\n\\nAs defense in depth, make Auth.js configuration errors fail loudly in your deployment pipeline (for example, treat `[auth][error]` log lines as a failed health check) so a broken configuration cannot silently reach production. As always, an existing session indicates authentication only — for authorization, perform an explicit role/permission check rather than relying on session existence. See the [role-based access control guide](https://authjs.dev/guides/role-based-access-control).\\n\\n### References\\n\\n- Protecting resources / session management: https://authjs.dev/getting-started/session-management/protecting\\n- Role-based access control (RBAC): https://authjs.dev/guides/role-based-access-control\\n- Auth.js error reference: https://authjs.dev/reference/core/errors\\n\\n### For more information\\n\\nIf you have any concerns, Auth.js requests responsible disclosure, outlined here: https://authjs.dev/security\\n\\n### Credits\\n\\nReported by @marc-zollingkoffer-syzygy.\", \"ghsa_id\": \"GHSA-8fpg-xm3f-6cx3\", \"github_reviewed_at\": \"2026-07-23T14:52:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-8fpg-xm3f-6cx3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8fpg-xm3f-6cx3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-23T14:52:23Z\", \"references\": [\"https://github.com/nextauthjs/next-auth/security/advisories/GHSA-8fpg-xm3f-6cx3\", \"https://github.com/nextauthjs/next-auth/commit/d008b9b764bf4b322a87e1822d1dda7789258d8f\", \"https://github.com/nextauthjs/next-auth/releases/tag/next-auth@5.0.0-beta.32\", \"https://github.com/advisories/GHSA-8fpg-xm3f-6cx3\"], \"repository_advisory_url\": \"https://api.github.com/repos/nextauthjs/next-auth/security-advisories/GHSA-8fpg-xm3f-6cx3\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/nextauthjs/next-auth\", \"summary\": \"Auth.js: Configuration errors can cause existence-based auth checks to fail open (auth object populated with an error)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-23T14:52:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-8fpg-xm3f-6cx3\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.0-beta.32\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"next-auth\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.0-beta.0, <= 5.0.0-beta.31\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8fpg-xm3f-6cx3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "next-auth: >= 5.0.0-beta.0, <= 5.0.0-beta.31"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "next-auth"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-23T19:37:32.604064Z",
+  "provenance": {
+    "content_sha256": "fec14ce5107dde577e7b327afb888945a9b3d4712678ecf1b80a369df0e61195",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-23T14:52:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8fpg-xm3f-6cx3",
+  "status": "active",
+  "title": "Auth.js: Configuration errors can cause existence-based auth checks to fail open (auth object populated with an error)",
+  "updated_at": "2026-07-23T14:52:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8fpg-xm3f-6cx3"
+}
