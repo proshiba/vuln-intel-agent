@@ -1,0 +1,52 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "Log in\nSkip to main content\nSkip to sidebar\nDashboards\nProjects\nIssues\neazyBI\nGive feedback to Atlassian\nHelp\nKeyboard Shortcuts\nAbout Jira\nJira Credits\nLog In\nAcknowledged notifications\nCore Server\nSERVER-128341\nSort on $meta crashes server\nUndo Transition\nIn Code Review\nExport\nnull\nXML\nWord\nPrintable\nJSON\nDetails\nType:\nBug\nResolution:\nUnresolved\nPriority:\nMajor - P3\nFix Version/s:\n8.2.12\n,\n8.0.28\n,\n7.0.39\n,\n8.3.7\nAffects Version/s:\n8.0.27\nComponent/s:\nNone\nLabels:\nNone\nField Tab\nAha! Info\nAssigned Teams:\nQuery Optimization\nOperating System:\nALL\nSteps To Reproduce:\nHide\ndb.coll.drop();\ndb.coll.insertOne({x: 1});\ndb.coll.createIndex({x: 1});\ndb.coll.find({x: {$gte: 1}}).sort({x: {$meta: \"randVal”}});\nShow\ndb.coll.drop();\ndb.coll.insertOne({x: 1});\ndb.coll.createIndex({x: 1});\ndb.coll.find({x: {$gte: 1}}).sort({x: {$meta: \"randVal”}});\nCAR Domain/s:\nNone\nAha! Reference:\nNone\nTracking Level:\nNone\nRisk Status:\nNone\nExec Notes:\nNone\nGoal Name(s):\nNone\nGoal Link:\nNone\nDescription\nprojjal.chanda@mongodb.com\n: The issue here is how we deal with sort with raw bson sort order containing meta expressions.\nFor example for sort pattern  { $sort: { score:\n{ $meta: \"textScore\" }\n, posts: -1 } }, the “score” fieldname doesn’t mean anything. The parsed SortPattern doesn’t store it and when we pushdown sort from Agg layer to Find layer or during sort key merging, we reserialize it and replace the fieldname “score” with “$computed0”, which results in the mentioned error during project pushdown since the code treats it as a normal field instead of a special meta expression component.\nActual parsed sort pattern handling is ok since we don’t store this field path for meta expression case, and will be forced to deal with the meta expression separately. The issue happens when we deal with the raw BSONObj sort pattern instead. Apart from project pushdown, I audited other usages of raw bson sort order in the code base and we are not handling this in other places as well. Eg, I was able to reproduce the same error in a sharded cluster due to the reserialized sort key merge with a different edge case query.\nHowever “$computed” will atmost cause the mentioned uassert error. But the more concerning situation is when this field name is not replaced by “$computed” field but uses the original field name (when we are using find command instead of aggregate and it is not reserialized) and the planner analysis treats it as a normal field and acts based on that.\nI was able to cause a crash by triggering an invariant through the following script.\ndb.coll.insert({x: 1});\ndb.coll.createIndex({x: 1});\ndb.coll.find({x: {$gte: 1}}).sort({x: {$meta: \"randVal”}});\nThis happens on analyzeSort call when checking for isSortCovered and because the field name for the sort order here is deceptively called “x” it passes the check.\nSimilarly in query encoder, we don’t handle the meta expression in encodeKeyForSort except only for “textScore” (valid $meta sort are \"textScore\", \"randVal\", \"geoNearDistance\", \"searchScore\", \"vectorSearchScore\", \"score\") so two different queries can be producing the same plan cache key.  Running “db.coll.find({x: {$gte: 1}}).sort({y: {$meta: \"randVal\"}}).explain()” and “db.coll.find({x: {$gte: 1}}).sort(\n{y: -1}\n).explain()” both give the same planCacheKey. (When reconstructing the plan from the cache, sort pattern is re-applied from the live FindCommandRequest so it still returns correct results)\nThe underlying issue has been there in mongo since the beginning so this can be reproduced in all the earlier versions (tested upto v6.0).\nFor a broader fix to prevent future issues, we should be parsing the SortPattern as early as possible and use that everywhere and avoid using the raw BSON obj.\nAttachments\nIssue Links\nrelated to\nSERVER-119464\nAggregation pipeline with $match: { $text }, $sort, $project gives an error\nIn Code Review\nActivity\nPeople\nAssignee:\nAlexander Ignatyev\nReporter:\nAlexander Ignatyev\nParticipants:\nAlexander Ignatyev\nVotes\n:\n0\nVote for this issue\nWatchers:\n5\nStart watching this issue\nDates\nCreated:\nJun 05 2026 10:53:21 AM UTC\nUpdated:\nJul 22 2026 07:20:10 PM UTC\nPagerDuty\nAtlassian Jira\nProject Management Software\nAbout Jira\nReport a problem\nPowered by a free Atlassian\nJira\nopen source license for MongoDB. Try Jira -\nbug tracking software\nfor\nyour\nteam.\nAtlassian",
+  "canonical_id": "mongodb:https-jira.mongodb.org-browse-server-128341-1",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [],
+    "cves": [
+      "CVE-2026-9737"
+    ],
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "MongoDB Server",
+      "Ops Manager",
+      "Enterprise Advanced"
+    ]
+  },
+  "first_seen_at": "2026-07-23T19:37:23.733545Z",
+  "provenance": {
+    "content_sha256": "c3a5c3cc83d8e87b50f279ee74d86cbde14ad3e5798a0af461bcb7c32e83e106",
+    "extractor_version": "0.1.0",
+    "source_type": "feed"
+  },
+  "published_at": "2026-07-22T19:20:40Z",
+  "schema_version": 1,
+  "source_id": "mongodb",
+  "source_url": "https://jira.mongodb.org/browse/SERVER-128341",
+  "status": "active",
+  "title": "Find command with $meta sort can lead to crash (CVE-2026-9737)",
+  "updated_at": "2026-07-22T19:20:40Z",
+  "vendor": "MongoDB",
+  "vendor_advisory_id": "https://jira.mongodb.org/browse/SERVER-128341#1"
+}

