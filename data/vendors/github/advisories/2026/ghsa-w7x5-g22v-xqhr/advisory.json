@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/26767398?v=4\", \"events_url\": \"https://api.github.com/users/jweny/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jweny/followers\", \"following_url\": \"https://api.github.com/users/jweny/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jweny/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jweny\", \"id\": 26767398, \"login\": \"jweny\", \"node_id\": \"MDQ6VXNlcjI2NzY3Mzk4\", \"organizations_url\": \"https://api.github.com/users/jweny/orgs\", \"received_events_url\": \"https://api.github.com/users/jweny/received_events\", \"repos_url\": \"https://api.github.com/users/jweny/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jweny/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jweny/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jweny\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-8384\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-647\", \"name\": \"Use of Non-Canonical URL Paths for Authorization Decisions\"}], \"description\": \"### Description (as reported)\\n\\n#### Summary\\n\\nIn Jetty 12.1.8, org.eclipse.jetty.util.URIUtil.canonicalPath() may leave dot-dot path segments unnormalized when a semicolon path parameter marker is followed by a slash and a dot\\n  segment.\\n\\nA minimal example is:\\n\\n`/public;/../admin/secret`\\n\\nIn my local reproduction, URIUtil.canonicalPath() returns:\\n\\n`/public/../admin/secret`\\n\\ninstead of the expected normalized path:\\n\\n`/admin/secret`\\n\\nWhen Jetty's `SecurityHandler.PathMapped` is used to protect a path prefix such as `/admin/*`, the non-normalized canonical path may not match the protected prefix. As a result, an unauthenticated request may bypass the configured path-based security constraint.\\n\\n\\n\\n#### Tested Version\\n\\nJetty: 12.1.8\\nJDK: 17.0.18\\nMaven: 3.9.14\\n\\nMaven artifacts used:\\n\\n  org.eclipse.jetty:jetty-server:12.1.8\\n  org.eclipse.jetty:jetty-security:12.1.8\\n  org.eclipse.jetty:jetty-session:12.1.8\\n\\nOnly confirmed Jetty 12.1.8 so far. \\n\\n\\n#### Minimal Reproduction\\n\\nStarts a minimal Jetty server with the following security setup:\\n\\n```java\\nSecurityHandler.PathMapped security = new SecurityHandler.PathMapped();\\nsecurity.put(\\\"/admin/*\\\", Constraint.from(\\\"admin\\\"));\\nsecurity.put(\\\"/*\\\", Constraint.ALLOWED);\\nsecurity.setAuthenticator(new BasicAuthenticator());\\n```\\n\\nThe test then sends requests with no `Authorization` header.\\n\\nObserved result:\\n\\n```\\nGET /admin/secret                  -> 401\\nGET /public;x/../admin/secret      -> 200\\n```\\n\\nThe handler receives paths such as:\\n\\n`/public/../admin/secret`\\n\\nThis suggests that the `/admin/*` security constraint is bypassed because `PathMapped` matching is performed against the non-normalized canonical path.\\n\\n\\n#### Suspected Root Cause\\n\\nThe suspected root cause is in `URIUtil.canonicalPath()`.\\n\\nThe relevant logic is approximately:\\n\\n```java\\n    for (int i = 0; i < end; i++)\\n    {\\n        char c = encodedPath.charAt(i);\\n\\n        switch (c)\\n        {\\n            case ';':\\n                if (builder == null)\\n                {\\n                    builder = new Utf8StringBuilder(encodedPath.length());\\n                    builder.append(encodedPath, 0, i);\\n                }\\n\\n                while (++i < end)\\n                {\\n                    if (encodedPath.charAt(i) == '/')\\n                    {\\n                        builder.append('/');\\n                        break;\\n                    }\\n                }\\n                break;\\n\\n            case '.':\\n                if (slash)\\n                    normal = false;\\n                if (builder != null)\\n                    builder.append(c);\\n                break;\\n        }\\n\\n        slash = c == '/';\\n    }\\n\\n    String canonical = (builder != null)\\n        ? (onBadUtf8 == null ? builder.toCompleteString() : builder.takeCompleteString(onBadUtf8))\\n        : encodedPath;\\n    return normal ? canonical : normalizePath(canonical);\\n```\\n\\nFor the input:\\n\\n`/public;/../admin/secret`\\n\\nwhen the outer loop reaches the semicolon:\\n\\n```\\n    i      = 7\\n    c      = ';'\\n    slash  = false\\n    normal = true\\n```\\n\\nInside `case ';'`, the `while (++i < end)` loop advances i to the next character, which is already '/' for the empty path parameter form \\\";/\\\".\\n\\nThe code then appends '/' to the canonical builder:\\n\\n`builder.append('/');`\\n\\nAt this point, the canonical builder ends with '/':\\n\\n`/public/`\\n\\nHowever, the local variable `c` is still the old value ';', because `c` was read before entering the switch and is not updated when the inner loop advances `i`.\\n\\nAfter leaving the switch, the loop updates the slash state using:\\n\\n`slash = c == '/';`\\n\\nSince `c` is still ';', slash becomes `false`.\\n\\nOn the next iteration, the scanner reaches '.', which is the first dot in the following \\\"../\\\" segment. Because slash is incorrectly `false`, this code does not run:\\n\\n```java\\n    if (slash)\\n        normal = false;\\n```\\n\\nTherefore `normal` remains `true`, and `canonicalPath()` returns the canonical string directly instead of calling `normalizePath(canonical)`.\\n\\nThe result is:\\n\\n`/public/../admin/secret`\\n\\ninstead of:\\n\\n`/admin/secret`\\n\\nIn short:\\n\\n`case ';'` advances the scan position i and appends '/' to the canonical builder, but the loop tail still updates slash from the stale character `c=';'`. As a result, the following dot-dot segment is not detected as a path traversal segment.\\n\\n####  More Precise Trigger Condition\\n\\nThe issue is not limited to a non-empty path parameter such as \\\";x\\\".\\n\\nThe more precise trigger shape is:\\n\\n`;[^/]*/.`\\n\\nExamples:\\n\\n```\\n    /public;/../admin/secret\\n    /public;x/../admin/secret\\n    /public;anything/../admin/secret\\n    /public;/./admin/secret\\n```\\n\\nThe minimal form is:\\n\\n`/public;/../admin/secret`\\n\\nbecause the semicolon is immediately followed by '/', so the inner while loop reaches '/' on its first increment.\\n\\n####  Potential Minimal Fix Direction\\n\\nA minimal fix would be to ensure that, when case ';' consumes input until '/' and appends '/' to the canonical builder, the slash state reflects the last effective character in the canonical path.\\n\\nFor example, conceptually:\\n\\n```java\\n    case ';':\\n        if (builder == null)\\n        {\\n            builder = new Utf8StringBuilder(encodedPath.length());\\n            builder.append(encodedPath, 0, i);\\n        }\\n\\n        while (++i < end)\\n        {\\n            if (encodedPath.charAt(i) == '/')\\n            {\\n                builder.append('/');\\n                slash = true;\\n                break;\\n            }\\n        }\\n        continue;\\n```\\n\\nThe important part is to avoid the loop tail from overwriting slash using the stale `c` value:\\n\\n`slash = c == '/';`\\n\\nIn other words, `slash` should represent the last effective character appended to the canonical builder, not the original input character read before case ';' advanced `i`.\", \"epss\": {\"percentage\": 0.00198, \"percentile\": 0.0971}, \"ghsa_id\": \"GHSA-w7x5-g22v-xqhr\", \"github_reviewed_at\": \"2026-07-22T22:57:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-w7x5-g22v-xqhr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w7x5-g22v-xqhr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-8384\"}], \"nvd_published_at\": \"2026-07-14T09:16:42Z\", \"published_at\": \"2026-07-22T22:57:36Z\", \"references\": [\"https://github.com/jetty/jetty.project/security/advisories/GHSA-w7x5-g22v-xqhr\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-8384\", \"https://github.com/jetty/jetty.project/pull/14969\", \"https://github.com/jetty/jetty.project/pull/14973\", \"https://github.com/jetty/jetty.project/commit/82969c77f6da46e27008b10b3c14840cd31db084\", \"https://github.com/jetty/jetty.project/commit/ade27ce93a37c33278720250d85c48601230ae3f\", \"https://github.com/jetty/jetty.project/releases/tag/jetty-12.0.35\", \"https://github.com/jetty/jetty.project/releases/tag/jetty-12.1.9\", \"https://gitlab.eclipse.org/security/cve-assignment/-/work_items/108\", \"https://github.com/advisories/GHSA-w7x5-g22v-xqhr\"], \"repository_advisory_url\": \"https://api.github.com/repos/jetty/jetty.project/security-advisories/GHSA-w7x5-g22v-xqhr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jetty/jetty.project\", \"summary\": \"Eclipse Jetty: Path parameter traversal\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-22T22:57:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-w7x5-g22v-xqhr\", \"vulnerabilities\": [{\"first_patched_version\": \"12.0.35\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-util\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 12.0.0, <= 12.0.34\"}, {\"first_patched_version\": \"12.1.9\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.eclipse.jetty:jetty-util\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 12.1.0, <= 12.1.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w7x5-g22v-xqhr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.eclipse.jetty:jetty-util: >= 12.0.0, <= 12.0.34",
+      "org.eclipse.jetty:jetty-util: >= 12.1.0, <= 12.1.8"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-8384"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.eclipse.jetty:jetty-util"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-23T19:37:33.071445Z",
+  "provenance": {
+    "content_sha256": "a0daa75e9d54153a0e76fa361a1894d56b9a5791a6c36888f522daa28dfa7a28",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-22T22:57:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w7x5-g22v-xqhr",
+  "status": "active",
+  "title": "Eclipse Jetty: Path parameter traversal",
+  "updated_at": "2026-07-22T22:57:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w7x5-g22v-xqhr"
+}
