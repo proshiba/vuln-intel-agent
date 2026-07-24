@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Am I affected?\\n\\nYou are affected if your application registers the `@better-auth/scim` plugin and lets authenticated users generate SCIM tokens. The default `canGenerateToken` policy was affected, and custom policies were affected when they did not reject provider IDs already used by other account providers. The provider-ID collision issue additionally requires SSO, SAML, OIDC, generic OAuth, or social providers whose account rows use custom provider IDs, plus existing account rows under those IDs.\\n\\nThe deprovisioning and email-update issues require only the SCIM plugin and a valid SCIM bearer token. Published versions from `@better-auth/scim@1.4.0-beta.27` through `1.6.21` are affected. Beta versions from `1.7.0-beta.0` through `1.7.0-beta.9` are affected. Upgrade to `@better-auth/scim@1.6.22` or `1.7.0-beta.10`.\\n\\n### Summary\\n\\n`@better-auth/scim` used the same logical provider ID for SCIM provider configuration and account ownership. SCIM token issuance did not reject all account-provider namespaces. An authenticated user could therefore mint a SCIM token whose provider ID matched an existing SSO, SAML, OIDC, generic OAuth, or social provider. SCIM user routes then selected account rows by that provider ID and treated those users as SCIM-managed, even when the SCIM token had never provisioned them.\\n\\nThe same write path had 2 additional validation issues. First, SCIM `active: false` was not modeled, so identity providers could receive a successful response while the user stayed active. Second, SCIM PUT and PATCH updates changed global email addresses without the same uniqueness check used by create, and `emailVerified` stayed unchanged after an email reassignment.\\n\\n### Details\\n\\nThe SCIM bearer middleware decoded the provider ID from the bearer token and loaded the matching `scimProvider` row. User listing and user lookup then queried ordinary account rows by `account.providerId`. This made the provider ID a user-controlled authorization key. If a SCIM token used a provider ID that belonged to SSO, SAML, OIDC, generic OAuth, or another account provider, the SCIM routes could resolve users that the token did not own.\\n\\nThe highest-impact path was non-organization deletion. On affected versions, `DELETE /scim/v2/Users/:id` for a non-organization SCIM token deleted the global Better Auth user and their sessions after resolving the user through the colliding provider ID. A low-privileged authenticated user could therefore delete users associated with a colliding provider namespace.\\n\\nOrganization-scoped tokens were also affected by the provider-ID collision. If the colliding provider ID matched the organization's SSO or OIDC connection, SCIM PUT or PATCH could resolve an SSO-provisioned organization member and rewrite global profile fields. Before the patch, changing a user's email through SCIM skipped the uniqueness check and left `emailVerified` unchanged.\\n\\nSCIM deactivation had a separate failure mode. The SCIM `active` attribute was missing from the user schemas and PATCH mapping, so `active: false` was stripped from requests. A standard identity-provider deactivation signal could return success while the user kept their identity, sessions, and access.\\n\\n### Patches\\n\\nFixed in `@better-auth/scim@1.6.22` and `@better-auth/scim@1.7.0-beta.10`.\\n\\nThe patch rejects SCIM provider IDs that collide with built-in providers, configured social providers, generic OAuth providers, and SSO provider rows before a token is minted. It also scopes SCIM deletion to the SCIM account link when the user has other identities. The global user is deleted only when the SCIM account is the user's sole linked account.\\n\\nThe patch models the SCIM `active` attribute. App-level SCIM deactivation maps `active: false` to the admin plugin's enforced disabled-user state and revokes sessions. If the admin plugin is absent, the request is rejected instead of being silently dropped.\\n\\nThe patch adds the email uniqueness check to SCIM PUT and PATCH updates and resets `emailVerified` whenever SCIM changes a user's email.\\n\\n### Workarounds\\n\\nIf you cannot upgrade immediately, configure `canGenerateToken` to reject provider IDs that match any account provider ID used by your application. Include built-in providers, social providers, generic OAuth providers, SSO, SAML, and OIDC provider IDs. Also restrict which users can generate SCIM tokens.\\n\\nDo not rely on deactivation reports from your identity provider until you have upgraded. Confirm that deactivated users have actually lost access, especially if your identity provider deprovisions through `active: false`.\\n\\nIf you use SCIM account linking, avoid broad domain-based linking rules. A shared email domain is not proof that a SCIM token may manage a pre-existing user. Prefer organization-membership checks or an explicit application predicate.\\n\\nAudit existing `scimProvider` rows and remove any row whose `providerId` matches another account provider namespace.\\n\\n### Impact\\n\\nWith the provider-ID collision issue, an authenticated attacker could act through a provider namespace they did not own. They could list and read SCIM user resources for users linked to the colliding provider. They could also update profile and account fields and delete global user records on the non-organization path. In organization-scoped deployments, a colliding token could mutate global profile fields for SSO-provisioned organization members.\\n\\nWith the deactivation issue, a terminated user could remain active after an identity provider reported successful deprovisioning through `active: false`. With the email-update issue, SCIM could assign one user's email to another user on adapters without an enforced unique index. That could corrupt email-keyed login and lookup, while SQL adapters could raise an unhandled adapter error.\\n\\n### Credit\\n\\nFound through internal validation.\", \"ghsa_id\": \"GHSA-rjg6-39jm-rgg4\", \"github_reviewed_at\": \"2026-07-24T15:40:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-rjg6-39jm-rgg4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rjg6-39jm-rgg4\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T15:40:54Z\", \"references\": [\"https://github.com/better-auth/better-auth/security/advisories/GHSA-rjg6-39jm-rgg4\", \"https://github.com/better-auth/better-auth/pull/10242\", \"https://github.com/better-auth/better-auth/commit/7c126dcd1aad24468ec37e876545c1d083d8acca\", \"https://github.com/better-auth/better-auth/releases/tag/v1.6.22\", \"https://github.com/better-auth/better-auth/releases/tag/v1.7.0-beta.10\", \"https://github.com/advisories/GHSA-rjg6-39jm-rgg4\"], \"repository_advisory_url\": \"https://api.github.com/repos/better-auth/better-auth/security-advisories/GHSA-rjg6-39jm-rgg4\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/better-auth/better-auth\", \"summary\": \"@better-auth/scim: account takeover and stale access via SCIM provider-id collision\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T15:40:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-rjg6-39jm-rgg4\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.22\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@better-auth/scim\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.4.0-beta.27, <= 1.6.21\"}, {\"first_patched_version\": \"1.7.0-beta.10\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@better-auth/scim\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.7.0-beta.0, <= 1.7.0-beta.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rjg6-39jm-rgg4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@better-auth/scim: >= 1.4.0-beta.27, <= 1.6.21",
+      "@better-auth/scim: >= 1.7.0-beta.0, <= 1.7.0-beta.9"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@better-auth/scim"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-24T19:36:04.953218Z",
+  "provenance": {
+    "content_sha256": "01ed9a8215238f526e519196617f098acf59d5ee0f8f435d17854dbc1b0b621f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T15:40:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rjg6-39jm-rgg4",
+  "status": "active",
+  "title": "@better-auth/scim: account takeover and stale access via SCIM provider-id collision",
+  "updated_at": "2026-07-24T15:40:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rjg6-39jm-rgg4"
+}

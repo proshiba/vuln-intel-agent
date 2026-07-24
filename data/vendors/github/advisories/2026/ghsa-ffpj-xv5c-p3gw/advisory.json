@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/249143265?v=4\", \"events_url\": \"https://api.github.com/users/Vlad-WKG/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Vlad-WKG/followers\", \"following_url\": \"https://api.github.com/users/Vlad-WKG/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Vlad-WKG/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Vlad-WKG\", \"id\": 249143265, \"login\": \"Vlad-WKG\", \"node_id\": \"U_kgDODtmf4Q\", \"organizations_url\": \"https://api.github.com/users/Vlad-WKG/orgs\", \"received_events_url\": \"https://api.github.com/users/Vlad-WKG/received_events\", \"repos_url\": \"https://api.github.com/users/Vlad-WKG/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Vlad-WKG/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Vlad-WKG/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Vlad-WKG\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59220\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"## Summary\\nTwo regexes in `backend/open_webui/utils/middleware.py` that parse `<$skillId|label>` skill-mention tags backtrack in O(n²) on input that contains `<$` followed by a long run with no closing `>`. Both run synchronously, on the asyncio event loop, on **every** chat completion with no feature gate. Because the default deployment is a single uvicorn worker, one such input pins a CPU core inside `re` and freezes the entire instance for all users until the worker is killed. Any authenticated user can trigger it with one chat message; it also fires accidentally on benign retrieved content (a RAG chunk or tool output) containing the pattern.\\n\\n## Affected versions\\n`>= 0.9.2, < 0.10.0`. Fixed in **v0.10.0** (there is no 0.9.7 release).\\n- `SKILL_MENTION_RE` (the extract pattern) has been O(n²) since **v0.9.2**; exploitable on 0.9.2–0.9.5 with a large input (hundreds of KB).\\n- **v0.9.6** added a second, far more aggressive O(n²) in the strip pattern (introduced by the \\\"keep label as readable text\\\" change), so on 0.9.6 a small input is enough to hang the instance.\\n\\nBoth are fixed by the same patch.\\n\\n## Affected component\\n`backend/open_webui/utils/middleware.py` (line numbers as of v0.9.6):\\n\\n```python\\n# line 2223 — used by extract_skill_ids_from_messages(), called unconditionally (~line 2625)\\nSKILL_MENTION_RE = re.compile(r'<\\\\$([^|>]+)\\\\|?[^>]*>')\\n\\n# line 2247 — used by strip_skill_mentions(), called unconditionally (line 2662)\\nstrip_re = re.compile(r'<\\\\$[^|>]+\\\\|?([^>]*)>')\\n```\\n\\n`extract_skill_ids_from_messages()` runs before the `if all_skill_ids:` block (that guard gates only skill *injection*, not the regex), and `strip_skill_mentions()` runs with no guard at all. Neither requires a skill to exist or any setting to be enabled. Both functions are plain synchronous calls inside the async `process_chat_payload` coroutine, so they block the event loop; with the default `UVICORN_WORKERS=1` (`backend/start.sh`) the whole instance stalls.\\n\\n## Root cause\\n`[^|>]` is a subset of `[^>]`, so the quantifier pair `[^|>]+ \\\\|? [^>]*` is ambiguous: on input that never closes with `>`, `[^|>]+` greedily consumes the tail, `>` fails, and the engine backtracks through every split point between `[^|>]+` and `[^>]*` — O(n) positions each doing O(n) work. Polynomial, not exponential, but more than enough to hang a single worker on a ~100 KB input.\\n\\n## Proof of concept\\nStandalone (no Open WebUI required):\\n\\n```python\\nimport re, time\\nEXTRACT = re.compile(r'<\\\\$([^|>]+)\\\\|?[^>]*>')\\nSTRIP   = re.compile(r'<\\\\$[^|>]+\\\\|?([^>]*)>')\\nfor n in (8_000, 16_000, 32_000, 64_000):\\n    s = '<$' + ('a' * n)\\n    for name, rx in (('extract', EXTRACT), ('strip', STRIP)):\\n        t = time.perf_counter(); rx.search(s)\\n        print(f'n={n:>6} {name:>7} = {(time.perf_counter()-t)*1000:8.1f} ms')\\n```\\n\\nTime quadruples per doubling of `n` (textbook O(n²)); the strip pattern runs for ~6 seconds on a 64k blob and for minutes on a ~96 KB one.\\n\\nEnd-to-end against a live instance (default config):\\n1. `docker run ghcr.io/open-webui/open-webui:v0.9.6` on defaults.\\n2. Log in as any user (no admin or skill setup).\\n3. Send a chat message containing `<$` followed by 50k+ characters with no `>`.\\n4. One CPU core pegs in `re`; UI and API stop responding for every user until the worker is killed.\\n\\n## Patch\\nRewrite the optional `|label` as a non-capturing optional group so the two quantifiers no longer overlap. Both patterns become linear; captures and substituted output are unchanged on well-formed `<$id|label>`, `<$id|>`, and bare `<$id>` mentions.\\n\\n```python\\nSKILL_MENTION_RE = re.compile(r'<\\\\$([^|>]+)(?:\\\\|[^>]*)?>')\\nstrip_re         = re.compile(r'<\\\\$[^|>]+(?:\\\\|([^>]*))?>')\\n```\\n\\nAfter the patch the same hostile input returns in under 1 ms. Shipped in v0.10.0.\\n\\n## Credit\\nReported by @Vlad-WKG, including a correct root-cause analysis and patch.\", \"epss\": {\"percentage\": 0.00319, \"percentile\": 0.238}, \"ghsa_id\": \"GHSA-ffpj-xv5c-p3gw\", \"github_reviewed_at\": \"2026-07-24T16:55:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-ffpj-xv5c-p3gw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ffpj-xv5c-p3gw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59220\"}], \"nvd_published_at\": \"2026-07-09T17:17:03Z\", \"published_at\": \"2026-07-24T16:55:55Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-ffpj-xv5c-p3gw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59220\", \"https://github.com/open-webui/open-webui/commit/61a26722155ec6ee1b629cf8dfcf975098c18331\", \"https://github.com/open-webui/open-webui/releases/tag/v0.10.0\", \"https://github.com/advisories/GHSA-ffpj-xv5c-p3gw\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-ffpj-xv5c-p3gw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: ReDoS in skill-mention regexes causes whole-instance DoS on default config\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T16:55:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-ffpj-xv5c-p3gw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.10.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.2, < 0.10.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ffpj-xv5c-p3gw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.9.2, < 0.10.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-59220"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-24T19:36:04.840106Z",
+  "provenance": {
+    "content_sha256": "e895acc30273b17b91697e50a466a10d41eacff635bb565fd7ec70419aa891c7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T16:55:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ffpj-xv5c-p3gw",
+  "status": "active",
+  "title": "Open WebUI: ReDoS in skill-mention regexes causes whole-instance DoS on default config",
+  "updated_at": "2026-07-24T16:55:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ffpj-xv5c-p3gw"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}, {\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"## Summary\\nGitPython's `check_unsafe_options` guard (the control introduced by CVE-2026-42215 / GHSA-2f96 and hardened since) can be bypassed for **every** guarded method (`clone`/`clone_from`, `fetch`/`pull`/`push`, `ls_remote`, `iter_commits`, `blame`, `archive`) by smuggling an option token inside the VALUE of a single-character kwarg. In the default `allow_unsafe_options=False` configuration this yields arbitrary command execution via `--upload-pack`.\\n\\n## Root Cause\\nThe guard builds its candidate option list from kwarg KEYS only: `_option_candidates([], {\\\"n\\\":\\\"--upload-pack=<cmd>\\\"})` returns `['-n']` (cmd.py:1042-1046 derives the candidate from the key, never the value). `-n` is not on the denylist, so `check_unsafe_options` passes. But `transform_kwarg('n', value, split_single_char_options=True)` (cmd.py:1600-1606) emits **two** argv tokens `['-n', '--upload-pack=<cmd>']`. git then parses the second token as `--upload-pack` and executes the attacker-supplied command. The guard never inspects the value that becomes a separate argv token.\\n\\n## Impact\\nArbitrary OS command execution as the host process (via `--upload-pack`) in the default configuration, affecting all guarded methods since they all build candidates through the name-only `_option_candidates`.\\n\\n## Proof of Concept\\n```python\\nfrom git import Repo\\nRepo.clone_from(bare_repo, out_dir, n=\\\"--upload-pack=touch /tmp/ACE;git-upload-pack\\\")\\n# /tmp/ACE created -> ACE. Direct-name form upload_pack=\\\"...\\\" is correctly BLOCKED.\\n```\\nFile-write variant on a guarded revision command: `iter_commits('HEAD', g='--output=/path')` -> candidate `['-g']` passes, argv `['-g','--output=/path']`, victim file truncated.\\n\\n## Attack Chain\\n1. Entry: app forwards a user-supplied options dict -> `Repo.clone_from(url, path, n=\\\"--upload-pack=touch /tmp/ACE;git-upload-pack\\\")`. Guard: `check_unsafe_options(options=_option_candidates([], kwargs), unsafe=unsafe_git_clone_options)` at base.py. Bypass proof: `_option_candidates([], {\\\"n\\\":\\\"--upload-pack=...\\\"})` -> `['-n']` (key-only), not on denylist -> no UnsafeOptionError (verified live).\\n2. Transform: `transform_kwarg('n', value, split_single_char_options=True)` -> `['-n', '--upload-pack=touch /tmp/ACE;git-upload-pack']`. Guard: none (guard already passed on name-only candidate). Bypass proof: verified transform emits two tokens.\\n3. Sink: `git clone -n --upload-pack='touch ...;git-upload-pack' -- <src> <dst>`; git parses and runs the second token. Impact: ACE (marker created, verified end-to-end).\\n\\n## Bypass Evidence\\nLive-verified on HEAD (tag 3.1.53): `_option_candidates` returns key-only candidate `['-n']`; `transform_kwargs` emits the smuggled `--upload-pack=` token; clone_from with the payload created the marker file; the direct-name `upload_pack=` form raised UnsafeOptionError. All prior bypasses (GHSA-rpm5 underscore key, GHSA-2f96 long-option abbreviation, GHSA-v396 joined short option, GHSA-x2qx multi-before-split) are BLOCKED on HEAD — this is a distinct kwarg-value->separate-token vector.\\n\\n## Affected Versions\\n`<= 3.1.53`\\n\\n## Suggested Fix\\nMake `_option_candidates` also emit candidates derived from single-character kwarg VALUES when `split_single_char_options` is in effect, OR run `check_unsafe_options` over the fully-transformed argv rather than the reconstructed name-only candidate list.\\n\\n---\\nReported by **zx (Jace)** — GitHub: @manus-use\", \"ghsa_id\": \"GHSA-r9mr-m37c-5fr3\", \"github_reviewed_at\": \"2026-07-24T16:42:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-r9mr-m37c-5fr3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r9mr-m37c-5fr3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T16:42:57Z\", \"references\": [\"https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-r9mr-m37c-5fr3\", \"https://github.com/gitpython-developers/GitPython/pull/2180\", \"https://github.com/gitpython-developers/GitPython/commit/e8d0fbf774d1f6baa3b481adfe48bd262e43b453\", \"https://github.com/gitpython-developers/GitPython/releases/tag/3.1.54\", \"https://github.com/advisories/GHSA-r9mr-m37c-5fr3\"], \"repository_advisory_url\": \"https://api.github.com/repos/gitpython-developers/GitPython/security-advisories/GHSA-r9mr-m37c-5fr3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gitpython-developers/GitPython\", \"summary\": \"GitPython: Unsafe git option guard bypass via single-character kwarg value token smuggling enables arbitrary command execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T16:42:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-r9mr-m37c-5fr3\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.54\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"GitPython\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.53\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r9mr-m37c-5fr3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "GitPython: <= 3.1.53"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42215"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "GitPython"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-24T19:36:04.885023Z",
+  "provenance": {
+    "content_sha256": "e74dd7331c89acbce1c1535138dd0347f2b17fad3f3d8bc6a648b60028269565",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T16:42:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r9mr-m37c-5fr3",
+  "status": "active",
+  "title": "GitPython: Unsafe git option guard bypass via single-character kwarg value token smuggling enables arbitrary command execution",
+  "updated_at": "2026-07-24T16:42:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r9mr-m37c-5fr3"
+}
