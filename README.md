@@ -162,6 +162,10 @@ AI 要約を手動で指定する場合は、Critical 表と「悪用済み・Po
 
 `failed` または `partial` がある場合、その実行結果は公開前検証で拒否されます。
 
+## 脆弱性ビューア（GitHub Pages）
+
+`web/` には、`vulndb/index.csv` をブラウザ上で一覧・検索・絞り込みできる静的ビューアがあります。GitHub Pages で公開し、`.github/workflows/pages.yml` が `main` の更新時に検索インデックスを生成してデプロイします。初回のみ Settings → Pages → Source で「GitHub Actions」を選択してください。詳細は `web/README.md` を参照してください。
+
 ## 設定ファイル
 
 | パス | 用途 |
