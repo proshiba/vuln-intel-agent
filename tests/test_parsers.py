@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import feedparser
@@ -98,7 +99,13 @@ def test_cisa_kev_fixture_is_enrichment_only() -> None:
         for item in payload["vulnerabilities"]
     ]
 
-    assert parse_cisa_kev(records) == {"CVE-2026-10001"}
+    entries = parse_cisa_kev(records)
+
+    assert set(entries) == {"CVE-2026-10001", "CVE-2026-10002"}
+    assert entries["CVE-2026-10001"].date_added == datetime(2026, 7, 16, tzinfo=UTC)
+    assert entries["CVE-2026-10001"].ransomware is False
+    assert entries["CVE-2026-10002"].date_added == datetime(2026, 7, 10, tzinfo=UTC)
+    assert entries["CVE-2026-10002"].ransomware is True
 
 
 def test_github_advisory_normalizes_nested_vulnerability_fields() -> None:

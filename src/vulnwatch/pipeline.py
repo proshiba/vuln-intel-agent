@@ -23,6 +23,7 @@ from vulnwatch.models import (
     ChangeStatus,
     CollectionResult,
     CollectorKind,
+    KevEntry,
     Priority,
     Provenance,
     RunManifest,
@@ -204,7 +205,7 @@ class Pipeline:
                     )
                 )
 
-        kev: set[str] = set()
+        kev: dict[str, KevEntry] = {}
         if "cisa_kev" in results:
             kev = parse_cisa_kev(results["cisa_kev"].records)
             kev_outcome = outcomes["cisa_kev"]
@@ -422,7 +423,7 @@ class Pipeline:
         self,
         draft: AdvisoryDraft,
         source: SourceDefinition,
-        kev: set[str],
+        kev: dict[str, KevEntry],
     ) -> Advisory:
         draft_id = canonical_id(draft)
         facts = AdvisoryFacts(
@@ -440,7 +441,12 @@ class Pipeline:
             mitigations=draft.mitigations,
         )
         enrichment = enrich_assets(source.vendor, facts.products, self.products)
-        enrichment.cisa_kev = bool(set(facts.cves) & kev)
+        listed = [entry for cve in facts.cves if (entry := kev.get(cve)) is not None]
+        enrichment.cisa_kev = bool(listed)
+        # 複数CVEを含むアドバイザリでは、最も早い掲載日を代表値として保持する。
+        dates = [entry.date_added for entry in listed if entry.date_added is not None]
+        enrichment.kev_date_added = min(dates) if dates else None
+        enrichment.kev_ransomware = any(entry.ransomware for entry in listed)
         decision = decide_priority(facts, enrichment)
         return Advisory(
             canonical_id=draft_id,

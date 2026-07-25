@@ -313,8 +313,17 @@ class AdvisoryFacts(StrictModel):
         return _normalize_cves(values)
 
 
+class KevEntry(StrictModel):
+    """CISA KEV の掲載情報。掲載日は悪用確認の速報性を測る基準に使う。"""
+
+    date_added: datetime | None = None
+    ransomware: bool = False
+
+
 class AdvisoryEnrichment(StrictModel):
     cisa_kev: bool = False
+    kev_date_added: datetime | None = None
+    kev_ransomware: bool = False
     asset_match: bool = False
     matched_asset_ids: list[str] = Field(default_factory=list)
     internet_exposed: bool = False

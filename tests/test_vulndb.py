@@ -149,6 +149,81 @@ def test_exploitation_and_poc_flags_are_sticky_with_observed_dates(
     assert entry.cisa_kev is True
 
 
+def test_kev_lag_records_how_early_a_vendor_signal_beat_the_kev_listing(
+    tmp_path: Path, advisory_factory
+) -> None:
+    # A vendor advisory states exploitation on NOW; CISA lists the CVE six days later.
+    vendor_signal = advisory_factory(
+        facts=AdvisoryFacts(cves=["CVE-2026-12345"], known_exploited=True)
+    )
+    db = VulnDb(tmp_path)
+    db.apply([vendor_signal], NOW)
+    db.write()
+
+    listed = advisory_factory(
+        facts=AdvisoryFacts(cves=["CVE-2026-12345"]),
+        enrichment=AdvisoryEnrichment(
+            cisa_kev=True,
+            kev_date_added=datetime(2026, 7, 24, tzinfo=UTC),
+            kev_ransomware=True,
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([listed], LATER)
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert entry.exploitation_source == "example"
+    assert entry.exploitation_observed_at == NOW
+    assert entry.kev_listed_at == datetime(2026, 7, 24, tzinfo=UTC)
+    assert entry.kev_lag_days == 6
+    assert entry.ransomware_use is True
+    assert _read_csv(tmp_path)[0]["kev_lag_days"] == "6"
+
+
+def test_kev_sourced_exploitation_claims_no_lag(tmp_path: Path, advisory_factory) -> None:
+    # Exploitation established by KEV itself must never be credited as an early signal,
+    # even though the historical listing date precedes the observation.
+    listed = advisory_factory(
+        enrichment=AdvisoryEnrichment(
+            cisa_kev=True, kev_date_added=datetime(2021, 5, 1, tzinfo=UTC)
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([listed], NOW)
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert entry.known_exploited is True
+    assert entry.exploitation_source == "cisa_kev"
+    assert entry.kev_lag_days is None
+    assert _read_csv(tmp_path)[0]["kev_lag_days"] == ""
+
+
+def test_kev_listing_before_our_observation_reports_no_lag(
+    tmp_path: Path, advisory_factory
+) -> None:
+    # A vendor signal seen after CISA already listed the CVE is not an early warning.
+    vendor_signal = advisory_factory(
+        facts=AdvisoryFacts(cves=["CVE-2026-12345"], known_exploited=True)
+    )
+    db = VulnDb(tmp_path)
+    db.apply([vendor_signal], NOW)
+    db.write()
+
+    listed = advisory_factory(
+        facts=AdvisoryFacts(cves=["CVE-2026-12345"]),
+        enrichment=AdvisoryEnrichment(
+            cisa_kev=True, kev_date_added=datetime(2026, 7, 1, tzinfo=UTC)
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([listed], LATER)
+    db.write()
+
+    assert _read_entry(tmp_path, "VW-2026-0001").kev_lag_days is None
+
+
 def test_withdrawn_only_when_all_sources_withdraw(tmp_path: Path, advisory_factory) -> None:
     first = advisory_factory()
     second = advisory_factory(
