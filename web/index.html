@@ -222,6 +222,13 @@
             <option value="7">7.0以上（High+）</option>
             <option value="4">4.0以上（Moderate+）</option>
           </select>
+          <select id="since">
+            <option value="0">公開日: すべて</option>
+            <option value="7">過去7日</option>
+            <option value="30">過去30日</option>
+            <option value="90">過去90日</option>
+            <option value="365">過去1年</option>
+          </select>
           <label class="chk"><input type="checkbox" id="f_kev" /> CISA KEV</label>
           <label class="chk"><input type="checkbox" id="f_exp" /> 悪用確認</label>
           <label class="chk"><input type="checkbox" id="f_poc" /> PoC公開</label>
@@ -255,6 +262,12 @@
       const $ = (id) => document.getElementById(id);
       const esc = (s) => (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       const nf = new Intl.NumberFormat("ja-JP");
+      // A YYYY-MM-DD cutoff `days` before today (UTC), for the published-date filter.
+      const cutoffDay = (days) => {
+        const d = new Date();
+        d.setUTCDate(d.getUTCDate() - days);
+        return d.toISOString().slice(0, 10);
+      };
 
       function severity(cvss, sev) {
         if (typeof cvss === "number") {
@@ -298,6 +311,8 @@
         const prio = $("prio").value;
         const vendor = $("vendor").value.toLowerCase();
         const minc = parseFloat($("cvss").value) || 0;
+        const sinceDays = parseInt($("since").value, 10) || 0;
+        const sinceDate = sinceDays ? cutoffDay(sinceDays) : "";
         const kev = $("f_kev").checked, exp = $("f_exp").checked,
           poc = $("f_poc").checked, fixed = $("f_fixed").checked;
         const sort = $("sort").value;
@@ -306,6 +321,7 @@
           if (prio && r.prio !== prio) return false;
           if (vendor && !r.vendors.toLowerCase().includes(vendor)) return false;
           if (minc && !(typeof r.cvss === "number" && r.cvss >= minc)) return false;
+          if (sinceDate && !(r.pub && r.pub >= sinceDate)) return false;
           if (kev && !(r.flags & F.kev)) return false;
           if (exp && !(r.flags & F.exp)) return false;
           if (poc && !(r.flags & F.poc)) return false;
@@ -398,7 +414,7 @@
           tiles(raw.stats);
           $("vendor").insertAdjacentHTML("beforeend",
             raw.vendors.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
-          for (const id of ["q", "sort", "prio", "vendor", "cvss", "f_kev", "f_exp", "f_poc", "f_fixed"]) {
+          for (const id of ["q", "sort", "prio", "vendor", "cvss", "since", "f_kev", "f_exp", "f_poc", "f_fixed"]) {
             const el = $(id);
             el.addEventListener(id === "q" ? "input" : "change", () => {
               clearTimeout(state.t);
