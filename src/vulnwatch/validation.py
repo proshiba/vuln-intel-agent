@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from vulnwatch.attack_surface import load_attack_surface
 from vulnwatch.config import load_products, load_sources
 from vulnwatch.models import Advisory, RunManifest, SourceOutcomeStatus, Tier
 from vulnwatch.report import (
@@ -29,11 +30,13 @@ def max_unsuccessful_sources(expected_source_count: int) -> int:
 def validate_config(
     sources_path: Path = Path("config/sources.yaml"),
     products_path: Path = Path("config/products.yaml"),
-) -> tuple[int, int]:
+    attack_surface_path: Path = Path("config/attack_surface.yaml"),
+) -> tuple[int, int, int]:
     sources = load_sources(sources_path)
     load_products(products_path)
+    attack_surface = load_attack_surface(attack_surface_path)
     enabled = sum(source.enabled for source in sources.sources)
-    return len(sources.sources), enabled
+    return len(sources.sources), enabled, len(attack_surface.classes)
 
 
 def validate_tree(root: Path) -> tuple[int, int]:

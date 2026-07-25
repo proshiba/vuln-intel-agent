@@ -172,6 +172,7 @@
       .f-exp { color: var(--kev); border-color: var(--kev); }
       .f-poc { color: #fff; background: var(--poc); }
       .f-fixed { color: var(--fixed); border-color: var(--fixed); }
+      .f-surface { color: var(--accent); border-color: var(--accent); }
       tr.detail td { background: var(--panel-2); cursor: default; }
       .detail-grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 14px; font-size: 13px; }
       .detail-grid dt { color: var(--muted); }
@@ -229,6 +230,7 @@
             <option value="90">過去90日</option>
             <option value="365">過去1年</option>
           </select>
+          <select id="surface"><option value="">攻撃対象面: すべて</option></select>
           <label class="chk"><input type="checkbox" id="f_kev" /> CISA KEV</label>
           <label class="chk"><input type="checkbox" id="f_exp" /> 悪用確認</label>
           <label class="chk"><input type="checkbox" id="f_poc" /> PoC公開</label>
@@ -259,6 +261,7 @@
       const PAGE = 80;
       const F = { fixed: 1, poc: 2, exp: 4, kev: 8 };
       const state = { data: null, filtered: [], shown: 0 };
+      const SURFACE = {};
       const $ = (id) => document.getElementById(id);
       const esc = (s) => (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       const nf = new Intl.NumberFormat("ja-JP");
@@ -285,9 +288,9 @@
       const PRIO_RANK = { P1: 0, P2: 1, P3: 2, INFO: 3 };
 
       function makeRow(r) {
-        // [id, cve, vendors, products, title, cvss, sev, prio, flags, pub, upd]
+        // [id, cve, vendors, products, title, cvss, sev, prio, flags, pub, upd, asc]
         return { id: r[0], cve: r[1], vendors: r[2], products: r[3], title: r[4],
-          cvss: r[5], sev: r[6], prio: r[7], flags: r[8], pub: r[9], upd: r[10],
+          cvss: r[5], sev: r[6], prio: r[7], flags: r[8], pub: r[9], upd: r[10], asc: r[11] || "",
           hay: (r[1] + " " + r[2] + " " + r[3] + " " + r[4] + " " + r[0]).toLowerCase() };
       }
 
@@ -313,6 +316,7 @@
         const minc = parseFloat($("cvss").value) || 0;
         const sinceDays = parseInt($("since").value, 10) || 0;
         const sinceDate = sinceDays ? cutoffDay(sinceDays) : "";
+        const surface = $("surface").value;
         const kev = $("f_kev").checked, exp = $("f_exp").checked,
           poc = $("f_poc").checked, fixed = $("f_fixed").checked;
         const sort = $("sort").value;
@@ -322,6 +326,7 @@
           if (vendor && !r.vendors.toLowerCase().includes(vendor)) return false;
           if (minc && !(typeof r.cvss === "number" && r.cvss >= minc)) return false;
           if (sinceDate && !(r.pub && r.pub >= sinceDate)) return false;
+          if (surface && r.asc !== surface) return false;
           if (kev && !(r.flags & F.kev)) return false;
           if (exp && !(r.flags & F.exp)) return false;
           if (poc && !(r.flags & F.poc)) return false;
@@ -354,6 +359,10 @@
         if (r.flags & F.fixed) b.push('<span class="badge f-fixed">修正</span>');
         return `<span class="flags">${b.join("")}</span>`;
       }
+      function surfaceBadge(r) {
+        if (!r.asc) return "";
+        return `<span class="badge f-surface" title="初期アクセス面">${esc(SURFACE[r.asc] || r.asc)}</span>`;
+      }
 
       function renderMore() {
         const frag = document.createDocumentFragment();
@@ -366,7 +375,7 @@
             `<td class="vendors hide-sm">${esc(r.vendors || "-")}</td>` +
             `<td class="num">${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"}</td>` +
             `<td><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span></td>` +
-            `<td>${flagBadges(r)}</td>` +
+            `<td>${flagBadges(r)}${surfaceBadge(r)}</td>` +
             `<td class="title">${esc(r.title)} ${badgeSev(r)}</td>` +
             `<td class="num hide-sm">${esc(r.upd)}</td>`;
           tr.addEventListener("click", () => toggleDetail(tr, r));
@@ -397,6 +406,7 @@
           <dt>製品</dt><dd>${esc(r.products || "-")}</dd>
           <dt>CVSS / 深刻度</dt><dd>${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"} ${badgeSev(r)}</dd>
           <dt>優先度 / 状態</dt><dd><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span> ${flagBadges(r)}</dd>
+          <dt>攻撃対象面</dt><dd>${r.asc ? esc(SURFACE[r.asc] || r.asc) : "-"}</dd>
           <dt>公開 / 更新</dt><dd>${esc(r.pub || "-")} / ${esc(r.upd || "-")}</dd>
           ${links.length ? `<dt>参照</dt><dd>${links.join(" · ")}</dd>` : ""}
         </dl></td>`;
@@ -414,7 +424,13 @@
           tiles(raw.stats);
           $("vendor").insertAdjacentHTML("beforeend",
             raw.vendors.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
-          for (const id of ["q", "sort", "prio", "vendor", "cvss", "since", "f_kev", "f_exp", "f_poc", "f_fixed"]) {
+          const surfaces = raw.attack_surfaces || {};
+          const surfaceCounts = (raw.stats && raw.stats.surfaces) || {};
+          Object.assign(SURFACE, surfaces);
+          $("surface").insertAdjacentHTML("beforeend",
+            Object.entries(surfaces).map(([id, label]) =>
+              `<option value="${esc(id)}">${esc(label)}（${nf.format(surfaceCounts[id] || 0)}）</option>`).join(""));
+          for (const id of ["q", "sort", "prio", "vendor", "cvss", "since", "surface", "f_kev", "f_exp", "f_poc", "f_fixed"]) {
             const el = $(id);
             el.addEventListener(id === "q" ? "input" : "change", () => {
               clearTimeout(state.t);

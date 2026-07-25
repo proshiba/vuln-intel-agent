@@ -172,5 +172,6 @@ AI 要約を手動で指定する場合は、Critical 表と「悪用済み・Po
 |---|---|
 | `config/sources.yaml` | 収集ソース、collector、parser、許可ホスト、取得上限などを定義します。 |
 | `config/products.yaml` | 自組織で利用している製品名、公開区分、担当部署を定義します。 |
+| `config/attack_surface.yaml` | 初期アクセスに悪用されやすい製品（VPN 機器、メール/コラボ基盤など）を分類ごとに定義します。台帳とビューアの「攻撃対象面」分類に使います。 |
 
 `config/products.yaml` には IP アドレス、ホスト名、認証情報などの機密情報を保存しないでください。

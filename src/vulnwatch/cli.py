@@ -39,10 +39,14 @@ def _since(value: str) -> datetime:
 def config_validate(
     sources: Annotated[Path, typer.Option()] = Path("config/sources.yaml"),
     products: Annotated[Path, typer.Option()] = Path("config/products.yaml"),
+    attack_surface: Annotated[Path, typer.Option()] = Path("config/attack_surface.yaml"),
 ) -> None:
-    total, enabled = validate_config(sources, products)
+    total, enabled, surface_classes = validate_config(sources, products, attack_surface)
     export_schemas()
-    typer.echo(f"configuration valid: {total} sources, {enabled} enabled")
+    typer.echo(
+        f"configuration valid: {total} sources, {enabled} enabled, "
+        f"{surface_classes} attack-surface classes"
+    )
 
 
 @app.command()
