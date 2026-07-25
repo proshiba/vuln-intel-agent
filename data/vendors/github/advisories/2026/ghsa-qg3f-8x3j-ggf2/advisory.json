@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/59762500?v=4\", \"events_url\": \"https://api.github.com/users/addcontent/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/addcontent/followers\", \"following_url\": \"https://api.github.com/users/addcontent/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/addcontent/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/addcontent\", \"id\": 59762500, \"login\": \"addcontent\", \"node_id\": \"MDQ6VXNlcjU5NzYyNTAw\", \"organizations_url\": \"https://api.github.com/users/addcontent/orgs\", \"received_events_url\": \"https://api.github.com/users/addcontent/received_events\", \"repos_url\": \"https://api.github.com/users/addcontent/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/addcontent/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/addcontent/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/addcontent\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59223\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\nThe administrator-configured `WEB_FETCH_FILTER_LIST` (the allow/block list applied to server-side web fetches: RAG URL ingestion, URL-to-markdown, web-search content fetch) matches hostnames incorrectly, so the filter can be bypassed.\\n\\n## Details\\n\\n`is_string_allowed` (`backend/open_webui/utils/misc.py`) matches with `str.endswith(...)`, and the primary web-fetch call site (`backend/open_webui/retrieval/web/utils.py`) called it with the **full URL string**, not the hostname:\\n\\n- **Blocklist bypass via path.** A blocklist entry `!internal.example.com` only matches a URL that *ends with* that string. Any URL with a path (`https://internal.example.com/x`) ends with `/x`, so the entry never matches and the fetch proceeds. The blocklist effectively only stopped path-less URLs.\\n- **Allowlist false-reject and bypass.** An allowlist `company.com` rejected the legitimate `https://api.company.com/status` and admitted `https://attacker.example/path/company.com`.\\n- **Non-label-boundary matching** at the hostname-shaped call site (`retrieval/web/main.py`): `endswith('corp.com')` also matched `evilcorp.com`, and `10.0.0.1` matched `110.0.0.1`.\\n\\n## Impact\\n\\nAn authenticated user able to trigger a server-side web fetch can reach hosts the administrator intended to block with `WEB_FETCH_FILTER_LIST`.\\n\\nOpen WebUI's primary SSRF protection is a separate, always-on guard that rejects any URL resolving to a non-global IP (`validate_url` and the connection-layer `_ssrf_safe_new_conn`, active whenever `ENABLE_RAG_LOCAL_WEB_FETCH` is off, the default). That guard is unaffected by this issue and continues to block loopback, RFC1918 and link-local addresses, including the `169.254.169.254` cloud-metadata endpoint. This bypass therefore does **not** grant access to those internal targets. What it defeats is the administrator's ability to block specific **publicly-resolvable** hosts (internal services reachable from the server over a public IP, e.g. split-horizon DNS or internal PaaS endpoints) and to enforce an allowlist. Fetched content is returned to the requester, so for hosts reachable from the server's network position this is a read/content-disclosure SSRF against the admin-blocked host.\\n\\n## Patch\\n\\nMatching is now performed on the parsed hostname using DNS label boundaries. A dedicated `is_host_allowed(host, ...)` matches an entry only when host and entry are equal or the entry is a parent domain (`host == entry or host.endswith('.' + entry)`), so `corp.com` matches `api.corp.com` but not `evilcorp.com`, and IP entries match only the identical address. Both web-fetch call sites pass the parsed hostname rather than the full URL. The generic `is_string_allowed` is retained unchanged for unrelated non-host filters.\\n\\n## Credit\\n\\nReported by @addcontent.\", \"epss\": {\"percentage\": 0.00223, \"percentile\": 0.12871}, \"ghsa_id\": \"GHSA-qg3f-8x3j-ggf2\", \"github_reviewed_at\": \"2026-07-24T20:49:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-qg3f-8x3j-ggf2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qg3f-8x3j-ggf2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59223\"}], \"nvd_published_at\": \"2026-07-09T17:17:03Z\", \"published_at\": \"2026-07-24T20:49:40Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-qg3f-8x3j-ggf2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59223\", \"https://github.com/open-webui/open-webui/pull/25949\", \"https://github.com/open-webui/open-webui/commit/087878ce848a4d828012068b5997dac480f43656\", \"https://github.com/open-webui/open-webui/releases/tag/v0.10.0\", \"https://github.com/advisories/GHSA-qg3f-8x3j-ggf2\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-qg3f-8x3j-ggf2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: `WEB_FETCH_FILTER_LIST` host allow/block filter bypassable via URL path and non-label-boundary matching\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T20:49:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-qg3f-8x3j-ggf2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.10.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.10.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qg3f-8x3j-ggf2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: < 0.10.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-59223"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-25T19:32:35.370959Z",
+  "provenance": {
+    "content_sha256": "784a4bd0812ce3e994ae29b7e1def9ddeedbe095a1338440a0f9f2842dc51ad9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T20:49:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qg3f-8x3j-ggf2",
+  "status": "active",
+  "title": "Open WebUI: `WEB_FETCH_FILTER_LIST` host allow/block filter bypassable via URL path and non-label-boundary matching",
+  "updated_at": "2026-07-24T20:49:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qg3f-8x3j-ggf2"
+}

@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Impact\\n\\nA builder-level user can make Budibase issue server-side HTTP requests to loopback or private-network targets by using DNS rebinding against two outbound fetch paths that are still not pinned to the validated DNS answer.\\n\\nThe first path is OpenAPI query import. It validates the supplied hostname with the blacklist and then performs a separate raw fetch. A hostname that resolves to a public address during validation and to `127.0.0.1` during the request is accepted.\\n\\nThe second path is REST datasource/query execution. It calls the fixed `fetchWithBlacklist()` helper, but provides a custom undici `fetchFn` that installs a `dispatcher`. The helper passes a pinned Node `agent`, but undici uses the dispatcher and resolves the original hostname again at connection time. This defeats the DNS pinning added for the previous outbound fetch advisory.\\n\\nImpact is authenticated SSRF from the Budibase server process. An attacker with the relevant builder/query privileges can reach loopback or private HTTP services that should be blocked by Budibase's outbound fetch protections, subject to the normal response handling of each feature.\\n\\n## Reproduction\\n\\n1. Configure an attacker-controlled hostname so the validation lookup returns a public IP address and the later request lookup returns an internal address such as `127.0.0.1`.\\n2. Start a loopback canary HTTP service on the Budibase host.\\n3. For OpenAPI query import, submit an import URL such as `http://rebind.test:<port>/openapi.json` through the builder query import endpoints. In a harness matching the current import code, validation resolved `rebind.test` to `8.8.8.8`, the raw fetch then resolved `rebind.test` to `127.0.0.1`, and the loopback canary returned `loopback-canary-hit:/openapi.json`.\\n4. For REST datasource/query execution, configure a REST datasource/query URL using the same rebinding hostname. In a harness matching the current helper plus REST undici custom fetch path, a direct loopback URL was blocked and a pinned Node-agent control did not hit loopback, but the REST undici path re-resolved the hostname to `127.0.0.1` and returned `REST-UNDICI-REBIND-CANARY` from the loopback service.\\n\\nObserved OpenAPI import proof:\\n\\n```json\\n{\\n  \\\"outcome\\\": \\\"allowed\\\",\\n  \\\"body\\\": \\\"loopback-canary-hit:/openapi.json\\\",\\n  \\\"lookups\\\": [\\n    {\\\"phase\\\": \\\"guard\\\", \\\"hostname\\\": \\\"rebind.test\\\", \\\"address\\\": \\\"8.8.8.8\\\"},\\n    {\\\"phase\\\": \\\"fetch\\\", \\\"hostname\\\": \\\"rebind.test\\\", \\\"address\\\": \\\"127.0.0.1\\\"}\\n  ]\\n}\\n```\\n\\nObserved REST undici proof:\\n\\n```json\\n{\\n  \\\"directControl\\\": {\\\"outcome\\\": \\\"blocked\\\", \\\"hitsAfter\\\": 0},\\n  \\\"pinnedNodeFetchControl\\\": {\\\"outcome\\\": \\\"no_loopback_hit\\\", \\\"hitsAfter\\\": 0},\\n  \\\"undiciBypass\\\": {\\n    \\\"outcome\\\": \\\"allowed\\\",\\n    \\\"status\\\": 200,\\n    \\\"body\\\": \\\"REST-UNDICI-REBIND-CANARY\\\",\\n    \\\"hitsAfter\\\": 1\\n  },\\n  \\\"lookupTrace\\\": [\\n    {\\\"phase\\\": \\\"guard\\\", \\\"hostname\\\": \\\"rebind.test\\\", \\\"address\\\": \\\"8.8.8.8\\\"},\\n    {\\\"phase\\\": \\\"fetch\\\", \\\"hostname\\\": \\\"rebind.test\\\", \\\"address\\\": \\\"127.0.0.1\\\"}\\n  ]\\n}\\n```\\n\\n## Root cause and technical details\\n\\nThe central helper now resolves and validates the target hostname, then passes a pinned Node `http.Agent` or `https.Agent` to the request. That protects callers whose HTTP client honors the Node `agent` option.\\n\\nOpenAPI query import does not use that helper. In `packages/server/src/api/controllers/query/import/index.ts`, `assertUrlIsSafe()` calls `blacklist.isBlacklisted(parsed.hostname)`, but `fetchFromUrl()` then calls `fetch(currentUrl, { redirect: \\\"manual\\\" })`. That creates a validate-then-fetch gap where DNS can change between the blacklist lookup and the actual connection.\\n\\nREST datasource/query execution uses the helper but changes the transport semantics. In `packages/server/src/integrations/rest.ts`, `setDispatcher()` creates an undici dispatcher with `getDispatcher({ rejectUnauthorized, url: requestUrl })`, then the custom fetch function calls `fetch(requestUrl, setDispatcher(requestInput, requestUrl))`. In `packages/backend-core/src/utils/outboundFetch.ts`, `fetchWithBlacklist()` passes the pinned Node `agent` to `fetchFn`, but undici fetch uses the supplied `dispatcher` instead. The actual connection performs a second hostname resolution and can be rebound to a blocked address.\\n\\nCurrent affected code is present in latest `master` and in the latest release tag `3.39.14`.\\n\\n## Remediation\\n\\nRoute OpenAPI query import through the pinned outbound fetch helper rather than validating and raw-fetching separately.\\n\\nMake `fetchWithBlacklist()` pin the actual connection for every supported transport. For undici callers, provide a dispatcher whose lookup or connect behavior is pinned to the validated IP, or reject custom fetch functions that do not explicitly enforce the pinned address. Add regression coverage for direct loopback blocking, DNS rebinding through OpenAPI import, DNS rebinding through REST undici dispatcher, redirect-to-loopback, IPv4-mapped IPv6, and mixed public/private DNS answers.\", \"ghsa_id\": \"GHSA-xg5g-26x8-cvf4\", \"github_reviewed_at\": \"2026-07-24T21:17:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-xg5g-26x8-cvf4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xg5g-26x8-cvf4\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T21:17:25Z\", \"references\": [\"https://github.com/Budibase/budibase/security/advisories/GHSA-xg5g-26x8-cvf4\", \"https://github.com/Budibase/budibase/pull/19178\", \"https://github.com/Budibase/budibase/commit/1fecb3fc3497e8db7b60b42cc514ce304ffe3a41\", \"https://github.com/Budibase/budibase/commit/5758bdb242802ca20c4ed0dc579e4330ee898ef3\", \"https://github.com/Budibase/budibase/commit/586802b5706367520d14245e18a7d0cabab0be11\", \"https://github.com/Budibase/budibase/releases/tag/3.39.30\", \"https://github.com/advisories/GHSA-xg5g-26x8-cvf4\"], \"repository_advisory_url\": \"https://api.github.com/repos/Budibase/budibase/security-advisories/GHSA-xg5g-26x8-cvf4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Budibase/budibase\", \"summary\": \" Budibase: DNS rebinding SSRF bypasses remain in OpenAPI import and REST query execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T21:17:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-xg5g-26x8-cvf4\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@budibase/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.38.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xg5g-26x8-cvf4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@budibase/server: <= 3.38.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@budibase/server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-25T19:32:35.329151Z",
+  "provenance": {
+    "content_sha256": "37e63ab933da9152b04c1075fd0ce536dd2666a5e9701c49ba497eaccb7c1d5f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T21:17:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xg5g-26x8-cvf4",
+  "status": "active",
+  "title": " Budibase: DNS rebinding SSRF bypasses remain in OpenAPI import and REST query execution",
+  "updated_at": "2026-07-24T21:17:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xg5g-26x8-cvf4"
+}
