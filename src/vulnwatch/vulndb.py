@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import Field
 from ruamel.yaml import YAML
 
+from vulnwatch.attack_surface import classify as classify_attack_surface
 from vulnwatch.identity import slugify
 from vulnwatch.models import Advisory, AdvisoryStatus, Priority, StrictModel
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
@@ -35,6 +36,7 @@ CSV_COLUMNS = (
     "poc_public",
     "known_exploited",
     "cisa_kev",
+    "attack_surface_class",
     "cvss_score",
     "vendor_severity",
     "priority",
@@ -383,6 +385,7 @@ class VulnDb:
                     _flag(record.poc_public),
                     _flag(record.known_exploited),
                     _flag(record.cisa_kev),
+                    classify_attack_surface(record.vendors, record.products) or "",
                     record.cvss_score if record.cvss_score is not None else "",
                     record.vendor_severity or "",
                     record.priority,

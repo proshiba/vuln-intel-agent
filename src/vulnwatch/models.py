@@ -227,6 +227,28 @@ class ProductRegistry(StrictModel):
     products: list[ProductAsset] = Field(default_factory=list)
 
 
+class AttackSurfaceProduct(StrictModel):
+    """初期アクセス面のキュレーション製品（ベンダー名＋製品名）。"""
+
+    vendor: str
+    name: str
+
+
+class AttackSurfaceClass(StrictModel):
+    """初期アクセス面の分類（VPN機器、メール/コラボ基盤など）。"""
+
+    label: str
+    products: list[AttackSurfaceProduct] = Field(default_factory=list)
+
+
+class AttackSurfaceRegistry(StrictModel):
+    """`config/attack_surface.yaml` の内容。分類IDごとに製品一覧を持つ。"""
+
+    schema_version: int = 1
+    as_of: str | None = None
+    classes: dict[str, AttackSurfaceClass] = Field(default_factory=dict)
+
+
 class RawRecord(StrictModel):
     source_id: str
     url: str
