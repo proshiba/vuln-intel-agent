@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vulnwatch 脆弱性ビューア</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%A1%EF%B8%8F%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-2: #f0f2f5;
+        --border: #e2e5ea;
+        --text: #1b1f27;
+        --muted: #626a78;
+        --accent: #2563eb;
+        --accent-weak: #e8effe;
+        --crit: #d21c3c;
+        --high: #e8590c;
+        --mod: #b7791f;
+        --low: #6b7280;
+        --kev: #d21c3c;
+        --poc: #7c3aed;
+        --fixed: #157347;
+        --shadow: 0 1px 3px rgba(20, 24, 33, 0.08), 0 1px 2px rgba(20, 24, 33, 0.06);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d1117;
+          --panel: #161b22;
+          --panel-2: #1c2230;
+          --border: #2a313c;
+          --text: #e6edf3;
+          --muted: #9aa4b2;
+          --accent: #4f8cf7;
+          --accent-weak: #17233f;
+          --crit: #ff6b81;
+          --high: #ff924d;
+          --mod: #e5b567;
+          --low: #9aa4b2;
+          --kev: #ff6b81;
+          --poc: #b892ff;
+          --fixed: #4ec98a;
+          --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN",
+          "Noto Sans JP", Meiryo, sans-serif;
+        line-height: 1.5;
+        font-size: 14px;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      header.top {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: color-mix(in srgb, var(--panel) 88%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--border);
+        padding: 12px 20px;
+      }
+      .wrap { max-width: 1200px; margin: 0 auto; }
+      .brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+      .brand h1 { font-size: 17px; margin: 0; letter-spacing: 0.2px; }
+      .brand .sub { color: var(--muted); font-size: 12px; }
+      main { max-width: 1200px; margin: 0 auto; padding: 18px 20px 60px; }
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .tile {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 14px;
+        box-shadow: var(--shadow);
+      }
+      .tile .n { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .tile .l { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+      .tile.kev .n { color: var(--kev); }
+      .tile.poc .n { color: var(--poc); }
+      .tile.fixed .n { color: var(--fixed); }
+      .controls {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        box-shadow: var(--shadow);
+        margin-bottom: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .controls .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      #q {
+        flex: 1 1 280px;
+        min-width: 200px;
+        padding: 9px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 14px;
+      }
+      select, .chk {
+        padding: 7px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 13px;
+      }
+      .chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+      .chk input { accent-color: var(--accent); }
+      .meta { color: var(--muted); font-size: 12.5px; margin: 4px 2px 10px; }
+      table { width: 100%; border-collapse: collapse; }
+      .tablewrap {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: var(--shadow);
+      }
+      thead th {
+        text-align: left;
+        font-size: 11.5px;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel-2);
+        white-space: nowrap;
+      }
+      tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      tbody tr { cursor: pointer; }
+      tbody tr:hover { background: var(--accent-weak); }
+      .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+      .cve { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+      .title { color: var(--text); }
+      .vendors { color: var(--muted); font-size: 12.5px; }
+      .badge {
+        display: inline-block;
+        padding: 1px 7px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        border: 1px solid transparent;
+        white-space: nowrap;
+      }
+      .sev-Critical { color: #fff; background: var(--crit); }
+      .sev-High { color: #fff; background: var(--high); }
+      .sev-Moderate { color: #221; background: var(--mod); }
+      .sev-Low, .sev- { color: var(--muted); border-color: var(--border); }
+      .prio { border-color: var(--border); color: var(--muted); }
+      .prio-P1 { color: #fff; background: var(--crit); }
+      .prio-P2 { color: #fff; background: var(--high); }
+      .prio-P3 { color: #fff; background: var(--accent); }
+      .flags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+      .f-kev { color: #fff; background: var(--kev); }
+      .f-exp { color: var(--kev); border-color: var(--kev); }
+      .f-poc { color: #fff; background: var(--poc); }
+      .f-fixed { color: var(--fixed); border-color: var(--fixed); }
+      tr.detail td { background: var(--panel-2); cursor: default; }
+      .detail-grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 14px; font-size: 13px; }
+      .detail-grid dt { color: var(--muted); }
+      .detail-grid dd { margin: 0; }
+      .more { display: block; width: 100%; margin: 14px 0; padding: 11px; border-radius: 9px;
+        border: 1px solid var(--border); background: var(--panel); color: var(--text);
+        font-size: 14px; cursor: pointer; }
+      .more:hover { background: var(--accent-weak); }
+      .center { text-align: center; color: var(--muted); padding: 40px 0; }
+      @media (max-width: 720px) {
+        .hide-sm { display: none; }
+        main { padding: 14px 12px 60px; }
+        header.top { padding: 10px 12px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap brand">
+        <h1>🛡️ vulnwatch 脆弱性ビューア</h1>
+        <span class="sub" id="genat"></span>
+      </div>
+    </header>
+    <main>
+      <section class="tiles" id="tiles"></section>
+      <section class="controls">
+        <div class="row">
+          <input id="q" type="search" placeholder="CVE・ベンダー・製品・タイトルで検索…" autocomplete="off" />
+          <select id="sort">
+            <option value="upd">更新日が新しい順</option>
+            <option value="pub">公開日が新しい順</option>
+            <option value="cvss">CVSSが高い順</option>
+            <option value="prio">優先度が高い順</option>
+          </select>
+        </div>
+        <div class="row">
+          <select id="prio">
+            <option value="">優先度: すべて</option>
+            <option value="P1">P1</option>
+            <option value="P2">P2</option>
+            <option value="P3">P3</option>
+            <option value="INFO">INFO</option>
+          </select>
+          <select id="vendor"><option value="">ベンダー: すべて</option></select>
+          <select id="cvss">
+            <option value="0">CVSS: 指定なし</option>
+            <option value="9">9.0以上（Critical）</option>
+            <option value="7">7.0以上（High+）</option>
+            <option value="4">4.0以上（Moderate+）</option>
+          </select>
+          <label class="chk"><input type="checkbox" id="f_kev" /> CISA KEV</label>
+          <label class="chk"><input type="checkbox" id="f_exp" /> 悪用確認</label>
+          <label class="chk"><input type="checkbox" id="f_poc" /> PoC公開</label>
+          <label class="chk"><input type="checkbox" id="f_fixed" /> 修正あり</label>
+        </div>
+      </section>
+      <div class="meta" id="meta">読み込み中…</div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>CVE / ID</th>
+              <th class="hide-sm">ベンダー</th>
+              <th class="num">CVSS</th>
+              <th>優先度</th>
+              <th>状態</th>
+              <th>タイトル</th>
+              <th class="num hide-sm">更新日</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <button class="more" id="more" hidden>さらに表示</button>
+      <div class="center" id="empty" hidden>該当する脆弱性はありません。</div>
+    </main>
+    <script>
+      const PAGE = 80;
+      const F = { fixed: 1, poc: 2, exp: 4, kev: 8 };
+      const state = { data: null, filtered: [], shown: 0 };
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) => (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const nf = new Intl.NumberFormat("ja-JP");
+
+      function severity(cvss, sev) {
+        if (typeof cvss === "number") {
+          if (cvss >= 9) return "Critical";
+          if (cvss >= 7) return "High";
+          if (cvss >= 4) return "Moderate";
+          return "Low";
+        }
+        const s = (sev || "").toLowerCase();
+        if (s === "critical") return "Critical";
+        if (s === "high" || s === "important") return "High";
+        if (s === "medium" || s === "moderate") return "Moderate";
+        return sev ? "Low" : "";
+      }
+      const PRIO_RANK = { P1: 0, P2: 1, P3: 2, INFO: 3 };
+
+      function makeRow(r) {
+        // [id, cve, vendors, products, title, cvss, sev, prio, flags, pub, upd]
+        return { id: r[0], cve: r[1], vendors: r[2], products: r[3], title: r[4],
+          cvss: r[5], sev: r[6], prio: r[7], flags: r[8], pub: r[9], upd: r[10],
+          hay: (r[1] + " " + r[2] + " " + r[3] + " " + r[4] + " " + r[0]).toLowerCase() };
+      }
+
+      function tiles(s) {
+        const p = s.priorities || {};
+        const t = [
+          ["総登録数", nf.format(s.total), ""],
+          ["CISA KEV", nf.format(s.kev), "kev"],
+          ["悪用確認", nf.format(s.exploited), "kev"],
+          ["PoC公開", nf.format(s.poc), "poc"],
+          ["修正あり", nf.format(s.fixed), "fixed"],
+          ["P1 / P2", (p.P1 || 0) + " / " + (p.P2 || 0), ""],
+        ];
+        $("tiles").innerHTML = t.map(([l, n, c]) =>
+          `<div class="tile ${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+      }
+
+      function apply() {
+        const q = $("q").value.trim().toLowerCase();
+        const terms = q ? q.split(/\s+/) : [];
+        const prio = $("prio").value;
+        const vendor = $("vendor").value.toLowerCase();
+        const minc = parseFloat($("cvss").value) || 0;
+        const kev = $("f_kev").checked, exp = $("f_exp").checked,
+          poc = $("f_poc").checked, fixed = $("f_fixed").checked;
+        const sort = $("sort").value;
+        let out = state.data.rows.filter((r) => {
+          if (terms.length && !terms.every((t) => r.hay.includes(t))) return false;
+          if (prio && r.prio !== prio) return false;
+          if (vendor && !r.vendors.toLowerCase().includes(vendor)) return false;
+          if (minc && !(typeof r.cvss === "number" && r.cvss >= minc)) return false;
+          if (kev && !(r.flags & F.kev)) return false;
+          if (exp && !(r.flags & F.exp)) return false;
+          if (poc && !(r.flags & F.poc)) return false;
+          if (fixed && !(r.flags & F.fixed)) return false;
+          return true;
+        });
+        out.sort((a, b) => {
+          if (sort === "cvss") return (b.cvss || -1) - (a.cvss || -1);
+          if (sort === "pub") return b.pub < a.pub ? -1 : b.pub > a.pub ? 1 : 0;
+          if (sort === "prio") return (PRIO_RANK[a.prio] ?? 9) - (PRIO_RANK[b.prio] ?? 9) || (b.cvss || -1) - (a.cvss || -1);
+          return b.upd < a.upd ? -1 : b.upd > a.upd ? 1 : 0;
+        });
+        state.filtered = out;
+        state.shown = 0;
+        $("rows").innerHTML = "";
+        $("empty").hidden = out.length > 0;
+        $("meta").textContent = `${nf.format(state.data.rows.length)} 件中 ${nf.format(out.length)} 件が該当`;
+        renderMore();
+      }
+
+      function badgeSev(r) {
+        const s = severity(r.cvss, r.sev);
+        return s ? `<span class="badge sev-${s}">${s}</span>` : "";
+      }
+      function flagBadges(r) {
+        const b = [];
+        if (r.flags & F.kev) b.push('<span class="badge f-kev">KEV</span>');
+        else if (r.flags & F.exp) b.push('<span class="badge f-exp">悪用</span>');
+        if (r.flags & F.poc) b.push('<span class="badge f-poc">PoC</span>');
+        if (r.flags & F.fixed) b.push('<span class="badge f-fixed">修正</span>');
+        return `<span class="flags">${b.join("")}</span>`;
+      }
+
+      function renderMore() {
+        const frag = document.createDocumentFragment();
+        const end = Math.min(state.shown + PAGE, state.filtered.length);
+        for (let i = state.shown; i < end; i++) {
+          const r = state.filtered[i];
+          const tr = document.createElement("tr");
+          tr.innerHTML =
+            `<td class="cve">${esc(r.cve || r.id)}</td>` +
+            `<td class="vendors hide-sm">${esc(r.vendors || "-")}</td>` +
+            `<td class="num">${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"}</td>` +
+            `<td><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span></td>` +
+            `<td>${flagBadges(r)}</td>` +
+            `<td class="title">${esc(r.title)} ${badgeSev(r)}</td>` +
+            `<td class="num hide-sm">${esc(r.upd)}</td>`;
+          tr.addEventListener("click", () => toggleDetail(tr, r));
+          frag.appendChild(tr);
+        }
+        $("rows").appendChild(frag);
+        state.shown = end;
+        $("more").hidden = state.shown >= state.filtered.length;
+        $("more").textContent = `さらに表示（残り ${nf.format(state.filtered.length - state.shown)} 件）`;
+      }
+
+      function toggleDetail(tr, r) {
+        if (tr.nextSibling && tr.nextSibling.classList?.contains("detail")) {
+          tr.nextSibling.remove();
+          return;
+        }
+        const links = [];
+        if (r.cve) {
+          links.push(`<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener">NVD</a>`);
+          links.push(`<a href="https://osv.dev/vulnerability/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener">OSV</a>`);
+        }
+        const d = document.createElement("tr");
+        d.className = "detail";
+        d.innerHTML = `<td colspan="7"><dl class="detail-grid">
+          <dt>タイトル</dt><dd>${esc(r.title)}</dd>
+          <dt>CVE / 内部ID</dt><dd class="cve">${esc(r.cve || "-")} / ${esc(r.id)}</dd>
+          <dt>ベンダー</dt><dd>${esc(r.vendors || "-")}</dd>
+          <dt>製品</dt><dd>${esc(r.products || "-")}</dd>
+          <dt>CVSS / 深刻度</dt><dd>${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"} ${badgeSev(r)}</dd>
+          <dt>優先度 / 状態</dt><dd><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span> ${flagBadges(r)}</dd>
+          <dt>公開 / 更新</dt><dd>${esc(r.pub || "-")} / ${esc(r.upd || "-")}</dd>
+          ${links.length ? `<dt>参照</dt><dd>${links.join(" · ")}</dd>` : ""}
+        </dl></td>`;
+        tr.after(d);
+      }
+
+      async function load() {
+        try {
+          const res = await fetch("data/index.json");
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const raw = await res.json();
+          raw.rows = raw.rows.map(makeRow);
+          state.data = raw;
+          $("genat").textContent = "更新: " + (raw.generated_at || "").slice(0, 16).replace("T", " ");
+          tiles(raw.stats);
+          $("vendor").insertAdjacentHTML("beforeend",
+            raw.vendors.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
+          for (const id of ["q", "sort", "prio", "vendor", "cvss", "f_kev", "f_exp", "f_poc", "f_fixed"]) {
+            const el = $(id);
+            el.addEventListener(id === "q" ? "input" : "change", () => {
+              clearTimeout(state.t);
+              state.t = setTimeout(apply, id === "q" ? 120 : 0);
+            });
+          }
+          $("more").addEventListener("click", renderMore);
+          apply();
+        } catch (e) {
+          $("meta").textContent = "インデックスの読み込みに失敗しました: " + e.message;
+        }
+      }
+      load();
+    </script>
+  </body>
+</html>
