@@ -1,27 +1,28 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-07-24T19:31:54.987140+00:00
-- Completed: 2026-07-24T19:39:13.309146+00:00
+- Started: 2026-07-25T19:28:25.732678+00:00
+- Completed: 2026-07-25T19:36:11.604415+00:00
 
 ## Changes
 
-- new: 177
-- quarantined: 1
-- unchanged: 2176
-- updated: 170
+- new: 135
+- quarantined: 2
+- unchanged: 1942
+- updated: 157
 
 ## Priorities
 
-- INFO: 2524
+- INFO: 2236
 
 ## Source outcomes
 
-- failed: 1
-- not_modified: 76
+- failed: 2
+- not_modified: 80
 - partial: 0
-- success: 83
+- success: 78
 
 ## Unsuccessful sources
 
+- ibm (failed, json_api): records=0, parse_failures=0 — json_api: ibm: response exceeds 60000000 bytes
 - osv (failed, osv_global): records=0, parse_failures=0 — osv_global: osv: OSV modified index is not sorted newest-first

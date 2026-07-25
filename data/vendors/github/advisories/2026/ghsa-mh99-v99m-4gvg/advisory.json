@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/24456233?v=4\", \"events_url\": \"https://api.github.com/users/bnbdr/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bnbdr/followers\", \"following_url\": \"https://api.github.com/users/bnbdr/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bnbdr/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bnbdr\", \"id\": 24456233, \"login\": \"bnbdr\", \"node_id\": \"MDQ6VXNlcjI0NDU2MjMz\", \"organizations_url\": \"https://api.github.com/users/bnbdr/orgs\", \"received_events_url\": \"https://api.github.com/users/bnbdr/received_events\", \"repos_url\": \"https://api.github.com/users/bnbdr/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bnbdr/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bnbdr/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bnbdr\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-14257\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n\\n`expand()` bounds the *number* of results it produces (the `max` option,\\n`100_000` by default) but not their *length*. By chaining many brace groups,\\nan attacker keeps the result count under `max` while making every result grow\\nwith the number of groups. Building `max` long results — plus the intermediate\\narrays combined at each brace group — exhausts memory and crashes the Node\\nprocess with an **uncatchable** out-of-memory error. `try/catch` around\\n`expand()` does not help: the fatal error terminates the process.\\n\\nA ~7.5 KB input (`'{a,b}'.repeat(1500)`) is enough to crash a default Node\\nprocess.\\n\\n### Details\\n\\nFor `N` chained brace groups such as `'{a,b}'.repeat(N)`:\\n\\n- the result count is `2^N`, immediately capped at `max` (`100_000`), so the\\n  `max` protection appears to hold, but\\n- each result is `N` characters long, so the total output size is\\n  `max × N` characters, which grows without bound in `N`.\\n\\n`expand_` combines each brace set with the fully-expanded tail:\\n\\n```js\\nconst post = m.post.length ? expand_(m.post, max, false) : ['']\\n...\\nfor (let j = 0; j < N.length; j++) {\\n  for (let k = 0; k < post.length && expansions.length < max; k++) {\\n    const expansion = pre + N[j] + post[k]   // grows one group longer per level\\n    ...\\n    expansions.push(expansion)\\n  }\\n}\\n```\\n\\nThe loop guard `expansions.length < max` limits how many strings are built, but\\nnothing limits how long they get. Each recursion level materializes another\\narray of up to `max` strings, one character longer than the level below, and —\\nbecause V8 represents `pre + N[j] + post[k]` as a cons-string (rope) that\\nreferences `post[k]` — those intermediate strings stay reachable through the\\nwhole chain. Memory therefore scales with `max × N`.\\n\\nMeasured on `5.0.7` (`'{a,b}'.repeat(N)`, default `max`):\\n\\n| groups (N) | input bytes | result count | peak RSS |\\n|---|---|---|---|\\n| 20 | 100 | 100,000 | ~80 MB |\\n| 50 | 250 | 100,000 | ~214 MB |\\n| 100 | 500 | 100,000 | ~409 MB |\\n| 300 | 1,500 | 100,000 | ~1,148 MB |\\n| 1500 | 7,500 | — | **OOM crash** |\\n\\n### Proof of concept\\n\\n```js\\nconst { expand } = require('brace-expansion')\\n\\n// ~7.5 KB input — crashes the process with a fatal, uncatchable OOM:\\n//   FATAL ERROR: ... JavaScript heap out of memory\\ntry {\\n  expand('{a,b}'.repeat(1500))\\n} catch (e) {\\n  // never reached — the process is already dead\\n}\\n```\\n\\n### Impact\\n\\nAny application that passes attacker-influenced strings to\\n`brace-expansion.expand()` — directly, or transitively via `minimatch` / `glob`\\nbrace patterns — can be crashed by a small request. Because the failure is a\\nfatal V8 out-of-memory error rather than a thrown exception, it cannot be caught\\nand it takes down the whole worker/process, denying service.\\n\\n### Remediation\\n\\nUpgrade to a patched release. The fix bounds the total number of characters a\\nsingle `expand()` call may accumulate (`EXPANSION_MAX_LENGTH`, default\\n`4_000_000`, configurable via a new `maxLength` option), applied inside the\\noutput-building loops so intermediate arrays are bounded too. Once the limit is\\nreached, output is truncated — consistent with how `max` already truncates —\\ninstead of growing without bound. The limit sits well above any realistic\\nexpansion (100,000 results hitting `max` measure ~1M characters), so legitimate\\ninput is unaffected.\\n\\nAfter the fix, `'{a,b}'.repeat(1500)` returns a bounded, truncated result in\\n~0.7 s using ~340 MB and never crashes, including under a constrained 512 MB\\nheap.\\n\\nThe fix bounds memory but the algorithm still rebuilds intermediate arrays at\\neach level (roughly `O(N × maxLength)` work on this input class). A streaming\\nrewrite that produces output in `O(total output size)` can be a non-urgent\\nfollow-up.\\n\\nIf immediate upgrade isn't possible, avoid passing untrusted input to\\n`expand()` / glob brace patterns, or pass a small explicit `max` **and**\\n`maxLength`.\", \"epss\": {\"percentage\": 0.00339, \"percentile\": 0.2632}, \"ghsa_id\": \"GHSA-mh99-v99m-4gvg\", \"github_reviewed_at\": \"2026-07-24T21:53:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-mh99-v99m-4gvg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mh99-v99m-4gvg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-14257\"}], \"nvd_published_at\": \"2026-07-23T14:17:00Z\", \"published_at\": \"2026-07-24T21:53:14Z\", \"references\": [\"https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-mh99-v99m-4gvg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-14257\", \"https://github.com/juliangruber/brace-expansion/commit/a1bd33999ea75262c4749fff3bbb0d1372bd07b5\", \"https://github.com/juliangruber/brace-expansion\", \"https://www.npmjs.com/package/brace-expansion\", \"https://github.com/advisories/GHSA-mh99-v99m-4gvg\"], \"repository_advisory_url\": \"https://api.github.com/repos/juliangruber/brace-expansion/security-advisories/GHSA-mh99-v99m-4gvg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/juliangruber/brace-expansion\", \"summary\": \"brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-24T21:53:15Z\", \"url\": \"https://api.github.com/advisories/GHSA-mh99-v99m-4gvg\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.8\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"brace-expansion\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.0.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mh99-v99m-4gvg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "brace-expansion: <= 5.0.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-14257"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "brace-expansion"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-25T19:32:35.251655Z",
+  "provenance": {
+    "content_sha256": "28b180373a190eb8ebff866be6f71252e631b1716e6b0fbbc179ce4628dda0d9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-24T21:53:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mh99-v99m-4gvg",
+  "status": "active",
+  "title": "brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash",
+  "updated_at": "2026-07-24T21:53:15Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mh99-v99m-4gvg"
+}
