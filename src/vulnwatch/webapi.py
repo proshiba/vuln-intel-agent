@@ -23,6 +23,12 @@ from typing import Any
 
 API_VERSION = "v1"
 SCHEMA_VERSION = 1
+# research_bench ポータル連携仕様のバージョン（docs/portal-spec.md）。
+SPEC_VERSION = "1.0"
+APP_ID = "vuln-intel-agent"
+DISPLAY_NAME = "脆弱性インテル"
+# ポータルはビューアを iframe で並べるため、二重のヘッダを隠す。
+EMBED_CSS = "header.top { display: none !important; } main { padding-top: 12px; }"
 RAW_BASE_TEMPLATE = "https://raw.githubusercontent.com/{repository}/{ref}/vulndb/vulns"
 # ポータル側は prefix と vuln_id を差し込んで詳細 YAML の URL を組み立てる。
 DETAIL_URL_TEMPLATE = "{base}/{prefix}/{vuln_id}.yaml"
@@ -85,20 +91,35 @@ def build_meta(
 
     raw_base = RAW_BASE_TEMPLATE.format(repository=repository, ref=ref)
     return {
+        # ポータル連携仕様 v1（research_bench docs/portal-spec.md）の必須フィールド。
+        "spec_version": SPEC_VERSION,
+        "app_id": APP_ID,
+        "name": DISPLAY_NAME,
         "schema_version": SCHEMA_VERSION,
         "api_version": API_VERSION,
-        "name": "vulnwatch",
         "description": (
             "ベンダー公式・公的データベース・OSINT から収集した脆弱性台帳の静的 JSON API。"
         ),
         "generated_at": generated_at,
         "repository": f"https://github.com/{repository}",
-        "site_url": site_url,
+        # 仕様上、相対パス解決の基点になるため末尾のスラッシュを必須とする。
+        "site_url": site_url if site_url.endswith("/") else f"{site_url}/",
         "license": "収集元各社の原典に従う。二次利用時は各出典を確認すること。",
         "cors": True,
+        "capabilities": ["iframe", "deep-link", "postmessage"],
+        # ポータルが iframe に注入し、ヘッダの二重化を防ぐ。
+        "embed_css": EMBED_CSS,
+        # エンティティ種別ごとの詳細ページ。{detail} にエンティティの detail が入る。
+        "deep_links": {
+            "cve": "#/vuln/{detail}",
+            "report": "#/vuln/{detail}",
+        },
         "endpoints": {
             "meta": f"api/{API_VERSION}/meta.json",
+            # 仕様 v1 のエンティティ配列。ポータルはこれを読む。
             "search": f"api/{API_VERSION}/search.json",
+            # 同じデータの列指向版。ビューア専用の拡張であり仕様の一部ではない。
+            "viewer_index": f"api/{API_VERSION}/viewer.json",
             # 連携する側（人・エージェントとも）が最初に読む文書。
             "documentation": "INTEGRATION.md",
             "openapi": "openapi.yaml",
@@ -116,4 +137,95 @@ def build_meta(
         },
         "attack_surfaces": attack_surfaces,
         "stats": stats,
+    }
+
+
+def expand_flags(value: object, flag_map: dict[str, int]) -> list[str]:
+    """ビットマスクを名前の配列へ展開する。ポータルはこれをバッジとして描画する。"""
+
+    if not isinstance(value, int):
+        return []
+    return [name for name, bit in flag_map.items() if value & bit]
+
+
+def _attrs(
+    row: list[Any],
+    column: dict[str, int],
+    flag_map: dict[str, int],
+    prefix_dictionary: list[str],
+) -> dict[str, Any]:
+    """ポータルが「キー: 値」として素直に表示できる補足情報を作る。
+
+    値が無い項目は載せない。空欄が並ぶと画面が読みにくくなるため。
+    """
+
+    def cell(name: str) -> Any:
+        index = column.get(name)
+        return row[index] if index is not None else None
+
+    attrs: dict[str, Any] = {}
+    for label, name in (
+        ("題名", "title"),
+        ("ベンダー", "vendors"),
+        ("製品", "products"),
+        ("CVSS", "cvss"),
+        ("深刻度", "sev"),
+        ("優先度", "prio"),
+        ("公開", "pub"),
+        ("更新", "upd"),
+        ("攻撃面", "asc"),
+        ("KEVラグ", "lag"),
+    ):
+        value = cell(name)
+        if value not in (None, "", []):
+            attrs[label] = value
+    flags = expand_flags(cell("flags"), flag_map)
+    if flags:
+        attrs["flags"] = flags
+    prefix_index = cell("prefix")
+    if isinstance(prefix_index, int) and 0 <= prefix_index < len(prefix_dictionary):
+        # 生 YAML の URL を組み立てるために、番号ではなく実際の文字列を渡す。
+        attrs["prefix"] = prefix_dictionary[prefix_index]
+    return attrs
+
+
+def build_entities(
+    rows: list[list[Any]],
+    fields: list[str],
+    flag_map: dict[str, int],
+    prefix_dictionary: list[str],
+) -> list[dict[str, Any]]:
+    """列指向の索引を、ポータル仕様のエンティティ配列へ変換する。
+
+    CVE を持つ行は `cve` 型で、`value` を大文字の CVE ID にする。ポータルはこの値の
+    一致だけでソースを横断して束ねるため、結合キーとして最も重要な項目になる。
+    CVE 未採番の行は結合しようがないので `report` 型とし、内部 ID を値に使う。
+    """
+
+    column = {name: index for index, name in enumerate(fields)}
+    entities: list[dict[str, Any]] = []
+    for row in rows:
+        vuln_id = str(row[column["id"]])
+        cve = str(row[column["cve"]] or "").upper()
+        entities.append(
+            {
+                "type": "cve" if cve else "report",
+                "id": f"vuln:{vuln_id}",
+                "label": cve or vuln_id,
+                "value": cve or vuln_id,
+                "detail": vuln_id,
+                "attrs": _attrs(row, column, flag_map, prefix_dictionary),
+            }
+        )
+    return entities
+
+
+def build_search_document(*, generated_at: str, entities: list[dict[str, Any]]) -> dict[str, Any]:
+    """ポータルが読む仕様 v1 の索引本体。"""
+
+    return {
+        "spec_version": SPEC_VERSION,
+        "app_id": APP_ID,
+        "generated_at": generated_at,
+        "entities": entities,
     }

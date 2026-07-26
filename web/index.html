@@ -425,6 +425,32 @@
         tr.after(d);
       }
 
+      // ---- ディープリンク -----------------------------------------------------
+      // #/vuln/<内部ID> または #/cve/<CVE-ID> で 1 件を開いた状態にする。ポータルの
+      // 検索結果から飛んできたときに、生 YAML ではなくこのビューアで詳細が開く。
+      function openDeepLink() {
+        const matched = /^#\/(?:vuln|cve)\/(.+)$/.exec(location.hash || "");
+        if (!matched) return false;
+        const key = decodeURIComponent(matched[1]).trim().toUpperCase();
+        if (!key) return false;
+        resetControls();
+        // 検索対象には内部 ID と CVE の両方が含まれるので、そのまま絞り込める。
+        $("q").value = key;
+        apply();
+        const position = state.filtered.findIndex(
+          (r) => r.id.toUpperCase() === key || (r.cve || "").toUpperCase() === key
+        );
+        if (position < 0) return true;
+        // 対象がページングの先にある場合は、そこまで描画してから開く。
+        while (position >= state.shown && state.shown < state.filtered.length) renderMore();
+        const row = $("rows").querySelectorAll("tr:not(.detail)")[position];
+        if (row) {
+          toggleDetail(row, state.filtered[position]);
+          row.scrollIntoView({ block: "center" });
+        }
+        return true;
+      }
+
       // ---- iframe 連携 -------------------------------------------------------
       // ポータルなど親ページから postMessage で操作できるようにする。データは全て
       // 公開情報の読み取り専用なので、送信元オリジンは制限せず、応答は必ず要求元へ返す。
@@ -514,7 +540,7 @@
 
       async function load() {
         try {
-          const res = await fetch("api/v1/search.json");
+          const res = await fetch("api/v1/viewer.json");
           if (!res.ok) throw new Error("HTTP " + res.status);
           const raw = await res.json();
           raw.rows = raw.rows.map(makeRow);
@@ -539,6 +565,8 @@
           }
           $("more").addEventListener("click", renderMore);
           apply();
+          openDeepLink();
+          window.addEventListener("hashchange", openDeepLink);
           enableEmbedding(raw);
         } catch (e) {
           $("meta").textContent = "インデックスの読み込みに失敗しました: " + e.message;

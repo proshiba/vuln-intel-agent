@@ -15,7 +15,8 @@
 ├── iframe  → https://proshiba.github.io/vuln-intel-agent/     … 一覧UIをそのまま表示
 │              ↕ postMessage                                    … 表示の制御・選択の受け取り
 └── fetch   → api/v1/meta.json     … 何が提供されているか（最初に読む）
-             api/v1/search.json    … 全件の検索索引（検索は取得側で行う）
+             api/v1/search.json    … 全件の索引（ポータル連携仕様 v1・エンティティ配列）
+             api/v1/viewer.json    … 同じ内容の列指向版（同梱ビューア専用）
              raw.githubusercontent … 個別脆弱性の詳細（YAML）
 ```
 
@@ -55,13 +56,58 @@ GET https://proshiba.github.io/vuln-intel-agent/api/v1/meta.json
 
 複数リポジトリを横断する場合は、**各リポジトリの `meta.json` を集めて回る**のが基本形になります。`name`・`stats`・`generated_at` を見れば、対象と鮮度を一覧できます。
 
-## 2. 検索索引（search.json）
+## 2. 検索索引
+
+索引は 2 つの形で出しています。**外部から連携する場合は `search.json`（仕様 v1）を使ってください。**
+
+| ファイル | 形式 | 用途 |
+|---|---|---|
+| `api/v1/search.json` | エンティティ配列 | research_bench ポータル連携仕様 v1。外部連携はこちら |
+| `api/v1/viewer.json` | 列指向 | 同梱ビューア専用の拡張。仕様の一部ではない |
+
+### 2.1 `search.json`（仕様 v1）
 
 ```
 GET https://proshiba.github.io/vuln-intel-agent/api/v1/search.json
 ```
 
-台帳全件（現在 42,171 件）を、検索・絞り込み・並び替えに必要な列だけへ圧縮したものです。**gzip 配信で約 1.8MB**。1 回取得してメモリに置き、以降の検索はローカルで行ってください。
+```jsonc
+{
+  "spec_version": "1.0",
+  "app_id": "vuln-intel-agent",
+  "generated_at": "2026-07-26T00:00:00+00:00",
+  "entities": [
+    {
+      "type": "cve",                    // CVE 未採番の行は "report"
+      "id": "vuln:VW-2022-0293",        // このファイル内で一意
+      "label": "CVE-2019-6446",
+      "value": "CVE-2019-6446",         // 結合キー。大文字の CVE-YYYY-NNNN
+      "detail": "VW-2022-0293",         // deep_links の {detail} に入る
+      "attrs": {
+        "題名": "Numpy Deserialization of Untrusted Data",
+        "ベンダー": "GitHub; SUSE",
+        "製品": "Rancher;SLES;SUSE Manager;numpy",
+        "CVSS": 9.8,
+        "深刻度": "critical",
+        "優先度": "INFO",
+        "公開": "2022-05-24",
+        "更新": "2026-07-25",
+        "flags": ["fixed"],             // ビットマスクを展開した配列
+        "prefix": "github/2026/07"      // 詳細 YAML の配置
+      }
+    }
+  ]
+}
+```
+
+- **`value` が横串の要**です。CVE を持つ行は大文字の CVE ID なので、他ソースが同じ CVE を出していれば自動で結合されます。
+- CVE 未採番の 5,794 件は結合しようがないため `type: report`、`value` は内部 ID です。
+- `attrs` は値が無い項目を**含めません**。キーの有無を確認してから読んでください。
+- 現在 42,171 件・**gzip 配信で約 2.3MB**（非圧縮 19.3MB）。
+
+### 2.2 `viewer.json`（列指向・任意）
+
+同梱ビューアが使う形式です。**gzip 約 1.8MB** と軽いので、大量データを自前で持ちたい場合はこちらも使えます。
 
 各行は**配列**です。列の意味は `fields` が定義します（添字を直書きせず `fields.indexOf()` で解決することを推奨）。
 
@@ -133,6 +179,17 @@ const yamlText = await (await fetch(url)).text();   // YAML パーサが必要�
 | `products` / `vendors` | 切り詰めのない全量 |
 
 `prefix` が `-1` の行は配置が不明なため、詳細 URL を組み立てられません（現在は 0 件）。
+
+## 3.5 ビューアへのディープリンク
+
+`meta.deep_links` のテンプレートで、このビューアの該当行を開いた状態にできます。
+
+```
+#/vuln/<内部ID>     例: https://proshiba.github.io/vuln-intel-agent/#/vuln/VW-2026-0001
+#/cve/<CVE-ID>      例: https://proshiba.github.io/vuln-intel-agent/#/cve/CVE-2026-1281
+```
+
+該当行だけに絞り込まれ、詳細が開いた状態で表示されます。生の YAML（`detail_url_template`）より読みやすいため、検索結果からの「詳細」リンクにはこちらを使ってください。
 
 ## 4. iframe 埋め込みと postMessage
 
@@ -218,7 +275,9 @@ medium (1,000)  LOW (784)  important (613)  Important (591)  critical (388) ...
 
 ### `prio` は現在すべて `INFO`
 
-優先度は「自組織の資産台帳（`config/products.yaml`）と一致するか」で決まります。現在この台帳は空のため、**全 42,171 件が `INFO`** です。優先度を軸にした画面を作っても意味を持ちません。重要度は `cvss`・`flags`・`asc` から組み立ててください。
+優先度は「自組織の資産台帳（`config/products.yaml`）と一致するか」で決まります。`P1`/`P2`/`P3` になる条件はすべて資産一致を前提としており、現在この台帳は空（`products: []`）のため、**全 42,171 件が `INFO`** です。台帳を再生成しても変わりません。解消するには `config/products.yaml` に自組織の製品を登録する必要があります。
+
+それまでは優先度を軸にした画面を作っても意味を持ちません。重要度は `CVSS`・`flags`・`攻撃面` から組み立ててください。
 
 ### 欠損は珍しくない
 
@@ -242,25 +301,38 @@ medium (1,000)  LOW (784)  important (613)  Important (591)  critical (388) ...
 
 ## 6. 最小実装例
 
+### 仕様 v1（外部連携はこちら）
+
 ```js
 const BASE = "https://proshiba.github.io/vuln-intel-agent/";
 
 const meta = await (await fetch(BASE + "api/v1/meta.json")).json();
 const idx  = await (await fetch(BASE + meta.endpoints.search)).json();
 
+// 初期アクセスに使われうる製品で、実際に悪用が確認されているもの
+const hits = idx.entities.filter(
+  (e) => e.attrs["攻撃面"] === "vpn_gateway" && (e.attrs.flags || []).includes("exploited")
+);
+
+// このビューアの該当行を開く
+const viewerUrl = BASE + meta.deep_links[hits[0].type]
+  .replace("{detail}", encodeURIComponent(hits[0].detail));
+
+// 生の台帳エントリが要る場合
+const detailUrl = meta.endpoints.detail_url_template
+  .replace("{prefix}", hits[0].attrs.prefix)
+  .replace("{vuln_id}", hits[0].detail);
+```
+
+### 列指向（`viewer.json`）
+
+```js
+const idx = await (await fetch(BASE + meta.endpoints.viewer_index)).json();
 const col = Object.fromEntries(idx.fields.map((n, i) => [n, i]));
 const F = meta.search_index.flags;
-
-// 初期アクセスに使われうる製品で、実際に悪用が確認されているもの
 const hits = idx.rows.filter(
   (r) => r[col.asc] === "vpn_gateway" && r[col.flags] & F.exploited
 );
-
-// 詳細は必要になった時だけ取得する
-const first = hits[0];
-const detailUrl = meta.endpoints.detail_url_template
-  .replace("{prefix}", idx.prefix_dictionary[first[col.prefix]])
-  .replace("{vuln_id}", first[col.id]);
 ```
 
 ## 7. 互換性について
