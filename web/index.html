@@ -263,7 +263,7 @@
     <script>
       const PAGE = 80;
       const F = { fixed: 1, poc: 2, exp: 4, kev: 8, ransom: 16 };
-      const state = { data: null, filtered: [], shown: 0 };
+      const state = { data: null, meta: null, filtered: [], shown: 0 };
       const SURFACE = {};
       const $ = (id) => document.getElementById(id);
       const esc = (s) => (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -294,7 +294,7 @@
         // [id, cve, vendors, products, title, cvss, sev, prio, flags, pub, upd, asc, lag]
         return { id: r[0], cve: r[1], vendors: r[2], products: r[3], title: r[4],
           cvss: r[5], sev: r[6], prio: r[7], flags: r[8], pub: r[9], upd: r[10], asc: r[11] || "",
-          lag: typeof r[12] === "number" ? r[12] : null,
+          lag: typeof r[12] === "number" ? r[12] : null, prefix: r[13],
           hay: (r[1] + " " + r[2] + " " + r[3] + " " + r[4] + " " + r[0]).toLowerCase() };
       }
 
@@ -425,13 +425,101 @@
         tr.after(d);
       }
 
+      // ---- iframe 連携 -------------------------------------------------------
+      // ポータルなど親ページから postMessage で操作できるようにする。データは全て
+      // 公開情報の読み取り専用なので、送信元オリジンは制限せず、応答は必ず要求元へ返す。
+      // 外部からの問い合わせは毎回まっさらな条件から組み立てる。前回の絞り込みが
+      // 残っていると、ポータル側が指定していない条件で結果が変わってしまうため。
+      function resetControls() {
+        $("q").value = "";
+        for (const id of ["prio", "vendor", "cvss", "since", "surface"]) $(id).value = "";
+        for (const id of ["f_kev", "f_exp", "f_poc", "f_ransom", "f_fixed"]) {
+          $(id).checked = false;
+        }
+        $("sort").value = "upd";
+      }
+
+      function applyExternalQuery(query) {
+        resetControls();
+        const set = (id, value) => {
+          const el = $(id);
+          if (el && value !== undefined && value !== null) el.value = String(value);
+        };
+        const check = (id, value) => {
+          const el = $(id);
+          if (el && typeof value === "boolean") el.checked = value;
+        };
+        if (query.q !== undefined) set("q", query.q);
+        const f = query.filters || {};
+        set("prio", f.priority);
+        set("vendor", f.vendor);
+        set("cvss", f.minCvss);
+        set("since", f.sinceDays);
+        set("surface", f.attackSurface);
+        check("f_kev", f.kev);
+        check("f_exp", f.exploited);
+        check("f_poc", f.poc);
+        check("f_ransom", f.ransomware);
+        check("f_fixed", f.fixed);
+        if (query.sort) set("sort", query.sort);
+        apply();
+      }
+
+      function detailUrl(r) {
+        const meta = state.meta;
+        const prefix = state.data.prefix_dictionary?.[r.prefix];
+        if (!meta || prefix === undefined) return null;
+        return meta.endpoints.detail_url_template
+          .replace("{prefix}", prefix)
+          .replace("{vuln_id}", r.id);
+      }
+
+      function externalRow(r) {
+        return { id: r.id, cve: r.cve, vendors: r.vendors, products: r.products,
+          title: r.title, cvss: r.cvss, severity: severity(r.cvss, r.sev), priority: r.prio,
+          attackSurface: r.asc || null, kevLagDays: r.lag, published: r.pub, updated: r.upd,
+          kev: !!(r.flags & F.kev), exploited: !!(r.flags & F.exp), poc: !!(r.flags & F.poc),
+          ransomware: !!(r.flags & F.ransom), fixed: !!(r.flags & F.fixed),
+          detailUrl: detailUrl(r) };
+      }
+
+      function enableEmbedding(raw) {
+        const reply = (event, message) => {
+          if (event.source) event.source.postMessage(message, event.origin || "*");
+        };
+        window.addEventListener("message", (event) => {
+          const data = event.data;
+          if (!data || typeof data !== "object") return;
+          const limit = Math.min(Math.max(Number(data.limit) || 50, 1), 500);
+          if (data.type === "vulnwatch:query") {
+            applyExternalQuery(data);
+            reply(event, { type: "vulnwatch:result", requestId: data.requestId,
+              total: state.data.rows.length, matched: state.filtered.length,
+              rows: state.filtered.slice(0, limit).map(externalRow) });
+          } else if (data.type === "vulnwatch:get") {
+            const key = String(data.id || data.cve || "").toUpperCase();
+            const row = state.data.rows.find((r) => r.cve === key || r.id === key);
+            reply(event, { type: "vulnwatch:entry", requestId: data.requestId,
+              entry: row ? externalRow(row) : null });
+          } else if (data.type === "vulnwatch:meta") {
+            reply(event, { type: "vulnwatch:meta", requestId: data.requestId, meta: state.meta });
+          }
+        });
+        // 埋め込み時は、準備完了を親へ通知する。
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(
+            { type: "vulnwatch:ready", meta: state.meta, stats: raw.stats }, "*");
+        }
+      }
+
       async function load() {
         try {
-          const res = await fetch("data/index.json");
+          const res = await fetch("api/v1/search.json");
           if (!res.ok) throw new Error("HTTP " + res.status);
           const raw = await res.json();
           raw.rows = raw.rows.map(makeRow);
           state.data = raw;
+          state.meta = await fetch("api/v1/meta.json").then((r) => r.json()).catch(() => null);
           $("genat").textContent = "更新: " + (raw.generated_at || "").slice(0, 16).replace("T", " ");
           tiles(raw.stats);
           $("vendor").insertAdjacentHTML("beforeend",
@@ -451,6 +539,7 @@
           }
           $("more").addEventListener("click", renderMore);
           apply();
+          enableEmbedding(raw);
         } catch (e) {
           $("meta").textContent = "インデックスの読み込みに失敗しました: " + e.message;
         }
