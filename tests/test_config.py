@@ -10,7 +10,7 @@ def test_registry_has_all_sources_enabled_for_collection() -> None:
     registry = load_sources()
     enabled = {source.id for source in registry.sources if source.enabled}
 
-    assert len(registry.sources) == 160
+    assert len(registry.sources) == 166
     assert enabled == {source.id for source in registry.sources}
     assert all(source.allowed_hosts for source in registry.sources if source.enabled)
     assert all(isinstance(source.products, list) for source in registry.sources)

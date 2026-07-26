@@ -313,8 +313,28 @@ class AdvisoryFacts(StrictModel):
         return _normalize_cves(values)
 
 
+class KevEntry(StrictModel):
+    """CISA KEV の掲載情報。掲載日は悪用確認の速報性を測る基準に使う。"""
+
+    date_added: datetime | None = None
+    ransomware: bool = False
+
+
+class ExploitationReport(StrictModel):
+    """OSINT のリサーチ記事が報じた実悪用。悪用確認そのものではなく、その候補。"""
+
+    cve: str
+    source_id: str
+    url: str
+    title: str | None = None
+    evidence: str = ""
+    observed_at: datetime
+
+
 class AdvisoryEnrichment(StrictModel):
     cisa_kev: bool = False
+    kev_date_added: datetime | None = None
+    kev_ransomware: bool = False
     asset_match: bool = False
     matched_asset_ids: list[str] = Field(default_factory=list)
     internet_exposed: bool = False
@@ -426,6 +446,9 @@ class RunManifest(StrictModel):
     baseline: bool = False
     changes: list[ChangeRecord] = Field(default_factory=list)
     source_outcomes: list[SourceOutcome] = Field(default_factory=list)
+    # OSINT 由来の実悪用報告のうち、台帳へ記録できた件数と悪用確認へ昇格した件数。
+    exploitation_reports_recorded: int = 0
+    exploitation_promotions: int = 0
 
     @model_validator(mode="after")
     def validate_source_outcome_ids(self) -> RunManifest:

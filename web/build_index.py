@@ -33,8 +33,9 @@ FIELDS = [
     "pub",
     "upd",
     "asc",
+    "lag",
 ]
-FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV = 1, 2, 4, 8
+FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
 
 
 def _load_classifier():
@@ -73,7 +74,15 @@ def main() -> int:
     classifier = _load_classifier()
     rows: list[list[object]] = []
     vendors_set: set[str] = set()
-    stats = {"total": 0, "kev": 0, "exploited": 0, "poc": 0, "fixed": 0}
+    stats = {
+        "total": 0,
+        "kev": 0,
+        "exploited": 0,
+        "poc": 0,
+        "fixed": 0,
+        "ransomware": 0,
+        "kev_lag": 0,
+    }
     prio_counts: dict[str, int] = {}
     surface_counts: dict[str, int] = {}
     with CSV_PATH.open(encoding="utf-8", newline="") as handle:
@@ -91,6 +100,15 @@ def main() -> int:
             if r["cisa_kev"] == "true":
                 flags |= FLAG_KEV
                 stats["kev"] += 1
+            # Columns added later; read defensively so an older ledger CSV still builds.
+            if r.get("ransomware_use") == "true":
+                flags |= FLAG_RANSOMWARE
+                stats["ransomware"] += 1
+            try:
+                lag: int | str = int(r.get("kev_lag_days") or "")
+                stats["kev_lag"] += 1
+            except ValueError:
+                lag = ""
             try:
                 cvss: float | str = round(float(r["cvss_score"]), 1)
             except (TypeError, ValueError):
@@ -121,6 +139,7 @@ def main() -> int:
                     _day(r["published_at"]),
                     _day(r["updated_at"]),
                     asc,
+                    lag,
                 ]
             )
     # Newest first so the default view shows the most recently updated entries.
@@ -138,6 +157,7 @@ def main() -> int:
             "poc": FLAG_POC,
             "exploited": FLAG_EXPLOITED,
             "kev": FLAG_KEV,
+            "ransomware": FLAG_RANSOMWARE,
         },
         "stats": {**stats, "priorities": prio_counts, "surfaces": surface_counts},
         "attack_surfaces": surfaces,

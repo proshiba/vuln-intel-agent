@@ -3,7 +3,7 @@
 ## Vulnerability collection and daily report
 
 Use the project virtual environment (`.venv/bin/...`) and generate into `staging/` first. The
-normal full run collects all 160 enabled sources. Nine of those sources use the browser
+normal full run collects all 166 enabled sources. Nine of those sources use the browser
 collector, so install the browser extra and Chromium in a new environment before collecting:
 
 ```bash
@@ -20,7 +20,7 @@ Then run:
 ```
 
 After `collect`, verify `run-manifest.json.source_outcomes` before summarizing. A daily run must have
-exactly one outcome for every enabled source (currently 160). `success` and `not_modified` are
+exactly one outcome for every enabled source (currently 166). `success` and `not_modified` are
 acceptable; if any outcome is missing, `failed`, or `partial`, stop before summary, report, or
 publish, inspect its endpoint/count/error fields and `quarantine/`, then fix or retry the source.
 `vulnwatch validate` independently rejects incomplete or unsuccessful outcomes; use it only as a
