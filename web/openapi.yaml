@@ -41,9 +41,26 @@ paths:
 
   /api/v1/search.json:
     get:
-      summary: 全件の検索索引
+      summary: 検索索引（ポータル連携仕様 v1）
       description: |
-        台帳全件を、表示・検索・絞り込み・並び替えに必要な列だけに圧縮した索引です。
+        research_bench ポータル連携仕様 v1 のエンティティ配列です。ポータルは
+        `entities[].value` の一致だけでソースを横断して結合するため、CVE を持つ
+        エントリは `type: cve`・`value` を大文字の CVE ID にしています。
+        CVE 未採番のエントリは結合できないため `type: report` とし内部 ID を値にします。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchDocument"
+
+  /api/v1/viewer.json:
+    get:
+      summary: 検索索引（ビューア専用・列指向）
+      description: |
+        同じ台帳を列指向に圧縮したものです。同梱ビューアが読みます。仕様 v1 の一部
+        ではない拡張で、`meta.json` の `endpoints.viewer_index` から辿れます。
         列は `fields`、状態フラグは `flags` のビットマスク、詳細ファイルの配置は
         `prefix_dictionary` への添字で表されます。gzip 配信で約 1.8MB です。
       responses:
@@ -52,7 +69,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SearchIndex"
+                $ref: "#/components/schemas/ViewerIndex"
 
   /vulndb/vulns/{prefix}/{vuln_id}.yaml:
     get:
@@ -64,7 +81,8 @@ paths:
         直接配信します。索引より内容が厚く（修正バージョン、全出典 URL、OSINT
         報告の根拠文など）、常に最新です。
 
-        `prefix` は `search.json` の `prefix_dictionary[row[13]]` から得ます。
+        `prefix` は仕様 v1 の `entities[].attrs.prefix`、または `viewer.json` の
+        `prefix_dictionary[row[13]]` から得ます。
       parameters:
         - name: prefix
           in: path
@@ -93,8 +111,29 @@ components:
   schemas:
     Meta:
       type: object
-      required: [schema_version, api_version, generated_at, endpoints, stats]
+      required: [spec_version, app_id, name, generated_at, site_url, endpoints]
       properties:
+        spec_version:
+          type: string
+          description: ポータル連携仕様のバージョン。
+          examples: ["1.0"]
+        app_id:
+          type: string
+          description: ポータル内で一意なアプリ ID。
+          examples: ["vuln-intel-agent"]
+        capabilities:
+          type: array
+          items: { type: string }
+          examples: [["iframe", "deep-link", "postmessage"]]
+        embed_css:
+          type: string
+          description: iframe 埋め込み時にポータルが注入し、ヘッダの二重化を防ぐ。
+        deep_links:
+          type: object
+          description: |
+            エンティティ種別ごとの詳細ページ。`{detail}` にエンティティの `detail` が入ります。
+          additionalProperties: { type: string }
+          examples: [{"cve": "#/vuln/{detail}"}]
         schema_version: { type: integer }
         api_version: { type: string, examples: ["v1"] }
         name: { type: string }
@@ -110,7 +149,14 @@ components:
           type: object
           properties:
             meta: { type: string }
-            search: { type: string }
+            search:
+              type: string
+              description: 仕様 v1 のエンティティ配列。ポータルはこれを読みます。
+            viewer_index:
+              type: string
+              description: 列指向版。同梱ビューア専用の拡張です。
+            documentation: { type: string }
+            openapi: { type: string }
             detail_url_template:
               type: string
               description: |
@@ -153,7 +199,64 @@ components:
           description: 初期アクセス面の分類ごとの件数。
           additionalProperties: { type: integer }
 
-    SearchIndex:
+    SearchDocument:
+      type: object
+      required: [spec_version, app_id, entities]
+      properties:
+        spec_version: { type: string, examples: ["1.0"] }
+        app_id: { type: string, examples: ["vuln-intel-agent"] }
+        generated_at: { type: string, format: date-time }
+        entities:
+          type: array
+          items: { $ref: "#/components/schemas/Entity" }
+
+    Entity:
+      type: object
+      required: [type, id, label]
+      description: 索引の 1 レコード。ポータルが横串を作る粒度。
+      properties:
+        type:
+          type: string
+          enum: [cve, report]
+          description: CVE を持つものは `cve`、未採番は `report`。
+        id:
+          type: string
+          description: このファイル内で一意。`vuln:<内部ID>`。
+          examples: ["vuln:VW-2026-0001"]
+        label: { type: string, description: 画面表示用 }
+        value:
+          type: string
+          description: |
+            結合キー。`cve` 型は大文字の `CVE-YYYY-NNNN`、`report` 型は内部 ID。
+        detail:
+          type: string
+          description: "`deep_links` のテンプレートに埋める値（内部 ID）。"
+        attrs:
+          type: object
+          description: |
+            表示用の補足。「キー: 値」でそのまま表示されるため日本語キーを使います。
+            値が無い項目は含めません。`_` で始まるキーは使いません。
+          properties:
+            題名: { type: string }
+            ベンダー: { type: string }
+            製品: { type: string }
+            CVSS: { type: number }
+            深刻度: { type: string, description: ベンダー深刻度の生値（正規化されていない） }
+            優先度: { type: string, enum: [P1, P2, P3, INFO] }
+            公開: { type: string }
+            更新: { type: string }
+            攻撃面: { type: string, description: 初期アクセス面の分類 ID }
+            KEVラグ: { type: integer, description: CISA KEV 掲載より何日早く悪用を観測できたか }
+            flags:
+              type: array
+              items: { type: string, enum: [fixed, poc, exploited, kev, ransomware] }
+              description: ビットマスクを展開したもの。バッジとして描画されます。
+            prefix:
+              type: string
+              description: 詳細 YAML の配置。`detail_url_template` の `{prefix}` に入ります。
+              examples: ["ivanti/2026/07"]
+
+    ViewerIndex:
       type: object
       required: [fields, flags, rows]
       properties:

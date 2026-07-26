@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vulnwatch.webapi import build_meta, encode_prefixes, scan_entry_prefixes
+from vulnwatch.webapi import (
+    build_entities,
+    build_meta,
+    build_search_document,
+    encode_prefixes,
+    expand_flags,
+    scan_entry_prefixes,
+)
 
 
 def _entry(root: Path, prefix: str, vuln_id: str) -> None:
@@ -77,5 +84,148 @@ def test_meta_exposes_a_usable_detail_url_template() -> None:
         "vulndb/vulns/ivanti/2026/07/VW-2026-0001.yaml"
     )
     assert meta["endpoints"]["search"] == "api/v1/search.json"
+    # Integrators (including agents) must be able to find the guide from meta alone.
+    assert meta["endpoints"]["documentation"] == "INTEGRATION.md"
+    assert meta["endpoints"]["openapi"] == "openapi.yaml"
     assert meta["cors"] is True
     assert meta["stats"]["total"] == 3
+
+
+# --- ポータル連携仕様 v1 への準拠 -------------------------------------------
+# research_bench の docs/portal-spec.md に対応する。仕様側にバリデータが用意されて
+# いないため、準拠条件をここで検証する。
+
+FIELDS = [
+    "id",
+    "cve",
+    "vendors",
+    "products",
+    "title",
+    "cvss",
+    "sev",
+    "prio",
+    "flags",
+    "pub",
+    "upd",
+    "asc",
+    "lag",
+    "prefix",
+]
+FLAGS = {"fixed": 1, "poc": 2, "exploited": 4, "kev": 8, "ransomware": 16}
+
+
+def _row(**over: object) -> list[object]:
+    base: dict[str, object] = {
+        "id": "VW-2026-0001",
+        "cve": "CVE-2026-1281",
+        "vendors": "Ivanti",
+        "products": "Connect Secure",
+        "title": "RCE",
+        "cvss": 9.8,
+        "sev": "critical",
+        "prio": "P1",
+        "flags": 12,
+        "pub": "2026-07-20",
+        "upd": "2026-07-25",
+        "asc": "vpn_gateway",
+        "lag": 6,
+        "prefix": 0,
+    }
+    base.update(over)
+    return [base[name] for name in FIELDS]
+
+
+def test_flags_bitmask_expands_to_names() -> None:
+    assert sorted(expand_flags(12, FLAGS)) == ["exploited", "kev"]
+    assert expand_flags(0, FLAGS) == []
+    assert expand_flags("", FLAGS) == []
+
+
+def test_entity_matches_the_portal_contract() -> None:
+    entities = build_entities([_row()], FIELDS, FLAGS, ["ivanti/2026/07"])
+
+    assert len(entities) == 1
+    entity = entities[0]
+    assert entity["type"] == "cve"
+    assert entity["id"] == "vuln:VW-2026-0001"
+    assert entity["label"] == "CVE-2026-1281"
+    # value is the join key the portal uses to link sources; it must be the upper-case CVE.
+    assert entity["value"] == "CVE-2026-1281"
+    # detail is substituted into deep_links, which route by internal ID.
+    assert entity["detail"] == "VW-2026-0001"
+    attrs = entity["attrs"]
+    assert attrs["題名"] == "RCE"
+    assert attrs["優先度"] == "P1"
+    assert attrs["攻撃面"] == "vpn_gateway"
+    assert sorted(attrs["flags"]) == ["exploited", "kev"]
+    # The portal builds the raw YAML URL from this, so it must be the string, not an index.
+    assert attrs["prefix"] == "ivanti/2026/07"
+
+
+def test_cve_value_is_upper_cased_for_joining() -> None:
+    entities = build_entities([_row(cve="cve-2026-1281")], FIELDS, FLAGS, [])
+
+    assert entities[0]["value"] == "CVE-2026-1281"
+
+
+def test_entry_without_a_cve_becomes_a_report_keyed_by_internal_id() -> None:
+    entities = build_entities([_row(cve="")], FIELDS, FLAGS, [])
+
+    entity = entities[0]
+    assert entity["type"] == "report"
+    assert entity["label"] == entity["value"] == "VW-2026-0001"
+
+
+def test_empty_attrs_are_omitted() -> None:
+    entities = build_entities(
+        [_row(cvss="", sev="", asc="", lag="", flags=0, prefix=-1)], FIELDS, FLAGS, []
+    )
+
+    attrs = entities[0]["attrs"]
+    for absent in ("CVSS", "深刻度", "攻撃面", "KEVラグ", "flags", "prefix"):
+        assert absent not in attrs
+    assert attrs["題名"] == "RCE"
+
+
+def test_attrs_use_no_portal_reserved_keys() -> None:
+    entities = build_entities([_row()], FIELDS, FLAGS, ["ivanti/2026/07"])
+
+    # Keys beginning with "_" are reserved for the portal's own bookkeeping.
+    assert not [key for key in entities[0]["attrs"] if key.startswith("_")]
+
+
+def test_search_document_carries_the_spec_envelope() -> None:
+    document = build_search_document(
+        generated_at="2026-07-26T00:00:00+00:00",
+        entities=build_entities([_row()], FIELDS, FLAGS, ["ivanti/2026/07"]),
+    )
+
+    assert document["spec_version"] == "1.0"
+    assert document["app_id"] == "vuln-intel-agent"
+    assert document["generated_at"] == "2026-07-26T00:00:00+00:00"
+    assert len(document["entities"]) == 1
+
+
+def test_meta_carries_the_spec_v1_fields() -> None:
+    meta = build_meta(
+        generated_at="2026-07-26T00:00:00+00:00",
+        repository="proshiba/vuln-intel-agent",
+        site_url="https://proshiba.github.io/vuln-intel-agent",
+        ref="main",
+        stats={"total": 1},
+        fields=FIELDS,
+        flags=FLAGS,
+        attack_surfaces={"vpn_gateway": "VPN/リモートアクセス"},
+    )
+
+    assert meta["spec_version"] == "1.0"
+    assert meta["app_id"] == "vuln-intel-agent"
+    assert meta["name"] == "脆弱性インテル"
+    # The portal resolves relative endpoints against site_url, so it must end in a slash.
+    assert meta["site_url"].endswith("/")
+    assert meta["endpoints"]["search"] == "api/v1/search.json"
+    assert meta["endpoints"]["viewer_index"] == "api/v1/viewer.json"
+    # deep_links must cover every entity type this app emits.
+    assert set(meta["deep_links"]) == {"cve", "report"}
+    assert meta["deep_links"]["cve"] == "#/vuln/{detail}"
+    assert "iframe" in meta["capabilities"]

@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CSV_PATH = ROOT / "vulndb" / "index.csv"
 VULNS_ROOT = ROOT / "vulndb" / "vulns"
 API_DIR = Path(__file__).resolve().parent / "api" / "v1"
-SEARCH_PATH = API_DIR / "search.json"
+SEARCH_PATH = API_DIR / "search.json"  # ポータル連携仕様 v1（エンティティ配列）
+VIEWER_PATH = API_DIR / "viewer.json"  # ビューア専用（列指向）
 META_PATH = API_DIR / "meta.json"
 ATTACK_SURFACE_PATH = ROOT / "config" / "attack_surface.yaml"
 
@@ -59,12 +60,30 @@ FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
 def _load_webapi():
     """Import the shared API helpers, which live in the package."""
 
-    from vulnwatch.webapi import build_meta, encode_prefixes, scan_entry_prefixes
+    from vulnwatch.webapi import (
+        build_entities,
+        build_meta,
+        build_search_document,
+        encode_prefixes,
+        scan_entry_prefixes,
+    )
 
-    return build_meta, encode_prefixes, scan_entry_prefixes
+    return (
+        build_entities,
+        build_meta,
+        build_search_document,
+        encode_prefixes,
+        scan_entry_prefixes,
+    )
 
 
-build_meta, encode_prefixes, scan_entry_prefixes = _load_webapi()
+(
+    build_entities,
+    build_meta,
+    build_search_document,
+    encode_prefixes,
+    scan_entry_prefixes,
+) = _load_webapi()
 
 
 def _load_classifier():
@@ -205,22 +224,30 @@ def main() -> int:
     }
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")
     payload["generated_at"] = generated_at
+    entity_counts = {
+        "cve": sum(1 for row in rows if row[1]),
+        "report": sum(1 for row in rows if not row[1]),
+    }
     meta = build_meta(
         generated_at=generated_at,
         repository=REPOSITORY,
         site_url=SITE_URL,
         ref=REF,
-        stats={**stats, "priorities": prio_counts, "surfaces": surface_counts},
+        stats={**stats, **entity_counts, "priorities": prio_counts, "surfaces": surface_counts},
         fields=FIELDS,
         flags=payload["flags"],
         attack_surfaces=surfaces,
     )
+    entities = build_entities(rows, FIELDS, payload["flags"], prefix_dictionary)
+    search = build_search_document(generated_at=generated_at, entities=entities)
+
     API_DIR.mkdir(parents=True, exist_ok=True)
-    SEARCH_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), "utf-8")
+    VIEWER_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), "utf-8")
+    SEARCH_PATH.write_text(json.dumps(search, ensure_ascii=False, separators=(",", ":")), "utf-8")
     META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-    size = SEARCH_PATH.stat().st_size / 1_000_000
-    print(f"wrote {SEARCH_PATH} ({size:.1f} MB, {stats['total']} rows)")
-    print(f"wrote {META_PATH}")
+    for label, path in (("viewer", VIEWER_PATH), ("search", SEARCH_PATH)):
+        print(f"wrote {path} ({path.stat().st_size / 1_000_000:.1f} MB, {label})")
+    print(f"wrote {META_PATH} ({len(entities)} entities from {stats['total']} rows)")
     return 0
 
 
