@@ -23,6 +23,7 @@ from vulnwatch.models import (
     ChangeStatus,
     CollectionResult,
     CollectorKind,
+    ExploitationReport,
     KevEntry,
     Priority,
     Provenance,
@@ -34,7 +35,11 @@ from vulnwatch.models import (
     SourceState,
     Tier,
 )
-from vulnwatch.parsers import parse_cisa_kev, parse_record
+from vulnwatch.parsers import (
+    extract_exploitation_reports,
+    parse_cisa_kev,
+    parse_record,
+)
 from vulnwatch.priority import decide_priority, enrich_assets
 from vulnwatch.storage.filesystem import FileSystemStorage, write_json
 from vulnwatch.vulndb import VulnDb
@@ -213,6 +218,20 @@ class Pipeline:
                 kev_outcome.parsed_count = kev_outcome.record_count
                 self._write_success_state(states["cisa_kev"], results["cisa_kev"], started)
 
+        exploitation_reports: list[ExploitationReport] = []
+        for source in selected:
+            if source.parser != "exploitation_intel":
+                continue
+            intel_result = results.get(source.id)
+            if intel_result is None or intel_result.not_modified:
+                continue
+            for raw in intel_result.records:
+                exploitation_reports.extend(extract_exploitation_reports(source, raw, started))
+            intel_outcome = outcomes[source.id]
+            if intel_outcome.status == SourceOutcomeStatus.SUCCESS:
+                intel_outcome.parsed_count = intel_outcome.record_count
+                self._write_success_state(states[source.id], intel_result, started)
+
         coverage_changes: list[Advisory] = []
         for source in selected:
             if source.role not in {SourceRole.ADVISORY, SourceRole.COVERAGE}:
@@ -328,7 +347,7 @@ class Pipeline:
             self._write_success_state(next_state, selected_result, started)
 
         manifest.source_outcomes = [outcomes[source.id] for source in selected]
-        self._update_vulndb(manifest, coverage_changes)
+        self._update_vulndb(manifest, coverage_changes, exploitation_reports)
         self.storage.rebuild_indexes()
         manifest.completed_at = datetime.now(UTC)
         write_json(
@@ -474,6 +493,7 @@ class Pipeline:
         self,
         manifest: RunManifest,
         coverage_changes: list[Advisory] | None = None,
+        exploitation_reports: list[ExploitationReport] | None = None,
     ) -> None:
         db = VulnDb(self.output_root)
         now = datetime.now(UTC)
@@ -498,6 +518,10 @@ class Pipeline:
             # 初回はリポジトリ内の全アドバイザリから台帳をシードする。
             advisories = self.storage.all_advisories()
         db.apply(advisories, now)
+        if exploitation_reports:
+            recorded, promoted = db.apply_exploitation_reports(exploitation_reports, now)
+            manifest.exploitation_reports_recorded = recorded
+            manifest.exploitation_promotions = promoted
         db.write()
 
     def _handle_missing(

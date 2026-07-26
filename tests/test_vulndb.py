@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 from ruamel.yaml import YAML
 
-from vulnwatch.models import AdvisoryEnrichment, AdvisoryFacts, AdvisoryStatus
+from vulnwatch.models import (
+    AdvisoryEnrichment,
+    AdvisoryFacts,
+    AdvisoryStatus,
+    ExploitationReport,
+)
 from vulnwatch.vulndb import VulnDb, VulnRecord, validate_vulndb
 
 NOW = datetime(2026, 7, 18, 9, 0, tzinfo=UTC)
@@ -222,6 +227,125 @@ def test_kev_listing_before_our_observation_reports_no_lag(
     db.write()
 
     assert _read_entry(tmp_path, "VW-2026-0001").kev_lag_days is None
+
+
+def _report(cve: str, source_id: str, *, at: datetime, url: str | None = None):
+    return ExploitationReport(
+        cve=cve,
+        source_id=source_id,
+        url=url or f"https://{source_id}.example/post",
+        evidence=f"{cve} is actively exploited.",
+        observed_at=at,
+    )
+
+
+def test_single_osint_report_is_recorded_without_claiming_exploitation(
+    tmp_path: Path, advisory_factory
+) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    recorded, promoted = db.apply_exploitation_reports(
+        [_report("CVE-2026-12345", "greynoise_blog", at=NOW)], NOW
+    )
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert (recorded, promoted) == (1, 0)
+    assert len(entry.exploitation_reports) == 1
+    # A lone blog post must never set the irreversible exploitation flag.
+    assert entry.known_exploited is False
+    assert _read_csv(tmp_path)[0]["exploitation_report_count"] == "1"
+
+
+def test_two_independent_osint_reports_promote_to_known_exploitation(
+    tmp_path: Path, advisory_factory
+) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    recorded, promoted = db.apply_exploitation_reports(
+        [
+            _report("CVE-2026-12345", "greynoise_blog", at=LATER),
+            _report("CVE-2026-12345", "huntress_blog", at=NOW),
+        ],
+        LATER,
+    )
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert (recorded, promoted) == (2, 1)
+    assert entry.known_exploited is True
+    assert entry.exploitation_source == "osint"
+    # The earliest report date is what beats a later KEV listing.
+    assert entry.exploitation_observed_at == NOW
+    assert _read_csv(tmp_path)[0]["exploitation_report_sources"] == "greynoise_blog;huntress_blog"
+
+
+def test_repeated_reports_from_one_source_never_promote(tmp_path: Path, advisory_factory) -> None:
+    # One outlet republishing the same claim is not corroboration.
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    db.apply_exploitation_reports(
+        [
+            _report("CVE-2026-12345", "greynoise_blog", at=NOW, url="https://g.example/a"),
+            _report("CVE-2026-12345", "greynoise_blog", at=LATER, url="https://g.example/b"),
+        ],
+        LATER,
+    )
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert len(entry.exploitation_reports) == 2
+    assert entry.known_exploited is False
+
+
+def test_duplicate_report_is_not_recorded_twice(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    db.apply_exploitation_reports([_report("CVE-2026-12345", "greynoise_blog", at=NOW)], NOW)
+    recorded, _ = db.apply_exploitation_reports(
+        [_report("CVE-2026-12345", "greynoise_blog", at=LATER)], LATER
+    )
+    db.write()
+
+    assert recorded == 0
+    assert len(_read_entry(tmp_path, "VW-2026-0001").exploitation_reports) == 1
+
+
+def test_reports_for_unknown_cves_are_ignored(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    recorded, promoted = db.apply_exploitation_reports(
+        [_report("CVE-2026-00000", "greynoise_blog", at=NOW)], NOW
+    )
+
+    assert (recorded, promoted) == (0, 0)
+
+
+def test_osint_promotion_can_beat_a_later_kev_listing(tmp_path: Path, advisory_factory) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory()], NOW)
+    db.apply_exploitation_reports(
+        [
+            _report("CVE-2026-12345", "greynoise_blog", at=NOW),
+            _report("CVE-2026-12345", "huntress_blog", at=NOW),
+        ],
+        NOW,
+    )
+    db.write()
+
+    listed = advisory_factory(
+        facts=AdvisoryFacts(cves=["CVE-2026-12345"]),
+        enrichment=AdvisoryEnrichment(
+            cisa_kev=True, kev_date_added=datetime(2026, 7, 24, tzinfo=UTC)
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([listed], LATER)
+    db.write()
+
+    entry = _read_entry(tmp_path, "VW-2026-0001")
+    assert entry.exploitation_source == "osint"
+    assert entry.kev_lag_days == 6
 
 
 def test_withdrawn_only_when_all_sources_withdraw(tmp_path: Path, advisory_factory) -> None:

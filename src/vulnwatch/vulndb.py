@@ -10,7 +10,13 @@ from ruamel.yaml import YAML
 
 from vulnwatch.attack_surface import classify as classify_attack_surface
 from vulnwatch.identity import slugify
-from vulnwatch.models import Advisory, AdvisoryStatus, Priority, StrictModel
+from vulnwatch.models import (
+    Advisory,
+    AdvisoryStatus,
+    ExploitationReport,
+    Priority,
+    StrictModel,
+)
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
 VULNDB_DIRECTORY = "vulndb"
@@ -41,6 +47,8 @@ CSV_COLUMNS = (
     "kev_listed_at",
     "kev_lag_days",
     "ransomware_use",
+    "exploitation_report_count",
+    "exploitation_report_sources",
     "attack_surface_class",
     "cvss_score",
     "vendor_severity",
@@ -94,6 +102,8 @@ class VulnRecord(StrictModel):
     kev_listed_at: datetime | None = None
     kev_lag_days: int | None = None
     ransomware_use: bool = False
+    # OSINT のリサーチ記事が報じた実悪用。悪用確認の候補であり、確定ではない。
+    exploitation_reports: list[ExploitationReport] = Field(default_factory=list)
     cvss_score: float | None = None
     vendor_severity: str | None = None
     priority: Priority = Priority.INFO
@@ -254,6 +264,41 @@ class VulnDb:
         merged.extend(vuln_id for vuln_id in touched if vuln_id not in merged)
         self.registry.advisory_index[advisory.canonical_id] = merged
 
+    def apply_exploitation_reports(
+        self, reports: list[ExploitationReport], now: datetime
+    ) -> tuple[int, int]:
+        """OSINT の実悪用報告を台帳へ反映し、(記録した報告数, 昇格した件数) を返す。
+
+        報告は候補として蓄積するだけで、単独では確定した悪用フラグを立てない。独立した
+        2 ソース以上が同じ CVE を報じた時点で、はじめて known_exploited へ昇格させる。
+        単一ソースの誤読が、取り消せない悪用確認として台帳に残らないようにするため。
+        台帳に存在しない CVE の報告は、対象を特定できないため無視する。
+        """
+
+        recorded = 0
+        promoted = 0
+        for report in reports:
+            vuln_id = self.registry.cve_index.get(report.cve)
+            entry = self.load_entry(vuln_id) if vuln_id else None
+            if entry is None or entry.superseded_by is not None:
+                continue
+            if any(
+                existing.source_id == report.source_id and existing.url == report.url
+                for existing in entry.exploitation_reports
+            ):
+                continue
+            entry.exploitation_reports.append(report)
+            recorded += 1
+            if not entry.known_exploited and _corroborated(entry):
+                entry.known_exploited = True
+                entry.exploitation_observed_at = _earliest_report_at(entry)
+                entry.exploitation_source = "osint"
+                entry.kev_lag_days = _kev_lag_days(entry)
+                promoted += 1
+            entry.updated_at = now
+            self._dirty.add(entry.vuln_id)
+        return recorded, promoted
+
     def _create(self, advisory: Advisory, cve: str | None, now: datetime) -> str:
         vuln_id = self._allocate(advisory.published_at, now)
         record = VulnRecord(
@@ -412,6 +457,8 @@ class VulnDb:
                     record.kev_listed_at.isoformat() if record.kev_listed_at else "",
                     record.kev_lag_days if record.kev_lag_days is not None else "",
                     _flag(record.ransomware_use),
+                    len(record.exploitation_reports) or "",
+                    ";".join(sorted({report.source_id for report in record.exploitation_reports})),
                     classify_attack_surface(record.vendors, record.products) or "",
                     record.cvss_score if record.cvss_score is not None else "",
                     record.vendor_severity or "",
@@ -465,6 +512,25 @@ def validate_vulndb(root: Path) -> int:
     if listed != set(entries):
         raise ValueError("vulndb index.csv does not match the YAML entries")
     return len(entries)
+
+
+_MIN_CORROBORATING_SOURCES = 2
+
+
+def _corroborated(entry: VulnRecord) -> bool:
+    """独立した複数ソースが同じ CVE の実悪用を報じていれば True。"""
+
+    return (
+        len({report.source_id for report in entry.exploitation_reports})
+        >= _MIN_CORROBORATING_SOURCES
+    )
+
+
+def _earliest_report_at(entry: VulnRecord) -> datetime | None:
+    """最も早い報告日時。KEV 掲載との差を測る基準に使う。"""
+
+    stamps = [_aware(report.observed_at) for report in entry.exploitation_reports]
+    return min(stamps) if stamps else None
 
 
 def _kev_lag_days(entry: VulnRecord) -> int | None:
