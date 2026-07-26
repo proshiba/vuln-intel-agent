@@ -77,5 +77,8 @@ def test_meta_exposes_a_usable_detail_url_template() -> None:
         "vulndb/vulns/ivanti/2026/07/VW-2026-0001.yaml"
     )
     assert meta["endpoints"]["search"] == "api/v1/search.json"
+    # Integrators (including agents) must be able to find the guide from meta alone.
+    assert meta["endpoints"]["documentation"] == "INTEGRATION.md"
+    assert meta["endpoints"]["openapi"] == "openapi.yaml"
     assert meta["cors"] is True
     assert meta["stats"]["total"] == 3

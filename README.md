@@ -166,7 +166,9 @@ AI 要約を手動で指定する場合は、Critical 表と「悪用済み・Po
 
 `web/` には、脆弱性台帳をブラウザ上で一覧・検索・絞り込みできる静的ビューアと、読み取り専用の静的 JSON API（`api/v1/`、OpenAPI 3.1 定義は `web/openapi.yaml`）があります。GitHub Pages で公開し、`.github/workflows/pages.yml` が `main` の更新時に生成してデプロイします。初回のみ Settings → Pages → Source で「GitHub Actions」を選択してください。
 
-GitHub Pages と raw.githubusercontent.com はどちらも CORS を許可しているため、別リポジトリのポータルから JavaScript で横断検索したり、ビューアを iframe で埋め込んで postMessage で連携したりできます。詳細は `web/README.md` を参照してください。
+GitHub Pages と raw.githubusercontent.com はどちらも CORS を許可しているため、別リポジトリのポータルから JavaScript で横断検索したり、ビューアを iframe で埋め込んで postMessage で連携したりできます。
+
+**外部から連携する場合は [`web/INTEGRATION.md`](web/INTEGRATION.md) を参照してください。** 公開 URL、索引の列の意味、postMessage の仕様、実装時の注意点を、それ単体で実装できる形にまとめてあります。リポジトリ内部の構成や運用は `web/README.md` を参照してください。
 
 ## 設定ファイル
 

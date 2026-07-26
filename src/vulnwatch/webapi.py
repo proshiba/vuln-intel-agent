@@ -99,6 +99,9 @@ def build_meta(
         "endpoints": {
             "meta": f"api/{API_VERSION}/meta.json",
             "search": f"api/{API_VERSION}/search.json",
+            # 連携する側（人・エージェントとも）が最初に読む文書。
+            "documentation": "INTEGRATION.md",
+            "openapi": "openapi.yaml",
             "detail_url_template": DETAIL_URL_TEMPLATE.format(
                 base=raw_base, prefix="{prefix}", vuln_id="{vuln_id}"
             ),
