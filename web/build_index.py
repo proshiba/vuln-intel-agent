@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
-"""Build a compact search index (site/data/index.json) from vulndb/index.csv.
+"""Build the static JSON API served from GitHub Pages.
 
-The full ledger CSV is tens of MB (its per-source column is huge); the UI only
-needs a few fields to list, search, filter and sort. We emit an array-of-arrays
-with a fields header, a flags bitmask, date-only timestamps and truncated text
-so the client can fetch and search the whole dataset quickly (gzip-served).
+Emits two files under web/api/v1/:
+
+- search.json … compact index of the whole ledger. The full CSV is tens of MB
+  (its per-source column is huge), so we emit an array-of-arrays with a fields
+  header, a flags bitmask, date-only timestamps and truncated text. Both the
+  bundled viewer and any external portal search over this in the browser.
+- meta.json   … discovery document: counts, schema version and how to build a
+  detail URL. Per-entry detail is not pre-generated; the ledger YAML already
+  lives in the repository and is readable from raw.githubusercontent.com, which
+  is always current and richer than anything we would duplicate here.
+
+Both hosts send Access-Control-Allow-Origin: *, so a portal on another origin
+can read all of this directly from JavaScript.
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CSV_PATH = ROOT / "vulndb" / "index.csv"
-OUT_PATH = Path(__file__).resolve().parent / "data" / "index.json"
+VULNS_ROOT = ROOT / "vulndb" / "vulns"
+API_DIR = Path(__file__).resolve().parent / "api" / "v1"
+SEARCH_PATH = API_DIR / "search.json"
+META_PATH = API_DIR / "meta.json"
 ATTACK_SURFACE_PATH = ROOT / "config" / "attack_surface.yaml"
+
+REPOSITORY = os.environ.get("VULNWATCH_REPOSITORY", "proshiba/vuln-intel-agent")
+REF = os.environ.get("VULNWATCH_REF", "main")
+SITE_URL = os.environ.get("VULNWATCH_SITE_URL", "https://proshiba.github.io/vuln-intel-agent/")
 
 FIELDS = [
     "id",
@@ -34,8 +51,20 @@ FIELDS = [
     "upd",
     "asc",
     "lag",
+    "prefix",
 ]
 FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
+
+
+def _load_webapi():
+    """Import the shared API helpers, which live in the package."""
+
+    from vulnwatch.webapi import build_meta, encode_prefixes, scan_entry_prefixes
+
+    return build_meta, encode_prefixes, scan_entry_prefixes
+
+
+build_meta, encode_prefixes, scan_entry_prefixes = _load_webapi()
 
 
 def _load_classifier():
@@ -140,10 +169,19 @@ def main() -> int:
                     _day(r["updated_at"]),
                     asc,
                     lag,
+                    -1,  # placeholder; replaced with the prefix-dictionary index below
                 ]
             )
     # Newest first so the default view shows the most recently updated entries.
     rows.sort(key=lambda row: row[10], reverse=True)
+    # Tell callers where each entry's detail YAML lives. Vendor x year/month combinations
+    # repeat heavily, so a dictionary keeps this nearly free once gzipped.
+    prefix_dictionary, encoded = encode_prefixes(
+        [str(row[0]) for row in rows], scan_entry_prefixes(VULNS_ROOT)
+    )
+    prefix_column = FIELDS.index("prefix")
+    for row, prefix_index in zip(rows, encoded, strict=True):
+        row[prefix_column] = prefix_index
     labels = classifier.labels() if classifier is not None else {}
     # Keep only classes that actually occur, in the config's declared order.
     surfaces = {cid: labels.get(cid, cid) for cid in labels if cid in surface_counts}
@@ -161,12 +199,28 @@ def main() -> int:
         },
         "stats": {**stats, "priorities": prio_counts, "surfaces": surface_counts},
         "attack_surfaces": surfaces,
+        "prefix_dictionary": prefix_dictionary,
         "vendors": sorted(vendors_set),
         "rows": rows,
     }
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), "utf-8")
-    print(f"wrote {OUT_PATH} ({OUT_PATH.stat().st_size / 1_000_000:.1f} MB, {stats['total']} rows)")
+    generated_at = datetime.now(UTC).isoformat(timespec="seconds")
+    payload["generated_at"] = generated_at
+    meta = build_meta(
+        generated_at=generated_at,
+        repository=REPOSITORY,
+        site_url=SITE_URL,
+        ref=REF,
+        stats={**stats, "priorities": prio_counts, "surfaces": surface_counts},
+        fields=FIELDS,
+        flags=payload["flags"],
+        attack_surfaces=surfaces,
+    )
+    API_DIR.mkdir(parents=True, exist_ok=True)
+    SEARCH_PATH.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), "utf-8")
+    META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+    size = SEARCH_PATH.stat().st_size / 1_000_000
+    print(f"wrote {SEARCH_PATH} ({size:.1f} MB, {stats['total']} rows)")
+    print(f"wrote {META_PATH}")
     return 0
 
 

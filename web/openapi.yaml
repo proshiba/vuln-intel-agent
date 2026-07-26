@@ -1,0 +1,259 @@
+openapi: 3.1.0
+info:
+  title: vulnwatch 静的 JSON API
+  version: "1.0.0"
+  description: |
+    脆弱性台帳を GitHub Pages から配信する読み取り専用の静的 API です。
+
+    サーバは動いていません。すべての応答はビルド時に生成された静的ファイル、
+    または GitHub のリポジトリ上に存在するファイルそのものです。
+    そのためクエリパラメータによる絞り込みはできません。検索は `search.json`
+    を取得したうえで、呼び出し側（ブラウザの JavaScript など）で行います。
+
+    GitHub Pages と raw.githubusercontent.com はいずれも
+    `Access-Control-Allow-Origin: *` を返すため、別オリジンのポータルから
+    JavaScript で直接読み取れます。ポータルへの iframe 埋め込みも可能で、
+    埋め込んだビューアとは postMessage で連携できます（README を参照）。
+  license:
+    name: 収集元各社の原典に従う
+
+servers:
+  - url: https://proshiba.github.io/vuln-intel-agent
+    description: GitHub Pages
+  - url: https://raw.githubusercontent.com/proshiba/vuln-intel-agent/main
+    description: 台帳の実ファイル（個別脆弱性の詳細）
+
+paths:
+  /api/v1/meta.json:
+    get:
+      summary: API の discovery 文書
+      description: |
+        まずこれを読みます。件数、スキーマ版、検索索引の場所、個別詳細の URL の
+        組み立て方が入っています。複数リポジトリを横断する場合は、各リポジトリの
+        この文書を集めることで対象を把握できます。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+
+  /api/v1/search.json:
+    get:
+      summary: 全件の検索索引
+      description: |
+        台帳全件を、表示・検索・絞り込み・並び替えに必要な列だけに圧縮した索引です。
+        列は `fields`、状態フラグは `flags` のビットマスク、詳細ファイルの配置は
+        `prefix_dictionary` への添字で表されます。gzip 配信で約 1.8MB です。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchIndex"
+
+  /vulndb/vulns/{prefix}/{vuln_id}.yaml:
+    get:
+      summary: 個別脆弱性の詳細（YAML）
+      servers:
+        - url: https://raw.githubusercontent.com/proshiba/vuln-intel-agent/main
+      description: |
+        台帳エントリそのものです。事前生成はしておらず、リポジトリ上のファイルを
+        直接配信します。索引より内容が厚く（修正バージョン、全出典 URL、OSINT
+        報告の根拠文など）、常に最新です。
+
+        `prefix` は `search.json` の `prefix_dictionary[row[13]]` から得ます。
+      parameters:
+        - name: prefix
+          in: path
+          required: true
+          description: "`<ベンダー>/<年>/<月>` 形式の配置。例: `ivanti/2026/07`"
+          schema:
+            type: string
+        - name: vuln_id
+          in: path
+          required: true
+          description: "内部 ID。例: `VW-2026-0001`"
+          schema:
+            type: string
+            pattern: '^VW-\d{4}-\d{4,}$'
+      responses:
+        "200":
+          description: OK
+          content:
+            application/yaml:
+              schema:
+                $ref: "#/components/schemas/VulnRecord"
+        "404":
+          description: 該当エントリなし
+
+components:
+  schemas:
+    Meta:
+      type: object
+      required: [schema_version, api_version, generated_at, endpoints, stats]
+      properties:
+        schema_version: { type: integer }
+        api_version: { type: string, examples: ["v1"] }
+        name: { type: string }
+        description: { type: string }
+        generated_at: { type: string, format: date-time }
+        repository: { type: string, format: uri }
+        site_url: { type: string, format: uri }
+        license: { type: string }
+        cors:
+          type: boolean
+          description: 別オリジンから読めるかどうか。
+        endpoints:
+          type: object
+          properties:
+            meta: { type: string }
+            search: { type: string }
+            detail_url_template:
+              type: string
+              description: |
+                `{prefix}` と `{vuln_id}` を差し替えて詳細 URL を組み立てます。
+              examples:
+                - https://raw.githubusercontent.com/proshiba/vuln-intel-agent/main/vulndb/vulns/{prefix}/{vuln_id}.yaml
+        search_index:
+          type: object
+          properties:
+            fields:
+              type: array
+              items: { type: string }
+            flags:
+              type: object
+              additionalProperties: { type: integer }
+            prefix_field: { type: string }
+            detail_format: { type: string, examples: ["yaml"] }
+        attack_surfaces:
+          type: object
+          description: 初期アクセス面の分類 ID とその表示名。
+          additionalProperties: { type: string }
+        stats:
+          $ref: "#/components/schemas/Stats"
+
+    Stats:
+      type: object
+      properties:
+        total: { type: integer, description: 台帳の総エントリ数 }
+        kev: { type: integer, description: CISA KEV 掲載 }
+        exploited: { type: integer, description: 悪用確認済み }
+        poc: { type: integer, description: PoC 公開 }
+        fixed: { type: integer, description: 修正あり }
+        ransomware: { type: integer, description: ランサムウェア悪用確認 }
+        kev_lag: { type: integer, description: KEV 掲載より早く悪用を観測できた件数 }
+        priorities:
+          type: object
+          additionalProperties: { type: integer }
+        surfaces:
+          type: object
+          description: 初期アクセス面の分類ごとの件数。
+          additionalProperties: { type: integer }
+
+    SearchIndex:
+      type: object
+      required: [fields, flags, rows]
+      properties:
+        generated_at: { type: string, format: date-time }
+        fields:
+          type: array
+          items: { type: string }
+          description: |
+            `rows` の各要素の並び。
+            `[id, cve, vendors, products, title, cvss, sev, prio, flags,
+              pub, upd, asc, lag, prefix]`
+        flags:
+          type: object
+          description: |
+            `rows[i][8]` のビットマスクの意味。
+            fixed=1, poc=2, exploited=4, kev=8, ransomware=16
+          additionalProperties: { type: integer }
+        stats:
+          $ref: "#/components/schemas/Stats"
+        attack_surfaces:
+          type: object
+          additionalProperties: { type: string }
+        prefix_dictionary:
+          type: array
+          items: { type: string }
+          description: |
+            詳細ファイルの配置パターン。`rows[i][13]` がこの配列への添字です
+            （-1 は配置不明）。実データでは 139 種類程度しかないため、
+            辞書化により索引サイズはほとんど増えません。
+        vendors:
+          type: array
+          items: { type: string }
+        rows:
+          type: array
+          description: 配列の配列。列の意味は `fields` を参照。
+          items:
+            type: array
+            items:
+              anyOf:
+                - type: string
+                - type: number
+                - type: "null"
+
+    VulnRecord:
+      type: object
+      description: |
+        台帳エントリ。CVE または内部 ID 単位で、複数ソースの観測を集約したものです。
+      properties:
+        vuln_id: { type: string }
+        cve: { type: [string, "null"] }
+        title: { type: string }
+        vendors: { type: array, items: { type: string } }
+        products: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, withdrawn] }
+        published_at: { type: string, format: date-time }
+        fixed: { type: boolean }
+        fixed_versions: { type: array, items: { type: string } }
+        poc_public: { type: boolean }
+        known_exploited:
+          type: boolean
+          description: 悪用が確認されたか。一度立つと取り消しません。
+        exploitation_observed_at: { type: string, format: date-time }
+        exploitation_source:
+          type: [string, "null"]
+          description: |
+            最初に悪用を裏づけた出典。`cisa_kev` / `osint` / ベンダーの source ID。
+        cisa_kev: { type: boolean }
+        kev_listed_at: { type: [string, "null"], format: date-time }
+        kev_lag_days:
+          type: [integer, "null"]
+          description: |
+            CISA KEV 掲載より何日早く悪用を観測できたか。KEV 以外の出典が先に
+            観測できた場合にのみ入ります。
+        ransomware_use: { type: boolean }
+        exploitation_reports:
+          type: array
+          description: OSINT のリサーチ記事が報じた実悪用。悪用確認の候補です。
+          items:
+            type: object
+            properties:
+              cve: { type: string }
+              source_id: { type: string }
+              url: { type: string, format: uri }
+              title: { type: [string, "null"] }
+              evidence: { type: string, description: 根拠となった記事中の文 }
+              observed_at: { type: string, format: date-time }
+        cvss_score: { type: [number, "null"] }
+        vendor_severity: { type: [string, "null"] }
+        priority: { type: string, enum: [P1, P2, P3, INFO] }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              canonical_id: { type: string }
+              source_id: { type: string }
+              vendor: { type: string }
+              url: { type: string, format: uri }
+              status: { type: string }
+              first_seen_at: { type: string, format: date-time }
+              last_seen_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
