@@ -37,22 +37,33 @@ GET https://proshiba.github.io/vuln-intel-agent/api/v1/meta.json
 
 ```jsonc
 {
-  "schema_version": 1,
-  "api_version": "v1",
+  "spec_version": "1.0",                 // ポータル連携仕様のバージョン
+  "app_id": "vuln-intel-agent",          // ポータル内で一意
+  "name": "脆弱性インテル",                // 日本語表示名
   "generated_at": "2026-07-26T03:49:37+00:00",
+  "site_url": "https://proshiba.github.io/vuln-intel-agent/",   // 末尾スラッシュあり
   "cors": true,
+  "capabilities": ["iframe", "deep-link", "postmessage"],
+  "embed_css": "header.top { display: none !important; } …",    // iframe 埋め込み時に注入
+  "deep_links": {
+    "cve": "#/vuln/{detail}",            // {detail} にエンティティの detail が入る
+    "report": "#/vuln/{detail}"
+  },
   "endpoints": {
     "meta": "api/v1/meta.json",
-    "search": "api/v1/search.json",
+    "search": "api/v1/search.json",      // 仕様 v1 のエンティティ配列
+    "viewer_index": "api/v1/viewer.json",// 列指向版（ビューア専用の拡張）
+    "documentation": "INTEGRATION.md",
+    "openapi": "openapi.yaml",
     "detail_url_template": "https://raw.githubusercontent.com/proshiba/vuln-intel-agent/main/vulndb/vulns/{prefix}/{vuln_id}.yaml"
   },
   "search_index": { "fields": [...], "flags": {...}, "detail_format": "yaml" },
   "attack_surfaces": { "vpn_gateway": "VPN/リモートアクセス", ... },
-  "stats": { "total": 42171, "kev": 688, "exploited": 1173, ... }
+  "stats": { "total": 42171, "cve": 36377, "report": 5794, "kev": 688, ... }
 }
 ```
 
-`endpoints.meta` と `endpoints.search` は `site_url` からの相対パスです。
+`endpoints.*` と `deep_links.*` は `site_url` からの相対パスです（`detail_url_template` のみ絶対 URL）。
 
 複数リポジトリを横断する場合は、**各リポジトリの `meta.json` を集めて回る**のが基本形になります。`name`・`stats`・`generated_at` を見れば、対象と鮮度を一覧できます。
 
