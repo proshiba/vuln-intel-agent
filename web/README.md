@@ -8,6 +8,7 @@
 |---|---|
 | `index.html` | 単一ファイルのビューア本体（CSS・JS を内包）。`api/v1/search.json` を取得して描画します。 |
 | `build_index.py` | 台帳から静的 JSON API（`api/v1/`）を生成します。 |
+| `INTEGRATION.md` | 外部連携ガイド。ポータル側の実装者・エージェント向け。 |
 | `openapi.yaml` | API の OpenAPI 3.1 定義。 |
 | `api/v1/meta.json` | 生成物（Git 管理対象外）。件数・スキーマ版・詳細 URL の組み立て方。 |
 | `api/v1/search.json` | 生成物（Git 管理対象外）。全件の検索索引。 |
@@ -24,6 +25,12 @@
 - 更新日・公開日・CVSS・優先度での並び替え
 - 行クリックで詳細（製品、深刻度、公開・更新日、NVD / OSV への参照リンク）を展開
 - ライト / ダークの自動切り替え、スマートフォン幅への対応
+
+## 外部連携（ポータル埋め込み・API 利用）
+
+**別サイトから組み込む場合は [`INTEGRATION.md`](INTEGRATION.md) を参照してください。** 公開 URL・列の意味・postMessage の仕様・実装時の注意（深刻度が正規化されていない、優先度が現在すべて `INFO` である等）を、それ単体で実装できる形にまとめてあります。公開後は <https://proshiba.github.io/vuln-intel-agent/INTEGRATION.md> からも取得でき、`api/v1/meta.json` の `endpoints.documentation` からも辿れます。
+
+以下はこのリポジトリを保守する側向けの概要です。
 
 ## 静的 JSON API
 
