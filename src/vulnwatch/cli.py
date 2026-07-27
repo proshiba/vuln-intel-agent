@@ -19,6 +19,13 @@ from vulnwatch.report import generate_report, write_agent_report_summary
 from vulnwatch.schemas import export_schemas
 from vulnwatch.storage import publish_tree
 from vulnwatch.summarizers import summarize_tree
+from vulnwatch.threatintel import (
+    ThreatIntelStore,
+    VulnThreatActivity,
+    export_csv,
+    export_misp,
+    export_stix,
+)
 from vulnwatch.validation import validate_config, validate_tree
 
 app = typer.Typer(no_args_is_help=True)
@@ -157,6 +164,58 @@ def source_test(
             indent=2,
         )
     )
+
+
+threat_app = typer.Typer(no_args_is_help=True)
+app.add_typer(threat_app, name="threat")
+
+
+@threat_app.command("apply")
+def threat_apply(
+    findings: Annotated[Path, typer.Argument(help="調査結果のJSONファイル")],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """調査で得た攻撃活動（キャンペーン・マルウェア・IOC）を台帳へ反映します。
+
+    JSON は VulnThreatActivity の配列です。保存時に出典URLの有無、値の正規化、
+    非公開アドレスの排除が検証され、条件を満たさない指標は取り込まれません。
+    """
+
+    payload = json.loads(findings.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        payload = [payload]
+    store = ThreatIntelStore(repository)
+    applied = 0
+    indicators = 0
+    for item in payload:
+        activity = VulnThreatActivity.model_validate(item)
+        merged = store.apply(activity)
+        applied += 1
+        indicators += len(merged.indicators)
+    typer.echo(f"applied {applied} vulnerabilities, {indicators} indicators")
+
+
+@threat_app.command("export")
+def threat_export(
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """台帳の攻撃活動を CSV / STIX / MISP へ書き出します。"""
+
+    store = ThreatIntelStore(repository)
+    activities = list(store.iter_activities())
+    now = datetime.now(UTC)
+    store.exports_root.mkdir(parents=True, exist_ok=True)
+    (store.exports_root / "iocs.csv").write_text(export_csv(activities), encoding="utf-8")
+    (store.exports_root / "iocs.stix.json").write_text(
+        json.dumps(export_stix(activities, generated_at=now), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (store.exports_root / "iocs.misp.json").write_text(
+        json.dumps(export_misp(activities, generated_at=now), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    total = sum(len(activity.indicators) for activity in activities)
+    typer.echo(f"exported {total} indicators from {len(activities)} vulnerabilities")
 
 
 if __name__ == "__main__":

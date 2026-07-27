@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from vulnwatch.webapi import (
     build_entities,
     build_meta,
     build_search_document,
+    build_threat_entities,
     encode_prefixes,
     expand_flags,
     scan_entry_prefixes,
@@ -225,7 +227,71 @@ def test_meta_carries_the_spec_v1_fields() -> None:
     assert meta["site_url"].endswith("/")
     assert meta["endpoints"]["search"] == "api/v1/search.json"
     assert meta["endpoints"]["viewer_index"] == "api/v1/viewer.json"
-    # deep_links must cover every entity type this app emits.
+    # Vulnerability entities open in the bundled viewer. Malware/actor/IOC entities are
+    # emitted purely so the portal can join them across sources; this app has no page for
+    # them, so it deliberately declares no deep link rather than one that lands nowhere.
     assert set(meta["deep_links"]) == {"cve", "report"}
     assert meta["deep_links"]["cve"] == "#/vuln/{detail}"
     assert "iframe" in meta["capabilities"]
+
+
+# --- 攻撃活動エンティティ（ポータルの横串用） --------------------------------
+
+
+def _activity(**over: object):
+    from vulnwatch.threatintel import (
+        IndicatorRole,
+        IndicatorType,
+        ThreatCampaign,
+        ThreatIndicator,
+        VulnThreatActivity,
+    )
+
+    base: dict[str, object] = {
+        "vuln_id": "VW-2026-0001",
+        "cve": "CVE-2026-1281",
+        "campaigns": [
+            ThreatCampaign(name="Example", actors=["APT Example"], malware=["ValleyRAT"])
+        ],
+        "indicators": [
+            ThreatIndicator(
+                type=IndicatorType.DOMAIN,
+                value="c2.example.test",
+                role=IndicatorRole.C2,
+                source_id="unit42",
+                url="https://unit42.paloaltonetworks.com/example",
+            )
+        ],
+        "updated_at": datetime(2026, 7, 27, tzinfo=UTC),
+    }
+    base.update(over)
+    return VulnThreatActivity(**base)  # type: ignore[arg-type]
+
+
+def test_threat_activity_becomes_joinable_entities() -> None:
+    entities = {e["type"]: e for e in build_threat_entities([_activity()])}
+
+    assert set(entities) == {"malware", "actor", "ioc.domain"}
+    # The portal folds actor/malware names to lower-case alphanumerics before joining,
+    # so the value must already be in that form to match other sources.
+    assert entities["malware"]["value"] == "valleyrat"
+    assert entities["malware"]["label"] == "ValleyRAT"
+    assert entities["actor"]["value"] == "aptexample"
+    assert entities["ioc.domain"]["value"] == "c2.example.test"
+    assert entities["ioc.domain"]["attrs"]["出典"].startswith("https://")
+    assert entities["ioc.domain"]["attrs"]["関連CVE"] == ["CVE-2026-1281"]
+
+
+def test_the_same_indicator_across_vulnerabilities_is_one_entity() -> None:
+    entities = build_threat_entities(
+        [_activity(), _activity(vuln_id="VW-2026-0002", cve="CVE-2026-9999")]
+    )
+
+    domains = [e for e in entities if e["type"] == "ioc.domain"]
+    assert len(domains) == 1
+    # Both vulnerabilities are recorded on the shared entity.
+    assert domains[0]["attrs"]["関連CVE"] == ["CVE-2026-1281", "CVE-2026-9999"]
+
+
+def test_no_threat_entities_without_activity() -> None:
+    assert build_threat_entities([]) == []
