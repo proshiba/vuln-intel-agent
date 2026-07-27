@@ -96,6 +96,8 @@ AI 要約を手動で指定する場合は、Critical 表と「悪用済み・Po
 | `vulnwatch validate --root staging` | 生成ツリー、収集完全性、レポート、台帳を検証します。 |
 | `vulnwatch publish --root staging --repository .` | 検証済み生成物をリポジトリ直下の公開用パスへ同期します。 |
 | `vulnwatch source test <source-id> --fixture <file>` | fixture を使って特定ソースのパース結果を確認します。 |
+| `vulnwatch threat apply <findings.json>` | 調査で得た攻撃活動（キャンペーン・マルウェア・IOC）を台帳へ反映します。 |
+| `vulnwatch threat export` | 攻撃活動を `vulndb/exports/` へ CSV / STIX / MISP で書き出します。 |
 
 ## 収集されるデータ
 

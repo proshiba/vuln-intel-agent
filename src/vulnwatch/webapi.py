@@ -18,6 +18,7 @@ JSON より内容も厚い。
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -229,3 +230,61 @@ def build_search_document(*, generated_at: str, entities: list[dict[str, Any]]) 
         "generated_at": generated_at,
         "entities": entities,
     }
+
+
+def build_threat_entities(activities: list[Any]) -> list[dict[str, Any]]:
+    """攻撃活動を、ポータルが横串に使えるエンティティへ展開する。
+
+    ポータルは `value` の一致だけでソースをまたいで束ねるため、マルウェア名・攻撃者名・
+    IOC を個別のエンティティとして出す。仕様の正規化規則（actor/malware は小文字化して
+    英数字以外を除去、ioc は refang 済みの小文字）に合わせた値を `value` に入れる。
+
+    同じ値が複数の脆弱性に現れる場合は 1 エンティティにまとめ、関連 CVE を attrs に持たせる。
+    """
+
+    entities: dict[str, dict[str, Any]] = {}
+
+    def upsert(entity_type: str, key: str, label: str, value: str, attrs: dict[str, Any]) -> None:
+        entity = entities.get(key)
+        if entity is None:
+            entities[key] = {
+                "type": entity_type,
+                "id": key,
+                "label": label,
+                "value": value,
+                "detail": label,
+                "attrs": attrs,
+            }
+            return
+        related = entity["attrs"].setdefault("関連CVE", [])
+        for cve in attrs.get("関連CVE", []):
+            if cve not in related:
+                related.append(cve)
+
+    for activity in activities:
+        reference = activity.cve or activity.vuln_id
+        for name in activity.malware_names:
+            slug = _join_slug(name)
+            upsert("malware", f"malware:{slug}", name, slug, {"関連CVE": [reference]})
+        for name in activity.actor_names:
+            slug = _join_slug(name)
+            upsert("actor", f"actor:{slug}", name, slug, {"関連CVE": [reference]})
+        for indicator in activity.indicators:
+            upsert(
+                f"ioc.{indicator.type}",
+                f"ioc:{indicator.type}:{indicator.value}",
+                indicator.value,
+                indicator.value,
+                {
+                    "関連CVE": [reference],
+                    "役割": str(indicator.role),
+                    "出典": indicator.url,
+                },
+            )
+    return list(entities.values())
+
+
+def _join_slug(name: str) -> str:
+    """アクター名・マルウェア名の結合キー。仕様どおり小文字化して英数字以外を除く。"""
+
+    return re.sub(r"[^a-z0-9]", "", name.casefold())

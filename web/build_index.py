@@ -60,27 +60,33 @@ FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
 def _load_webapi():
     """Import the shared API helpers, which live in the package."""
 
+    from vulnwatch.threatintel import ThreatIntelStore
     from vulnwatch.webapi import (
         build_entities,
         build_meta,
         build_search_document,
+        build_threat_entities,
         encode_prefixes,
         scan_entry_prefixes,
     )
 
     return (
+        ThreatIntelStore,
         build_entities,
         build_meta,
         build_search_document,
+        build_threat_entities,
         encode_prefixes,
         scan_entry_prefixes,
     )
 
 
 (
+    ThreatIntelStore,
     build_entities,
     build_meta,
     build_search_document,
+    build_threat_entities,
     encode_prefixes,
     scan_entry_prefixes,
 ) = _load_webapi()
@@ -224,10 +230,13 @@ def main() -> int:
     }
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")
     payload["generated_at"] = generated_at
-    entity_counts = {
+    activities_for_stats = list(ThreatIntelStore(ROOT).iter_activities())
+    entity_counts: dict[str, int] = {
         "cve": sum(1 for row in rows if row[1]),
         "report": sum(1 for row in rows if not row[1]),
     }
+    for entity in build_threat_entities(activities_for_stats):
+        entity_counts[entity["type"]] = entity_counts.get(entity["type"], 0) + 1
     meta = build_meta(
         generated_at=generated_at,
         repository=REPOSITORY,
@@ -239,6 +248,10 @@ def main() -> int:
         attack_surfaces=surfaces,
     )
     entities = build_entities(rows, FIELDS, payload["flags"], prefix_dictionary)
+    # 攻撃活動（マルウェア・攻撃者・IOC）はポータルの横串の要になるため、索引に載せる。
+    activities = list(ThreatIntelStore(ROOT).iter_activities())
+    threat_entities = build_threat_entities(activities)
+    entities.extend(threat_entities)
     search = build_search_document(generated_at=generated_at, entities=entities)
 
     API_DIR.mkdir(parents=True, exist_ok=True)
@@ -247,7 +260,10 @@ def main() -> int:
     META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     for label, path in (("viewer", VIEWER_PATH), ("search", SEARCH_PATH)):
         print(f"wrote {path} ({path.stat().st_size / 1_000_000:.1f} MB, {label})")
-    print(f"wrote {META_PATH} ({len(entities)} entities from {stats['total']} rows)")
+    print(
+        f"wrote {META_PATH} ({len(entities)} entities from {stats['total']} rows, "
+        f"{len(threat_entities)} from threat activity)"
+    )
     return 0
 
 
