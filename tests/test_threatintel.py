@@ -157,9 +157,7 @@ def test_merge_keeps_earlier_observations_and_folds_duplicates() -> None:
 def test_store_merges_into_an_existing_entry(tmp_path: Path) -> None:
     store = ThreatIntelStore(tmp_path)
     store.apply(_activity())
-    store.apply(
-        _activity(indicators=[_indicator(type=IndicatorType.SHA256, value="cd" * 32)])
-    )
+    store.apply(_activity(indicators=[_indicator(type=IndicatorType.SHA256, value="cd" * 32)]))
 
     loaded = store.load("VW-2026-0001")
     assert loaded is not None
