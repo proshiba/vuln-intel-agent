@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "a8e5cf2d8b58441983ee057a1ae095085a07eabeea4ace0ec520f24898cd10a2",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-20\"], \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"## Impact\\n\\nNuxt server islands accept props via the `/__nuxt_island/` endpoint. When an application has a server island component that forwards props directly into Vue's dynamic component resolution (`<component :is>`, `resolveDynamicComponent`, or `h()`), an attacker can pass a plain string value (rather than a component definition) to instantiate any globally-registered Vue component or any native HTML element.\\n\\nFor example:\\n```json\\n{ \\\"as\\\": \\\"SomeGlobalComponent\\\" }\\n```\\n\\n...resolves and renders `SomeGlobalComponent` if it is globally registered, even though the attacker should only be able to drive props for the island's declared component. Similarly, `{ \\\"as\\\": \\\"iframe\\\" }` renders an `<iframe>` element.\\n\\nUnlike the primary RCE vector (GHSA-9473-5f9j-94wq), this does **not** require `vue.runtimeCompiler` to be enabled. A plain string prop is sufficient to trigger component resolution. The `template`/`render` key guard that addresses the RCE vector does not block plain string values.\\n\\nSome component libraries expose a polymorphic `as` / `asChild` prop that forwards its value into `<component :is>`; `@nuxt/ui` (via `reka-ui`) is a widely used example. An application is affected if such a component receives the attacker-controlled value inside a server island. Note this does not require explicit prop forwarding: island props the island component does not declare fall through as attributes onto its single root element, so an island whose root is a `reka-ui` / `@nuxt/ui` component receives the attacker's `as` value implicitly. Unlike the RCE vector, no `vue.runtimeCompiler` is required, which makes this vector reachable in more configurations. These libraries are not themselves vulnerable; they are noted only because they commonly provide the dynamic-component sink. Installing `@nuxt/ui` does not by itself register any component as a server island: the application must define the island (a `.server.vue` file).\\n\\n## Mitigating factors\\n\\n- Exploitation requires a server island component that puts an attacker-controlled value onto a dynamic-component path (`<component :is>`, `resolveDynamicComponent`, `h()`, or a polymorphic `as` / `asChild` prop), either explicitly or via attribute fallthrough when the island's root is such a component.\\n- Reachable components are limited to what is actually in the island app's global registry. In a default pages-enabled app that is `RouterView` and `RouterLink` (both registered globally by the pages router plugin, which runs even in component islands), plus any `components/global/` component and any component a module registers globally. `RouterLink` in particular renders an attacker-influenced `<a>` (and, because an island that declares no props forwards all props, `to` and other `RouterLink` props ride the same fallthrough). Vue built-ins (`Transition`, `KeepAlive`, `Teleport`, `Suspense`) and Nuxt auto-imports (`ClientOnly`, `NuxtLink`, `NuxtPage`, etc.) are NOT in the island app's global registry and cannot be resolved this way; an unresolved name instead renders as a native HTML element (the element-injection half of this issue).\\n- Declaring the props an island accepts, or setting `inheritAttrs: false` on it, prevents an undeclared `as` from falling through to a polymorphic root and neutralizes this vector.\\n- Arbitrary JavaScript execution is not possible through this vector (no `template`/`render` compilation).\\n- Island component names are constrained to the build-time component registry; an attacker cannot resolve arbitrary components.\\n\\n## Affected versions\\n\\nNuxt `>=3.1.0 <3.21.10` and `>=4.0.0 <4.5.1`, with component islands active. The island prop-forwarding behavior has existed since server islands were introduced in v3.1.0, and this vector does not depend on `vue.runtimeCompiler`. Nuxt 2 is not affected.\\n\\nNote the patch (below) closes the implicit attribute-fallthrough path, which is the majority case. An island that *explicitly* forwards an untrusted prop into dynamic component resolution (or forwards it under a prop name other than `as`) remains the application's responsibility in every version; see Workarounds.\\n\\n## Patches\\n\\nFixed in `nuxt@4.5.1` and `nuxt@3.21.10`. Patched releases reject a top-level `as` island prop (HTTP 400 at the `/__nuxt_island/` endpoint). This closes the implicit path: island props an island does not declare fall through as attributes onto its single root, so a top-level `as` would otherwise reach a polymorphic root component's `as` prop (the `reka-ui` / `@nuxt/ui` convention) and drive dynamic component resolution without the author binding it. Rejecting the top-level `as` prop blocks that fallthrough while leaving nested data and other prop names untouched.\\n\\nThe framework deliberately does not attempt to block every case: it cannot safely tell a string used as data from one used as a component selector, and it has no island-local hook into Vue's `h()` or `resolveDynamicComponent()`. An island that explicitly forwards an untrusted value into `<component :is>` / `h()` / `resolveDynamicComponent()`, or that forwards it under a different polymorphic prop name, is therefore not covered by the patch and must follow the guidance below. The Nuxt documentation now warns against this.\\n\\n## Workarounds\\n\\nUpgrade to `nuxt@4.5.1` or `nuxt@3.21.10`. That upgrade also removes the related object-prop RCE (GHSA-9473-5f9j-94wq). In addition, in any version:\\n\\n1. Do not forward island props into `<component :is>`, `resolveDynamicComponent`, or `h()`. Map an untrusted discriminator through a closed allowlist of imported component definitions instead of passing the raw prop value.\\n2. Declare the props an island accepts, or set `inheritAttrs: false` on it, so request input cannot fall through to a polymorphic root component.\\n3. Avoid registering sensitive components globally that could leak information if instantiated by an attacker.\\n\\n## References\\n\\n- [Nuxt Server Islands documentation](https://nuxt.com/docs/guide/directory-structure/components#server-islands)\\n- [Vue Security Guide](https://vuejs.org/guide/best-practices/security.html)\\n\\n\\n\\n\", \"ghsa_id\": \"GHSA-48hr-524c-v5w3\", \"html_url\": \"https://github.com/nuxt/nuxt/security/advisories/GHSA-48hr-524c-v5w3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-48hr-524c-v5w3\"}], \"private_fork\": null, \"published_at\": \"2026-07-27T10:24:12Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/28706372?v=4\", \"events_url\": \"https://api.github.com/users/danielroe/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/danielroe/followers\", \"following_url\": \"https://api.github.com/users/danielroe/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/danielroe/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/danielroe\", \"id\": 28706372, \"login\": \"danielroe\", \"node_id\": \"MDQ6VXNlcjI4NzA2Mzcy\", \"organizations_url\": \"https://api.github.com/users/danielroe/orgs\", \"received_events_url\": \"https://api.github.com/users/danielroe/received_events\", \"repos_url\": \"https://api.github.com/users/danielroe/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/danielroe/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/danielroe/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/danielroe\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Unauthorized Component Instantiation via Server Island Props in Nuxt\", \"updated_at\": \"2026-07-27T10:24:12Z\", \"url\": \"https://api.github.com/repos/nuxt/nuxt/security-advisories/GHSA-48hr-524c-v5w3\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"patched_versions\": \"4.5.1\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.5.1\"}, {\"package\": {\"ecosystem\": \"npm\", \"name\": \"nuxt\"}, \"patched_versions\": \"3.21.10\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.1.0, < 3.21.10\"}], \"withdrawn_at\": null}",
+  "canonical_id": "nuxt:ghsa-48hr-524c-v5w3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nuxt: >= 3.1.0, < 3.21.10",
+      "nuxt: >= 4.0.0, < 4.5.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 4.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [
+      "nuxt: 3.21.10",
+      "nuxt: 4.5.1"
+    ],
+    "mitigations": [],
+    "products": [
+      "nuxt"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-27T19:37:39.512477Z",
+  "provenance": {
+    "content_sha256": "ab83428586bf0e3a00c10dc16f143fd15ce6893d0225bb123ee0b20596ad74c1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-27T10:24:12Z",
+  "schema_version": 1,
+  "source_id": "nuxt_github",
+  "source_url": "https://github.com/nuxt/nuxt/security/advisories/GHSA-48hr-524c-v5w3",
+  "status": "active",
+  "title": "Unauthorized Component Instantiation via Server Island Props in Nuxt",
+  "updated_at": "2026-07-27T10:24:12Z",
+  "vendor": "Nuxt",
+  "vendor_advisory_id": "GHSA-48hr-524c-v5w3"
+}
