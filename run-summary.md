@@ -1,28 +1,27 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-07-27T19:32:48.668579+00:00
-- Completed: 2026-07-27T19:41:13.839038+00:00
+- Started: 2026-07-28T19:32:47.835622+00:00
+- Completed: 2026-07-28T19:41:25.471422+00:00
 
 ## Changes
 
-- new: 113
-- quarantined: 2
-- unchanged: 2057
-- updated: 169
+- new: 181
+- quarantined: 1
+- unchanged: 2138
+- updated: 162
 
 ## Priorities
 
-- INFO: 2341
+- INFO: 2482
 
 ## Source outcomes
 
-- failed: 2
+- failed: 1
 - not_modified: 78
 - partial: 0
-- success: 86
+- success: 87
 
 ## Unsuccessful sources
 
 - osv (failed, osv_global): records=0, parse_failures=0 — osv_global: osv: OSV modified index is not sorted newest-first
-- progress (failed, html): records=0, parse_failures=0 — html: progress: HTTP 502 from https://docs.progress.com/bundle/moveit-automation-release-notes-2026/page/Fixed-Issues-2026.html

@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4313217?v=4\", \"events_url\": \"https://api.github.com/users/Lougarou/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Lougarou/followers\", \"following_url\": \"https://api.github.com/users/Lougarou/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Lougarou/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Lougarou\", \"id\": 4313217, \"login\": \"Lougarou\", \"node_id\": \"MDQ6VXNlcjQzMTMyMTc=\", \"organizations_url\": \"https://api.github.com/users/Lougarou/orgs\", \"received_events_url\": \"https://api.github.com/users/Lougarou/received_events\", \"repos_url\": \"https://api.github.com/users/Lougarou/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Lougarou/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Lougarou/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Lougarou\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54632\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-755\", \"name\": \"Improper Handling of Exceptional Conditions\"}], \"description\": \"### Impact\\n\\nA single malformed inbound UDP packet on the RTP/ICE socket can remotely terminate an active RTP or WebRTC media session. The packet receive handler indexes packet (and STUN attribute) bytes without sufficient length checks and throws, and the UDP receive loop converted any such exception into a channel `Close` rather than dropping the packet. One small, unauthenticated packet therefore ends the media session.\\n\\nThis is reachable during ICE connectivity checks — before the DTLS handshake and before any STUN `MESSAGE-INTEGRITY` verification. Because the RTP/ICE port is shared/advertised in the ICE candidates, a peer or on-path attacker can reach it (exposure is lower for a blind off-path attacker that must first learn the ephemeral port). Impact is availability only — no loss of confidentiality or integrity.\\n\\n### Affected versions\\n\\nNuGet package `SIPSorcery` `<= 10.0.8`.\\n\\n### Patches\\n\\nFixed in `10.0.9`.\\n\\n### Root cause\\n\\nTwo issues combine:\\n\\n1. **Unchecked indexing of untrusted bytes.**\\n   - `RTPChannel.OnRTPPacketReceived` read `packet[1]` after only checking the packet was non-empty, so a 1-byte packet threw `IndexOutOfRangeException`.\\n   - `STUNAttribute.ParseMessageAttributes` passed a `null`/short value to the typed attribute parsers, and `STUNXORAddressAttribute` (and the non-XOR `STUNAddressAttribute`) then read `attributeValue[1]`, `AsSpan(2)` and `AsSpan(4)` with no length check. A STUN message carrying an `XOR-MAPPED-ADDRESS`, `XOR-PEER-ADDRESS` or `XOR-RELAYED-ADDRESS` attribute of length 0–7 threw (`NullReferenceException` for length 0, `IndexOutOfRangeException`/`ArgumentOutOfRangeException` for 1–7).\\n\\n2. **The UDP receive loop closed the channel on any exception.** The catch-all in `UdpReceiver.EndReceiveFrom` called `Close()`, tearing down the channel, instead of dropping the offending packet and continuing. This was systemic: any unhandled exception anywhere in the packet pipeline (STUN, RTP, RTCP, DTLS demux, SRTP, TURN) became a channel teardown.\\n\\n### Fix\\n\\n- `UdpReceiver.EndReceiveFrom`: a non-socket exception now logs and drops the single packet and re-arms the receive loop (matching the existing `SIPUDPChannel` behaviour), instead of closing the channel. Genuine socket failures continue to be handled separately.\\n- `RTPChannel.OnRTPPacketReceived`: requires a minimum packet length (`RTPHeader.MIN_HEADER_LEN`) before indexing the discriminator bytes.\\n- STUN parsing: `ParseMessageAttributes` validates each attribute value length and skips malformed/truncated attributes; the XOR/address attribute constructors validate length defensively; `ParseSTUNMessage` no longer dereferences a null attribute list.\\n\\nRegression tests were added covering the 1-byte packet (channel stays open and remains usable), short/zero-length XOR address attributes (0–7 bytes), and truncated STUN messages.\\n\\n### Workarounds\\n\\nNone within the library short of upgrading. Restricting the RTP/ICE port to known peers at the network layer reduces exposure but does not eliminate it, since a negotiating peer can still trigger the condition.\\n\\n### Credit\\n\\nResponsibly reported by Lokhesh Ujhoodha.\", \"ghsa_id\": \"GHSA-28gm-jrmw-xx93\", \"github_reviewed_at\": \"2026-07-28T17:01:19Z\", \"html_url\": \"https://github.com/advisories/GHSA-28gm-jrmw-xx93\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-28gm-jrmw-xx93\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54632\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T17:01:19Z\", \"references\": [\"https://github.com/sipsorcery-org/sipsorcery/security/advisories/GHSA-28gm-jrmw-xx93\", \"https://github.com/sipsorcery-org/sipsorcery/pull/1677\", \"https://github.com/sipsorcery-org/sipsorcery/commit/bdb76cbc0c7216e3126f743fb78e8525af56cea2\", \"https://github.com/advisories/GHSA-28gm-jrmw-xx93\"], \"repository_advisory_url\": \"https://api.github.com/repos/sipsorcery-org/sipsorcery/security-advisories/GHSA-28gm-jrmw-xx93\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sipsorcery-org/sipsorcery\", \"summary\": \"SIPSorcery: Malformed UDP packet on the RTP/ICE socket can remotely terminate a media session (DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T17:01:22Z\", \"url\": \"https://api.github.com/advisories/GHSA-28gm-jrmw-xx93\", \"vulnerabilities\": [{\"first_patched_version\": \"10.0.9\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"SIPSorcery\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 10.0.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-28gm-jrmw-xx93",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "SIPSorcery: <= 10.0.8"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54632"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "SIPSorcery"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-28T19:37:11.934026Z",
+  "provenance": {
+    "content_sha256": "10be5d102f59b13e95e25beef8642c45ec7590b9c96ddd7eb74188e0187dd7b4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T17:01:19Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-28gm-jrmw-xx93",
+  "status": "active",
+  "title": "SIPSorcery: Malformed UDP packet on the RTP/ICE socket can remotely terminate a media session (DoS)",
+  "updated_at": "2026-07-28T17:01:22Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-28gm-jrmw-xx93"
+}

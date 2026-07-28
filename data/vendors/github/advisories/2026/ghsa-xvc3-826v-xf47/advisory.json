@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/63073556?v=4\", \"events_url\": \"https://api.github.com/users/0x7d8/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0x7d8/followers\", \"following_url\": \"https://api.github.com/users/0x7d8/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0x7d8/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0x7d8\", \"id\": 63073556, \"login\": \"0x7d8\", \"node_id\": \"MDQ6VXNlcjYzMDczNTU2\", \"organizations_url\": \"https://api.github.com/users/0x7d8/orgs\", \"received_events_url\": \"https://api.github.com/users/0x7d8/received_events\", \"repos_url\": \"https://api.github.com/users/0x7d8/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0x7d8/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0x7d8/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0x7d8\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61609\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\nThe `authentication` rate limiter used for the login and two-factor checkpoint endpoints applies a single global bucket shared by every client, instead of keying per IP or per account. An unauthenticated attacker sending ~10 requests per minute from one IP exhausts the shared bucket and causes HTTP 429 for every user on every IP attempting to log in or complete 2FA, for as long as the attack is sustained. This is a trivially triggered, unauthenticated, panel-wide authentication denial of service.\\n\\n### Details\\nIn `app/Providers/RouteServiceProvider::configureRateLimiting()` the limiter is defined as:\\n\\n```php\\nRateLimiter::for('authentication', function (Request $request) {\\n    if ($request->route()->named('auth.post.forgot-password')) {\\n        return Limit::perMinute(2)->by($request->ip());\\n    }\\n\\n    return Limit::perMinute(10);\\n});\\n```\\n\\nThe forgot-password branch is correctly scoped with `->by($request->ip())`. The fall-through return, which covers `POST /auth/login` and `POST /auth/login/checkpoint` (see `routes/auth.php`, the `throttle:authentication` group), omits `->by()` entirely.\\n\\nFor a named limiter, Laravel 11 derives the cache key as `md5($limiterName . $limit->key)` (`Illuminate\\\\Routing\\\\Middleware\\\\ThrottleRequests::handleRequestUsingNamedLimiter`). `Limit::perMinute(10)` is constructed with an empty `key`, so the resolved key is `md5('authentication')`, a constant identical for every incoming request. All clients therefore contend for one shared counter rather than one counter per source.\\n\\nTwo factors make this worse:\\n- `throttle:authentication` is registered as group middleware in `routes/auth.php`, so it increments before the route-level `recaptcha` middleware on `POST /auth/login`. Requests count toward the limit regardless of reCAPTCHA outcome.\\n- `POST /auth/login/checkpoint` has no reCAPTCHA at all, giving an attacker a clean, low-cost way to fill the shared bucket with malformed requests.\\n\\nOnce the 10/minute global limit is hit, the throttle returns 429 to all subsequent requests on those endpoints until the one-minute window decays. Repeating the burst each minute holds the panel in a permanent locked-out state for all legitimate users.\\n\\n### PoC\\n1. Stand up a default Pterodactyl panel.\\n2. From a single attacker IP, exhaust the shared bucket via the checkpoint endpoint (no reCAPTCHA):\\n\\n```bash\\nfor i in $(seq 1 11); do\\n  curl -s -o /dev/null -w \\\"%{http_code}\\\\n\\\" \\\\\\n    -X POST https://panel.example.com/auth/login/checkpoint \\\\\\n    -H 'Content-Type: application/json' \\\\\\n    -H 'X-Requested-With: XMLHttpRequest' \\\\\\n    -d '{\\\"confirmation_token\\\":\\\"x\\\",\\\"authentication_code\\\":\\\"000000\\\"}'\\ndone\\n```\\n\\nRequests 1-10 return a normal 4xx (validation/auth failure); request 11 returns `429 Too Many Requests`.\\n\\n3. From a completely different IP and a valid account, attempt a normal login:\\n\\n```bash\\ncurl -s -o /dev/null -w \\\"%{http_code}\\\\n\\\" \\\\\\n  -X POST https://panel.example.com/auth/login \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -H 'X-Requested-With: XMLHttpRequest' \\\\\\n  -d '{\\\"user\\\":\\\"valid@example.com\\\",\\\"password\\\":\\\"correct-horse\\\"}'\\n```\\n\\nThis returns `429` despite being a different IP, different account, and valid credentials. Looping step 2 once per minute keeps every user locked out indefinitely.\\n\\n### Impact\\nThis is an unauthenticated availability attack against authentication. Any internet-facing Pterodactyl panel can be made unusable for all users (login and 2FA verification both blocked) by a single low-bandwidth attacker, with no credentials, no privileges, and no user interaction. Administrators are locked out alongside regular users, hampering incident response. The forgot-password endpoint is unaffected because it is correctly keyed per IP.\\n\\nSuggested fix: key the fall-through limit by request source, at minimum:\\n\\n```php\\nreturn Limit::perMinute(10)->by($request->ip());\\n```\\n\\nIdeally combine the IP with the submitted identifier for login (e.g. `->by($request->ip() . '|' . (string) $request->input('user'))`) and the IP plus confirmation token for the checkpoint, so brute-force protection per account is preserved while removing the shared global bucket.\\n\\n### Disclaimer\\nThis report was written by AI, the bug itself was found and confirmed by the reporter.\", \"ghsa_id\": \"GHSA-xvc3-826v-xf47\", \"github_reviewed_at\": \"2026-07-28T14:57:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-xvc3-826v-xf47\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xvc3-826v-xf47\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61609\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T14:57:59Z\", \"references\": [\"https://github.com/pterodactyl/panel/security/advisories/GHSA-xvc3-826v-xf47\", \"https://github.com/advisories/GHSA-xvc3-826v-xf47\"], \"repository_advisory_url\": \"https://api.github.com/repos/pterodactyl/panel/security-advisories/GHSA-xvc3-826v-xf47\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pterodactyl/panel\", \"summary\": \"Pterodactyl's shared global rate-limit key on login and 2FA checkpoint enables unauthenticated panel-wide authentication lockout (DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T14:58:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-xvc3-826v-xf47\", \"vulnerabilities\": [{\"first_patched_version\": \"1.13.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pterodactyl/panel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.7.0, <= 1.12.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xvc3-826v-xf47",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pterodactyl/panel: >= 1.7.0, <= 1.12.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61609"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pterodactyl/panel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-28T19:37:11.975190Z",
+  "provenance": {
+    "content_sha256": "76b023efe7a2773004c3e282a765f1dca4fa17c19bb773482d5d0e324bfa28f4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T14:57:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xvc3-826v-xf47",
+  "status": "active",
+  "title": "Pterodactyl's shared global rate-limit key on login and 2FA checkpoint enables unauthenticated panel-wide authentication lockout (DoS)",
+  "updated_at": "2026-07-28T14:58:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xvc3-826v-xf47"
+}
