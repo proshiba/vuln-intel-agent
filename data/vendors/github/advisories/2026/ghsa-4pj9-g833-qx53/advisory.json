@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/12426?v=4\", \"events_url\": \"https://api.github.com/users/edevil/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/edevil/followers\", \"following_url\": \"https://api.github.com/users/edevil/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/edevil/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/edevil\", \"id\": 12426, \"login\": \"edevil\", \"node_id\": \"MDQ6VXNlcjEyNDI2\", \"organizations_url\": \"https://api.github.com/users/edevil/orgs\", \"received_events_url\": \"https://api.github.com/users/edevil/received_events\", \"repos_url\": \"https://api.github.com/users/edevil/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/edevil/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/edevil/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/edevil\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46428\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:L/SI:L/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-295\", \"name\": \"Improper Certificate Validation\"}], \"description\": \"### Summary\\nAn inverted-boolean bug in lettre's `boring-tls` integration silently\\ndisables TLS hostname verification for callers using the default (strict)\\nconfiguration. An on-path attacker presenting any chain-valid certificate\\nfor any domain can intercept SMTP submission, including PLAIN/LOGIN\\ncredentials and message contents, against any lettre user built with the\\n`boring-tls` feature. Other TLS backends (`native-tls`, `rustls`) are\\nunaffected.\\n\\n### Details\\nboring's `SslConnectorBuilder::set_verify_hostname(bool)` /\\n`verify_hostname(bool)` API takes a *verify* flag — `true` means enforce\\nhostname verification, `false` means skip it. (Boring docs:\\nhttps://docs.rs/boring/latest/boring/ssl/struct.ConnectConfiguration.html#method.set_verify_hostname)\\nlettre's `TlsParametersBuilder` exposes the opposite-named flag\\n`accept_invalid_hostnames: bool` — `true` means *accept invalid* (skip\\nverification), `false` means verify. lettre passes this flag directly to\\nboring at both TLS-upgrade sites, inverting the semantics:\\nsrc/transport/smtp/client/net.rs:202 (sync)\\n    .verify_hostname(*accept_invalid_hostnames)\\nsrc/transport/smtp/client/async_net.rs:377 (async)\\n    config.set_verify_hostname(accept_invalid_hostnames);\\nConcrete behaviour under `boring-tls`:\\n  * accept_invalid_hostnames = false  (the strict default)\\n      → set_verify_hostname(false)  → hostname verification SKIPPED\\n        (wrong; the caller asked for strict verification)\\n  * accept_invalid_hostnames = true   (explicit opt-in to \\\"dangerous\\\")\\n      → set_verify_hostname(true)   → hostname verification ENFORCED\\n        (wrong; the caller opted into accepting any name)\\nBoring's own warning on `set_verify_hostname`:\\n    \\\"If hostname verification is not used, *any* valid certificate for\\n    *any* site will be trusted for use from any other. This introduces\\n    a significant vulnerability to man-in-the-middle attacks.\\\"\\n`native-tls` (src/transport/smtp/client/tls.rs:355) uses\\n`danger_accept_invalid_hostnames(self.accept_invalid_hostnames)`, whose\\nflag name and semantics match lettre's — unaffected. `rustls` uses a\\nseparate verifier path — unaffected.\\nThe bug was introduced in PR #797 (\\\"Add support for boring TLS\\\"), commit\\n985fa7e, first released in v0.10.1, and persists unchanged through v0.11.21\\n(latest). Zero existing tests cover `accept_invalid_hostnames` end-to-end\\nwith any backend, which is why the inversion has gone undetected.\\nFix: negate the flag at both call sites. Two-line patch:\\n    -    .verify_hostname(*accept_invalid_hostnames)\\n    +    .verify_hostname(!*accept_invalid_hostnames)\\n    -    config.set_verify_hostname(accept_invalid_hostnames);\\n    +    config.set_verify_hostname(!accept_invalid_hostnames);\\nI have the patch ready locally and can push to a private fork if a\\ncollaborative fix branch is preferred.\\n\\n### PoC\\nSetup (any lettre version >= v0.10.1, built with the `boring-tls`\\nfeature, default-strict configuration):\\n1. Generate a TLS cert for any hostname the attacker controls, e.g.\\n   `attacker.example`, signed by any CA in the client's trust store\\n   (e.g. a Let's Encrypt cert is sufficient).\\n2. Stand up an attacker SMTP server on the network path between the\\n   lettre client and the intended MX. Have it present the\\n   `attacker.example` cert on STARTTLS or implicit TLS.\\n3. Use lettre with default-strict TLS to send to the real MX hostname,\\n   e.g. `mail.example.com`:\\n       use lettre::transport::smtp::client::{Tls, TlsParameters};\\n       use lettre::{AsyncSmtpTransport, Tokio1Executor, Message};\\n       let tls = TlsParameters::builder(\\\"mail.example.com\\\".to_owned())\\n           .build_boring()\\n           .unwrap();\\n       let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(\\n               \\\"mail.example.com\\\",\\n           )?\\n           .tls(Tls::Required(tls))\\n           .build();\\n       mailer.send(message).await?;     // succeeds against attacker\\nExpected with hostname verification: handshake fails because the\\npresented leaf cert's SAN does not match `mail.example.com`.\\nActual on `boring-tls`: handshake succeeds. lettre proceeds with the\\nSMTP transaction, sending MAIL FROM, RCPT TO, message body, and any\\nconfigured SMTP AUTH credentials to the attacker.\\nSymmetric inverse PoC (proves the inversion, not just a missing check):\\nconfigure `.dangerous_accept_invalid_hostnames(true)` and try to connect\\nto a server whose cert SAN matches the connect domain. With the bug,\\nthe handshake *fails* because lettre passes `true` to `verify_hostname`\\nand boring rejects... actually wait, it succeeds (SAN matches). Better\\ninverse demonstration: connect to a server whose cert SAN matches the\\nconnect domain with `accept_invalid_hostnames=true`, then connect to a\\nmismatched-SAN server with the same flag — the latter is rejected,\\nproving the flag is inverted (the user opted into accepting any name,\\nyet lettre enforces strict verification).\\nA reproducer cargo project can be produced on request.\\n\\n### Impact\\nWho is impacted: any lettre user who\\n  1. enables the `boring-tls` feature, AND\\n  2. relies on default-strict hostname verification\\n     (i.e. does NOT call `.dangerous_accept_invalid_hostnames(true)`).\\nThis is the entire \\\"I want strict TLS\\\" population on `boring-tls`. They\\nget the opposite of what they asked for: a TLS handshake that ignores\\nhostname mismatch.\\nExploitation: an attacker on the network path between the lettre client\\nand the target SMTP server, holding any chain-valid TLS certificate\\n(e.g. a free Let's Encrypt cert for a domain the attacker owns), can\\npresent that certificate when the lettre client connects to the intended\\nMX. boring accepts the handshake, lettre proceeds, and the attacker\\ngains read/write access to:\\n  * SMTP envelope (MAIL FROM, RCPT TO)\\n  * Message bodies, attachments, headers\\n  * Any SMTP AUTH credentials (PLAIN, LOGIN, CRAM-MD5, etc.)\\n  * Any DKIM signatures and DMARC alignment downstream depends on\\n    can be inspected and selectively dropped\\nConfidentiality and integrity impact: High. Availability impact: None\\ndirect (the attacker can choose to forward or drop, but the bug itself\\ndoes not deny service).\\nCloudflare's email-fwdr independently identified and mitigated this\\ndownstream by promoting a previously-metric-only post-handshake SAN\\ncheck to a hard error (fix landed 2026-05-12). Because we're mitigated\\ndownstream, we are not on a publication clock; we are reporting so the\\nupstream fix can ship and other lettre+boring-tls deployments can stop\\nrelying on per-caller workarounds. Happy to coordinate on embargo\\ntiming.\\nAffected versions: every released lettre version with `boring-tls`\\nsupport, from v0.10.1 (PR #797, commit 985fa7e) through v0.11.21\\n(latest). No prior advisory or fix.\\nSuggested fix: two-line negation of the flag at the boring call sites\\n(see Details). Patch is ready locally and can be attached to a private\\ncollaboration fork.\", \"epss\": {\"percentage\": 0.00191, \"percentile\": 0.09012}, \"ghsa_id\": \"GHSA-4pj9-g833-qx53\", \"github_reviewed_at\": \"2026-07-28T14:29:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-4pj9-g833-qx53\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4pj9-g833-qx53\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46428\"}], \"nvd_published_at\": \"2026-07-20T16:17:01Z\", \"published_at\": \"2026-07-28T14:29:10Z\", \"references\": [\"https://github.com/lettre/lettre/security/advisories/GHSA-4pj9-g833-qx53\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-46428\", \"https://github.com/lettre/lettre/commit/f5efffc88360dbdbfcef80f465e42d5bce68ca35\", \"https://github.com/lettre/lettre/releases/tag/v0.11.22\", \"https://rustsec.org/advisories/RUSTSEC-2026-0141.html\", \"https://github.com/advisories/GHSA-4pj9-g833-qx53\"], \"repository_advisory_url\": \"https://api.github.com/repos/lettre/lettre/security-advisories/GHSA-4pj9-g833-qx53\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/lettre/lettre\", \"summary\": \"lettre has TLS hostname verification disabled when using Boring TLS backend\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T14:29:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-4pj9-g833-qx53\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.22\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"lettre\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.10.1, < 0.11.22\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4pj9-g833-qx53",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lettre: >= 0.10.1, < 0.11.22"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46428"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:N/SC:L/SI:L/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lettre"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-28T19:37:11.983831Z",
+  "provenance": {
+    "content_sha256": "b139e8f53a4aa56c82d5860c09023dccf126da017ac4e393dcea0285e58cc223",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T14:29:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4pj9-g833-qx53",
+  "status": "active",
+  "title": "lettre has TLS hostname verification disabled when using Boring TLS backend",
+  "updated_at": "2026-07-28T14:29:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4pj9-g833-qx53"
+}

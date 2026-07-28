@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/53492292?v=4\", \"events_url\": \"https://api.github.com/users/mike197312/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mike197312/followers\", \"following_url\": \"https://api.github.com/users/mike197312/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mike197312/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mike197312\", \"id\": 53492292, \"login\": \"mike197312\", \"node_id\": \"MDQ6VXNlcjUzNDkyMjky\", \"organizations_url\": \"https://api.github.com/users/mike197312/orgs\", \"received_events_url\": \"https://api.github.com/users/mike197312/received_events\", \"repos_url\": \"https://api.github.com/users/mike197312/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mike197312/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mike197312/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mike197312\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54588\", \"cvss\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"### Summary\\nPoweradmin v4.3.2 uses the attacker-controlled `HTTP_HOST` request header as the\\n  authoritative source for building callback URLs in its OIDC, SAML, and logout\\n  authentication flows without any validation. An unauthenticated attacker can poison\\n  the `redirect_uri` sent to the Identity Provider, causing the IdP to redirect the\\n  victim's authorization code to an attacker-controlled server - resulting in full\\n  account takeover with no credentials required.\\n\\n  Three independent code paths are affected:\\n\\n  - **Primary (Critical):** `OidcService::getCallbackUrl()` - `redirect_uri` poisoning\\n  - **Secondary (High):** `SamlConfigurationService::getBaseUrl()` - SAML ACS/SLO URL poisoning\\n  - **Tertiary (Medium):** `LogoutController::getBaseUrl()` - post-logout redirect poisoning\\n\\n### Details\\n\\n***Root Cause***\\n\\n  The application constructs absolute URLs dynamically from `HTTP_HOST` rather than\\n  from a trusted configured base URL. The header is fully client-controlled and is not\\n  validated before use in any authentication flow.\\n\\n  Poweradmin's own codebase contains the correct pattern -\\n  `DocsController::getValidatedHost()` (line 244) calls `isValidHostname()` before\\n  using the value - but this was never applied to authentication flows.\\n\\n  ### Primary: `lib/Application/Service/OidcService.php` (~line 460)\\n\\n  ```php\\n  private function getCallbackUrl(): string\\n  {\\n      $scheme = $this->detectScheme();\\n      // HTTP_HOST taken directly with zero validation\\n      $host = $this->request->getServerParam('HTTP_HOST', 'localhost');\\n      $basePrefix = $this->configManager->get('interface', 'base_url_prefix', '');\\n      return $scheme . '://' . $host . $basePrefix . '/oidc/callback';\\n  }\\n\\n  HTTP_HOST is embedded verbatim as redirect_uri in the OAuth 2.0 authorization\\n  request sent to the IdP. HTTP_X_FORWARDED_PROTO is similarly used unvalidated\\n  for scheme detection.\\n\\n  Secondary: lib/Application/Service/SamlConfigurationService.php (~line 134)\\n\\n  private function getBaseUrl(): string\\n  {\\n      $configuredBaseUrl = $this->configManager->get('interface', 'base_url', '');\\n      if (!empty($configuredBaseUrl)) {\\n          return rtrim($configuredBaseUrl, '/');  // safe path - rarely configured\\n      }\\n      // Falls through on every default installation\\n      $host = $_SERVER['HTTP_HOST'] ?? 'localhost';\\n      ...\\n      return $scheme . '://' . $host . $prefix;\\n  }\\n\\n  Used to construct SAML ACS URL, SLO URL, and entity ID - all poisonable via Host header.\\n  The safe fallback only activates when interface.base_url is explicitly set, which is\\n  optional and empty by default.\\n\\n  Tertiary: lib/Application/Controller/LogoutController.php (~line 272)\\n\\n  Same $_SERVER['HTTP_HOST'] pattern used for post-logout redirect URL construction.\\n\\n### PoC\\nEnvironment: Poweradmin v4.3.2, Docker, PHP 8.2, OIDC enabled, interface.base_url empty (default).\\n\\n  docker exec poweradmin-container php -r \\\"\\n  require '/app/vendor/autoload.php';\\n  putenv('PA_CONFIG_PATH=/app/config/settings.php');\\n\\n  use PowerAdmin\\\\Application\\\\Service\\\\OidcService;\\n  use PowerAdmin\\\\Infrastructure\\\\Configuration\\\\ConfigurationManager;\\n  use PowerAdmin\\\\Infrastructure\\\\Web\\\\Request;\\n\\n  \\\\$_SERVER['HTTP_HOST'] = 'attacker.com';\\n  \\\\$_SERVER['HTTPS']     = '';\\n\\n  \\\\$config      = ConfigurationManager::getInstance();\\n  \\\\$request     = new Request();\\n  \\\\$oidcService = new OidcService(\\\\$config, \\\\$request);\\n  \\\\$authUrl     = \\\\$oidcService->initiateAuthFlow('test');\\n\\n  parse_str(parse_url(\\\\$authUrl, PHP_URL_QUERY), \\\\$p);\\n  echo 'redirect_uri: ' . urldecode(\\\\$p['redirect_uri']) . PHP_EOL;\\n\\n  if (str_contains(\\\\$p['redirect_uri'], 'attacker.com')) {\\n      echo '[CONFIRMED] Host header injection successful' . PHP_EOL;\\n  }\\n  \\\"\\n\\n  Output:\\n\\n  redirect_uri: http://attacker.com/oidc/callback\\n\\n  [CONFIRMED] Host header injection successful - redirect_uri contains attacker.com\\n\\n  The redirect_uri in the authorization request sent to the Identity Provider is\\n  http://attacker.com/oidc/callback. The victim's authorization code will be\\n  delivered to this URL upon successful authentication.\\n\\n  Note on PKCE: PKCE does not mitigate this attack. The attacker initiates the\\n  flow themselves and controls both code_challenge and code_verifier.\\n\\n### Impact\\nDirect Impact\\n\\n  An attacker who can send a request with a spoofed Host header - directly or via a\\n  misconfigured reverse proxy (proxy_set_header Host $http_host is the nginx default) -\\n  can steal any user's authorization code and gain full authenticated access to Poweradmin.\\n  No credentials, malware, or prior access required.\\n\\n  DNS Infrastructure Impact\\n\\n  Poweradmin manages PowerDNS. A compromised administrator account grants full DNS zone\\n  control, enabling:\\n\\n  - MX hijacking - redirect all inbound email to attacker's mail server; intercept\\n  password reset emails and 2FA codes for any third-party service registered with the domain\\n  - SPF/DKIM manipulation - add attacker's IP to SPF, publish attacker's DKIM key →\\n  send cryptographically authenticated email as the organization (passes DMARC)\\n  - Subdomain takeover - point mail., vpn., app. to attacker infrastructure\\n  - SSL certificate theft - remove CAA records and complete ACME DNS-01 challenge\\n  to obtain wildcard certificate *.company.com from any CA\\n  - Full domain delegation - delegate subdomains to attacker nameserver\\n\\n  CVSS v3.1\\n\\n  ┌──────────────────────────────────┬─────────────────────────────────────┬──────────────┐\\n  │             Scenario             │               Vector                │    Score     │\\n  ├──────────────────────────────────┼─────────────────────────────────────┼──────────────┤\\n  │ Standard deployment              │ AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:L │ 8.2 High     │\\n  ├──────────────────────────────────┼─────────────────────────────────────┼──────────────┤\\n  │ Proxy misconfigured ($http_host) │ AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:L │ 9.3 Critical │\\n  └──────────────────────────────────┴─────────────────────────────────────┴──────────────┘\\n\\n  Recommended Fix\\n\\n  Immediate mitigation: Set interface.base_url in config/settings.php -\\n  activates the safe branch in SamlConfigurationService immediately.\\n\\n  Code fix for OidcService: Prefer the configured base URL; if absent, validate\\n  HTTP_HOST via filter_var($hostname, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME)\\n  before use - the same pattern already implemented in DocsController::getValidatedHost().\", \"epss\": {\"percentage\": 0.00312, \"percentile\": 0.23575}, \"ghsa_id\": \"GHSA-3735-5339-xfwx\", \"github_reviewed_at\": \"2026-07-28T16:40:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-3735-5339-xfwx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3735-5339-xfwx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54588\"}], \"nvd_published_at\": \"2026-06-23T23:16:49Z\", \"published_at\": \"2026-07-28T16:40:05Z\", \"references\": [\"https://github.com/poweradmin/poweradmin/security/advisories/GHSA-3735-5339-xfwx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54588\", \"https://github.com/poweradmin/poweradmin/releases/tag/v4.2.4\", \"https://github.com/poweradmin/poweradmin/releases/tag/v4.3.3\", \"https://github.com/advisories/GHSA-3735-5339-xfwx\"], \"repository_advisory_url\": \"https://api.github.com/repos/poweradmin/poweradmin/security-advisories/GHSA-3735-5339-xfwx\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/poweradmin/poweradmin\", \"summary\": \"Poweradmin has Host Header Injection in OIDC redirect_uri, SAML ACS/SLO URL, and Logout Redirect Construction.\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T16:40:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-3735-5339-xfwx\", \"vulnerabilities\": [{\"first_patched_version\": \"4.2.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"poweradmin/poweradmin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.2.4\"}, {\"first_patched_version\": \"4.3.3\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"poweradmin/poweradmin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.3.0, < 4.3.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3735-5339-xfwx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "poweradmin/poweradmin: < 4.2.4",
+      "poweradmin/poweradmin: >= 4.3.0, < 4.3.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54588"
+    ],
+    "cvss_score": 9.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "poweradmin/poweradmin"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-28T19:37:11.937136Z",
+  "provenance": {
+    "content_sha256": "ae9e22f805ea7b229f62eae53d427d774d4377383cd450c0f673965d37598f7d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T16:40:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3735-5339-xfwx",
+  "status": "active",
+  "title": "Poweradmin has Host Header Injection in OIDC redirect_uri, SAML ACS/SLO URL, and Logout Redirect Construction.",
+  "updated_at": "2026-07-28T16:40:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3735-5339-xfwx"
+}
