@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75063323?v=4\", \"events_url\": \"https://api.github.com/users/ashrexon/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ashrexon/followers\", \"following_url\": \"https://api.github.com/users/ashrexon/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ashrexon/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ashrexon\", \"id\": 75063323, \"login\": \"ashrexon\", \"node_id\": \"MDQ6VXNlcjc1MDYzMzIz\", \"organizations_url\": \"https://api.github.com/users/ashrexon/orgs\", \"received_events_url\": \"https://api.github.com/users/ashrexon/received_events\", \"repos_url\": \"https://api.github.com/users/ashrexon/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ashrexon/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ashrexon/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ashrexon\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52838\", \"cvss\": {\"score\": 2.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 2.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n \\nEasy!Appointments allows administrators to define a custom \\\"booking disabled\\\" message through the booking settings page. That value is stored in the `disable_booking_message` setting via a rich-text editor and later passed directly to the public `booking_message` view without escaping or sanitization:\\n \\n```php\\n<p><?= vars('message_text') ?></p>\\n```\\n \\nAn authenticated administrator can store HTML or JavaScript in this field, enable disabled-booking mode, and trigger stored XSS in every unauthenticated visitor who opens the public booking page.\\n \\n---\\n \\n## Root Cause — Step by Step Code Flow\\n \\n### Step 1 — Rich text editor value stored without sanitization\\nThe booking settings page collects the message value from the Trumbowyg rich-text editor and submits it as raw HTML:\\n \\n```javascript\\n// assets/js/pages/booking_settings.js line 61-92\\nbookingSettings.push({\\n    name: 'disable_booking_message',\\n    value: $disableBookingMessage.trumbowyg('html'),\\n});\\n```\\n \\n### Step 2 — Settings controller saves value verbatim\\nThe backend settings controller persists the submitted value without any HTML sanitization:\\n \\n```php\\n// application/controllers/Booking_settings.php line 76-104\\n$this->settings_model->save($setting);\\n```\\n \\n### Step 3 — Public booking controller forwards stored value to view\\nWhen booking is disabled, the public booking controller loads the stored message and passes it directly to the view:\\n \\n```php\\n// application/controllers/Booking.php line 113-132\\n$disable_booking_message = setting('disable_booking_message');\\n \\nhtml_vars([\\n    'message_text' => $disable_booking_message,\\n]);\\n```\\n \\n### Step 4 — Public view renders value without escaping\\nThe booking message view emits the value raw using PHP's short echo tag with no escaping:\\n \\n```php\\n// application/views/pages/booking_message.php line 10-12\\n<p><?= vars('message_text') ?></p>\\n```\\n \\nNo `htmlspecialchars()`, no sanitization, no template escaping is applied at any point in this rendering path.\\n \\n---\\n \\n## Proof of Concept\\n \\n**Step 1 — Store malicious disabled-booking message as admin:**\\n \\n```http\\nPOST /index.php/booking_settings/save HTTP/1.1\\nHost: 127.0.0.1:18094\\nCookie: <admin-session-cookie>\\nContent-Type: application/x-www-form-urlencoded\\n \\ncsrf_token=<token>&booking_settings[0][name]=disable_booking&booking_settings[0][value]=1&booking_settings[1][name]=disable_booking_message&booking_settings[1][value]=<img src=x onerror=alert(\\\"easyappointments xss by ashrexon\\\")>\\n```\\n \\nResponse: `200 OK` — settings saved successfully\\n \\n**Step 2 — Unauthenticated visitor opens public booking page:**\\n \\n```http\\nGET / HTTP/1.1\\nHost: 127.0.0.1:18094\\n(no authentication)\\n```\\n \\n**Observed response fragment:**\\n```html\\n<p><img src=x onerror=alert(\\\"easyappointments xss by ashrexon\\\")></p>\\n```\\n \\n**Observed browser behavior:**\\n \\n`alert(\\\"easyappointments xss by ashrexon\\\")` executes immediately on page load with no authentication required. Confirmed via browser screenshot attached as comment.\\n \\n**Runtime verification result:**\\n```\\nadmin login ok\\nsettings save ok\\npayload reflected on public page\\nPASS\\n```\\n \\n---\\n \\n## Real World Impact\\n \\nEasy!Appointments is deployed as a public-facing appointment booking surface for businesses, clinics, and service providers. An administrator can abuse the disabled-booking message — a customer-facing feature intended for maintenance or holiday notices — to plant JavaScript that executes in every visitor's browser when the booking page is disabled. This can be used to:\\n \\n- Execute arbitrary JavaScript in visitor browsers on the trusted booking domain\\n- Phish visitor credentials or personal information during booking downtime\\n- Deface the public booking page during maintenance or outage windows\\n- Redirect visitors to attacker-controlled sites\\n---\\n \\n## Suggested Fix\\n \\nEscape the message value before rendering in the view:\\n \\n```php\\n// application/views/pages/booking_message.php\\n<p><?= e(vars('message_text')) ?></p>\\n```\\n \\nAlternatively apply a strict HTML sanitizer (allowing only safe formatting tags, no event handlers or script elements) to the `disable_booking_message` value before storage or before rendering, to preserve intended rich-text formatting while preventing script injection.\\n \\n---\\n \\n## Reporter\\n**Yash Shendge (ashrexon)**\\n2026-05-25\", \"epss\": {\"percentage\": 0.00184, \"percentile\": 0.08195}, \"ghsa_id\": \"GHSA-996f-334j-67g7\", \"github_reviewed_at\": \"2026-07-29T16:30:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-996f-334j-67g7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-996f-334j-67g7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52838\"}], \"nvd_published_at\": \"2026-07-14T16:17:00Z\", \"published_at\": \"2026-07-29T16:30:09Z\", \"references\": [\"https://github.com/alextselegidis/easyappointments/security/advisories/GHSA-996f-334j-67g7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-52838\", \"https://github.com/alextselegidis/easyappointments/commit/629a0415f54f75556c17f4f5d9c77fda1fdbdeae\", \"https://github.com/alextselegidis/easyappointments/releases/tag/1.6.0\", \"https://github.com/advisories/GHSA-996f-334j-67g7\"], \"repository_advisory_url\": \"https://api.github.com/repos/alextselegidis/easyappointments/security-advisories/GHSA-996f-334j-67g7\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/alextselegidis/easyappointments\", \"summary\": \"Easy!Appointments disable_booking_message rendered as raw HTML on public booking page — Stored XSS\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-29T16:30:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-996f-334j-67g7\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"alextselegidis/easyappointments\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.5.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-996f-334j-67g7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "alextselegidis/easyappointments: <= 1.5.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-52838"
+    ],
+    "cvss_score": 2.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:C/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "alextselegidis/easyappointments"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.277318Z",
+  "provenance": {
+    "content_sha256": "d19040e6888086db6ddd1ec8d4affad6a8a01d3fdceff39b9968f7ea1584e605",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-29T16:30:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-996f-334j-67g7",
+  "status": "active",
+  "title": "Easy!Appointments disable_booking_message rendered as raw HTML on public booking page — Stored XSS",
+  "updated_at": "2026-07-29T16:30:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-996f-334j-67g7"
+}

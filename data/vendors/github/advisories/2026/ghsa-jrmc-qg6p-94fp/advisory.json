@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25558174?v=4\", \"events_url\": \"https://api.github.com/users/wodzen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/wodzen/followers\", \"following_url\": \"https://api.github.com/users/wodzen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/wodzen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/wodzen\", \"id\": 25558174, \"login\": \"wodzen\", \"node_id\": \"MDQ6VXNlcjI1NTU4MTc0\", \"organizations_url\": \"https://api.github.com/users/wodzen/orgs\", \"received_events_url\": \"https://api.github.com/users/wodzen/received_events\", \"repos_url\": \"https://api.github.com/users/wodzen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/wodzen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/wodzen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/wodzen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54080\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-1325\", \"name\": \"Improperly Controlled Sequential Memory Allocation\"}], \"description\": \"## Summary\\n\\n**Description**\\n\\nA PostScript-interpreter-driven Denial of Service (CWE-1325) vulnerability in veraPDF allows a remote attacker to exhaust validator memory or CPU by submitting a PDF whose Type 0 font `/Encoding` (or any `/ToUnicode`) is a CMap stream containing attacker-supplied PostScript. veraPDF reuses its CMap parser as a general PostScript interpreter and exposes the unguarded `array N` allocation operator and the `for` control operator with no zero-increment guard. This affects all current versions of veraPDF-parser.\\n\\n## Details\\n\\nThe vulnerability resides in veraPDF-parser. CMap streams referenced as a Type 0 font's `/Encoding` (or any font's `/ToUnicode`) are parsed by `CMapParser` (veraPDF-parser/src/main/java/org/verapdf/pd/font/cmap/CMapParser.java), which extends `PSParser`. Tokens that are not the small CMap-specific keyword set (`begincodespacerange`, `bfchar`, `cidchar`, ...) fall through to `PSObject.execute` (veraPDF-parser/src/main/java/org/verapdf/parser/postscript/PSObject.java), which dispatches generic PostScript operators implemented in `PSOperator` (veraPDF-parser/src/main/java/org/verapdf/parser/postscript/PSOperator.java).\\n\\nTwo operators in that interpreter take their bound from the PDF and apply no validation:\\n1. `array` at PSOperator.java:536-547 pops the top number from the operand stack and immediately calls `COSArray.construct(arraySize)`, then loops `arraySize` times appending `COSObject.getEmpty()`. `COSArray.construct(int)` calls `new ArrayList<>(arraySize)` (COSArray.java:102), so the underlying `Object[]` is allocated up-front. Passing `2147483647` (`Integer.MAX_VALUE`) requests a 16 GB backing array on a 64-bit JVM.\\n2. `for` at PSOperator.java:571-592 reads `initial`, `increment`, and `limit` from the stack and loops `for (long i = initial; i <= limit; i += increment)`. Because `increment` is unchecked, `0 0 1 { } for` produces an infinite-CPU spin (and progressively a heap exhaustion as each iteration pushes `i` onto the operand stack).\\n\\n`CMapFactory.getCMap` only catches `IOException` and `PostScriptException`; it does not catch `OutOfMemoryError` or wall-clock budget, so the failure propagates out of font model construction and aborts the validation worker.\\n\\nA single payload byte sequence, the unframed PostScript `2147483647 array`, is sufficient. No `begincmap`/`endcmap` framing is required because the operator runs before the parser ever reaches the CMap structure.\\n\\n## Impact\\n\\nThis impacts all current releases of the veraPDF-parser. Successful exploitation requires only that the target validate an attacker-supplied PDF; a single Type 0 font with a malicious `/Encoding` (or any `/ToUnicode`) stream is sufficient.\\n\\n## Proposed Patch\\n\\nCap `array` allocation and forbid zero increments in `for`.\\n\\nAs a defensive measure, also wrap `CMapFactory.getCMap` to enforce a wall-clock and operand-stack-size budget on CMap parsing, and audit the remaining unbounded operators (`copy`, `roll`, `dict`) for similar primitives.\", \"ghsa_id\": \"GHSA-jrmc-qg6p-94fp\", \"github_reviewed_at\": \"2026-07-29T15:17:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-jrmc-qg6p-94fp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jrmc-qg6p-94fp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54080\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-29T15:17:32Z\", \"references\": [\"https://github.com/veraPDF/veraPDF-parser/security/advisories/GHSA-jrmc-qg6p-94fp\", \"https://github.com/veraPDF/veraPDF-parser/pull/703\", \"https://github.com/veraPDF/veraPDF-parser/commit/73d6ec002b98ce1f3f68640442f8e5d5613c80ce\", \"https://github.com/veraPDF/veraPDF-parser/commit/cb3538607a549d63504299be1088c85ae48605f4\", \"https://github.com/advisories/GHSA-jrmc-qg6p-94fp\"], \"repository_advisory_url\": \"https://api.github.com/repos/veraPDF/veraPDF-parser/security-advisories/GHSA-jrmc-qg6p-94fp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/veraPDF/veraPDF-parser\", \"summary\": \"veraPDF Parser DoS via PostScript CMap Streams\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-29T15:17:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-jrmc-qg6p-94fp\", \"vulnerabilities\": [{\"first_patched_version\": \"1.30.2\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.verapdf:parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.30.1\"}, {\"first_patched_version\": \"1.31.23\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.verapdf:parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.31.1, <= 1.31.22\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jrmc-qg6p-94fp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.verapdf:parser: <= 1.30.1",
+      "org.verapdf:parser: >= 1.31.1, <= 1.31.22"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54080"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.verapdf:parser"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.328221Z",
+  "provenance": {
+    "content_sha256": "4c2dc31d53a8bcb0b0088ae0f66c4edcb0bd2d3c2cfb3e74f37ae6f1c2cad5b3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-29T15:17:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jrmc-qg6p-94fp",
+  "status": "active",
+  "title": "veraPDF Parser DoS via PostScript CMap Streams",
+  "updated_at": "2026-07-29T15:17:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jrmc-qg6p-94fp"
+}

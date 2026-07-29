@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95119705?v=4\", \"events_url\": \"https://api.github.com/users/thegr1ffyn/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thegr1ffyn/followers\", \"following_url\": \"https://api.github.com/users/thegr1ffyn/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thegr1ffyn/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thegr1ffyn\", \"id\": 95119705, \"login\": \"thegr1ffyn\", \"node_id\": \"U_kgDOBatpWQ\", \"organizations_url\": \"https://api.github.com/users/thegr1ffyn/orgs\", \"received_events_url\": \"https://api.github.com/users/thegr1ffyn/received_events\", \"repos_url\": \"https://api.github.com/users/thegr1ffyn/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thegr1ffyn/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thegr1ffyn/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thegr1ffyn\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54656\", \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"### Summary\\n\\nWhen the Pydantic v2 output mode is in use, `datamodel-code-generator` reads a `validators` array from each model entry in the `--extra-template-data` file and synthesises a Pydantic `@field_validator(...)` decorator from each entry. The field names and the validator mode are interpolated into the decorator call wrapped in *unescaped* single quotes. A value containing `'` breaks out of the string literal, letting an attacker emit an arbitrary positional Python expression into the decorator. The expression is evaluated at class-definition time, i.e. the moment the developer imports the generated module. This is the same trust model as the recently-published GHSA-wjv6-jcfj-mf9r (extras-file comment injection) but the impact is full RCE rather than a docstring leak.\\n\\n### Details\\n\\nSink: `src/datamodel_code_generator/model/pydantic_v2/base_model.py`, `_process_validators` (lines 405–449, at tag `0.60.1` / commit `a321547e`):\\n\\n```python\\ndef _process_validators(self) -> None:\\n    validators = self.extra_template_data.get(\\\"validators\\\")\\n    if not validators:\\n        return\\n    ...\\n    for validator in validators:\\n        fields = validator.get(\\\"fields\\\") or [validator.get(\\\"field\\\")]\\n        fields = [f for f in fields if f]\\n        if not fields:\\n            continue\\n        function_path: str = validator[\\\"function\\\"]\\n        function_name = function_path.rsplit(\\\".\\\", 1)[-1]\\n        mode = validator.get(\\\"mode\\\", \\\"after\\\")\\n        fields_str = \\\", \\\".join(f\\\"'{f}'\\\" for f in fields)     # (A) UNESCAPED\\n        ...\\n        mode_str = f\\\"mode='{mode}'\\\"                          # (B) UNESCAPED\\n        prepared_validators.append({\\n            \\\"fields_str\\\": fields_str,\\n            \\\"mode_str\\\":   mode_str,\\n            \\\"method_name\\\": method_name,\\n            \\\"function_name\\\": function_name,\\n            \\\"mode\\\": mode,\\n        })\\n        self._additional_imports.append(Import.from_full_path(function_path))  # (C)\\n```\\n\\nThe strings from (A) and (B) flow verbatim into `src/datamodel_code_generator/model/template/pydantic_v2/BaseModel.jinja2`:\\n\\n```jinja\\n@field_validator({{ v.fields_str }}, {{ v.mode_str }})\\n```\\n\\nThere is no `repr()` call, no identifier check, and no quote-escaping.\\n\\nSecondary sink at (C): `Import.from_full_path(function_path)` splits on the last `.` and emits `from <prefix> import <suffix>`. A `;` in `function_path` therefore lands in the generated import line and runs as a statement at module load.\\n\\n### PoC\\n\\nA self-contained one-file PoC is available here: https://gist.github.com/thegr1ffyn/34d5c647e74487ffb2be27c76dace2aa\\n\\n### Impact\\n\\nArbitrary code execution in the developer's interpreter / CI runner the moment the generated module is imported. Anyone who accepts a `--extra-template-data` file from an untrusted source is impacted:\\n\\n- Pull requests adding or modifying project-local `*.template-data.json` / `.codegen.json` files consumed by a `make codegen` rule or pre-commit hook.\\n- Configuration snippets pasted from issue templates, READMEs, or third-party guides.\\n- Multi-tenant CI systems where one tenant's config file is read by another tenant's build.\\n\\nSame blast radius as GHSA-wjv6-jcfj-mf9r, but silent RCE rather than a docstring leak — significantly higher impact under the same threat model.\\n\\n\\n \\n> Introduced in 0.52.1 by commit [`a2b27562`](https://github.com/koxudaxi/datamodel-code-generator/commit/a2b27562) (*Add --validators option for Pydantic v2 field validators*).\\n\\n### Resolution\\n\\nThe fix validates `validators` entries with Pydantic models before rendering them. Field names must be valid non-keyword Python identifiers, `function` must be a dotted Python identifier path, and `mode` must be one of Pydantic's supported validator modes. The generated decorator arguments now render field names with `repr()` and mode with `!r`, so validated values are still emitted as Python string literals.\\n\\n### Remediation\\n\\nUpgrade to `datamodel-code-generator` `0.60.2` or later.\\n\\nThis issue affects `datamodel-code-generator` versions `>= 0.52.1, <= 0.60.1` and is fixed in `0.60.2`.\\n\\nSubmitted by: Hamza Haroon (thegr1ffyn)\", \"ghsa_id\": \"GHSA-8m8r-38jm-f355\", \"github_reviewed_at\": \"2026-07-28T21:44:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-8m8r-38jm-f355\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8m8r-38jm-f355\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54656\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T21:44:09Z\", \"references\": [\"https://github.com/koxudaxi/datamodel-code-generator/security/advisories/GHSA-8m8r-38jm-f355\", \"https://github.com/koxudaxi/datamodel-code-generator/commit/a43d02906111a2fdcaf13ee5b62eb2da85376f19\", \"https://github.com/koxudaxi/datamodel-code-generator/releases/tag/0.60.2\", \"https://github.com/advisories/GHSA-8m8r-38jm-f355\"], \"repository_advisory_url\": \"https://api.github.com/repos/koxudaxi/datamodel-code-generator/security-advisories/GHSA-8m8r-38jm-f355\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/koxudaxi/datamodel-code-generator\", \"summary\": \"`datamodel-code-generator` vulnerable to code execution on import via unescaped `validators` entries in --extra-template-data\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T21:44:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-8m8r-38jm-f355\", \"vulnerabilities\": [{\"first_patched_version\": \"0.60.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"datamodel-code-generator\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.52.1, <= 0.60.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8m8r-38jm-f355",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "datamodel-code-generator: >= 0.52.1, <= 0.60.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54656"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "poc_public": true,
+    "products": [
+      "datamodel-code-generator"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.387822Z",
+  "provenance": {
+    "content_sha256": "e3622580c04ad1ac5cc00d4754933ad803ab369429cd4f13a05a05cdc6d2aef7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T21:44:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8m8r-38jm-f355",
+  "status": "active",
+  "title": "`datamodel-code-generator` vulnerable to code execution on import via unescaped `validators` entries in --extra-template-data",
+  "updated_at": "2026-07-28T21:44:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8m8r-38jm-f355"
+}

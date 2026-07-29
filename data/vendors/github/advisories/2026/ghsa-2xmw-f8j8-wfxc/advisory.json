@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/579103?v=4\", \"events_url\": \"https://api.github.com/users/7a6163/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/7a6163/followers\", \"following_url\": \"https://api.github.com/users/7a6163/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/7a6163/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/7a6163\", \"id\": 579103, \"login\": \"7a6163\", \"node_id\": \"MDQ6VXNlcjU3OTEwMw==\", \"organizations_url\": \"https://api.github.com/users/7a6163/orgs\", \"received_events_url\": \"https://api.github.com/users/7a6163/received_events\", \"repos_url\": \"https://api.github.com/users/7a6163/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/7a6163/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/7a6163/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/7a6163\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54659\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"### Summary\\n\\n`Pagy::I18n.locale=` did not validate its argument before using it as a\\npath component to load the matching dictionary file (`<locale>.yml`). An\\napplication that assigns untrusted input to the locale — e.g. the common\\npattern `Pagy::I18n.locale = params[:locale]` — let that input influence\\nwhich file Pagy attempted to load.\\n\\n### Details\\n\\nThe setter stored the value as-is, and the loader joined it into a path\\nand read it:\\n\\n```ruby\\n# gem/lib/pagy/modules/i18n/i18n.rb\\ndef locale=(value)\\n  Thread.current[:pagy_locale] = value.to_s\\nend\\n\\n# ...later, when translating:\\npath = pathnames.reverse.map { |p| p.join(\\\"#{locale}.yml\\\") }.find(&:exist?)\\ndictionary = YAML.load_file(path)[locale]\\n```\\n\\nBecause the locale was used verbatim, a value such as an absolute path or\\na `../`-style string redirected the lookup outside the locales directory.\\nPagy's subsequent structural check (`dictionary['pagy']['p11n']`)\\nprevents the file's contents from being returned, so this is **not** a\\ndirect file read.\\n\\nFixed in 43.5.6 by constraining the locale to a BCP 47 shape before use:\\n\\n```ruby\\nLOCALE_PATTERN = /\\\\A[a-zA-Z]{2,8}(-[a-zA-Z0-9]{1,8})*\\\\z/\\n\\ndef locale=(value)\\n  Thread.current[:pagy_locale] = value.to_s[LOCALE_PATTERN]\\nend\\n```\\n\\nAny non-matching value (including `nil`) resolves to the default locale\\nand never reaches the file lookup.\\n\\n### PoC\\n\\nIn an application that sets `Pagy::I18n.locale = params[:locale]`, the\\nloader appends `.yml` and reads `<locale>.yml`, so the request param\\ncontrols the target path. For example, pointing it at the app's\\n`config/database.yml`:\\n\\n1. Send a request with `?locale=../../../config/database` (adjust the\\n   number of `../` to reach the app root from the gem's `locales/`\\n   directory).\\n2. Pagy calls `YAML.load_file` on the resulting `…/config/database.yml`.\\n3. The outcome differs by whether that `.yml` exists, is readable, parses\\n   as YAML, and has Pagy's expected structure — an existing, readable\\n   `config/database.yml` raises a different error than a non-existent\\n   path (which silently falls back to the default locale). This yields a\\n   file-existence / readability oracle for `.yml` paths, and the targeted\\n   file is read into the process during the attempt.\\n\\n### Impact\\n\\nInformation disclosure (CWE-22 / CWE-200): a file-existence / readability\\noracle for `.yml` paths on the host, plus a server-side read of\\nattacker-chosen files into the process. The file contents are not\\nreturned in the response.\\n\\nOnly applications that pass **unsanitized end-user input** into\\n`Pagy::I18n.locale=` are affected. Applications that set the locale from\\ntrusted values are not affected.\\n\\n**Patched:** pagy 43.5.6.\\n**Workaround (if you cannot upgrade):** validate the locale before\\nassigning it, e.g.\\n`Pagy::I18n.locale = params[:locale].to_s[/\\\\A[a-zA-Z]{2,8}(-[a-zA-Z0-9]{1,8})*\\\\z/]`,\\nor restrict it to your known set of locales.\", \"ghsa_id\": \"GHSA-2xmw-f8j8-wfxc\", \"github_reviewed_at\": \"2026-07-28T22:25:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-2xmw-f8j8-wfxc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2xmw-f8j8-wfxc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54659\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T22:25:29Z\", \"references\": [\"https://github.com/ddnexus/pagy/security/advisories/GHSA-2xmw-f8j8-wfxc\", \"https://github.com/ddnexus/pagy/pull/908\", \"https://github.com/ddnexus/pagy/commit/efcf09690e9fa7d7abdfb987b785a55f87e287df\", \"https://github.com/ddnexus/pagy/releases/tag/43.5.6\", \"https://github.com/advisories/GHSA-2xmw-f8j8-wfxc\"], \"repository_advisory_url\": \"https://api.github.com/repos/ddnexus/pagy/security-advisories/GHSA-2xmw-f8j8-wfxc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ddnexus/pagy\", \"summary\": \"Pagy I18n locale option is not validated before being used in a file path\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T22:25:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-2xmw-f8j8-wfxc\", \"vulnerabilities\": [{\"first_patched_version\": \"43.5.6\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"pagy\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 43.0.0, < 43.5.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2xmw-f8j8-wfxc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pagy: >= 43.0.0, < 43.5.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54659"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pagy"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.358704Z",
+  "provenance": {
+    "content_sha256": "2cc7132cfe0779b2401c17fde8e56637b88c55243eb5402272c0bd102f00e901",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T22:25:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2xmw-f8j8-wfxc",
+  "status": "active",
+  "title": "Pagy I18n locale option is not validated before being used in a file path",
+  "updated_at": "2026-07-28T22:25:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2xmw-f8j8-wfxc"
+}
