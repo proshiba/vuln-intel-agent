@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/29938825?v=4\", \"events_url\": \"https://api.github.com/users/0xshdax/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xshdax/followers\", \"following_url\": \"https://api.github.com/users/0xshdax/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xshdax/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xshdax\", \"id\": 29938825, \"login\": \"0xshdax\", \"node_id\": \"MDQ6VXNlcjI5OTM4ODI1\", \"organizations_url\": \"https://api.github.com/users/0xshdax/orgs\", \"received_events_url\": \"https://api.github.com/users/0xshdax/received_events\", \"repos_url\": \"https://api.github.com/users/0xshdax/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xshdax/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xshdax/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xshdax\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1511975?v=4\", \"events_url\": \"https://api.github.com/users/sanketsudake/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sanketsudake/followers\", \"following_url\": \"https://api.github.com/users/sanketsudake/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sanketsudake/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sanketsudake\", \"id\": 1511975, \"login\": \"sanketsudake\", \"node_id\": \"MDQ6VXNlcjE1MTE5NzU=\", \"organizations_url\": \"https://api.github.com/users/sanketsudake/orgs\", \"received_events_url\": \"https://api.github.com/users/sanketsudake/received_events\", \"repos_url\": \"https://api.github.com/users/sanketsudake/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sanketsudake/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sanketsudake/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sanketsudake\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50569\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"`HTTPTriggerSpec.Validate()` validated `Methods`, `FunctionReference`, `Host`, `IngressConfig`, and `CorsConfig`, but silently skipped `RelativeURL` and `Prefix`. Those two fields were validated at the CLI level only\\n(`pkg/fission-cli/cmd/httptrigger/create.go:83`). The post-CRD-modernization webhook for HTTPTrigger was retired in favor of API-server CEL — and CEL had no rules on those fields either — so an HTTPTrigger created via `kubectl apply` or\\na direct Kubernetes REST API call bypassed every URL-level check.\\n\\nA tenant with HTTPTrigger create permission could therefore create triggers whose `RelativeURL` or `Prefix`:\\n\\n- was empty (with both fields unset, the trigger has no URL),\\n- did not start with `/`,\\n- was exactly `/` (claiming the entire router root),\\n- contained `..` traversal segments (e.g. `/api/../admin`),\\n- collided with router-owned routes: `/router-healthz`, `/readyz`, `/_version`, `/auth/login`,\\n- collided with the router-internal function prefix `/fission-function/<ns>/<name>`.\\n\\n### Affected\\n\\n- Project: `github.com/fission/fission`\\n- Versions: all versions through v1.24.0\\n- Audited commit: `647c141`\\n- Component: `pkg/apis/core/v1/validation.go:HTTPTriggerSpec.Validate` (and the missing CEL on `HTTPTriggerSpec`)\\n- Configuration: default\\n\\nFix section (paste into the Fix / Patches field)\\n\\nFixed in [v1.25.0](https://github.com/fission/fission/releases/tag/v1.25.0) by:\\n\\n- [PR #3464](https://github.com/fission/fission/pull/3464) (commit [`0deed6bf`](https://github.com/fission/fission/commit/0deed6bf2af2a0c0c6094b25e1a0afad36773e3b)) — enforce the path-safety invariants at both admission layers so the API\\nserver's CEL evaluation and the Go-side `HTTPTriggerSpec.Validate()` agree:\\n  - Three `+kubebuilder:validation:XValidation` rules on `HTTPTriggerSpec` (the API server's CEL admission gate, regenerated into `crds/v1/fission.io_httptriggers.yaml`):\\n    - at least one of `relativeurl` or `prefix` must be non-empty;\\n    - `relativeurl`, when set, must start with `/`, must not be `/`, must contain no `..` segment, must not be in the reserved exact-path set, and must not start with `/fission-function/`;\\n    - `prefix`, when set, the same rules guarded by `has(self.prefix)`.\\n  - `validateTriggerPath` helper in `pkg/apis/core/v1/validation.go`, invoked from `HTTPTriggerSpec.Validate()`, mirrors the CEL rules so the CLI's early rejection and the router reconciler's status-Condition path match what the API\\nserver admits.\\n\\nRegression coverage: a new `TestHTTPTriggerSpecValidate_Path` table in `pkg/apis/core/v1/validation_validators_test.go` exercises every PoC case from the advisory plus literal `..`-prefixed-segment positives that must remain allowed.\", \"epss\": {\"percentage\": 0.00227, \"percentile\": 0.13534}, \"ghsa_id\": \"GHSA-vchh-r53j-8mpw\", \"github_reviewed_at\": \"2026-07-28T20:16:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-vchh-r53j-8mpw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vchh-r53j-8mpw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50569\"}], \"nvd_published_at\": \"2026-06-10T18:17:13Z\", \"published_at\": \"2026-07-28T20:16:00Z\", \"references\": [\"https://github.com/fission/fission/security/advisories/GHSA-vchh-r53j-8mpw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-50569\", \"https://github.com/fission/fission/pull/3464\", \"https://github.com/fission/fission/commit/0deed6bf3f26bc0f10e9130cd0d479b0b9f5f609\", \"https://github.com/fission/fission/releases/tag/v1.25.0\", \"https://github.com/advisories/GHSA-vchh-r53j-8mpw\"], \"repository_advisory_url\": \"https://api.github.com/repos/fission/fission/security-advisories/GHSA-vchh-r53j-8mpw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/fission/fission\", \"summary\": \"Fission: HTTPTrigger admission omits RelativeURL / Prefix validation; kubectl apply bypasses CLI checks\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T20:16:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-vchh-r53j-8mpw\", \"vulnerabilities\": [{\"first_patched_version\": \"1.25.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/fission/fission\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.24.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vchh-r53j-8mpw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/fission/fission: <= 1.24.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-50569"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/fission/fission"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.431989Z",
+  "provenance": {
+    "content_sha256": "8e583e0c68f4d5c4ff1812d1c8ed7486c776b9ccd0167597c67ba4f1783ad0f8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T20:16:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vchh-r53j-8mpw",
+  "status": "active",
+  "title": "Fission: HTTPTrigger admission omits RelativeURL / Prefix validation; kubectl apply bypasses CLI checks",
+  "updated_at": "2026-07-28T20:16:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vchh-r53j-8mpw"
+}

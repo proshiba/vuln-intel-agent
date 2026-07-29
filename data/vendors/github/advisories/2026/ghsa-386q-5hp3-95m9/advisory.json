@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95119705?v=4\", \"events_url\": \"https://api.github.com/users/thegr1ffyn/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thegr1ffyn/followers\", \"following_url\": \"https://api.github.com/users/thegr1ffyn/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thegr1ffyn/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thegr1ffyn\", \"id\": 95119705, \"login\": \"thegr1ffyn\", \"node_id\": \"U_kgDOBatpWQ\", \"organizations_url\": \"https://api.github.com/users/thegr1ffyn/orgs\", \"received_events_url\": \"https://api.github.com/users/thegr1ffyn/received_events\", \"repos_url\": \"https://api.github.com/users/thegr1ffyn/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thegr1ffyn/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thegr1ffyn/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thegr1ffyn\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54653\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-1336\", \"name\": \"Improper Neutralization of Special Elements Used in a Template Engine\"}], \"description\": \"### Summary\\n\\n`datamodel-code-generator` is vulnerable to code injection when generating Python models from an attacker-controlled JSON Schema, OpenAPI, YAML, JSON, Avro, Protobuf, or XSD schema. When a property carries a `\\\"default_factory\\\"` key, its value is interpolated verbatim — as a raw Python expression — into the generated `Field(default_factory=...)` / `field(default_factory=...)` call. Because this assignment is evaluated at class-definition time (i.e. on `import` of the generated module), an attacker who controls the schema controls a Python expression that runs in the consumer's process. No special CLI flags are required.\\n\\n### Details\\n\\nThe vulnerable chain spans the JSON-Schema-shaped parser and three sink locations (Pydantic v2, dataclass, msgspec):\\n\\n**Source — schema → `extras`**:\\n\\n- `src/datamodel_code_generator/parser/jsonschema.py:600-614` — `DEFAULT_FIELD_KEYS` includes the literal string `\\\"default_factory\\\"`.\\n- `src/datamodel_code_generator/parser/jsonschema.py:457-459` — `JsonSchemaObject.__init__` stores any non-standard key (including `default_factory`) in `self.extras`.\\n- `src/datamodel_code_generator/parser/jsonschema.py:797-812` — `get_field_extras` preserves `default_factory` through to the field model.\\n\\n**Sinks — `extras` → generated Python expression**:\\n\\n1. `src/datamodel_code_generator/model/pydantic_base.py:222-249`:\\n\\n   ```python\\n   default_factory = data.pop(\\\"default_factory\\\", None)\\n   ...\\n   if default_factory is not None:\\n       field_arguments = [f\\\"default_factory={default_factory}\\\", *field_arguments]\\n   ```\\n\\n   The `default_factory` value is interpolated raw (no `repr()`, no validation).\\n\\n2. `src/datamodel_code_generator/model/dataclass.py:211`:\\n\\n   ```python\\n   f\\\"{k}={v if k == 'default_factory' else repr(v)}\\\"\\n   ```\\n\\n   Explicit special-case to skip `repr()` for `default_factory`.\\n\\n3. `src/datamodel_code_generator/model/msgspec.py:361` — same pattern as dataclass.\\n\\nBecause `default_factory` is in `DEFAULT_FIELD_KEYS`, no special CLI flag is needed to reach the sink. Any input format that uses the JSON-Schema-shaped parser (`jsonschema`, `openapi`, `yaml`, `json`, `dict`, `csv`) — and any input format that converts to it (`avro`, `protobuf`, `xmlschema`) — is in scope.\\n\\n### Confirmed PoC matrix\\n\\n| Input file type | Output model type | Result |\\n|---|---|---|\\n| `jsonschema` | `pydantic_v2.BaseModel` | RCE on import |\\n| `jsonschema` | `dataclasses.dataclass` | RCE on import |\\n| `jsonschema` | `msgspec.Struct` | RCE on import |\\n| `jsonschema` | `typing.TypedDict` | safe (TypedDict doesn't render `field()`; `default_factory` silently dropped) |\\n| `openapi`    | `pydantic_v2.BaseModel` | RCE on import |\\n\\nOther JSON-Schema-shaped inputs (`yaml`, `json`, `dict`, `csv`, `avro`, `protobuf`, `xmlschema`) follow the same code path and are expected to reproduce.\\n\\n### PoC\\nSelf contained Proof of Concept is available at my secret gist: https://gist.github.com/thegr1ffyn/9648b0fe4fcf7d569ac8e61dd11eebaf\\n\\n### Impact\\n\\n- **Who's affected**: any developer or CI pipeline that runs `datamodel-codegen` against a schema they didn't author themselves — third-party API specs, schemas pulled from a registry, vendored upstream `.json` / `.yaml` / `.avsc` / `.proto` / `.xsd` files, schemas fetched from a remote URL or introspection endpoint — *and* who imports the generated `.py`.\\n- **What it gains**: arbitrary Python code execution in the importer's process at `import` time. The PoC copies `/etc/passwd` to a tmp file to demonstrate arbitrary read; the same primitive supports any operation the importing process can perform (filesystem write, environment exfiltration, secondary network calls, RCE on CI runners).\\n- **What it does NOT need**: no special CLI flags, no custom templates, no `--extra-template-data`, no `--use-schema-description`. Default invocation against a malicious schema is sufficient.\\n- **What does block it**: choosing `--output-model-type typing.TypedDict` (which doesn't render `field()` / `Field()` calls). All other supported output model types are vulnerable.\\n\\n### Resolution\\n\\nThe fix validates schema-provided `default_factory` values while extracting JSON Schema field extras. Only the supported factory names `dict`, `list`, and `set` are accepted; any other value now raises a generator error before code generation. Generator-created default factories for supported mutable defaults and optional nested models continue to use the existing code paths.\\n\\n### Remediation\\n\\nUpgrade to `datamodel-code-generator` `0.60.2` or later.\\n\\nThis issue affects `datamodel-code-generator` versions `>= 0.17.0, <= 0.60.1` and is fixed in `0.60.2`.\\n\\nSubmitted by: Hamza Haroon (thegr1ffyn)\", \"ghsa_id\": \"GHSA-386q-5hp3-95m9\", \"github_reviewed_at\": \"2026-07-28T21:48:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-386q-5hp3-95m9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-386q-5hp3-95m9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54653\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T21:48:14Z\", \"references\": [\"https://github.com/koxudaxi/datamodel-code-generator/security/advisories/GHSA-386q-5hp3-95m9\", \"https://github.com/koxudaxi/datamodel-code-generator/commit/17fc235e234cbcfaaadef8c74cb72c9687db0d1d\", \"https://github.com/koxudaxi/datamodel-code-generator/releases/tag/0.60.2\", \"https://github.com/advisories/GHSA-386q-5hp3-95m9\"], \"repository_advisory_url\": \"https://api.github.com/repos/koxudaxi/datamodel-code-generator/security-advisories/GHSA-386q-5hp3-95m9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/koxudaxi/datamodel-code-generator\", \"summary\": \"`datamodel-code-generator` vulnerable to code injection in via attacker-controlled `default_factory` schema field\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T21:48:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-386q-5hp3-95m9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.60.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"datamodel-code-generator\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.17.0, <= 0.60.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-386q-5hp3-95m9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "datamodel-code-generator: >= 0.17.0, <= 0.60.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54653"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "poc_public": true,
+    "products": [
+      "datamodel-code-generator"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.383326Z",
+  "provenance": {
+    "content_sha256": "bcb4e436b05db78038c88faff84036c7766a6b72ba775fb066eef4bf1972eeff",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T21:48:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-386q-5hp3-95m9",
+  "status": "active",
+  "title": "`datamodel-code-generator` vulnerable to code injection in via attacker-controlled `default_factory` schema field",
+  "updated_at": "2026-07-28T21:48:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-386q-5hp3-95m9"
+}

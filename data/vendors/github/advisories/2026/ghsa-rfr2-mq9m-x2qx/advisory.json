@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95119705?v=4\", \"events_url\": \"https://api.github.com/users/thegr1ffyn/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thegr1ffyn/followers\", \"following_url\": \"https://api.github.com/users/thegr1ffyn/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thegr1ffyn/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thegr1ffyn\", \"id\": 95119705, \"login\": \"thegr1ffyn\", \"node_id\": \"U_kgDOBatpWQ\", \"organizations_url\": \"https://api.github.com/users/thegr1ffyn/orgs\", \"received_events_url\": \"https://api.github.com/users/thegr1ffyn/received_events\", \"repos_url\": \"https://api.github.com/users/thegr1ffyn/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thegr1ffyn/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thegr1ffyn/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thegr1ffyn\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54691\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\n`datamodel-code-generator`'s built-in HTTP fetcher (`http.get_body`) issues an `httpx.GET` against any URL passed to `--url` (or reached via a redirect chain) with **no allow-list, no deny-list, no IP/host validation, and `follow_redirects=True`**. Loopback addresses, RFC1918 ranges, link-local (`169.254.169.254` cloud metadata), unique-local IPv6 and any other network-accessible target are all reachable. The JSON/YAML response body is parsed as a schema and reflected into the generated `.py` source, exfiltrating the response to anyone with access to that file (commonly committed to a repository).\\n\\n### Details\\n\\nSink: `src/datamodel_code_generator/http.py`, `get_body` (lines 31–61, at tag `0.60.1` / commit `a321547e`):\\n\\n```python\\ndef get_body(url, headers=None, ignore_tls=False,\\n             query_parameters=None, timeout=DEFAULT_HTTP_TIMEOUT) -> str:\\n    httpx = _get_httpx()\\n    try:\\n        response = httpx.get(\\n            url,\\n            headers=headers,\\n            verify=not ignore_tls,\\n            follow_redirects=True,          # (A)\\n            params=query_parameters,\\n            timeout=timeout,\\n        )\\n    except Exception as e:\\n        ...\\n    if response.status_code >= 400:\\n        ...\\n    content_type = response.headers.get(\\\"content-type\\\", \\\"\\\").lower()\\n    if \\\"text/html\\\" in content_type:\\n        raise SchemaFetchError(...)         # (B) — only filter\\n    return response.text                    # (C) → embedded in generated.py\\n```\\n\\n- (A) follows redirects unconditionally — a public URL → 302 → internal address chain works.\\n- (B) the only filter is rejecting `text/html`. Non-HTML internal endpoints (JSON APIs, cloud metadata, admin services) pass through.\\n- (C) the response body becomes the schema; its `title`, `description`, `properties`, etc. land in the generated `.py` as class attributes and `Field(description=...)` strings.\\n\\n`get_body` is called by `parser/base.py:1326` (`_get_text_from_url`), which is reached from CLI argument `--url <URL>`. (The `$ref` path is a separate advisory — see GHSA-D.)\\n\\nOnly affects users who installed the `[http]` extra (`pip install 'datamodel-code-generator[http]'`).\\n\\n### PoC\\n\\nA self-contained one-file PoC available here:\\nhttps://gist.github.com/thegr1ffyn/18de777d6c800a3b47715425e3f3e8f5\\n\\n### Impact\\n\\n**Who is impacted.** Anyone who runs `datamodel-codegen` with a `--url` they didn't fully verify, or who runs it inside a network with reachable internal services. Realistic scenarios:\\n\\n1. **Trojan documentation / README.** A blog post or README example reads `datamodel-codegen --url https://schemas.example.com/user.json -o user.py`. The attacker controls `example.com`, redirects to `http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>`, and the IAM credentials end up as a docstring in `user.py`.\\n2. **Internal port scan / disclosure.** Iterating `--url http://127.0.0.1:<port>/health` probes localhost services; non-HTML, non-error responses confirm a service and leak its body into the generated file.\\n3. **CI poisoning.** A PR adds a Makefile rule that calls `datamodel-codegen --url $(SCHEMA_URL)`; the CI runner reaches every internal service in its VPC and the response lands in PR artifacts.\\n\\n**Suggested fix.** Resolve the URL host, reject loopback / private / link-local / multicast / reserved IPs by default, disable redirects by default (`follow_redirects=False`), re-validate after each redirect if the user opts into following them, and add an `--allow-private-network` flag for opt-in legitimate use.\\n\\n### Maintainer resolution\\n\\nThis report was fixed together with GHSA-954p-556p-r752 by the private security PR koxudaxi/datamodel-code-generator-ghsa-rfr2-mq9m-x2qx#1, merged into the public repository as 5fdba4a09f2d7a9996a504975b7ef7d63e3715bb. Follow-up generated-file and coverage fixes were merged in koxudaxi/datamodel-code-generator#3279 and docs were synced in #3280. The patched release is 0.61.0.\\n\\nThe patch hardens the shared HTTP fetcher used by both direct CLI `--url` fetching and remote JSON Schema/OpenAPI `$ref` resolution:\\n\\n- validates HTTP(S) URLs before fetching;\\n- blocks localhost, loopback, private, link-local, reserved, and other non-public network targets by default;\\n- disables automatic redirect following and validates each redirect target before requesting it;\\n- adds `--allow-private-network` / `allow_private_network=True` as an explicit opt-in for trusted internal schema endpoints.\\n\\nRemote `$ref` fetching remains controlled by `--allow-remote-refs`; non-public/internal targets additionally require `--allow-private-network`.\\n\\nSubmitted by: Hamza Haroon (thegr1ffyn)\", \"ghsa_id\": \"GHSA-rfr2-mq9m-x2qx\", \"github_reviewed_at\": \"2026-07-28T21:30:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-rfr2-mq9m-x2qx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rfr2-mq9m-x2qx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54691\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-28T21:30:18Z\", \"references\": [\"https://github.com/koxudaxi/datamodel-code-generator/security/advisories/GHSA-rfr2-mq9m-x2qx\", \"https://github.com/koxudaxi/datamodel-code-generator/commit/5fdba4a09f2d7a9996a504975b7ef7d63e3715bb\", \"https://github.com/koxudaxi/datamodel-code-generator/releases/tag/0.61.0\", \"https://github.com/advisories/GHSA-rfr2-mq9m-x2qx\"], \"repository_advisory_url\": \"https://api.github.com/repos/koxudaxi/datamodel-code-generator/security-advisories/GHSA-rfr2-mq9m-x2qx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/koxudaxi/datamodel-code-generator\", \"summary\": \"datamodel-code-generator vulnerable to SSRF via --url: no host/IP validation, follows redirects\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-28T21:30:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-rfr2-mq9m-x2qx\", \"vulnerabilities\": [{\"first_patched_version\": \"0.61.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"datamodel-code-generator\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.1, <= 0.60.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rfr2-mq9m-x2qx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "datamodel-code-generator: >= 0.9.1, <= 0.60.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54691"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "poc_public": true,
+    "products": [
+      "datamodel-code-generator"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-29T19:35:56.403718Z",
+  "provenance": {
+    "content_sha256": "d6a6fe780f0d7e0fc37d80cbf1b1cfd0c4caf29d6573add723e71e1a7b1e4b78",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-28T21:30:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rfr2-mq9m-x2qx",
+  "status": "active",
+  "title": "datamodel-code-generator vulnerable to SSRF via --url: no host/IP validation, follows redirects",
+  "updated_at": "2026-07-28T21:30:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rfr2-mq9m-x2qx"
+}
