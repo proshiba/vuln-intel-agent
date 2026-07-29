@@ -1,13 +1,29 @@
 name: Deploy vulnerability viewer to Pages
 
 on:
-  # Publish after each daily auto-merge lands new ledger data on main.
+  # Publish when someone merges a change to the ledger or the viewer by hand.
+  #
+  # This does NOT cover the daily update. Auto-merge lands it with `gh pr merge`
+  # using GITHUB_TOKEN, and GitHub does not start workflow runs from pushes made
+  # with that token -- so the push below never fires for the bot's merges. That
+  # went unnoticed for three days and left the site showing stale data; the
+  # workflow_run trigger is what actually covers the daily path.
   push:
     branches: [main]
     paths:
       - "vulndb/index.csv"
       - "web/**"
       - ".github/workflows/pages.yml"
+  # Publish after the daily auto-merge lands new ledger data on main. A workflow
+  # completing is its own event, so this fires even though the merge push cannot.
+  workflow_run:
+    workflows: ["Auto-merge daily advisories"]
+    types: [completed]
+  # Safety net. Both triggers above depend on event plumbing that fails silently,
+  # and the only symptom is a site that quietly stops moving. Redeploying once a
+  # day costs a couple of minutes and bounds how stale the site can get.
+  schedule:
+    - cron: "40 21 * * *"
   # Allow manual redeployment from the Actions tab.
   workflow_dispatch:
 
@@ -24,10 +40,20 @@ concurrency:
 
 jobs:
   build:
+    # Do not publish when the daily run failed verification -- main has no new
+    # data in that case, and a deployment would only hide the failure.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # workflow_run and schedule do not carry the merge commit in the
+          # default ref, and the site is always built from main regardless of
+          # what triggered the run.
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
