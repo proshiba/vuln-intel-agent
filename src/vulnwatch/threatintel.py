@@ -322,14 +322,18 @@ _STIX_PATTERN = {
 }
 
 
-def export_stix(
-    activities: list[VulnThreatActivity], *, generated_at: datetime
-) -> dict[str, object]:
-    """STIX 2.1 バンドル。決定論的な ID を使い、実行ごとの差分を抑える。"""
+def export_stix(activities: list[VulnThreatActivity]) -> dict[str, object]:
+    """STIX 2.1 バンドル。
+
+    出力は入力データだけから決まります。実行時刻を引数に取らないのは、内容が
+    変わっていないのに毎回差分が出ると、本当の更新が埋もれてしまうためです。
+    """
 
     objects: list[dict[str, object]] = []
-    stamp = generated_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
     for activity in activities:
+        # 生成時刻ではなくデータ側の更新時刻を使う。実行のたびに created/modified が
+        # 動くと、内容が変わっていなくても毎回差分が出てしまうため。
+        stamp = _stix_time(activity.updated_at)
         for indicator in activity.indicators:
             labels = [indicator.role.value]
             if activity.cve:
@@ -348,21 +352,24 @@ def export_stix(
                     ),
                     "pattern": _STIX_PATTERN[indicator.type].format(value=indicator.value),
                     "pattern_type": "stix",
-                    "valid_from": (indicator.first_seen or generated_at)
-                    .astimezone(UTC)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "valid_from": _stix_time(indicator.first_seen or activity.updated_at),
                     "labels": labels,
                     "external_references": [
                         {"source_name": indicator.source_id, "url": indicator.url}
                     ],
                 }
             )
+    # バンドル ID も内容から導く。生成時刻に依存させると毎回変わってしまう。
+    fingerprint = "|".join(str(item["id"]) for item in objects)
     return {
         "type": "bundle",
-        "id": f"bundle--{_deterministic_uuid('bundle', stamp)}",
+        "id": f"bundle--{_deterministic_uuid('bundle', fingerprint)}",
         "objects": objects,
     }
+
+
+def _stix_time(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 _MISP_TYPES = {
@@ -376,10 +383,11 @@ _MISP_TYPES = {
 }
 
 
-def export_misp(
-    activities: list[VulnThreatActivity], *, generated_at: datetime
-) -> dict[str, object]:
-    """MISP イベント形式。脆弱性 1 件を 1 イベントとして表す。"""
+def export_misp(activities: list[VulnThreatActivity]) -> dict[str, object]:
+    """MISP イベント形式。脆弱性 1 件を 1 イベントとして表す。
+
+    STIX と同様、出力は入力データだけから決まります。
+    """
 
     events: list[dict[str, object]] = []
     for activity in activities:

@@ -180,23 +180,33 @@ def test_csv_export_flattens_indicators_with_their_context() -> None:
     assert SOURCE in rows[1]
 
 
-def test_stix_export_is_a_valid_bundle_with_stable_ids() -> None:
-    first = export_stix([_activity()], generated_at=NOW)
-    second = export_stix([_activity()], generated_at=NOW)
+def test_stix_export_is_a_valid_bundle() -> None:
+    bundle = export_stix([_activity()])
 
-    assert first["type"] == "bundle"
-    objects = first["objects"]
+    assert bundle["type"] == "bundle"
+    objects = bundle["objects"]
     assert isinstance(objects, list)
     indicator = objects[0]
     assert indicator["pattern"] == "[ipv4-addr:value = '45.61.136.14']"
     assert indicator["external_references"][0]["url"] == SOURCE
-    # Regenerating must not churn IDs, otherwise every run looks like a change.
-    assert first == second
-    json.dumps(first)  # serialisable
+    json.dumps(bundle)  # serialisable
+
+
+def test_stix_timestamps_come_from_the_data_not_the_run() -> None:
+    # The export is committed daily. Anything derived from the run time produces a diff on
+    # every run even when no threat activity changed, which buries the real updates.
+    activity = _activity(indicators=[_indicator(first_seen=EARLIER)])
+    bundle = export_stix([activity])
+    indicator = bundle["objects"][0]
+
+    assert indicator["created"] == "2026-07-27T00:00:00Z"  # the entry's updated_at
+    assert indicator["modified"] == "2026-07-27T00:00:00Z"
+    assert indicator["valid_from"] == "2026-07-20T00:00:00Z"  # the indicator's first_seen
+    assert bundle == export_stix([activity])
 
 
 def test_misp_export_emits_one_event_per_vulnerability() -> None:
-    events = export_misp([_activity()], generated_at=NOW)["response"]
+    events = export_misp([_activity()])["response"]
 
     assert isinstance(events, list)
     event = events[0]["Event"]
@@ -210,4 +220,4 @@ def test_exports_skip_vulnerabilities_without_indicators() -> None:
     empty = _activity(indicators=[])
 
     assert export_csv([empty]).strip().count("\n") == 0  # header only
-    assert export_misp([empty], generated_at=NOW)["response"] == []
+    assert export_misp([empty])["response"] == []

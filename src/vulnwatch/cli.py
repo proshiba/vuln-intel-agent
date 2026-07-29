@@ -203,15 +203,14 @@ def threat_export(
 
     store = ThreatIntelStore(repository)
     activities = list(store.iter_activities())
-    now = datetime.now(UTC)
     store.exports_root.mkdir(parents=True, exist_ok=True)
     (store.exports_root / "iocs.csv").write_text(export_csv(activities), encoding="utf-8")
     (store.exports_root / "iocs.stix.json").write_text(
-        json.dumps(export_stix(activities, generated_at=now), ensure_ascii=False, indent=2),
+        json.dumps(export_stix(activities), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (store.exports_root / "iocs.misp.json").write_text(
-        json.dumps(export_misp(activities, generated_at=now), ensure_ascii=False, indent=2),
+        json.dumps(export_misp(activities), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     total = sum(len(activity.indicators) for activity in activities)
