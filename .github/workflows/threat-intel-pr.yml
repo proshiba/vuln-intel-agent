@@ -1,0 +1,84 @@
+name: Open PR for threat activity findings
+
+# routine（Claude Code）が bot/threat-intel-daily へ調査結果を push すると、
+# 変更範囲・エクスポート整合・ユニットテストを検証し、通れば
+# bot/threat-intel-daily -> main のPull Requestを作成する。
+#
+# auto-merge-daily.yml と違い、マージはしない。調査は言語モデルが行うため、
+# 当面は人間が PR 上で出典と指標を確認してからマージする。
+on:
+  push:
+    branches: [bot/threat-intel-daily]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: threat-intel-pr
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out pushed branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # 変更範囲の検証で main と比較するため履歴ごと取得する。
+          fetch-depth: 0
+      - name: Only threat data may change
+        # 調査ルーチンが誤ってコード・設定・台帳本体に触れた push は拒否する。
+        run: |
+          git fetch origin main
+          unexpected=$(git diff --name-only origin/main...HEAD \
+            | grep -v -e '^vulndb/iocs/' -e '^vulndb/exports/' || true)
+          if [ -n "$unexpected" ]; then
+            echo "unexpected changes outside vulndb/iocs and vulndb/exports:"
+            echo "$unexpected"
+            exit 1
+          fi
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install --editable '.[dev]'
+      - name: Exports match the ledger
+        # threat export は決定論的なので、コミット済みのエクスポートを
+        # 再生成して差分ゼロであることが「iocs/ と exports/ が同期している」
+        # ことの検証になる。
+        run: |
+          vulnwatch threat export --repository .
+          git diff --exit-code vulndb/exports
+      - name: Run threat intel unit tests
+        run: pytest tests/test_threatintel.py
+
+  pull-request:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out pushed branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Open pull request (no merge)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_BRANCH: bot/threat-intel-daily
+        run: |
+          number=$(gh pr list --head "$BOT_BRANCH" --base main --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            echo "PR #$number already open; the push updated it."
+            exit 0
+          fi
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "日次の攻撃活動調査（キャンペーン・マルウェア・IOC）の結果です。" \
+            "マージ前に、各指標の出典 URL を開いて値が実際に載っているか、docs/threat-activity-routine.md の除外リストに反していないかを確認してください。" \
+            "検証（変更範囲・エクスポート整合・ユニットテスト）はこの PR の verify ジョブで通過済みです。")
+          gh pr create --head "$BOT_BRANCH" --base main \
+            --title "Daily threat activity update" --body "$body"
