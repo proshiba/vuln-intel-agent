@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-67439\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nThe synchronous execution RPCs `StartActionAndWait` and `StartActionByGetAndWait` return the full `LogEntry` for the just-executed action without checking whether the caller is allowed to read that action's logs.\\n\\nOliveTin's ACL model separates `exec` from `logs`. A deployment can intentionally allow a user to run an action while denying access to its historical or live output. That separation is enforced in `GetLogs`, `GetActionLogs`, `ExecutionStatus`, and `EventStream`, but it is not enforced in the synchronous `...AndWait` endpoints.\\n\\nAs a result, any user who can execute an action through these endpoints can read the action output immediately even when the action's ACL explicitly sets `logs:false`.\\n\\n## Details\\n\\nOliveTin defines separate per-action permissions:\\n\\n```go\\n// service/internal/config/config.go\\ntype PermissionsList struct {\\n    View bool `koanf:\\\"view\\\"`\\n    Exec bool `koanf:\\\"exec\\\"`\\n    Logs bool `koanf:\\\"logs\\\"`\\n    Kill bool `koanf:\\\"kill\\\"`\\n}\\n```\\n\\nThe normal log and streaming paths correctly enforce `logs` permission:\\n\\n```go\\n// service/internal/api/api.go\\nfunc (api *oliveTinAPI) isLogEntryAllowed(e *executor.InternalLogEntry, user *authpublic.AuthenticatedUser) bool {\\n    if user == nil || !isValidLogEntry(e) {\\n        return false\\n    }\\n    return acl.IsAllowedLogs(api.cfg, user, e.Binding.Action)\\n}\\n```\\n\\nThat check is used by:\\n\\n- `GetLogs`\\n- `GetActionLogs`\\n- `ExecutionStatus`\\n- `EventStream`\\n\\nHowever, the synchronous execution endpoints directly return the created `LogEntry` without any `logs` ACL check:\\n\\n```go\\n// service/internal/api/api.go\\nfunc (api *oliveTinAPI) StartActionAndWait(ctx ctx.Context, req *connect.Request[apiv1.StartActionAndWaitRequest]) (*connect.Response[apiv1.StartActionAndWaitResponse], error) {\\n    ...\\n    internalLogEntry, ok := api.startActionAndWaitRun(binding, args, user)\\n    if !ok {\\n        return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf(\\\"execution not found\\\"))\\n    }\\n    return connect.NewResponse(&apiv1.StartActionAndWaitResponse{\\n        LogEntry: api.internalLogEntryToPb(internalLogEntry, user),\\n    }), nil\\n}\\n\\nfunc (api *oliveTinAPI) StartActionByGetAndWait(ctx ctx.Context, req *connect.Request[apiv1.StartActionByGetAndWaitRequest]) (*connect.Response[apiv1.StartActionByGetAndWaitResponse], error) {\\n    ...\\n    internalLogEntry, ok := api.executor.GetLog(execReq.TrackingID)\\n    if ok {\\n        return connect.NewResponse(&apiv1.StartActionByGetAndWaitResponse{\\n            LogEntry: api.internalLogEntryToPb(internalLogEntry, user),\\n        }), nil\\n    }\\n    return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf(\\\"execution not found\\\"))\\n}\\n```\\n\\nAnd `internalLogEntryToPb()` includes the full output:\\n\\n```go\\n// service/internal/api/api.go\\nfunc (api *oliveTinAPI) internalLogEntryToPb(logEntry *executor.InternalLogEntry, authenticatedUser *authpublic.AuthenticatedUser) *apiv1.LogEntry {\\n    pble := &apiv1.LogEntry{\\n        ActionTitle:         logEntry.ActionTitle,\\n        Output:              logEntry.Output,\\n        ExitCode:            logEntry.ExitCode,\\n        ExecutionTrackingId: logEntry.ExecutionTrackingID,\\n        ...\\n    }\\n    ...\\n    return pble\\n}\\n```\\n\\nThe executor separately enforces `exec` permission, but there is no subsequent check that the response should omit or deny `Output` when `logs:false`.\\n\\n## Local Reproduction\\n\\nI verified this locally with a one-off test against the real `StartActionAndWait` handler.\\n\\nConfiguration used:\\n\\n- action `secret_action` with shell `echo SECRET_FROM_ACTION`\\n- user `low` matched by ACL:\\n  - `exec: true`\\n  - `logs: false`\\n  - `view: false`\\n  - `kill: false`\\n\\nThen I invoked `StartActionAndWait` as `low` through the real handler path using header-based auth.\\n\\nObserved output from the test run:\\n\\n```text\\n=== RUN   TestTempStartActionAndWaitLeaksOutputWithoutLogsPermission\\ntime=\\\"2026-03-12T23:36:33+01:00\\\" level=info msg=\\\"Action requested\\\" actionTitle=secret-action tags=\\\"[]\\\"\\ntime=\\\"2026-03-12T23:36:33+01:00\\\" level=info msg=\\\"Action parse args - Before\\\" actionTitle=secret-action cmd=\\\"echo SECRET_FROM_ACTION\\\"\\ntime=\\\"2026-03-12T23:36:33+01:00\\\" level=info msg=\\\"Action parse args - After\\\" actionTitle=secret-action cmd=\\\"echo SECRET_FROM_ACTION\\\"\\ntime=\\\"2026-03-12T23:36:33+01:00\\\" level=info msg=\\\"Action started\\\" actionTitle=secret-action timeout=5\\ntime=\\\"2026-03-12T23:36:33+01:00\\\" level=info msg=\\\"Action finished\\\" actionTitle=secret-action exit=0 outputLength=40 timedOut=false\\n    temp_acl_bypass_test.go:56: output=\\\"S\\\\x00E\\\\x00C\\\\x00R\\\\x00E\\\\x00T\\\\x00_\\\\x00F\\\\x00R\\\\x00O\\\\x00M\\\\x00_\\\\x00A\\\\x00C\\\\x00T\\\\x00I\\\\x00O\\\\x00N\\\\x00\\\\r\\\\x00\\\\n\\\\x00\\\" blocked=false action=\\\"secret-action\\\"\\n--- PASS: TestTempStartActionAndWaitLeaksOutputWithoutLogsPermission (0.03s)\\n```\\n\\nThe UTF-16LE formatting is from Windows `echo`, but the key result is that the response returned the real command output even though the caller's ACL explicitly denied log access.\\n\\n## Impact\\n\\n- **Bypass of log confidentiality controls:** Operators may configure actions to be executable but not log-readable. The `...AndWait` endpoints break that separation.\\n- **Disclosure of secrets printed by actions:** Many OliveTin actions wrap administrative scripts and commands whose stdout/stderr may contain credentials, internal paths, hostnames, tokens, or sensitive operational data.\\n- **Adjacent to previous output-leak bugs:** OliveTin already had an EventStream output disclosure bug. This is a separate response-path authorization gap on the synchronous execution APIs.\\n\\n## Recommended Fix\\n\\nEnforce `logs` permission before returning `LogEntry` content from synchronous execution endpoints.\\n\\nTwo reasonable fixes:\\n\\n1. Deny the endpoint response when `logs:false`\\n\\n```go\\nif !acl.IsAllowedLogs(api.cfg, user, binding.Action) {\\n    return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf(\\\"permission denied to view action output\\\"))\\n}\\n```\\n\\n2. Or redact log-bearing fields when `logs:false`\\n\\n```go\\npb := api.internalLogEntryToPb(internalLogEntry, user)\\nif !acl.IsAllowedLogs(api.cfg, user, binding.Action) {\\n    pb.Output = \\\"\\\"\\n    pb.ExitCode = 0\\n}\\nreturn connect.NewResponse(&apiv1.StartActionAndWaitResponse{LogEntry: pb}), nil\\n```\\n\\nThe same fix should be applied to both:\\n\\n- `StartActionAndWait`\\n- `StartActionByGetAndWait`\\n\\n## References\\n\\n- `service/internal/api/api.go`\\n- `service/internal/config/config.go`\\n- `service/internal/acl/acl.go`\", \"ghsa_id\": \"GHSA-jm28-2wcr-qf3h\", \"github_reviewed_at\": \"2026-07-30T14:25:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-jm28-2wcr-qf3h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jm28-2wcr-qf3h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-67439\"}], \"nvd_published_at\": \"2026-07-29T21:17:48Z\", \"published_at\": \"2026-07-30T14:25:20Z\", \"references\": [\"https://github.com/OliveTin/OliveTin/security/advisories/GHSA-jm28-2wcr-qf3h\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-67439\", \"https://github.com/OliveTin/OliveTin/commit/e421780c9885aa5024d2f47b4ed4898f2f18eb90\", \"https://github.com/OliveTin/OliveTin/releases/tag/3000.17.0\", \"https://github.com/advisories/GHSA-jm28-2wcr-qf3h\"], \"repository_advisory_url\": \"https://api.github.com/repos/OliveTin/OliveTin/security-advisories/GHSA-jm28-2wcr-qf3h\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/OliveTin/OliveTin\", \"summary\": \"OliveTin: StartActionAndWait Endpoints Bypass `logs` Permission and Return Action Output\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-30T14:25:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-jm28-2wcr-qf3h\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260708085316-e421780c9885\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/OliveTin/OliveTin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260708085316-e421780c9885\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jm28-2wcr-qf3h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/OliveTin/OliveTin: < 0.0.0-20260708085316-e421780c9885"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-67439"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/OliveTin/OliveTin"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-30T19:38:01.491065Z",
+  "provenance": {
+    "content_sha256": "150034d0a6149f56197889714e65ac314eda6a7cb5648c6bc9239f450198ab4a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-30T14:25:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jm28-2wcr-qf3h",
+  "status": "active",
+  "title": "OliveTin: StartActionAndWait Endpoints Bypass `logs` Permission and Return Action Output",
+  "updated_at": "2026-07-30T14:25:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jm28-2wcr-qf3h"
+}
