@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-41695\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"`src/main/java/org/springframework/data/mapping/context/PersistentPropertyPathFactory.java:175` · Unbounded Resource Allocation (Algorithmic DoS)\\n\\n### Impact\\n\\nWhen a consuming module routes user-supplied dot-paths (sort parameters, projection paths, PATCH paths) through `MappingContext.getPersistentPropertyPath(String, Class)`, each distinct string — including invalid ones — is cached forever. A remote attacker can send millions of requests with unique `?sort=aaaa<n>` values and grow the heap until the service OOMs.\\n\\n### Description\\n\\n`PersistentPropertyPathFactory.propertyPaths` (line 53) is a `ConcurrentHashMap<TypeAndPath, PathResolution>` populated by `getPotentiallyCachedPath()` (line 174-177) via `computeIfAbsent`. The key is `(TypeInformation, rawPathString)`. Crucially, unresolvable paths are also cached (as `PathResolution.unresolved`, line 204) so that the same `InvalidPersistentPropertyPath` can be re-thrown — meaning every distinct garbage string an attacker sends creates a permanent entry. There is no eviction. This is reachable from `AbstractMappingContext.getPersistentPropertyPath(String, Class)` (`AbstractMappingContext.java:345`), which Spring Data REST and several store query mappers call with HTTP-request-derived sort/filter property names.\\n\\nBy contrast, the sibling `SimplePropertyPath.cache` was already hardened to use `ConcurrentReferenceHashMap` (soft refs); this cache was not given the same treatment.\\n\\n### Exploit scenario\\n\\nAgainst a Spring Data REST endpoint, an attacker scripts `GET /things?sort=<random-40-char-string>` in a loop. Each request fails fast with `InvalidPersistentPropertyPath`, but each distinct random string leaves behind a `TypeAndPath` key, a `PathResolution` object holding the split segments list, and the source string in the map. After ~10M requests the JVM OOMs.\\n\\n### Preconditions\\n\\n- A downstream component (Spring Data REST, a store-specific `QueryMapper`, or application code) passes externally-supplied strings to `MappingContext.getPersistentPropertyPath(String, ...)`\\n- No upstream rate-limiting or path-string validation\\n\\n### How to fix\\n\\nA cache whose key can be derived from external input must be bounded. Replace `propertyPaths` (line 53) with a `ConcurrentLruCache<TypeAndPath, PathResolution>` of fixed capacity, or `ConcurrentReferenceHashMap` (matching the sibling `SimplePropertyPath.cache`). Additionally, do not cache `PathResolution.unresolved` results at all (line 204 in `createPersistentPropertyPath`) — re-computing a failed lookup is cheap, and caching negative results for arbitrary attacker strings is what makes this exploitable.\\n\\n### Adversarial verification\\n\\n**Verdict:** TRUE_POSITIVE (confidence: 7/10) — unbounded hard-ref `ConcurrentHashMap` keyed by raw path string, caches unresolved entries (line 204), reachable via public `MappingContext.getPersistentPropertyPath(String, ...)`; sibling `PropertyPath` cache was already converted to soft-refs but this one was missed. -3 confidence because the HTTP-input wiring lives in downstream modules (Spring Data REST / store mappers), not verifiable in this repo.\\n\\n**Code at the line — CONFIRMED**\\n- Line 53: `private final Map<TypeAndPath, PathResolution> propertyPaths = new ConcurrentHashMap<>();` — plain CHM, hard refs, no eviction, no size bound.\\n- Line 175: `propertyPaths.computeIfAbsent(TypeAndPath.of(type, propertyPath), ...)` — every distinct `(type, string)` pair is inserted.\\n- Line 204: `return PathResolution.unresolved(parts, segment, type, currentPath);` — returned from inside `computeIfAbsent`'s mapping function, so unresolvable paths are cached. The `PathResolution` retains the full attacker string (`source = StringUtils.collectionToDelimitedString(parts, \\\".\\\")`, line 452).\\n\\n**Callers within spring-data-commons**\\n- `AbstractMappingContext.getPersistentPropertyPath(String, Class<?>)` (line 345) and `(String, TypeInformation<?>)` (line 350) → `persistentPropertyPathFactory.from(type, propertyPath)` → straight into the unbounded cache. No validation, no `PropertyPath.from` gate.\\n- This is the public `MappingContext` interface (`MappingContext.java:174,186`), documented to throw `InvalidPersistentPropertyPath` on bad input — i.e., the contract explicitly anticipates being called with possibly-invalid strings.\\n- No in-repo caller routes HTTP input directly into the `String` overload. The `Sort.Order.property` → `getPersistentPropertyPath(String, ...)` bridge lives in store modules (Spring Data MongoDB `QueryMapper`, Spring Data REST sort translator). That wiring is out-of-repo as the finding states.\\n\\n**Protections — NONE on this cache**\\nContrast: `SimplePropertyPath.java:52` (the `PropertyPath.from` cache) uses `ConcurrentReferenceHashMap` (soft refs, GC-evictable). Spring already hardened the sibling cache against exactly this pattern. `PersistentPropertyPathFactory.propertyPaths` was not given the same treatment.\\n\\n**Stress-test**\\nIs this exclusion #3 (intended design)? The `PathResolution` javadoc (line 426-430) says caching unresolved paths is deliberate — to make repeated lookups of the *same* bad path cheap. But unbounded hard-ref caching of *arbitrary attacker-chosen* keys is not the intent; the sibling fix proves Spring considers this a bug class.\", \"epss\": {\"percentage\": 0.00363, \"percentile\": 0.28561}, \"ghsa_id\": \"GHSA-88fw-v6x4-3f58\", \"github_reviewed_at\": \"2026-07-31T16:44:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-88fw-v6x4-3f58\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-88fw-v6x4-3f58\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-41695\"}], \"nvd_published_at\": \"2026-06-10T00:16:50Z\", \"published_at\": \"2026-07-31T16:44:15Z\", \"references\": [\"https://github.com/spring-projects/security-advisories/security/advisories/GHSA-88fw-v6x4-3f58\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-41695\", \"https://github.com/spring-projects/spring-data-commons/commit/96e9475b963218bb702959524187342671f6b080\", \"https://github.com/spring-projects/spring-data-commons/commit/a4f893b66c18c70f2b22f29a2b55097b73c89941\", \"https://github.com/spring-projects/spring-data-commons/releases/tag/3.5.12\", \"https://github.com/spring-projects/spring-data-commons/releases/tag/4.0.6\", \"https://spring.io/security/cve-2026-41695\", \"https://github.com/advisories/GHSA-88fw-v6x4-3f58\"], \"repository_advisory_url\": \"https://api.github.com/repos/spring-projects/security-advisories/security-advisories/GHSA-88fw-v6x4-3f58\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/spring-projects/security-advisories\", \"summary\": \"Spring Data: Unbounded property-path cache keyed by externally-supplied path string\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T16:44:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-88fw-v6x4-3f58\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.6\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.springframework.data:spring-data-commons\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, <= 4.0.5\"}, {\"first_patched_version\": \"3.5.12\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.springframework.data:spring-data-commons\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.5.0, <= 3.5.11\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.springframework.data:spring-data-commons\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.4.0, <= 3.4.13\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-88fw-v6x4-3f58",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.springframework.data:spring-data-commons: >= 3.4.0, <= 3.4.13",
+      "org.springframework.data:spring-data-commons: >= 3.5.0, <= 3.5.11",
+      "org.springframework.data:spring-data-commons: >= 4.0.0, <= 4.0.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41695"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.springframework.data:spring-data-commons"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-31T19:38:04.568377Z",
+  "provenance": {
+    "content_sha256": "f6fbd3a4e8881b442587bb41b46f89659153a16282ccbb066ff35f91d8270f00",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T16:44:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-88fw-v6x4-3f58",
+  "status": "active",
+  "title": "Spring Data: Unbounded property-path cache keyed by externally-supplied path string",
+  "updated_at": "2026-07-31T16:44:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-88fw-v6x4-3f58"
+}
