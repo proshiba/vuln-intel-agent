@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "990a389a49d69f96e71961235bf44e7be83420a321932bf1eebc5c8471ee932e",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-66060\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-862\", \"CWE-926\"], \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}, {\"cwe_id\": \"CWE-926\", \"name\": \"Improper Export of Android Application Components\"}], \"description\": \"# Summary\\r\\n\\r\\nThe Home Assistant Companion app for Android registers a handler for `https://www.home-assistant.io/tag/<id>` tag links (Android deep-link / intent). This entry point could be reached by an untrusted caller — another app, or a process with shell access — and the app would immediately forward the attacker-chosen tag ID to **every configured Home Assistant server** using the victim's stored authenticated session, with **no user interaction**.\\r\\n\\r\\n# Details\\r\\n\\r\\nBecause `tag_scanned` events are commonly wired to automations — including physical-security actions such as unlocking doors, opening garage doors, or disarming alarms — this allowed silent, no-interaction, credential-free triggering of those automations from an untrusted source. The attacker never needs the user's Home Assistant password and rides solely on the client's stored access token.\\r\\n\\r\\nThe root cause is the same on both platforms (the iOS Companion app is tracked separately in [GHSA-j23v-9672-677j](https://github.com/home-assistant/core/security/advisories/GHSA-j23v-9672-677j)): a tag link delivered through an OS-level routing mechanism (Android intent) was treated as if it had been physically scanned and forwarded to the server without validating the caller or asking the user. Those routing mechanisms are reachable by any other app on the device.\\r\\n\\r\\n`nfc/TagReaderActivity` was exported (`android:exported=\\\"true\\\"`) with an implicit, auto-verified `ACTION_VIEW` intent filter for `https://www.home-assistant.io/tag/` URLs, and `onCreate` branched on `intent.action` only — it validated neither the calling UID, the launching package, nor the referrer. Because the component is exported and its class name is well-known, any app can also target it directly with an explicit `Intent` regardless of the filter; that explicit-intent path is the primary exposure, the implicit filter only broadens the delivery paths. The export itself is intentional and is preserved in the fix; the vulnerability is that an externally delivered tag was forwarded to the server without user confirmation, and the fix adds that confirmation rather than restricting the caller or the export.\\r\\n\\r\\nWeakness classes: [CWE-862](https://cwe.mitre.org/data/definitions/862.html) Missing Authorization; [CWE-926](https://cwe.mitre.org/data/definitions/926.html) Improper Export of Android Application Components.\\r\\n\\r\\nExploitation only requires that the victim is logged into any supported Home Assistant server version; the tag-scan call works against all current server releases.\\r\\n\\r\\n# Affected versions\\r\\n\\r\\n| Platform | Affected                         | Fixed      |\\r\\n| --- |----------------------------------|------------|\\r\\n| Home Assistant Companion for Android | All versions prior to `2026.5.3` | `2026.5.3` |\\r\\n\\r\\n# Impact\\r\\n\\r\\n**CVSS 3.1:** `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N` — **7.1 (High)**\\r\\n\\r\\nA caller with no privileges and no user interaction crosses the platform's app/security boundary (`S:C`) into the user's Home Assistant server and issues authenticated, integrity-affecting actions (`I:H`), without disclosing data (`C:N`) or affecting availability (`A:N`).\\r\\n\\r\\nFor an exploited user this means:\\r\\n\\r\\n- **Silent cross-app privilege escalation:** an untrusted app or page sends authenticated `tag_scanned` / `scanTag` events to every configured server using the victim's session, with no confirmation.\\r\\n- **Actuation of any tag-bound automation** the attacker can guess or enumerate — unlocking smart locks, opening garage doors, disarming alarms, toggling cameras, etc.\\r\\n- **Credential-free:** the attacker rides solely on the client's stored access token.\\r\\n\\r\\nThe vector is `AV:L`: a local, unprivileged app launches the exported activity, with no user interaction.\\r\\n\\r\\n# Steps to reproduce\\r\\n\\r\\nPrerequisites: the device has the Companion app installed and logged into ≥1 server; the attacker has an unprivileged app or `adb shell` access (no Android permissions required); the victim has an automation bound to a `tag_id` the attacker can pick (e.g. `poc_test_tag`).\\r\\n\\r\\n```bash\\r\\nPKG=\\\"io.homeassistant.companion.android\\\"   # or io.homeassistant.companion.android.minimal\\r\\nCOMPONENT=\\\"$PKG/io.homeassistant.companion.android.nfc.TagReaderActivity\\\"\\r\\n\\r\\nadb logcat -c\\r\\nadb shell am start -n \\\"$COMPONENT\\\" \\\\\\r\\n  -a android.intent.action.VIEW \\\\\\r\\n  -d \\\"https://www.home-assistant.io/tag/poc_test_tag\\\"\\r\\n\\r\\nsleep 2\\r\\nadb logcat -d | grep -iE \\\"TagReaderActivity|Tag ID:|Tag scanned to HA successfully\\\"\\r\\n```\\r\\n\\r\\n`am start` runs as the unprivileged `shell` user — equivalent to a malicious third-party app launching the exported activity. Logcat shows `Tag ID: poc_test_tag` → `Tag scanned to HA successfully`, and any automation bound to that tag fires; the server logs it as if the user had physically tapped a tag.\\r\\n\\r\\n# Workaround\\r\\n\\r\\nIf you cannot upgrade immediately:\\r\\n\\r\\n- Avoid binding sensitive or physical-security automations (locks, garage doors, alarms) to `tag_scanned` triggers, or gate those automations behind an additional condition.\\r\\n- Be cautious about which apps are installed on the same device as the Companion app, and avoid granting other parties `adb` access.\\r\\n\\r\\nThe robust mitigation is to upgrade to a patched version.\\r\\n\\r\\n# Fix\\r\\n\\r\\nUpdate the Companion app to a patched version (Android `2026.5.3` or later).\\r\\n\\r\\nThe app now requires **explicit, in-app user approval before any tag is forwarded** to Home Assistant, and provides a settings screen to review and revoke previously allowed tags. The OS-level entry point is intentionally preserved so the legitimate \\\"user taps a QR/NFC tag sticker\\\" flow keeps working — the fix is the confirmation gate, not removal of the deep link.\\r\\n\\r\\n- **Android (PR [home-assistant/android#6814](https://github.com/home-assistant/android/pull/6814)):** `TagReaderActivity` was migrated to a transparent confirmation BottomSheet with **Allow Once** / **Allow Always** actions, on its own task affinity. `scanTag` is issued only after explicit approval; dismissing the sheet forwards nothing. A settings screen lets the user clear always-allowed tags.\\r\\n\\r\\n# Acknowledgements\\r\\n\\r\\nDiscovered by @briansongdev.\", \"ghsa_id\": \"GHSA-2xqv-hwrf-983f\", \"html_url\": \"https://github.com/home-assistant/core/security/advisories/GHSA-2xqv-hwrf-983f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2xqv-hwrf-983f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-66060\"}], \"private_fork\": null, \"published_at\": \"2026-07-31T11:30:56Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/295814934?v=4\", \"events_url\": \"https://api.github.com/users/JC0liver/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JC0liver/followers\", \"following_url\": \"https://api.github.com/users/JC0liver/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JC0liver/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JC0liver\", \"id\": 295814934, \"login\": \"JC0liver\", \"node_id\": \"U_kgDOEaHHFg\", \"organizations_url\": \"https://api.github.com/users/JC0liver/orgs\", \"received_events_url\": \"https://api.github.com/users/JC0liver/received_events\", \"repos_url\": \"https://api.github.com/users/JC0liver/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JC0liver/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JC0liver/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JC0liver\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Companion app (Android) forwards NFC/QR tag scans to Home Assistant without user confirmation, allowing silent automation execution by untrusted callers\", \"updated_at\": \"2026-07-31T11:30:56Z\", \"url\": \"https://api.github.com/repos/home-assistant/core/security-advisories/GHSA-2xqv-hwrf-983f\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"android\", \"name\": \"Home Assistant Companion app\"}, \"patched_versions\": \"2026.5.3\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<2026.5.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "home-assistant:ghsa-2xqv-hwrf-983f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Home Assistant Companion app: <2026.5.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-66060"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+    "fixed_versions": [
+      "Home Assistant Companion app: 2026.5.3"
+    ],
+    "mitigations": [],
+    "products": [
+      "Home Assistant Companion app"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-31T19:38:11.287553Z",
+  "provenance": {
+    "content_sha256": "836f5159db98f43bdd5139bb004c02940ca400af3d4a27d961233899d04e1870",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T11:30:56Z",
+  "schema_version": 1,
+  "source_id": "home_assistant_github",
+  "source_url": "https://github.com/home-assistant/core/security/advisories/GHSA-2xqv-hwrf-983f",
+  "status": "active",
+  "title": "Companion app (Android) forwards NFC/QR tag scans to Home Assistant without user confirmation, allowing silent automation execution by untrusted callers",
+  "updated_at": "2026-07-31T11:30:56Z",
+  "vendor": "Home Assistant",
+  "vendor_advisory_id": "GHSA-2xqv-hwrf-983f"
+}

@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "e344fbe5dc25b4df5f04dfe1553cb3dbfe9741e7a77bddd69f96d0c85b094458",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": \"CVE-2026-66061\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# Summary\\r\\n\\r\\nThe Home Assistant Companion app for iOS registers a handler for `https://www.home-assistant.io/tag/<id>` tag links (iOS universal link). This entry point could be reached by an untrusted caller — another app, or a process with shell access — and the app would immediately forward the attacker-chosen tag ID to **every configured Home Assistant server** using the victim's stored authenticated session, with **no user interaction**.\\r\\n\\r\\n# Details\\r\\n\\r\\nBecause `tag_scanned` events are commonly wired to automations — including physical-security actions such as unlocking doors, opening garage doors, or disarming alarms — this allowed silent, no-interaction, credential-free triggering of those automations from an untrusted source. The attacker never needs the user's Home Assistant password and rides solely on the client's stored access token.\\r\\n\\r\\nThe root cause is the same on both platforms (the Android Companion app is tracked separately in [GHSA-2xqv-hwrf-983f](https://github.com/home-assistant/core/security/advisories/GHSA-2xqv-hwrf-983f)): a tag link delivered through an OS-level routing mechanism (iOS universal link) was treated as if it had been physically scanned and forwarded to the server without validating the caller or asking the user. Those routing mechanisms are reachable by any other app on the device.\\r\\n\\r\\n`iOSTagManager.handle(userActivity:)` recognized the tag from the universal link's `webpageURL` (host `www.home-assistant.io`) and fired the event directly via `fireEvent(tag:)`, returning `.handled`; `IncomingURLHandler` then showed only a passive, after-the-fact confirmation banner once the event had already been sent. A local app can route the universal link to the Companion app with no user interaction via `UIApplication.open(_:)`.\\r\\n\\r\\nWeakness class: [CWE-862](https://cwe.mitre.org/data/definitions/862.html) Missing Authorization.\\r\\n\\r\\nExploitation only requires that the victim is logged into any supported Home Assistant server version; the tag-scan call works against all current server releases.\\r\\n\\r\\n# Affected versions\\r\\n\\r\\n| Platform | Affected                         | Fixed      |\\r\\n| --- |----------------------------------|------------|\\r\\n| Home Assistant Companion for iOS | All versions prior to `2026.5.0` | `2026.5.0` |\\r\\n\\r\\n# Impact\\r\\n\\r\\n**CVSS 3.1:** `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N` — **7.1 (High)**\\r\\n\\r\\nA caller with no privileges and no user interaction crosses the platform's app/security boundary (`S:C`) into the user's Home Assistant server and issues authenticated, integrity-affecting actions (`I:H`), without disclosing data (`C:N`) or affecting availability (`A:N`).\\r\\n\\r\\nFor an exploited user this means:\\r\\n\\r\\n- **Silent cross-app privilege escalation:** an untrusted app or page sends authenticated `tag_scanned` events to every configured server using the victim's session, with no confirmation.\\r\\n- **Actuation of any tag-bound automation** the attacker can guess or enumerate — unlocking smart locks, opening garage doors, disarming alarms, toggling cameras, etc.\\r\\n- **Credential-free:** the attacker rides solely on the client's stored access token.\\r\\n\\r\\nThe vector is `AV:L`: a local, unprivileged app routes the universal link via `UIApplication.open(_:)`, with no user interaction.\\r\\n\\r\\n# Steps to reproduce\\r\\n\\r\\nFrom another app, route the universal link to the Companion app with no user interaction:\\r\\n\\r\\n```swift\\r\\nUIApplication.shared.open(URL(string: \\\"https://www.home-assistant.io/tag/poc_test_tag\\\")!)\\r\\n```\\r\\n\\r\\niOS delivers it to the Companion app as an `NSUserActivity`; `iOSTagManager.handle(userActivity:)` recognizes the tag and forwards the event to all configured servers with no prompt.\\r\\n\\r\\n# Workaround\\r\\n\\r\\nIf you cannot upgrade immediately:\\r\\n\\r\\n- Avoid binding sensitive or physical-security automations (locks, garage doors, alarms) to `tag_scanned` triggers, or gate those automations behind an additional condition.\\r\\n- Be cautious about which apps are installed on the same device as the Companion app.\\r\\n\\r\\nThe robust mitigation is to upgrade to a patched version.\\r\\n\\r\\n# Fix\\r\\n\\r\\nUpdate the Companion app to a patched version (iOS `2026.5.0` or later).\\r\\n\\r\\nThe app now requires **explicit, in-app user approval before any tag is forwarded** to Home Assistant, and provides a settings screen to review and revoke previously allowed tags. The OS-level entry point is intentionally preserved so the legitimate \\\"user taps a QR/NFC tag sticker\\\" flow keeps working — the fix is the confirmation gate, not removal of the deep link.\\r\\n\\r\\n**iOS (PR home-assistant/iOS#4617):** `Current.tags.handle(...)` gained a `.requiresApproval(tag, type)` result; unknown tags surface a `TagApprovalBottomSheet` with **Allow Once** / **Allow Always**, and `Current.tags.fireEvent(tag:)` runs only after approval. Allowed tags are persisted in a new `AllowedTag` table and managed through an `AllowedTagsView` settings screen.\\r\\n\\r\\n# Acknowledgements\\r\\n\\r\\nDiscovered by @briansongdev.\", \"ghsa_id\": \"GHSA-j23v-9672-677j\", \"html_url\": \"https://github.com/home-assistant/core/security/advisories/GHSA-j23v-9672-677j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j23v-9672-677j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-66061\"}], \"private_fork\": null, \"published_at\": \"2026-07-31T11:33:29Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/295814934?v=4\", \"events_url\": \"https://api.github.com/users/JC0liver/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JC0liver/followers\", \"following_url\": \"https://api.github.com/users/JC0liver/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JC0liver/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JC0liver\", \"id\": 295814934, \"login\": \"JC0liver\", \"node_id\": \"U_kgDOEaHHFg\", \"organizations_url\": \"https://api.github.com/users/JC0liver/orgs\", \"received_events_url\": \"https://api.github.com/users/JC0liver/received_events\", \"repos_url\": \"https://api.github.com/users/JC0liver/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JC0liver/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JC0liver/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JC0liver\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Companion app (iOS) forwards NFC/QR tag scans to Home Assistant without user confirmation, allowing silent automation execution by untrusted callers\", \"updated_at\": \"2026-07-31T11:33:29Z\", \"url\": \"https://api.github.com/repos/home-assistant/core/security-advisories/GHSA-j23v-9672-677j\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"ios\", \"name\": \"Home Assistant Companion app\"}, \"patched_versions\": \"2026.5.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<2026.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "home-assistant:ghsa-j23v-9672-677j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Home Assistant Companion app: <2026.5.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-66061"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+    "fixed_versions": [
+      "Home Assistant Companion app: 2026.5.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "Home Assistant Companion app"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-31T19:38:11.284203Z",
+  "provenance": {
+    "content_sha256": "315e37d158c87876ccc18464370ecaf9644a5e368912d7f484983dd2ae7b0c20",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T11:33:29Z",
+  "schema_version": 1,
+  "source_id": "home_assistant_github",
+  "source_url": "https://github.com/home-assistant/core/security/advisories/GHSA-j23v-9672-677j",
+  "status": "active",
+  "title": "Companion app (iOS) forwards NFC/QR tag scans to Home Assistant without user confirmation, allowing silent automation execution by untrusted callers",
+  "updated_at": "2026-07-31T11:33:29Z",
+  "vendor": "Home Assistant",
+  "vendor_advisory_id": "GHSA-j23v-9672-677j"
+}

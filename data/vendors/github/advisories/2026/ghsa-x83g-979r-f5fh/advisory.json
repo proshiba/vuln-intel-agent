@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-68501\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Impact\\nTwo unauthenticated Mollie shop endpoints look up orders by a sequential integer `orderId`\\nwith no ownership or session check. Chained, they expose customer PII.\\n\\n`GET /{_locale}/thank-you` (`PageRedirectController::thankYouAction`, route\\n`sylius_mollie_shop_thank_you_page_redirect`) loads the order with `findOneBy(['id' => $orderId])`\\nand returns a `302` whose `Location` header carries that order's `tokenValue`. Any `orderId`\\nthus yields that order's token. A non-existent id dereferences null and returns a `500`. The\\nhandler also writes the raw `orderId` into the session.\\n\\n`GET /{_locale}/get-code` (`QrCodeAction::fetchQrCodeFromOrder`, route\\n`sylius_mollie_shop_get_qr_code`) runs the same lookup and returns the order's QR code and id\\nas JSON, ignoring the session cart; this is where the front-end got the integer id. A bad id\\n`500`s here too.\\n\\nThat `tokenValue` is the order's only access control. Passed to the Sylius core page\\n`GET /{_locale}/register-after-checkout/{tokenValue}` it returns a form pre-filled with the\\ncustomer's first name, last name and email. The full attack: enumerate `orderId`, read the\\ntoken from the redirect, read the PII, at roughly a 1-in-71 hit rate for guest orders.\\n`register-after-checkout` is Sylius core, not the plugin, and trusts the token by design, so\\nthe leak is what must be fixed.\\n\\nNone of the plugin endpoints require a login, session or CSRF token.\\n\\n### Patches\\nFixed in **2.2.8**, **3.2.4** and **3.3.1**. \\n\\n### Workarounds\\nIf you cannot upgrade immediately, patch both endpoints at the project level by decorating\\nthe plugin controllers. The decorators enforce ownership before delegating to the original\\ncontroller, so no plugin behaviour is lost. They keep the original `orderId` request contract,\\nso no front-end or asset changes are required. Works on both 2.2 and 3.x.\\n\\n#### Step 1. Decorate the QR code controller\\nCreate `src/Controller/Mollie/SecureQrCodeAction.php` in your Sylius project:\\n\\n```php\\n<?php\\n\\ndeclare(strict_types=1);\\n\\nnamespace App\\\\Controller\\\\Mollie;\\n\\nuse Sylius\\\\Component\\\\Order\\\\Context\\\\CartContextInterface;\\nuse Sylius\\\\Component\\\\Order\\\\Context\\\\CartNotFoundException;\\nuse Sylius\\\\MolliePlugin\\\\Controller\\\\Shop\\\\QrCodeAction;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\JsonResponse;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\Request;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\Response;\\n\\nfinal class SecureQrCodeAction\\n{\\n    private const OWNED_ORDER_IDS_SESSION_KEY = 'sylius_mollie.owned_order_ids';\\n\\n    public function __construct(\\n        private readonly QrCodeAction $inner,\\n        private readonly CartContextInterface $cartContext,\\n    ) {\\n    }\\n\\n    public function fetchQrCodeFromOrder(Request $request): JsonResponse\\n    {\\n        $orderId = $request->get('orderId');\\n\\n        try {\\n            $cart = $this->cartContext->getCart();\\n        } catch (CartNotFoundException) {\\n            $cart = null;\\n        }\\n\\n        if (null !== $orderId && (null === $cart || (string) $cart->getId() !== (string) $orderId)) {\\n            return new JsonResponse([], Response::HTTP_FORBIDDEN);\\n        }\\n\\n        if (null !== $cart && null !== $cart->getId() && $request->hasSession()) {\\n            $session = $request->getSession();\\n            $ownedIds = $session->get(self::OWNED_ORDER_IDS_SESSION_KEY, []);\\n            $ownedIds[(string) $cart->getId()] = true;\\n            $session->set(self::OWNED_ORDER_IDS_SESSION_KEY, $ownedIds);\\n        }\\n\\n        return $this->inner->fetchQrCodeFromOrder($request);\\n    }\\n\\n    public function createPayment(Request $request): Response\\n    {\\n        return $this->inner->createPayment($request);\\n    }\\n\\n    public function removeQrCodeFromOrder(Request $request): JsonResponse\\n    {\\n        return $this->inner->removeQrCodeFromOrder($request);\\n    }\\n}\\n```\\n\\n#### Step 2. Decorate the thank-you controller\\nCreate `src/Controller/Mollie/SecurePageRedirectController.php`:\\n\\n```php\\n<?php\\n\\ndeclare(strict_types=1);\\n\\nnamespace App\\\\Controller\\\\Mollie;\\n\\nuse Sylius\\\\MolliePlugin\\\\Controller\\\\Shop\\\\PageRedirectController;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\RedirectResponse;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\Request;\\nuse Symfony\\\\Component\\\\HttpFoundation\\\\Session\\\\SessionInterface;\\nuse Symfony\\\\Component\\\\Routing\\\\RouterInterface;\\n\\nfinal class SecurePageRedirectController\\n{\\n    private const OWNED_ORDER_IDS_SESSION_KEY = 'sylius_mollie.owned_order_ids';\\n\\n    public function __construct(\\n        private readonly PageRedirectController $inner,\\n        private readonly RouterInterface $router,\\n    ) {\\n    }\\n\\n    public function thankYouAction(Request $request, SessionInterface $session): RedirectResponse\\n    {\\n        $orderId = $request->get('orderId');\\n\\n        if (null !== $orderId) {\\n            $ownedIds = $session->get(self::OWNED_ORDER_IDS_SESSION_KEY, []);\\n\\n            if (!isset($ownedIds[(string) $orderId])) {\\n                return new RedirectResponse($this->router->generate('sylius_shop_cart_summary'));\\n            }\\n        }\\n\\n        return $this->inner->thankYouAction($request, $session);\\n    }\\n}\\n```\\n\\n#### Step 3. Register the decorators\\nAppend to your project's `config/services.yaml`:\\n\\n```yaml\\nservices:\\n    App\\\\Controller\\\\Mollie\\\\SecureQrCodeAction:\\n        decorates: sylius_mollie.controller.shop.qr_code\\n        public: true\\n        arguments:\\n            $inner: '@.inner'\\n            $cartContext: '@sylius.context.cart'\\n\\n    App\\\\Controller\\\\Mollie\\\\SecurePageRedirectController:\\n        decorates: sylius_mollie.controller.shop.page_redirect\\n        public: true\\n        arguments:\\n            $inner: '@.inner'\\n            $router: '@router'\\n```\\n\\n> Both decorators keep `@.inner` and only add an ownership check on `orderId` before handing\\n> the request to the original action, so `createPayment`, `removeQrCodeFromOrder` and the\\n> thank-you redirect all keep their original behaviour and the front-end contract is unchanged.\\n\\n#### Step 4. Clear the cache\\n```bash\\nbin/console cache:clear\\n```\", \"ghsa_id\": \"GHSA-x83g-979r-f5fh\", \"github_reviewed_at\": \"2026-07-31T16:52:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-x83g-979r-f5fh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x83g-979r-f5fh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-68501\"}], \"nvd_published_at\": \"2026-07-30T21:18:13Z\", \"published_at\": \"2026-07-31T16:52:59Z\", \"references\": [\"https://github.com/Sylius/MolliePlugin/security/advisories/GHSA-x83g-979r-f5fh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-68501\", \"https://github.com/Sylius/MolliePlugin/pull/351\", \"https://github.com/Sylius/MolliePlugin/pull/352\", \"https://github.com/Sylius/MolliePlugin/pull/354\", \"https://github.com/Sylius/MolliePlugin/commit/01316b3ad3cf82e3c5ad160115d0a2cf89174e49\", \"https://github.com/Sylius/MolliePlugin/commit/153c754486b1bc597b67a90ac07ef71cd7958267\", \"https://github.com/Sylius/MolliePlugin/commit/d1f7753e92106e8bf3bedcfc61b02ea7b8e1c38a\", \"https://github.com/Sylius/MolliePlugin/releases/tag/v2.2.8\", \"https://github.com/Sylius/MolliePlugin/releases/tag/v3.2.4\", \"https://github.com/Sylius/MolliePlugin/releases/tag/v3.3.1\", \"https://github.com/advisories/GHSA-x83g-979r-f5fh\"], \"repository_advisory_url\": \"https://api.github.com/repos/Sylius/MolliePlugin/security-advisories/GHSA-x83g-979r-f5fh\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Sylius/MolliePlugin\", \"summary\": \"Sylius Mollie Plugin has unauthenticated IDOR that leaks order token and customer PII\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T16:53:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-x83g-979r-f5fh\", \"vulnerabilities\": [{\"first_patched_version\": \"2.2.8\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"sylius/mollie-plugin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.2.8\"}, {\"first_patched_version\": \"3.2.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"sylius/mollie-plugin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 3.2.4\"}, {\"first_patched_version\": \"3.3.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"sylius/mollie-plugin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.3.0, < 3.3.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x83g-979r-f5fh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "sylius/mollie-plugin: < 2.2.8",
+      "sylius/mollie-plugin: >= 3.0.0, < 3.2.4",
+      "sylius/mollie-plugin: >= 3.3.0, < 3.3.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-68501"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "sylius/mollie-plugin"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-07-31T19:38:04.544729Z",
+  "provenance": {
+    "content_sha256": "ca726fa5a3d54c1f12a9094ac4b62ffc8c5578a039c9f83f29748d60899ceeaa",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T16:52:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x83g-979r-f5fh",
+  "status": "active",
+  "title": "Sylius Mollie Plugin has unauthenticated IDOR that leaks order token and customer PII",
+  "updated_at": "2026-07-31T16:53:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x83g-979r-f5fh"
+}

