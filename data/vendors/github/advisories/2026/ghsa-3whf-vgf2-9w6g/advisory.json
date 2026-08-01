@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/250333441?v=4\", \"events_url\": \"https://api.github.com/users/ouicate/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ouicate/followers\", \"following_url\": \"https://api.github.com/users/ouicate/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ouicate/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ouicate\", \"id\": 250333441, \"login\": \"ouicate\", \"node_id\": \"U_kgDODuvJAQ\", \"organizations_url\": \"https://api.github.com/users/ouicate/orgs\", \"received_events_url\": \"https://api.github.com/users/ouicate/received_events\", \"repos_url\": \"https://api.github.com/users/ouicate/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ouicate/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ouicate/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ouicate\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n`NonFinalizedState::handle_reorg` is a recursive, unbounded async function that traverses parent blocks until it finds a common ancestor on the main chain. It has **no recursion depth limit** and **no cycle detection**. A malicious or buggy validator can serve a block whose `previous_block_hash` points back to itself (or forms a cycle with other blocks), causing `handle_reorg` to infinite-loop, consuming 100% CPU and never making sync progress. Additionally, `update()` contains an `.expect(\\\"empty snapshot impossible\\\")` that panics if the non-finalized snapshot becomes empty after trimming finalized blocks.\\n\\n### Details\\n\\n**Location:** `packages/zaino-state/src/chain_index/non_finalised_state.rs:443-489`\\n\\n```rust\\nasync fn handle_reorg(\\n    &self,\\n    working_snapshot: &mut NonfinalizedBlockCacheSnapshot,\\n    block: &impl Block,\\n) -> Result<IndexedBlock, SyncError> {\\n    let prev_block = match working_snapshot\\n        .get_block_by_hash_bytes_in_serialized_order(block.prev_hash_bytes_serialized_order())\\n        .cloned()\\n    {\\n        Some(prev_block) => {\\n            if !working_snapshot\\n                .heights_to_hashes\\n                .values()\\n                .any(|hash| hash == prev_block.hash())\\n            {\\n                Box::pin(self.handle_reorg(working_snapshot, &prev_block)).await?  // <-- LINE 459\\n            } else {\\n                prev_block\\n            }\\n        }\\n        None => {\\n            let prev_block = self\\n                .source\\n                .get_block(HashOrHeight::Hash(\\n                    zebra_chain::block::Hash::from_bytes_in_serialized_order(\\n                        block.prev_hash_bytes_serialized_order(),\\n                    ),\\n                ))\\n                .await\\n                .map_err(|e| { ... })?\\n                .ok_or(SyncError::ValidatorConnectionError(...))?;\\n            Box::pin(self.handle_reorg(working_snapshot, &*prev_block)).await?  // <-- LINE 483\\n        }\\n    };\\n    let indexed_block = block.to_indexed_block(&prev_block, self).await?;\\n    working_snapshot.add_block_new_chaintip(indexed_block.clone());\\n    Ok(indexed_block)\\n}\\n```\\n\\n**Infinite loop via self-referencing block:**\\n1. A compromised validator serves a block `B` where `B.prev_hash == B.hash`.\\n2. `handle_reorg` is called with `B`.\\n3. `get_block_by_hash_bytes_in_serialized_order(B.prev_hash)` finds `B` itself in `working_snapshot.blocks`.\\n4. Check: is `B.hash` in `working_snapshot.heights_to_hashes`? If `B` is a new chaintip not yet on the main chain, **no**.\\n5. Recurse with `prev_block` = `B` (the exact same block).\\n6. This repeats forever. The async recursion builds a new `Box::pin` future each iteration, consuming heap memory and CPU.\\n\\n**Stack exhaustion via deep reorg:**\\nA deep reorg of >1000 blocks would recurse >1000 times. Each async recursion creates a new `Box::pin` future on the heap. While this won't exhaust the native stack immediately, it will allocate unbounded heap memory and CPU time, effectively DoS-ing the sync task.\\n\\n**`.expect(\\\"empty snapshot impossible\\\")` panic:**\\n\\n**Location:** `packages/zaino-state/src/chain_index/non_finalised_state.rs:543-548`\\n\\n```rust\\nnew_snapshot.remove_finalized_blocks(finalized_height);\\nlet best_block = &new_snapshot\\n    .blocks\\n    .values()\\n    .max_by_key(|block| block.chainwork())\\n    .cloned()\\n    .expect(\\\"empty snapshot impossible\\\"); // <-- LINE 548\\n```\\n\\nIf `finalized_height` is greater than or equal to all blocks in `new_snapshot.blocks`, `remove_finalized_blocks` retains only blocks at or above that height. If none exist, `new_snapshot.blocks` becomes empty. The `.expect()` then panics. While the comment claims this is \\\"impossible,\\\" defensive programming dictates it is reachable under corruption or edge-case sync conditions.\\n\\n### PoC\\n\\n1. Run a regtest.\\n2. Serve a block where `header.previous_block_hash == block.hash()`.\\n3. Zaino's `NonFinalizedState::sync` enters `handle_reorg` and infinite-loops.\\n4. Sync never completes. CPU usage pegs to 100%. No new blocks are served to clients.\\n\\n### Fix\\n\\n1. **Add an explicit recursion depth limit** (e.g., max 1000 iterations) and return `SyncError::ReorgFailure` if exceeded:\\n   ```rust\\n   const MAX_REORG_DEPTH: usize = 1000;\\n   ```\\n2. **Track visited hashes** in a `HashSet<BlockHash>` during traversal to detect cycles and abort with an error.\\n3. **Replace `.expect(\\\"empty snapshot impossible\\\")`** with a proper `Err(UpdateError::DatabaseHole)` or similar error return.\\n\\n### Additional Attack Vectors\\n\\n- **Deep reorg DoS:** A miner with significant hash power (or a compromised validator) triggers a deep reorg. Zaino spends excessive CPU and memory in `handle_reorg`, starving the async runtime and stalling response serving.\\n- **Fork-choice manipulation:** By serving cyclic or very deep sidechains, an attacker can keep Zaino stuck in reorg handling indefinitely, preventing it from ever serving the real best chain.\", \"ghsa_id\": \"GHSA-3whf-vgf2-9w6g\", \"github_reviewed_at\": \"2026-07-31T19:49:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-3whf-vgf2-9w6g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3whf-vgf2-9w6g\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-31T19:49:35Z\", \"references\": [\"https://github.com/zingolabs/zaino/security/advisories/GHSA-3whf-vgf2-9w6g\", \"https://github.com/zingolabs/zaino/pull/1172\", \"https://github.com/zingolabs/zaino/commit/428822509bc722eb9727681752686ede9bc87e77\", \"https://github.com/zingolabs/zaino/commit/d874295f1377bec7fd712ef75b364181b8c77d46\", \"https://github.com/zingolabs/zaino/commit/e05112aac54ec3cdb6da29fbc143ea710b32f009\", \"https://github.com/advisories/GHSA-3whf-vgf2-9w6g\"], \"repository_advisory_url\": \"https://api.github.com/repos/zingolabs/zaino/security-advisories/GHSA-3whf-vgf2-9w6g\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/zingolabs/zaino\", \"summary\": \"zaino-state has a Non-Finalized State Reorg — No Cycle Detection or Depth Limit\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T19:49:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-3whf-vgf2-9w6g\", \"vulnerabilities\": [{\"first_patched_version\": \"0.4.1\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"zaino-state\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.4.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3whf-vgf2-9w6g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "zaino-state: < 0.4.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "zaino-state"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-01T19:31:55.053149Z",
+  "provenance": {
+    "content_sha256": "bd7566ed1403cbfdf47196389f8f9ecbbc0aedd3f1feac96a2b380eca1628419",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T19:49:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3whf-vgf2-9w6g",
+  "status": "active",
+  "title": "zaino-state has a Non-Finalized State Reorg — No Cycle Detection or Depth Limit",
+  "updated_at": "2026-07-31T19:49:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3whf-vgf2-9w6g"
+}

