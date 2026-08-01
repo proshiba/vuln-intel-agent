@@ -1,26 +1,26 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-07-31T19:33:45.138206+00:00
-- Completed: 2026-07-31T19:42:21.243404+00:00
+- Started: 2026-08-01T19:27:52.037197+00:00
+- Completed: 2026-08-01T19:34:42.160014+00:00
 
 ## Changes
 
-- new: 193
+- new: 115
 - quarantined: 1
-- unchanged: 2289
-- updated: 173
+- unchanged: 2102
+- updated: 158
 
 ## Priorities
 
-- INFO: 2656
+- INFO: 2376
 
 ## Source outcomes
 
 - failed: 1
-- not_modified: 77
+- not_modified: 84
 - partial: 0
-- success: 88
+- success: 81
 
 ## Unsuccessful sources
 

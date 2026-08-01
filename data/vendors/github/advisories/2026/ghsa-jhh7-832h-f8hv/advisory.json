@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/192484081?v=4\", \"events_url\": \"https://api.github.com/users/lukegranto23/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lukegranto23/followers\", \"following_url\": \"https://api.github.com/users/lukegranto23/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lukegranto23/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lukegranto23\", \"id\": 192484081, \"login\": \"lukegranto23\", \"node_id\": \"U_kgDOC3kS8Q\", \"organizations_url\": \"https://api.github.com/users/lukegranto23/orgs\", \"received_events_url\": \"https://api.github.com/users/lukegranto23/received_events\", \"repos_url\": \"https://api.github.com/users/lukegranto23/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lukegranto23/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lukegranto23/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lukegranto23\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54768\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-204\", \"name\": \"Observable Response Discrepancy\"}], \"description\": \"## Summary\\n\\nThe `sendPasswordResetEmail` mutation in WPGraphQL is explicitly designed to prevent user enumeration. The resolver in `src/Mutation/SendPasswordResetEmail.php` states in a code comment:\\n\\n`// We obsfucate the actual success of this mutation to prevent user enumeration.`\\n\\nThe mutation always returns `success: true` regardless of whether the supplied username/email belongs to an existing user. The intended public output field is only `success: Boolean`.\\n\\nHowever, a deprecated `user` field is still registered on the `SendPasswordResetEmailPayload` output type in `src/Deprecated.php` (lines 433-450). This deprecated field resolves to a full `User` object when the supplied username/email corresponds to an existing author-class user, and `null` otherwise — completely undermining the anti-enumeration design.\\n\\nThe `@todo remove in 3.0.0` comment acknowledges the field is scheduled for removal, but it remains active in all 2.x releases, including current 2.14.1.\\n\\nDiscovered via source code review on May 29, 2026.\\n\\n## Details\\n\\nThe mutation resolver in `src/Mutation/SendPasswordResetEmail.php`:\\n\\n```php\\n$payload = ['success' => true, 'id' => null];\\n$user_data = self::get_user_data($input['username']);\\nif (!$user_data) {\\n    graphql_debug(...);\\n    return $payload;  // id stays null\\n}\\n// ...send email, then...\\nreturn ['id' => $user_data->ID, 'success' => true];\\n```\\n\\nThe intended public output field is only `success`. The `id` is internal-only state for downstream resolvers.\\n\\n`src/Deprecated.php` registers an additional `user` field on the same payload type:\\n\\n```php\\nregister_graphql_field(\\n    'SendPasswordResetEmailPayload',\\n    'user',\\n    [\\n        'type' => 'User',\\n        'deprecationReason' => static function () { return __('This field will be removed...'); },\\n        'resolve' => static function ($payload, $args, AppContext $context) {\\n            return !empty($payload['id'])\\n                ? $context->get_loader('user')->load_deferred($payload['id'])\\n                : null;\\n        },\\n    ],\\n);\\n```\\n\\nThis field reads the internal `$payload['id']` and resolves it through the standard user loader. The User Model's `allowed_restricted_fields` policy permits unauthenticated reads of public author fields (`databaseId`, `name`, `firstName`, `lastName`, `slug`, `description`, `uri`, `url`).\\n\\n## PoC\\n\\n```graphql\\nmutation EnumerateUser {\\n  sendPasswordResetEmail(input: { username: \\\"victim@example.com\\\" }) {\\n    success\\n    user {\\n      databaseId\\n      name\\n      firstName\\n      lastName\\n      slug\\n      description\\n      uri\\n    }\\n  }\\n}\\n```\\n\\nBehavior:\\n- Non-existing user/email → `data.sendPasswordResetEmail.user` is `null`\\n- - Existing author-class user → `data.sendPasswordResetEmail.user` is a full User object with the listed fields populated\\n- - `success` always returns `true`, preserving the appearance of obfuscation — the deprecated `user` field is the leak\\n## Impact\\n\\n1. **Username/email enumeration:** unauthenticated attacker can verify whether any username or email is registered, with no WPGraphQL-side rate limiting\\n2. 2. **Profile disclosure for author-class users:** for any user with published posts (including editors and administrators), the attacker obtains `databaseId`, `name`, `firstName`, `lastName`, `slug`, `description` (user bio), `uri` — substantially more than mere existence\\n3. 3. **Bypasses partial hardening:** sites that disabled the REST API user endpoint, the user XML sitemap, and `?author=N` author redirects may still be vulnerable through this WPGraphQL path\\n4. 4. **Spearphishing setup:** firstName/lastName/description for authors provides personalized phishing material\\n## Recommended fix\\n\\nEither remove the deprecated `user` field entirely (advance the existing `@todo remove in 3.0.0`) or change the resolver to always return `null`:\\n\\n```diff\\n'resolve' => static function ($payload, $args, AppContext $context) {\\n-    return !empty($payload['id']) ? $context->get_loader('user')->load_deferred($payload['id']) : null;\\n- +    // Always null — this deprecated field previously leaked user existence,\\n- +    // undermining the anti-enumeration design of the sendPasswordResetEmail mutation.\\n- +    return null;\\n- },\\n- ```\\nDefense in depth — change the mutation resolver itself to not populate `$payload['id']` on real success:\\n\\n```diff\\nreturn [\\n-    'id'      => $user_data->ID,\\n- +    'id'      => null,\\n-      'success' => true,\\n- ];\\n- ```\\n\\nLuke Granto — independent security researcher operating in good faith. Discovery via source code review of wp-graphql/wp-graphql v2.14.1, approximately 15 minutes from `git clone` to confirmed bug. No live exploitation against any third-party deployment.\", \"ghsa_id\": \"GHSA-jhh7-832h-f8hv\", \"github_reviewed_at\": \"2026-07-31T22:24:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-jhh7-832h-f8hv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jhh7-832h-f8hv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54768\"}], \"nvd_published_at\": null, \"published_at\": \"2026-07-31T22:24:29Z\", \"references\": [\"https://github.com/wp-graphql/wp-graphql/security/advisories/GHSA-jhh7-832h-f8hv\", \"https://github.com/wp-graphql/wp-graphql/releases/tag/wp-graphql/v2.15.1\", \"https://github.com/advisories/GHSA-jhh7-832h-f8hv\"], \"repository_advisory_url\": \"https://api.github.com/repos/wp-graphql/wp-graphql/security-advisories/GHSA-jhh7-832h-f8hv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/wp-graphql/wp-graphql\", \"summary\": \"WPGraphQL has deprecated `user` field on SendPasswordResetEmailPayload that leaks user existence + profile (defeats explicit anti-enumeration design)\", \"type\": \"reviewed\", \"updated_at\": \"2026-07-31T22:24:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-jhh7-832h-f8hv\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"composer\", \"name\": \"wp-graphql/wp-graphql\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jhh7-832h-f8hv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wp-graphql/wp-graphql: <= 2.6.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54768"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wp-graphql/wp-graphql"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-01T19:31:55.005161Z",
+  "provenance": {
+    "content_sha256": "9530ce1577bf13ec67be4dbbe1c431ca225ffdfc47648a2d490f7c219fea8d94",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-07-31T22:24:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jhh7-832h-f8hv",
+  "status": "active",
+  "title": "WPGraphQL has deprecated `user` field on SendPasswordResetEmailPayload that leaks user existence + profile (defeats explicit anti-enumeration design)",
+  "updated_at": "2026-07-31T22:24:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jhh7-832h-f8hv"
+}
