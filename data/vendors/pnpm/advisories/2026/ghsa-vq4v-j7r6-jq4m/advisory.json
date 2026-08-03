@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "eed748bd23e20841910c34f4a87d8848f48854a4904657ca2aff15b92431db26",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-22\", \"CWE-73\", \"CWE-94\"], \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}, {\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"## Summary\\r\\nWhen resolving a package, pnpm uses the resolved **manifest `name`** as a raw path segment for the isolated-linker import target. A tarball dependency whose `package.json` `name` is a scoped path traversal (`@x/../../…/<abs path>`) is therefore extracted **outside `node_modules`**, to an attacker-chosen absolute path, and can **overwrite existing files** there. Attacker controls the destination, filenames, and contents → arbitrary file write → **code execution** (e.g. `~/.zshrc`, `.git/hooks/pre-commit`, another package's code). Occurs during `pnpm install` **even with `--ignore-scripts`** (no lifecycle scripts run), defeating that safety.\\r\\n\\r\\nSame class as the just-patched **GHSA-hwx4** (transitive-dependency *alias* traversal) and **GHSA-v23m** (`stage download` manifest name/version traversal), in a sink their fixes did not cover: the isolated-linker import target keyed by the resolved **name**.\\r\\n\\r\\n## Root cause\\r\\n- The isolated-linker import target is built with a raw `path.join(modules, <resolved name>)` in `installing/deps-resolver/src/resolvePeers.ts:706`, `installing/deps-resolver/src/index.ts:614`, and `deps/graph-builder/src/lockfileToDepGraph.ts:233` — **without** the `safeJoinModulesDir` guard used on the symlink/hoisted/bin paths (`installing/deps-restorer/src/lockfileToHoistedDepGraph.ts:222`). The store location is `node_modules/.pnpm/<id>/node_modules/<name>`, so a traversal `<name>` escapes.\\r\\n- The only resolve-time name gate (`resolving/npm-resolver/src/pickPackage.ts:753`) rejects only *unscoped* names containing `/`, so a **scoped** `@x/../..` passes.\\r\\n\\r\\n## Steps to reproduce\\r\\nSelf-contained PoC (real `pnpm@11.9.0`; loopback tarball server; escape target is a throwaway temp dir):\\r\\n```\\r\\nnpm i pnpm@11.9.0\\r\\n# host a tarball whose package.json name = \\\"@x/\\\"+\\\"../\\\".repeat(25)+\\\"<abs>/OUTSIDE\\\"; victim depends on the http URL\\r\\npnpm install --ignore-scripts\\r\\n```\\r\\nConfirmed output (`repro/poc.mjs`, exit 0):\\r\\n```\\r\\nescape dir is outside the project        : true\\r\\nnew file implanted outside node_modules  : true\\r\\npre-existing file OVERWRITTEN            : true\\r\\n*** CONFIRMED: a tarball dependency wrote & overwrote files OUTSIDE the project during `pnpm install --ignore-scripts` ***\\r\\n```\\r\\n\\r\\n## Remediation\\r\\nRoute the isolated-linker import-target joins (`resolvePeers.ts:706`, `deps-resolver/index.ts:614`, `lockfileToDepGraph.ts:233`) through `safeJoinModulesDir` (as the hoisted linker already does), and/or enforce `validate-npm-package-name` on the resolved manifest name (close the scoped-name gap at `pickPackage.ts:753`) so the import target rejects a traversal name and re-asserts containment before any write.\\r\\n\\r\\n\", \"ghsa_id\": \"GHSA-vq4v-j7r6-jq4m\", \"html_url\": \"https://github.com/pnpm/pnpm/security/advisories/GHSA-vq4v-j7r6-jq4m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vq4v-j7r6-jq4m\"}], \"private_fork\": null, \"published_at\": \"2026-08-02T23:41:57Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1927579?v=4\", \"events_url\": \"https://api.github.com/users/zkochan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zkochan/followers\", \"following_url\": \"https://api.github.com/users/zkochan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zkochan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zkochan\", \"id\": 1927579, \"login\": \"zkochan\", \"node_id\": \"MDQ6VXNlcjE5Mjc1Nzk=\", \"organizations_url\": \"https://api.github.com/users/zkochan/orgs\", \"received_events_url\": \"https://api.github.com/users/zkochan/received_events\", \"repos_url\": \"https://api.github.com/users/zkochan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zkochan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zkochan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zkochan\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"pnpm: A tarball dependency's manifest `name` escapes node_modules → arbitrary file write/overwrite on install\", \"updated_at\": \"2026-08-02T23:41:57Z\", \"url\": \"https://api.github.com/repos/pnpm/pnpm/security-advisories/GHSA-vq4v-j7r6-jq4m\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"pnpm\"}, \"patched_versions\": \">=10.34.5 <11.0.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 10.34.5\"}, {\"package\": {\"ecosystem\": \"npm\", \"name\": \"pnpm\"}, \"patched_versions\": \">=11.11.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">=11.0.0 <11.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "pnpm:ghsa-vq4v-j7r6-jq4m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pnpm: < 10.34.5",
+      "pnpm: >=11.0.0 <11.11.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [
+      "pnpm: >=10.34.5 <11.0.0",
+      "pnpm: >=11.11.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "pnpm"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-03T19:38:25.357784Z",
+  "provenance": {
+    "content_sha256": "d58f5e79f1b211eddd8602ee326367c2fecf8f6978b80d157c30905eec0bb0d5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-02T23:41:57Z",
+  "schema_version": 1,
+  "source_id": "pnpm_github",
+  "source_url": "https://github.com/pnpm/pnpm/security/advisories/GHSA-vq4v-j7r6-jq4m",
+  "status": "active",
+  "title": "pnpm: A tarball dependency's manifest `name` escapes node_modules → arbitrary file write/overwrite on install",
+  "updated_at": "2026-08-02T23:41:57Z",
+  "vendor": "pnpm",
+  "vendor_advisory_id": "GHSA-vq4v-j7r6-jq4m"
+}
