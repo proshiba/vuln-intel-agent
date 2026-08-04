@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/89183311?v=4\", \"events_url\": \"https://api.github.com/users/360AlphaLab/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/360AlphaLab/followers\", \"following_url\": \"https://api.github.com/users/360AlphaLab/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/360AlphaLab/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/360AlphaLab\", \"id\": 89183311, \"login\": \"360AlphaLab\", \"node_id\": \"MDQ6VXNlcjg5MTgzMzEx\", \"organizations_url\": \"https://api.github.com/users/360AlphaLab/orgs\", \"received_events_url\": \"https://api.github.com/users/360AlphaLab/received_events\", \"repos_url\": \"https://api.github.com/users/360AlphaLab/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/360AlphaLab/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/360AlphaLab/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/360AlphaLab\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69252\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"# summary:\\nIn Flowise, the `/api/v1/files` route is protected only by the `feat:files` feature gate and does not enforce `checkPermission(...)` on either `GET` or `DELETE`. As a result, any authenticated API key within the organization, even one with unrelated permissions, can list and delete files belonging to other workspaces in the same organization.\\n\\n# details:\\nThe `/files` route is mounted with `IdentityManager.checkFeatureByPlan('feat:files')` only and has no additional permission middleware. In the controller:\\n\\n- `getAllFiles` uses only `req.user.activeOrganizationId` and calls `getFilesListFromStorage(activeOrganizationId)`, which recursively lists files under the organization storage root\\n- `deleteFile` reads `activeWorkspaceId`, but only uses it for storage quota bookkeeping; the actual deletion is performed using `activeOrganizationId + user-controlled path`\\n\\nAs a result, the API key’s `permissions` and `activeWorkspaceId` are not used to restrict file access.  \\nIn the local test environment,an API key bound to workspace `1592b32a-a11b-4996-80b6-e1c4c2969d88` with only `[\\\"tools:view\\\"]` was created, then successfully:\\n\\n- called `GET /api/v1/files` and received `200 OK`\\n- listed a test file stored under a different workspace, `f92a9a4d-392e-4db2-af82-d14e1d553446`\\n- called `DELETE /api/v1/files?path=f92a9a4d-392e-4db2-af82-d14e1d553446/poc-cross-workspace.txt` and received `200 OK`\\n- confirmed the file was removed by re-querying the file list\\n\\n# impact:\\nAny low-privileged API key holder within the same organization can list and delete files from other workspaces without any file-specific permission. This breaks workspace isolation inside the organization and can lead to unauthorized file access and destructive tampering.\\n\\n# reproduction steps:\\n\\n1. Log in as a user who can create API keys, and create a key with only an unrelated permission, for example:\\n\\n```bash\\ncurl -i -b tamako.cookie \\\\\\n  -H 'x-request-from: internal' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"keyName\\\":\\\"poc-files-noperm\\\",\\\"permissions\\\":[\\\"tools:view\\\"]}' \\\\\\n  http://localhost:8080/api/v1/apikey\\n```\\n\\n2. Record the returned API key. In my local test, the key was:\\n\\n- `ykT6h4Q-u2PZDJmy2kMLWWKL_N42u8mHfYSvHC5Ja0E`\\n\\n3. Prepare a test file under a different workspace within the same organization, for example:\\n\\n- `f92a9a4d-392e-4db2-af82-d14e1d553446/poc-cross-workspace.txt`\\n\\n4. Use the low-privileged API key to list files:\\n\\n```bash\\ncurl -i \\\\\\n  -H 'Authorization: Bearer ykT6h4Q-u2PZDJmy2kMLWWKL_N42u8mHfYSvHC5Ja0E' \\\\\\n  http://localhost:8080/api/v1/files\\n```\\n\\n5. Observe a `200 OK` response that includes a file from another workspace, for example:\\n\\n```json\\n[{\\\"name\\\":\\\"poc-cross-workspace.txt\\\",\\\"path\\\":\\\"f92a9a4d-392e-4db2-af82-d14e1d553446/poc-cross-workspace.txt\\\",\\\"size\\\":19}]\\n```\\n\\n6. Use the same API key to delete that file:\\n\\n```bash\\ncurl -i -X DELETE --get \\\\\\n  -H 'Authorization: Bearer ykT6h4Q-u2PZDJmy2kMLWWKL_N42u8mHfYSvHC5Ja0E' \\\\\\n  --data-urlencode 'path=f92a9a4d-392e-4db2-af82-d14e1d553446/poc-cross-workspace.txt' \\\\\\n  http://localhost:8080/api/v1/files\\n```\\n\\n7. Observe a `200 OK` response:\\n\\n```json\\n{\\\"message\\\":\\\"file_deleted\\\"}\\n```\\n\\n8. Call `GET /api/v1/files` again and confirm that the file is no longer present.\", \"ghsa_id\": \"GHSA-wp74-f5hh-5f3r\", \"github_reviewed_at\": \"2026-08-04T14:54:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-wp74-f5hh-5f3r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wp74-f5hh-5f3r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69252\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T14:54:03Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-wp74-f5hh-5f3r\", \"https://github.com/FlowiseAI/Flowise/pull/6435\", \"https://github.com/FlowiseAI/Flowise/commit/bc22bf8baec95b6a3d6e1b3563b4f03491cd6fbb\", \"https://github.com/FlowiseAI/Flowise/releases/tag/flowise@3.1.3\", \"https://github.com/advisories/GHSA-wp74-f5hh-5f3r\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-wp74-f5hh-5f3r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: Missing authorization on `/api/v1/files` allows low-privileged API keys to list and delete files across workspaces within the same organization\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T14:54:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-wp74-f5hh-5f3r\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wp74-f5hh-5f3r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise: <= 3.1.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-69252"
+    ],
+    "cvss_score": 7.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.745745Z",
+  "provenance": {
+    "content_sha256": "7c6a661243b247eb74083eb59e911c7058898c10ec0aeda10f4e810b4dc10e6e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T14:54:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wp74-f5hh-5f3r",
+  "status": "active",
+  "title": "Flowise: Missing authorization on `/api/v1/files` allows low-privileged API keys to list and delete files across workspaces within the same organization",
+  "updated_at": "2026-08-04T14:54:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wp74-f5hh-5f3r"
+}

