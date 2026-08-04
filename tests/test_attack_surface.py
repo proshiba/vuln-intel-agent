@@ -11,6 +11,7 @@ from vulnwatch.models import (
     AttackSurfaceClass,
     AttackSurfaceProduct,
     AttackSurfaceRegistry,
+    SurfaceReach,
 )
 
 
@@ -82,3 +83,45 @@ def test_shipped_config_classifies_known_edge_products() -> None:
     assert classify(["Ivanti"], ["Ivanti Connect Secure"]) == "vpn_gateway"
     assert classify(["Microsoft"], ["Microsoft SharePoint Server"]) == "webmail_collab"
     assert classify(["Example"], ["Example OS"]) is None
+
+
+def test_cpe_style_product_names_supply_the_vendor() -> None:
+    # NVD/OSV 由来のエントリはベンダー欄が収集元（"NIST"）になり、実際のベンダー名は
+    # 製品名の側にしか現れない。専用ソースを持たない製品はこの形でしか台帳に入らないため、
+    # ここで一致しないと分類の追加が無意味になる。
+    classifier = AttackSurfaceClassifier(
+        AttackSurfaceRegistry(
+            classes={
+                "rmm_remote_support": AttackSurfaceClass(
+                    label="RMM",
+                    reach=SurfaceReach.NETWORK_PIVOT,
+                    products=[AttackSurfaceProduct(vendor="BeyondTrust", name="Remote Support")],
+                )
+            }
+        )
+    )
+
+    assert classifier.classify(["NIST"], ["beyondtrust remote support"]) == "rmm_remote_support"
+
+
+def test_reach_is_reported_per_class() -> None:
+    classifier = AttackSurfaceClassifier(
+        AttackSurfaceRegistry(
+            classes={
+                "vpn_gateway": AttackSurfaceClass(
+                    label="VPN",
+                    reach=SurfaceReach.NETWORK_PIVOT,
+                    products=[AttackSurfaceProduct(vendor="Ivanti", name="Connect Secure")],
+                ),
+                "file_transfer": AttackSurfaceClass(
+                    label="MFT",
+                    products=[AttackSurfaceProduct(vendor="CrushFTP", name="CrushFTP")],
+                ),
+            }
+        )
+    )
+
+    assert classifier.reach_of("vpn_gateway") is SurfaceReach.NETWORK_PIVOT
+    # reach を書かなければ service 扱い。既存の定義を壊さずに追加できる。
+    assert classifier.reach_of("file_transfer") is SurfaceReach.SERVICE
+    assert classifier.reach_of("unknown_class") is None

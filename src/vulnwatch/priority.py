@@ -11,6 +11,7 @@ from vulnwatch.models import (
     Priority,
     ProductAsset,
     ProductRegistry,
+    SurfaceReach,
 )
 
 
@@ -67,4 +68,39 @@ def decide_priority(facts: AdvisoryFacts, enrichment: AdvisoryEnrichment) -> Adv
         return AdvisoryDecision(
             priority=Priority.P3, reasons=["資産一致、攻撃条件または修正版を要確認"]
         )
-    return AdvisoryDecision(priority=Priority.INFO, reasons=["資産不一致または判定情報不足"])
+    return _decide_by_attack_surface(facts, enrichment)
+
+
+def _decide_by_attack_surface(
+    facts: AdvisoryFacts, enrichment: AdvisoryEnrichment
+) -> AdvisoryDecision:
+    """資産台帳に載っていない製品を、初期アクセス面としての重みで評価する。
+
+    `config/products.yaml` に自組織の資産を登録していなくても、外部公開されやすく
+    悪用の実績がある製品は放置できない。とくに VPN 装置・境界機器・リモート管理基盤は、
+    1台の侵害が内部ネットワーク全体への足がかりになるため、その他のサービスより高く扱う。
+    """
+
+    surface = enrichment.attack_surface_class
+    if surface is None:
+        return AdvisoryDecision(priority=Priority.INFO, reasons=["資産不一致または判定情報不足"])
+
+    pivot = enrichment.attack_surface_reach is SurfaceReach.NETWORK_PIVOT
+    label = "境界・リモートアクセス機器" if pivot else "初期アクセス面の製品"
+
+    if enrichment.cisa_kev or facts.known_exploited is True:
+        return AdvisoryDecision(priority=Priority.P1, reasons=[f"{label}で悪用確認済み"])
+    if pivot and facts.remote is True and facts.authentication_required is False:
+        return AdvisoryDecision(
+            priority=Priority.P1, reasons=[f"{label}に認証不要のリモート攻撃が可能"]
+        )
+
+    severity = (facts.vendor_severity or "").casefold()
+    if pivot:
+        # 境界機器は、侵害時に内部ネットワークへ広く到達しうる点だけで一段高く扱う。
+        if severity in {"critical", "high", "important"}:
+            return AdvisoryDecision(priority=Priority.P2, reasons=[f"{label}の高深刻度"])
+        return AdvisoryDecision(priority=Priority.P3, reasons=[label])
+    if severity == "critical":
+        return AdvisoryDecision(priority=Priority.P3, reasons=[f"{label}のCritical"])
+    return AdvisoryDecision(priority=Priority.INFO, reasons=[f"{label}（深刻度は低〜中）"])

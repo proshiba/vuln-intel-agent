@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
-from vulnwatch.models import AttackSurfaceRegistry
+from vulnwatch.models import AttackSurfaceRegistry, SurfaceReach
 
 DEFAULT_PATH = Path("config/attack_surface.yaml")
 
@@ -64,6 +64,14 @@ class AttackSurfaceClassifier:
     def labels(self) -> dict[str, str]:
         return {class_id: klass.label for class_id, klass in self._registry.classes.items()}
 
+    def reach_of(self, class_id: str | None) -> SurfaceReach | None:
+        """分類IDの到達範囲。未知のIDは None（優先度を引き上げない）。"""
+
+        if class_id is None:
+            return None
+        klass = self._registry.classes.get(class_id)
+        return klass.reach if klass is not None else None
+
     def classify(self, vendors: Iterable[str], products: Iterable[str]) -> str | None:
         """一致した最初の分類IDを返す。一致なしは None。
 
@@ -76,10 +84,15 @@ class AttackSurfaceClassifier:
         product_tokens = [_tokens(value) for value in products if value]
         if not vendor_tokens or not product_tokens:
             return None
+        # NVD/OSV など汎用フィード由来のエントリは、ベンダー欄がその収集元（"NIST" など）に
+        # なり、実際のベンダー名は CPE 由来の製品名の側に入る（例: "beyondtrust privileged
+        # remote access"）。専用の収集ソースを持たない製品はこの形でしか台帳に現れないため、
+        # 製品名の側もベンダー名の照合対象に含める。
+        vendor_candidates = vendor_tokens + product_tokens
         for class_id, vendor_spec, name_spec in self._specs:
             vendor_ok = any(
                 _contains(value, vendor_spec) or _contains(vendor_spec, value)
-                for value in vendor_tokens
+                for value in vendor_candidates
             )
             if vendor_ok and any(_contains(value, name_spec) for value in product_tokens):
                 return class_id
@@ -102,3 +115,13 @@ def classify(vendors: Sequence[str], products: Sequence[str]) -> str | None:
     """既定の分類器でベンダー・製品を分類する簡易ヘルパー。"""
 
     return default_classifier().classify(vendors, products)
+
+
+def classify_with_reach(
+    vendors: Sequence[str], products: Sequence[str]
+) -> tuple[str | None, SurfaceReach | None]:
+    """分類IDと、その面の到達範囲をまとめて返す。"""
+
+    classifier = default_classifier()
+    class_id = classifier.classify(vendors, products)
+    return class_id, classifier.reach_of(class_id)
