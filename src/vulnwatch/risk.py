@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from vulnwatch.config import ConfigError, load_sources
-from vulnwatch.models import Advisory, Tier
+from vulnwatch.models import Advisory, SurfaceReach, Tier
 
 RISK_LEVELS = ("緊急", "高", "中", "低")
 _BASE_POINTS = {"Critical": 30, "High": 22, "Moderate": 12, "その他": 5}
@@ -94,6 +94,14 @@ def assess_risk(
         points, label = factor
         score += points
         reasons.append(label)
+
+    if advisory.enrichment.attack_surface_reach is SurfaceReach.NETWORK_PIVOT:
+        # 1台の侵害が内部ネットワーク全体への足がかりになるため、他の面より重く見る。
+        score += 12
+        reasons.append("侵害されると内部ネットワークへ広く到達しうる機器")
+    elif advisory.enrichment.attack_surface_class is not None:
+        score += 6
+        reasons.append("初期アクセスに悪用されやすい製品")
 
     if advisory.enrichment.asset_match:
         score += 10

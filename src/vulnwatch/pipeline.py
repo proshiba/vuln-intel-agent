@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from vulnwatch.attack_surface import classify_with_reach
 from vulnwatch.collectors import CollectorError, create_collector
 from vulnwatch.collectors.osv import OSV_HOST, OSV_QUERY_URL
 from vulnwatch.collectors.osv_global import (
@@ -460,6 +461,9 @@ class Pipeline:
             mitigations=draft.mitigations,
         )
         enrichment = enrich_assets(source.vendor, facts.products, self.products)
+        enrichment.attack_surface_class, enrichment.attack_surface_reach = classify_with_reach(
+            [source.vendor], facts.products
+        )
         listed = [entry for cve in facts.cves if (entry := kev.get(cve)) is not None]
         enrichment.cisa_kev = bool(listed)
         # 複数CVEを含むアドバイザリでは、最も早い掲載日を代表値として保持する。

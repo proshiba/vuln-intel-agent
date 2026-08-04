@@ -234,10 +234,20 @@ class AttackSurfaceProduct(StrictModel):
     name: str
 
 
+class SurfaceReach(StrEnum):
+    """その面が侵害されたとき、攻撃者がどこまで到達しうるか。"""
+
+    # 内部ネットワークの広い範囲へ到達しうる（VPN装置・境界機器・リモート管理基盤）。
+    NETWORK_PIVOT = "network_pivot"
+    # 影響がそのサービスとデータに概ね限られる。
+    SERVICE = "service"
+
+
 class AttackSurfaceClass(StrictModel):
     """初期アクセス面の分類（VPN機器、メール/コラボ基盤など）。"""
 
     label: str
+    reach: SurfaceReach = SurfaceReach.SERVICE
     products: list[AttackSurfaceProduct] = Field(default_factory=list)
 
 
@@ -338,6 +348,9 @@ class AdvisoryEnrichment(StrictModel):
     asset_match: bool = False
     matched_asset_ids: list[str] = Field(default_factory=list)
     internet_exposed: bool = False
+    # 初期アクセス面の分類。自組織の資産台帳とは独立に、外部公開されやすい製品かどうかを表す。
+    attack_surface_class: str | None = None
+    attack_surface_reach: SurfaceReach | None = None
 
 
 class AdvisoryDecision(StrictModel):
