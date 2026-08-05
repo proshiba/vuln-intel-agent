@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/193660555?v=4\", \"events_url\": \"https://api.github.com/users/Foxer131/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Foxer131/followers\", \"following_url\": \"https://api.github.com/users/Foxer131/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Foxer131/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Foxer131\", \"id\": 193660555, \"login\": \"Foxer131\", \"node_id\": \"U_kgDOC4sGiw\", \"organizations_url\": \"https://api.github.com/users/Foxer131/orgs\", \"received_events_url\": \"https://api.github.com/users/Foxer131/received_events\", \"repos_url\": \"https://api.github.com/users/Foxer131/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Foxer131/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Foxer131/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Foxer131\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70481\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\nOn standard channels, the message update and delete handlers accepted any caller holding write access on the channel, without checking that the caller wrote the message. Write access is the same grant a member needs in order to post, so every ordinary participant in a shared channel could rewrite or permanently delete any other participant's messages. The group and direct message branch of the same handlers enforced authorship; the standard branch did not.\\n\\n## Preconditions\\nChannels are disabled by default and must be enabled by an administrator (`ENABLE_CHANNELS`). The channel must be a standard channel; group and direct message channels are not affected. The attacker is any authenticated account with role `user` that holds write access on the channel, whether granted publicly, per user, or through a group. No ownership of the channel, channel manager role, or elevated role is required. Channel and message ids are returned by the listing endpoints the member can already call.\\n\\n## Impact\\nAn ordinary member could replace the content of another member's message while the message stayed attributed to its original author, and could attach arbitrary `data` and `meta` payloads to it through the same form. The member could also permanently delete other members' messages, up to the entire visible history of the channel. This is an integrity and availability loss against other users of the channel: content can be forged under a colleague's name and records can be destroyed. It reaches no further than channels the attacker already has write access to, and it discloses nothing the attacker could not already read as a member. Pinning is unaffected and is not part of this issue.\\n\\n## Fix\\nFixed in `c609ec411` (#27197), released in 0.11.0. Both handlers now apply the same authorship check the group and direct message branch already used, so a non-admin caller can act only on their own messages regardless of write access. Upgrading fully resolves it, with no configuration change required.\\n\\n## Root cause\\nAffected components:\\n- `backend/open_webui/routers/channels.py`, `update_message_by_id` (`POST /api/v1/channels/{id}/messages/{message_id}/update`)\\n- `backend/open_webui/routers/channels.py`, `delete_message_by_id` (`DELETE /api/v1/channels/{id}/messages/{message_id}/delete`)\\n\\nBoth handlers branch on channel type, and the two branches asked different questions. The group and direct message branch asked whether the caller wrote the message. The standard branch asked whether the caller is allowed to write in the channel, which is a permission level, not an identity. Those are not interchangeable: posting a message runs that same write check, so the grant that lets a member participate was silently accepted as the grant to rewrite and remove everyone else's content, and every ordinary participant satisfied it. The model layer looks messages up by primary key alone, so the router branch was the only authorization that ran.\\n\\n## Proof of concept\\nReported with a script that runs end to end against a live instance. An administrator seeds the accounts and a standard channel granting read and write; everything after that is performed by a separate plain `user` account in no group that owns neither the channel nor any of the messages. That account edits a victim's message, attaches structured payloads to it, and deletes a second victim message, all returning 200, with the channel history dumped before and after. Controls in the same run confirm the scoping: a read-only member is refused with 403, and a cross-member edit on a group channel is refused with 403.\\n\\n## Credits\\n@Foxer131 — reported the missing authorship check on the standard-channel update and delete handlers.\", \"ghsa_id\": \"GHSA-mj5r-jf49-m3w7\", \"github_reviewed_at\": \"2026-08-04T19:45:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-mj5r-jf49-m3w7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mj5r-jf49-m3w7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70481\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T19:45:39Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-mj5r-jf49-m3w7\", \"https://github.com/open-webui/open-webui/pull/27197\", \"https://github.com/open-webui/open-webui/commit/c609ec41154fa092fa0af80d9d365de06b666286\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.0\", \"https://github.com/advisories/GHSA-mj5r-jf49-m3w7\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-mj5r-jf49-m3w7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Any member with write access to a standard channel can edit or delete other members' messages\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T19:45:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-mj5r-jf49-m3w7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.5.0, <= 0.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mj5r-jf49-m3w7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.5.0, <= 0.10.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-70481"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-05T19:36:57.892413Z",
+  "provenance": {
+    "content_sha256": "7c2d8cbb1cb52f1d25486a501f8a3910b59f99fdcb19120bd3a839c7139bae74",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T19:45:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mj5r-jf49-m3w7",
+  "status": "active",
+  "title": "Open WebUI: Any member with write access to a standard channel can edit or delete other members' messages",
+  "updated_at": "2026-08-04T19:45:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mj5r-jf49-m3w7"
+}

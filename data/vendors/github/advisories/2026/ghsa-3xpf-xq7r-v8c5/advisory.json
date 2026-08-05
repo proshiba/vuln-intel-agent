@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70486\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-1021\", \"name\": \"Improper Restriction of Rendered UI Layers or Frames\"}], \"description\": \"## Summary\\nAny authenticated user with access to a terminal server could get script of their choosing to run in the Open WebUI origin itself. The HTML file preview rendered terminal-served files in an iframe whose sandbox always granted `allow-same-origin` alongside `allow-scripts`, and the file is served from a path on the application's own origin, so the sandbox provided no isolation at all. Script in a previewed file could read the victim's session token and take over the account.\\n\\n## Preconditions\\n- At least one terminal server configured by an admin (`TERMINAL_SERVER_CONNECTIONS`, empty by default) and reachable by the victim. Deployments with no terminal server configured are not affected.\\n- The attacker needs a normal authenticated account with access to that terminal server, no admin rights.\\n- No victim interaction beyond having the chat open: a `display_file` tool call opens the preview automatically.\\n- `TERMINAL_PROXY_HEADERS` unset, which is the default. An operator who had already set a restrictive Content-Security-Policy through it was not exposed, since those headers are merged into every proxied response including the served file.\\n- The `iframeSandboxAllowSameOrigin` user setting is off by default, but the affected branch ignored it entirely.\\n\\n## Impact\\nThe previewed document runs in the application origin, so it can reach the parent window, read the session token out of `localStorage` and exfiltrate it, which is full account takeover of the victim. If the victim is an admin, or any user holding `workspace.functions`, that takeover extends to server-side code execution through Functions. Getting the malicious file written and displayed still requires a prompt-injection or a social step, which is what keeps the complexity high rather than trivial. Instances with no terminal server configured were never affected, and neither was the `srcdoc` preview path.\\n\\n## Fix\\nFixed in 0.11.0 by 65a5fad7b (#26907). The `serveUrl` preview branch now gates `allow-same-origin` behind the same `iframeSandboxAllowSameOrigin` setting the `srcdoc` branch already used, so by default the preview loads at an opaque origin and cannot reach the parent context. Upgrading is sufficient, no configuration change is required, and HTML previews continue to render normally.\\n\\n## Root cause\\n- `src/lib/components/chat/FileNav/FilePreview.svelte`, the `serveUrl` iframe branch, reached for HTML files served through `/api/v1/terminals/{id}/files/serve/...`.\\n- Present from 0.9.0, where that branch was introduced, through 0.10.2.\\n\\nThe component grew two preview paths. The `srcdoc` path was hardened: same-origin became opt-in and a CSP was injected into the document. The `serveUrl` path, added later for files streamed from a terminal server, kept a static sandbox string with `allow-same-origin` baked into it. Because the terminal proxy is mounted under the application's own origin and forwards the upstream response without adding a Content-Security-Policy of its own unless the operator configured one, and no global CSP is set, the sandbox was the only isolation boundary left, and it was granting precisely the permission that dissolved it.\\n\\n## Proof of concept\\nWrite an HTML file containing a script that reads `window.parent.localStorage.token` to a terminal server the victim can reach, then trigger `display_file` for that file. The chat handler opens the preview on the resulting `terminal:display_file` event with no click, the script executes at the application origin, and the token is exfiltrated.\\n\\n## Credits\\nReported by @manus-use (researcher zx / Jace).\", \"ghsa_id\": \"GHSA-3xpf-xq7r-v8c5\", \"github_reviewed_at\": \"2026-08-04T20:02:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-3xpf-xq7r-v8c5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3xpf-xq7r-v8c5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70486\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-04T20:02:03Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-3xpf-xq7r-v8c5\", \"https://github.com/open-webui/open-webui/pull/26907\", \"https://github.com/open-webui/open-webui/commit/65a5fad7b97db99d490d81f4e0860282c3a4543c\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.0\", \"https://github.com/advisories/GHSA-3xpf-xq7r-v8c5\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-3xpf-xq7r-v8c5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Same-origin XSS to account takeover via terminal file-preview iframe hardcoding allow-same-origin\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-04T20:02:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-3xpf-xq7r-v8c5\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.0, <= 0.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3xpf-xq7r-v8c5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.9.0, <= 0.10.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-70486"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-05T19:36:57.880107Z",
+  "provenance": {
+    "content_sha256": "1722b3fcd256e8d1991f07f5c01500db98ad1978b6e3bd3f0102e0c0d7ba296b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-04T20:02:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3xpf-xq7r-v8c5",
+  "status": "active",
+  "title": "Open WebUI: Same-origin XSS to account takeover via terminal file-preview iframe hardcoding allow-same-origin",
+  "updated_at": "2026-08-04T20:02:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3xpf-xq7r-v8c5"
+}
