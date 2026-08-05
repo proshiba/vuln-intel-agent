@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "9effe4502fad2a77f44c0526e93e35a743fc63ef6dc11049467d0894873d1a45",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Paincakess\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/78134328?v=4\", \"events_url\": \"https://api.github.com/users/Paincakess/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Paincakess/followers\", \"following_url\": \"https://api.github.com/users/Paincakess/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Paincakess/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Paincakess\", \"id\": 78134328, \"login\": \"Paincakess\", \"node_id\": \"MDQ6VXNlcjc4MTM0MzI4\", \"organizations_url\": \"https://api.github.com/users/Paincakess/orgs\", \"received_events_url\": \"https://api.github.com/users/Paincakess/received_events\", \"repos_url\": \"https://api.github.com/users/Paincakess/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Paincakess/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Paincakess/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Paincakess\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-696\", \"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-696\", \"name\": \"Incorrect Behavior Order\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\r\\n\\r\\nThe `POST /settings/owner` endpoint derives its authorization from the settings singleton write it performs, which\\r\\npasses through the permission layer. In affected versions two side effects ran before that write: an outbound owner\\r\\nreport to the configured compliance intake endpoint containing request-supplied fields, and, if that report failed, a\\r\\ndirect database write setting `directus_settings.project_status` to `pending`. Directus populates accountability\\r\\nglobally but does not reject unauthenticated requests at the middleware layer, so an unauthenticated caller received\\r\\n`403 Forbidden` while both side effects had already been dispatched.\\r\\n\\r\\n## Details\\r\\n\\r\\nThe route has no per-route authorization guard. The outbound report was issued ahead of the settings write and was\\r\\nintentionally not awaited, so it continued to settle after the outer request had already failed with a permission error.\\r\\n\\r\\nThe report is a POST to the configured compliance endpoint (`COMPLIANCE_URL`, default `compliance.directus.io`) whose\\r\\nbody is assembled from the request payload (`project_owner`, `org_name`, `project_usage`, `product_updates`) together\\r\\nwith the instance's `project_id` and version. Every payload field is caller-supplied and none are validated before the\\r\\nreport is sent. The destination is fixed by configuration and is not influenced by the request.\\r\\n\\r\\nThe rejection handler attached to that call performed a direct query-builder update of\\r\\n`directus_settings.project_status`, bypassing the permission layer entirely. This path is reached only when the outbound\\r\\nreport fails, which is the standing condition on deployments with restricted outbound network access.\\r\\n`project_status = 'pending'` is the flag read by the daily project status job, which re-sends the stored owner\\r\\ninformation and then clears the flag.\\r\\n\\r\\nAn unauthenticated read of `project_id` from the settings table also preceded the check. That value is not returned to\\r\\nthe caller and is not disclosed.\\r\\n\\r\\nBoth side effects require `PROJECT_OWNER_ENABLED`, which is enabled by default. With it disabled the reporting helper\\r\\nreturns before issuing any request, and neither side effect occurs.\\r\\n\\r\\n## Impact\\r\\n\\r\\nAn unauthenticated caller able to reach the API could:\\r\\n\\r\\n- Cause the instance to submit caller-controlled strings to the configured compliance intake endpoint, from the\\r\\n  instance's own network position and under its `project_id`, with no authorization. This permits submitting spurious\\r\\n  owner records attributable to the deployment and polluting the intake pipeline.\\r\\n- On deployments where the outbound report fails, set `directus_settings.project_status` to `pending`. The written value\\r\\n  is fixed and not attacker-chosen. Its effect is that the daily project status job sends one additional owner report\\r\\n  per day until a report succeeds.\\r\\n\\r\\nThe stored owner information itself is not modified, nothing is disclosed to the caller, and no privilege escalation or\\r\\naccess to other collections follows. The persistent effect on the instance is limited to a single non-security settings\\r\\nfield.\\r\\n\\r\\n## Workarounds\\r\\n\\r\\nFor deployments that cannot upgrade immediately:\\r\\n\\r\\n- Set `PROJECT_OWNER_ENABLED=false` if the project owner and compliance reporting flow is not in use. Neither side\\r\\n  effect can be triggered while it is disabled.\\r\\n- Block `POST /settings/owner` at a reverse proxy in front of Directus, or restrict it to authenticated requests.\\r\\n- If the flag has already been flipped, clearing `directus_settings.project_status` returns the instance to its prior\\r\\n  state.\\r\\n\\r\\n## Credit\\r\\n\\r\\nReported by @Paincakess \\r\\n\", \"ghsa_id\": \"GHSA-6hpw-rhhq-6xq3\", \"html_url\": \"https://github.com/directus/directus/security/advisories/GHSA-6hpw-rhhq-6xq3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6hpw-rhhq-6xq3\"}], \"private_fork\": null, \"published_at\": \"2026-08-05T16:15:09Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/9389634?v=4\", \"events_url\": \"https://api.github.com/users/br41nslug/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/br41nslug/followers\", \"following_url\": \"https://api.github.com/users/br41nslug/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/br41nslug/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/br41nslug\", \"id\": 9389634, \"login\": \"br41nslug\", \"node_id\": \"MDQ6VXNlcjkzODk2MzQ=\", \"organizations_url\": \"https://api.github.com/users/br41nslug/orgs\", \"received_events_url\": \"https://api.github.com/users/br41nslug/received_events\", \"repos_url\": \"https://api.github.com/users/br41nslug/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/br41nslug/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/br41nslug/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/br41nslug\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"Unauthenticated telemetry submission and settings write via pre-authorization side effects on the project owner endpoint\", \"updated_at\": \"2026-08-05T16:15:09Z\", \"url\": \"https://api.github.com/repos/directus/directus/security-advisories/GHSA-6hpw-rhhq-6xq3\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"npm\", \"name\": \"directus\"}, \"patched_versions\": \"12.1.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 11.13.0, < 12.1.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "directus:ghsa-6hpw-rhhq-6xq3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "directus: >= 11.13.0, < 12.1.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [
+      "directus: 12.1.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "directus"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-05T19:37:05.656912Z",
+  "provenance": {
+    "content_sha256": "c79d87c3ead38ee96491e3e50ca5a1ce22efe06ca86f6a2791875999e9a80a7a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-05T16:15:09Z",
+  "schema_version": 1,
+  "source_id": "directus_github",
+  "source_url": "https://github.com/directus/directus/security/advisories/GHSA-6hpw-rhhq-6xq3",
+  "status": "active",
+  "title": "Unauthenticated telemetry submission and settings write via pre-authorization side effects on the project owner endpoint",
+  "updated_at": "2026-08-05T16:15:09Z",
+  "vendor": "Directus",
+  "vendor_advisory_id": "GHSA-6hpw-rhhq-6xq3"
+}
