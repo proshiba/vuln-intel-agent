@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92464658?v=4\", \"events_url\": \"https://api.github.com/users/bhaswanthc/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bhaswanthc/followers\", \"following_url\": \"https://api.github.com/users/bhaswanthc/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bhaswanthc/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bhaswanthc\", \"id\": 92464658, \"login\": \"bhaswanthc\", \"node_id\": \"U_kgDOBYLmEg\", \"organizations_url\": \"https://api.github.com/users/bhaswanthc/orgs\", \"received_events_url\": \"https://api.github.com/users/bhaswanthc/received_events\", \"repos_url\": \"https://api.github.com/users/bhaswanthc/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bhaswanthc/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bhaswanthc/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bhaswanthc\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"## Summary\\n`IndexFile.from_tree`, `IndexFile.reset` (→ from_tree) and `IndexFile.merge_tree` append caller-influenced treeish strings positionally to `git read-tree` with no unsafe-option guard, no `allow_unsafe_options` parameter, and no `--` separator. `git read-tree --index-output=<file>` writes the resulting index to an arbitrary path, and last-occurrence-wins lets an injected `--index-output` override the method's internal temp path — clobbering an arbitrary file with a valid git-index blob. This is a distinct, never-guarded sink: commit `3af0c251` (GHSA-3f7w-8rr8-f37f) guarded only `checkout_index` and `tag`; `read_tree` was left unprotected (it is among the acknowledged unguarded call sites in that advisory's sweep but was never reported or fixed).\\n\\n## Root Cause\\n`from_tree` (index/base.py:388), `reset` (delegates to from_tree), and `merge_tree` (index/base.py:291) call `repo.git.read_tree(*arg_list)` with no `check_unsafe_options` and no `--`. The treeish is caller-influenced and positional.\\n\\n## Impact\\nArbitrary file overwrite / destruction at the privileges of the host process. Content is constrained to a git-index blob (not attacker-chosen, so not RCE), but the target path is fully attacker-controlled — corrupting/truncating configs or destroying files at attacker-chosen writable locations = I:H + A:H (per the skill's \\\"overwrite-any-path = I:H\\\" rule). Pure VALUE control (positional treeish). Default configuration.\\n\\n## Proof of Concept\\n```python\\nIndexFile.from_tree(repo, \\\"--index-output=/home/victim/.bashrc\\\")\\n# target overwritten with a valid git-index blob (DIRC...)\\n```\\n\\n## Attack Chain\\n1. Entry: app calls `IndexFile.from_tree(repo, treeish)` / `reset(commit=…)` / `merge_tree(base=…, rhs=…)` with attacker `treeish=\\\"--index-output=/home/victim/.bashrc\\\"`.\\n2. Check: NONE — the methods have no `allow_unsafe_options` and never call `check_unsafe_options`.\\n3. Sink: `repo.git.read_tree(*arg_list)` — no `--`. argv (from_tree, observed): `['git','read-tree','--index-output=<tmp>','--index-output=/…/victim']` (last-wins).\\n4. Impact: target path created/overwritten with a valid git-index blob; existing content destroyed.\\n\\n## Bypass Evidence\\nIndependently reproduced (gate harness): `IndexFile.from_tree(repo,'--index-output=<victim>')` → victim overwritten; before=`IMPORTANT ORIGINAL CONTENT`, after starts `DIRC\\\\x00\\\\x00\\\\x00\\\\x02…` (destructive clobber, valid index blob). `reset(commit=…)` and both `merge_tree` positionals verified. Fix-commit read: `3af0c251` touched only `checkout_index`+`tag`; `read_tree` untouched on HEAD.\\n\\n## Affected Versions\\n`GitPython <= 3.1.57` (sinks present verbatim on the latest release tag).\\n\\n## Suggested Fix\\nAdd a `check_unsafe_options` guard (with an `allow_unsafe_options` parameter) to `from_tree`/`reset`/`merge_tree`, and/or place a `--` separator before the positional treeish arguments; block `--index-output` (a path-taking option) on this sink.\\n\\n---\\nReported by **zx (Jace)** — GitHub: @manus-use\", \"ghsa_id\": \"GHSA-4gmw-gg2m-w46p\", \"github_reviewed_at\": \"2026-08-07T15:33:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-4gmw-gg2m-w46p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4gmw-gg2m-w46p\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-07T15:33:57Z\", \"references\": [\"https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-4gmw-gg2m-w46p\", \"https://github.com/gitpython-developers/GitPython/pull/2204\", \"https://github.com/gitpython-developers/GitPython/commit/9b5dcaf85da5946dbf69dcd53f9edba08f760b32\", \"https://github.com/gitpython-developers/GitPython/releases/tag/3.1.58\", \"https://github.com/advisories/GHSA-4gmw-gg2m-w46p\"], \"repository_advisory_url\": \"https://api.github.com/repos/gitpython-developers/GitPython/security-advisories/GHSA-4gmw-gg2m-w46p\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gitpython-developers/GitPython\", \"summary\": \"GitPython: Unguarded git read-tree option forwarding in IndexFile.from_tree/reset/merge_tree enables arbitrary file overwrite\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-07T15:34:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-4gmw-gg2m-w46p\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.58\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"GitPython\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.57\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4gmw-gg2m-w46p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "GitPython: <= 3.1.57"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "GitPython"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-07T19:26:50.041431Z",
+  "provenance": {
+    "content_sha256": "0b919642e14c1e2390cd31a8955e1fdb3cd173ceb711ee23b10eaea05ea880f3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-07T15:33:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4gmw-gg2m-w46p",
+  "status": "active",
+  "title": "GitPython: Unguarded git read-tree option forwarding in IndexFile.from_tree/reset/merge_tree enables arbitrary file overwrite",
+  "updated_at": "2026-08-07T15:34:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4gmw-gg2m-w46p"
+}
