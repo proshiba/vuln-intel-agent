@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 2.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-209\", \"name\": \"Generation of Error Message Containing Sensitive Information\"}], \"description\": \"### Summary\\n\\nWhen an RC API call triggers a panic (recovered by the job runner), the full Go stack trace is included in the JSON error response. This leaks internal file paths, Go module versions, goroutine state, and memory addresses to the API caller.\\n\\n### Details\\n\\nThe panic recovery in `fs/rc/jobs/job.go:110-115`:\\n\\n```go\\nfunc (j *Job) run(ctx context.Context, fn rc.Func, in rc.Params) {\\n    defer func() {\\n        if r := recover(); r != nil {\\n            j.mu.Lock()\\n            j.EndTime = time.Now()\\n            j.Error = fmt.Sprintf(\\\"panic received: %v \\\\n%s\\\", r, string(debug.Stack()))\\n            // ...\\n        }\\n    }()\\n```\\n\\nThe full `debug.Stack()` output is placed into `j.Error`, which is then returned in the HTTP response JSON.\\n\\n### PoC\\n\\nTrigger a parse error by setting config path to a non-INI file, then calling dump:\\n\\n```bash\\ncurl -s -X POST http://localhost:5572/config/setpath \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"path\\\":\\\"/etc/hostname\\\"}' \\n\\ncurl -s -X POST http://localhost:5572/config/dump\\n```\\n\\nResponse includes:\\n\\n```json\\n{\\n  \\\"error\\\": \\\"panic received: fatal error: Failed to load config file \\\\\\\"/etc/hostname\\\\\\\": could not parse line: ... \\\\ngoroutine 9 [running]:\\\\nruntime/debug.Stack()\\\\n\\\\truntime/debug/stack.go:26 +0x64\\\\ngithub.com/rclone/rclone/fs/rc/jobs.(*Job).run.func1()\\\\n\\\\tgithub.com/rclone/rclone/fs/rc/jobs/job.go:112 +0x34\\\\n...\\\",\\n  \\\"status\\\": 500\\n}\\n```\\n\\n**Disclosed information includes:**\\n- Full filesystem paths (`github.com/rclone/rclone/fs/config/config.go:377`)\\n- Go module versions (`github.com/go-chi/chi/v5@v5.2.5`)\\n- Go runtime version (from binary)\\n- Goroutine IDs and states\\n- Memory addresses (ASLR leak)\\n- File contents (first unparseable line of the target file)\\n\\n**Tested and confirmed on rclone v1.74.4.**\\n\\n### Impact\\n\\nInformation disclosure that aids exploitation of other vulnerabilities. Stack traces reveal internal architecture, dependency versions (useful for known-CVE targeting), and memory layout. The error message also leaks partial file contents (the first line that fails INI parsing), which can be used alongside the arbitrary file read finding as a complementary file read primitive for non-INI files.\\n\\n### Affected Versions\\n\\nAll versions with RC API support through at least v1.74.4.\\n\\n### Remediation\\n\\nReturn a generic error message to the API caller. Log the full stack trace server-side only. Strip `debug.Stack()` from HTTP responses.\", \"ghsa_id\": \"GHSA-gwfq-86j8-7qhv\", \"github_reviewed_at\": \"2026-08-05T19:59:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-gwfq-86j8-7qhv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gwfq-86j8-7qhv\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-05T19:59:55Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-gwfq-86j8-7qhv\", \"https://github.com/rclone/rclone/commit/ff43a1e3ae17627c80e523a0ca7445f96516d199\", \"https://github.com/rclone/rclone/releases/tag/v1.75.0\", \"https://github.com/advisories/GHSA-gwfq-86j8-7qhv\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-gwfq-86j8-7qhv\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone: Verbose Stack Trace Disclosure in RC API Error Responses\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-05T20:01:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-gwfq-86j8-7qhv\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.74.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gwfq-86j8-7qhv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: <= 1.74.4"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 2.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-08-07T10:22:59.602846Z",
+  "provenance": {
+    "content_sha256": "460bd06bd47b394f2617557a3d821e8bc75805e3253e8364b0aed12573ad188f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-05T19:59:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gwfq-86j8-7qhv",
+  "status": "active",
+  "title": "rclone: Verbose Stack Trace Disclosure in RC API Error Responses",
+  "updated_at": "2026-08-05T20:01:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gwfq-86j8-7qhv"
+}

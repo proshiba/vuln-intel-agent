@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/26510385?v=4\", \"events_url\": \"https://api.github.com/users/0xsharz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xsharz/followers\", \"following_url\": \"https://api.github.com/users/0xsharz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xsharz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xsharz\", \"id\": 26510385, \"login\": \"0xsharz\", \"node_id\": \"MDQ6VXNlcjI2NTEwMzg1\", \"organizations_url\": \"https://api.github.com/users/0xsharz/orgs\", \"received_events_url\": \"https://api.github.com/users/0xsharz/received_events\", \"repos_url\": \"https://api.github.com/users/0xsharz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xsharz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xsharz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xsharz\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"# Quadratic CPU consumption in `!!omap` resolution (js-yaml 3.x and 4.x)\\n\\n## Summary\\n\\n`resolveYamlOmap()` enforces key uniqueness for `!!omap` sequences with a linear\\nscan (`objectKeys.indexOf(...)`) inside the per-element loop, making resolution\\n**O(n²)** in the number of entries. A modestly sized YAML document therefore\\nconsumes disproportionate CPU inside `yaml.load()`, giving a denial of service\\nagainst any consumer that parses untrusted YAML.\\n\\n`!!omap` is registered in the **default schema**\\n(`lib/schema/default.js` → `require('../type/omap')`), so a plain\\n`yaml.load(untrustedInput)` with no options is affected — no custom schema or\\nnon-default configuration is required.\\n\\n**This is the same weakness as CVE-2026-59870 / GHSA-724g-mxrg-4qvm**, which was\\nfixed in the 5.x line in 5.2.1. That fix was never backported: both currently\\nmaintained legacy lines still carry the original implementation.\\n\\n## Affected versions\\n\\n| Line | Latest tested | Status |\\n|---|---|---|\\n| 3.x | **3.15.0** | Affected — `objectKeys.indexOf(pairKey)` at `lib/type/omap.js:29` |\\n| 4.x | **4.3.0** | Affected — `objectKeys.indexOf(pairKey)` at `lib/type/omap.js:30` |\\n| 5.x | 5.2.2 | **Not affected** — fixed in 5.2.1 (uses a `Set`) |\\n\\nBoth figures are the newest release of each line at the time of writing, so\\nthis is not a \\\"you are on an old version\\\" issue.\\n\\n## Details\\n\\n`lib/type/omap.js` (js-yaml 4.3.0):\\n\\n```js\\nif (objectKeys.indexOf(pairKey) === -1) objectKeys.push(pairKey)\\nelse return false\\n```\\n\\n`objectKeys` grows by one element per entry, and `Array.prototype.indexOf` is a\\nlinear scan, so resolving an `n`-entry `!!omap` performs roughly\\n`1 + 2 + … + n` comparisons — quadratic in `n`. The work happens synchronously\\ninside `yaml.load()`, blocking the event loop for its whole duration.\\n\\nThe 5.x line already solves exactly this by tracking seen keys in a `Set`\\n(`src/tag/sequence/omap.ts`):\\n\\n```ts\\nif (carrier.seen.has(key)) return 'duplicate key in ordered map'\\ncarrier.seen.add(key)\\n```\\n\\n## Proof of concept\\n\\n```js\\n// poc.js  —  node poc.js\\nconst yaml = require('js-yaml');\\nconst doc = n => '!!omap\\\\n' + Array.from({length: n}, (_, i) => `- k${i}: ${i}`).join('\\\\n') + '\\\\n';\\n\\nfor (const n of [10000, 20000, 40000, 80000]) {\\n  const d = doc(n), t = Date.now();\\n  yaml.load(d);                      // default schema, no options\\n  console.log(`n=${n} bytes=${d.length} load=${Date.now() - t}ms`);\\n}\\n```\\n\\n### Measured (node v20.20.2, default heap, no flags)\\n\\n**js-yaml 4.3.0**\\n\\n```\\nn=10000  bytes=137787   load=54ms\\nn=20000  bytes=297787   load=169ms\\nn=40000  bytes=617787   load=646ms\\nn=80000  bytes=1257787  load=2607ms\\n```\\n\\n**js-yaml 3.15.0**\\n\\n```\\nn=10000  bytes=137787   load=53ms\\nn=20000  bytes=297787   load=166ms\\nn=40000  bytes=617787   load=641ms\\nn=80000  bytes=1257787  load=2567ms\\n```\\n\\nRuntime grows by a factor of ~4 for each doubling of `n`, which is the\\nsignature of O(n²) (linear growth would be ~2×).\\n\\nScaling further: a **2.48 MB** document with 150,000 entries blocked\\n`yaml.load()` for **10.8 seconds**.\\n\\n## Impact\\n\\nAny service that parses attacker-influenced YAML with js-yaml 3.x or 4.x can be\\nstalled with a small input. Because the loop is synchronous, a single request\\nblocks the Node.js event loop and stalls every other request in the process —\\nso the amplification is per-process, not just per-request.\\n\\nSuggested severity: consistent with **CVE-2026-59870** (the same weakness in\\n5.x), i.e. Availability-only impact, network attack vector, no privileges or\\nuser interaction required.\\n\\n## Suggested fix\\n\\nMirror the 5.x fix — replace the linear scan with a `Set`:\\n\\n```js\\n// lib/type/omap.js\\nconst seen = new Set()\\n// ...\\nif (seen.has(pairKey)) return false\\nseen.add(pairKey)\\n```\\n\\nThis preserves the existing duplicate-key rejection semantics exactly while\\nmaking resolution O(n). A `maxOmapLength`-style cap would also work, but the\\n`Set` matches what 5.x already ships and requires no new option.\\n\\n## References\\n\\n- CVE-2026-59870 / GHSA-724g-mxrg-4qvm — same weakness in 5.0.0–5.2.0, fixed in 5.2.1\\n- `lib/type/omap.js` (3.x, 4.x) — the affected resolver\\n- `lib/schema/default.js` — registers `!!omap` in the default schema\\n\\n## Discovery\\n\\nFound by an automated static-analysis and executed-proof-of-concept scanner run\\nagainst js-yaml 4.2.0, then manually verified against 3.15.0 and 4.3.0 by\\nexecuting the proof of concept above. All timings in this report were measured\\non the **current** releases of each line, not on the version originally scanned.\", \"ghsa_id\": \"GHSA-5p4m-2wfm-xmqj\", \"github_reviewed_at\": \"2026-08-06T20:27:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-5p4m-2wfm-xmqj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5p4m-2wfm-xmqj\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-06T20:27:32Z\", \"references\": [\"https://github.com/nodeca/js-yaml/security/advisories/GHSA-5p4m-2wfm-xmqj\", \"https://github.com/advisories/GHSA-5p4m-2wfm-xmqj\"], \"repository_advisory_url\": \"https://api.github.com/repos/nodeca/js-yaml/security-advisories/GHSA-5p4m-2wfm-xmqj\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nodeca/js-yaml\", \"summary\": \"JS-YAML: Quadratic CPU consumption in !!omap resolution (3.x and 4.x) — CVE-2026-59870 fix not backported\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-06T20:27:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-5p4m-2wfm-xmqj\", \"vulnerabilities\": [{\"first_patched_version\": \"4.3.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"js-yaml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.3.1\"}, {\"first_patched_version\": \"3.15.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"js-yaml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 3.15.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5p4m-2wfm-xmqj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "js-yaml: >= 3.0.0, < 3.15.1",
+      "js-yaml: >= 4.0.0, < 4.3.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59870"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "js-yaml"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-07T10:22:59.453592Z",
+  "provenance": {
+    "content_sha256": "e3994ff8d1d468af89cd31a8e5de448261c195297f43ffa422aea7f88e5fd9ab",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-06T20:27:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5p4m-2wfm-xmqj",
+  "status": "active",
+  "title": "JS-YAML: Quadratic CPU consumption in !!omap resolution (3.x and 4.x) — CVE-2026-59870 fix not backported",
+  "updated_at": "2026-08-06T20:27:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5p4m-2wfm-xmqj"
+}

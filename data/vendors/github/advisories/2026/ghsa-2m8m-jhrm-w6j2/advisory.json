@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/216992819?v=4\", \"events_url\": \"https://api.github.com/users/cyberlanc3r/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cyberlanc3r/followers\", \"following_url\": \"https://api.github.com/users/cyberlanc3r/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cyberlanc3r/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cyberlanc3r\", \"id\": 216992819, \"login\": \"cyberlanc3r\", \"node_id\": \"U_kgDODO8MMw\", \"organizations_url\": \"https://api.github.com/users/cyberlanc3r/orgs\", \"received_events_url\": \"https://api.github.com/users/cyberlanc3r/received_events\", \"repos_url\": \"https://api.github.com/users/cyberlanc3r/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cyberlanc3r/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cyberlanc3r/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cyberlanc3r\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-71312\", \"cvss\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"## 1. Summary\\n\\nrclone interpolates remote SFTP paths into PowerShell hash commands. Its quoting helper escapes only ASCII apostrophe, although PowerShell accepts four Unicode smart quotes as single-quote delimiters. An attacker-controlled filename can therefore terminate the intended path literal and append PowerShell statements executed as the victim's SSH account.\\n\\n## 2. Affected Assets & Attack Surface\\n\\n- Audited commit: `a0c09f1381ae93e2a9a33c529d170186c61ad058`\\n- Backend: `backend/sftp`\\n- Relevant code:\\n  - `backend/sftp/sftp.go:1802-1812` — PowerShell hash commands\\n  - `backend/sftp/sftp.go:1663-1699` — `Fs.run`\\n  - `backend/sftp/sftp.go:1988-2067` — `Object.Hash`\\n  - `backend/sftp/sftp.go:2071-2090` — `quoteOrEscapeShellPath`\\n- Exposed input: remote filename controlled by an SFTP collaborator, upstream storage source, or other party able to create or rename files.\\n- Required execution context: PowerShell as the SSH command shell, SSH exec enabled, and server-side hashing invoked.\\n\\n## 3. Technical Root Cause Analysis\\n\\nFor PowerShell, `quoteOrEscapeShellPath` wraps a path in ASCII apostrophes and doubles only `U+0027`:\\n\\n```go\\nreturn \\\"'\\\" + strings.ReplaceAll(shellPath, \\\"'\\\", \\\"''\\\") + \\\"'\\\", nil\\n```\\n\\nWindows PowerShell also treats `U+2018`, `U+2019`, `U+201A`, and `U+201B` as single-quote delimiters. Those characters pass through the rclone encoder and can close the quoted path. The completed string is sent as shell source through an SSH exec request.\\n\\nThe security boundary fails because shell syntax is constructed by string concatenation rather than passing data through a non-code channel.\\n\\n## 4. Proof-of-Concept & Evidence\\n\\n- Each of the four Unicode smart quotes was passed through the production quoting function and used to terminate the path literal.\\n- A harmless injected `Set-Content` statement created a marker file.\\n- The stronger test invoked the exact production `Object.Hash` path and MD5 PowerShell command against a fake SSH session backed by local PowerShell.\\n- A valid prefix file allowed `Get-FileHash` to complete; the appended statement then executed.\\n- The filename used only characters permitted by Windows filesystems and did not depend on slash, colon, pipe, or ASCII apostrophe.\\n- The focused test passed normally and under Go's race detector.\\n\\nReproduction outline:\\n\\n1. Configure an SFTP remote whose command shell is PowerShell.\\n2. Enable or autodetect the PowerShell hash command.\\n3. Place a file whose name contains a smart quote followed by a harmless marker-writing statement and PowerShell comment syntax.\\n4. Trigger an rclone operation that calculates the remote hash.\\n5. Observe the marker created with the SSH account's permissions.\\n\\n## 5. Impact Assessment\\n\\nSuccessful exploitation provides arbitrary command execution as the victim's SSH account. This can permit file theft, modification, deletion, credential access, persistence, and lateral movement allowed by that account.\\n\\nThe attacker needs filename-control capability but does not need the victim's SSH credentials or an interactive shell. The rclone user's hash operation supplies the execution step.\", \"epss\": {\"percentage\": 0.00276, \"percentile\": 0.19648}, \"ghsa_id\": \"GHSA-2m8m-jhrm-w6j2\", \"github_reviewed_at\": \"2026-08-05T20:37:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-2m8m-jhrm-w6j2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2m8m-jhrm-w6j2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-71312\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-05T20:37:56Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-2m8m-jhrm-w6j2\", \"https://github.com/rclone/rclone/commit/e122fba1a57641b63a580aa26c026903a84e2e88\", \"https://github.com/rclone/rclone/releases/tag/v1.75.0\", \"https://github.com/advisories/GHSA-2m8m-jhrm-w6j2\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-2m8m-jhrm-w6j2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone: PowerShell Smart-Quote Filename Injection Enables SFTP Server-Side Command Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-05T20:38:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-2m8m-jhrm-w6j2\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.74.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2m8m-jhrm-w6j2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: <= 1.74.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-71312"
+    ],
+    "cvss_score": 8.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-07T10:22:59.579595Z",
+  "provenance": {
+    "content_sha256": "a64f44180fa8fe9d9ab2ef3c35161b6837ad69567b4d5c2822cf88d83fddb9e7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-05T20:37:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2m8m-jhrm-w6j2",
+  "status": "active",
+  "title": "rclone: PowerShell Smart-Quote Filename Injection Enables SFTP Server-Side Command Execution",
+  "updated_at": "2026-08-05T20:38:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2m8m-jhrm-w6j2"
+}

