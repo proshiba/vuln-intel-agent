@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/180247239?v=4\", \"events_url\": \"https://api.github.com/users/Dangel165/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Dangel165/followers\", \"following_url\": \"https://api.github.com/users/Dangel165/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Dangel165/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Dangel165\", \"id\": 180247239, \"login\": \"Dangel165\", \"node_id\": \"U_kgDOCr5axw\", \"organizations_url\": \"https://api.github.com/users/Dangel165/orgs\", \"received_events_url\": \"https://api.github.com/users/Dangel165/received_events\", \"repos_url\": \"https://api.github.com/users/Dangel165/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Dangel165/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Dangel165/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Dangel165\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59732\", \"cvss\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\n`rclone archive extract` can write extracted files outside the user-selected destination prefix when extracting a crafted archive. A malicious archive entry containing parent path components such as `../` can escape the requested extraction prefix and create or overwrite sibling objects in the same bucket/path scope.\\n\\n### Details\\n\\nThe affected code path is in `cmd/archive/extract/extract.go`.\\n\\nIn `ArchiveExtract()`, the archive entry path is taken from `f.NameInArchive`. The code strips only a leading `./` prefix and then joins the archive entry path with the destination directory:\\n\\n```go\\nremote := f.NameInArchive\\nremote = strings.TrimPrefix(remote, \\\"./\\\")\\nif dstDir != \\\"\\\" {\\n    remote = path.Join(dstDir, remote)\\n}\\n_, err = operations.Rcat(ctx, dst, remote, fin, f.ModTime(), nil)\\n```\\n\\nParent path components such as `../` are not rejected before `path.Join()` is used.\\n\\nWhen the destination is an S3-style remote such as:\\n\\n```text\\n:s3:bucket/safe/prefix\\n```\\n\\nrclone creates the destination filesystem rooted at `bucket/safe` and treats `prefix` as the destination directory. If the archive contains an entry named:\\n\\n```text\\n../escaped-from-prefix.txt\\n```\\n\\nthen `path.Join(\\\"prefix\\\", \\\"../escaped-from-prefix.txt\\\")` resolves to:\\n\\n```text\\nescaped-from-prefix.txt\\n```\\n\\nAs a result, the S3 backend uploads the object to:\\n\\n```text\\nbucket/safe/escaped-from-prefix.txt\\n```\\n\\ninstead of the expected destination:\\n\\n```text\\nbucket/safe/prefix/escaped-from-prefix.txt\\n```\\n\\nThis allows an attacker-controlled archive to escape the selected extraction prefix on object-storage remotes.\\n\\n### PoC\\n\\nTest environment:\\n\\n- Windows 11\\n- rclone v1.74.3 official Windows amd64 binary\\n- Local fake S3 HTTP endpoint\\n- Crafted ZIP archive containing `../escaped-from-prefix.txt`\\n\\nSteps to reproduce:https://drive.google.com/file/d/1P_cLKFgiWSVSATB8500yP28jdzwt9FAt/view?usp=sharing\\n\\n1. Extract the attached PoC ZIP.\\n\\n2. Run the PoC script:\\n\\n```powershell\\npowershell -ExecutionPolicy Bypass -File .\\\\run-poc.ps1 -RcloneExe \\\"C:\\\\path\\\\to\\\\rclone.exe\\\"\\n```\\n\\n3. The PoC creates a ZIP archive containing this entry:\\n\\n```text\\n../escaped-from-prefix.txt\\n```\\n\\n4. The PoC starts a local fake S3 endpoint and runs rclone with an S3-style destination prefix:\\n\\n```powershell\\nrclone archive extract malicious.zip :s3:bucket/safe/prefix\\n```\\n\\n5. Observe the fake S3 request log.\\n\\nExpected safe behavior:\\n\\n```text\\nPUT /bucket/safe/prefix/escaped-from-prefix.txt\\n```\\n\\nObserved behavior:\\n\\n```text\\nPUT /bucket/safe/escaped-from-prefix.txt?x-id=PutObject\\n```\\n\\nThis shows that the archive entry escaped the requested `safe/prefix` destination and was written under `safe/` instead.\\n\\nThe PoC package includes:\\n\\n- `run-poc.ps1`\\n- `fake-s3-server.py`\\n- `README.md`\\n- `report-draft.md`\\n- captured proof logs\\n\\n### Impact\\n\\nAn attacker who supplies an archive that a victim extracts with `rclone archive extract` can cause extracted files to be written outside the destination prefix selected by the victim when the destination is an S3-style object storage remote.\\n\\nDepending on the victim's configured remote credentials and bucket permissions, this may allow creation or overwrite of sibling objects outside the intended extraction directory/prefix.\\n\\nThis does not require compromising the S3 service itself. The attack relies on the victim extracting an attacker-controlled archive with rclone into an object-storage prefix.\", \"epss\": {\"percentage\": 0.00213, \"percentile\": 0.11666}, \"ghsa_id\": \"GHSA-4vr5-p2gc-h23p\", \"github_reviewed_at\": \"2026-08-05T20:43:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-4vr5-p2gc-h23p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4vr5-p2gc-h23p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59732\"}], \"nvd_published_at\": \"2026-07-14T22:17:29Z\", \"published_at\": \"2026-08-05T20:43:47Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-4vr5-p2gc-h23p\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59732\", \"https://github.com/rclone/rclone/commit/1a746732441e8158f32fab35924b23701e719a8c\", \"https://github.com/rclone/rclone/commit/d11efe0d58fe6a2d6d90675bb9d8ee5840c51e1d\", \"https://github.com/rclone/rclone/releases/tag/v1.74.4\", \"https://github.com/advisories/GHSA-4vr5-p2gc-h23p\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-4vr5-p2gc-h23p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone archive extract allows S3 destination prefix escape via crafted archive paths\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-05T20:43:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-4vr5-p2gc-h23p\", \"vulnerabilities\": [{\"first_patched_version\": \"1.74.4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.74.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4vr5-p2gc-h23p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: <= 1.74.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59732"
+    ],
+    "cvss_score": 5.0,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-07T10:22:59.570569Z",
+  "provenance": {
+    "content_sha256": "63ee3944868db8bc741e8f41e8020c7fd8fb816482878414ad76407f9e705a95",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-05T20:43:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4vr5-p2gc-h23p",
+  "status": "active",
+  "title": "rclone archive extract allows S3 destination prefix escape via crafted archive paths",
+  "updated_at": "2026-08-05T20:43:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4vr5-p2gc-h23p"
+}
