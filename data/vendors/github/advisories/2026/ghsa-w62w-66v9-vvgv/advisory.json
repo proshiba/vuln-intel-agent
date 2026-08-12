@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-54917\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.8, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"## Summary\\n\\nThe S3 API gateway and the Iceberg REST catalog gateway construct their routers with `mux.NewRouter().SkipClean(true)`. With path cleaning disabled, a `..` segment inside the URL survives routing, so a request such as:\\n\\n```\\nGET /bucket-A/../evil-bucket/key\\n```\\n\\nis matched as `bucket=bucket-A`, `object=../evil-bucket/key`. The captured object key is then joined into a filer path with `util.JoinPath` (S3) / `path.Join` (Iceberg), which collapse the `..` server-side, so the actual read or write lands in `evil-bucket`.\\n\\nThe captured path variables were never validated for traversal segments before reaching the handlers, so bucket isolation depended on downstream checks rather than on the path itself.\\n\\n## Impact\\n\\n- **With authentication disabled** (`enableAuth=false`): direct cross-bucket read and write. An object key containing `..` resolves to and operates on a different bucket than the one named in the request path.\\n- **With authentication enabled** (`enableAuth=true`): an authorization confused-deputy. IAM evaluates the policy against the mux `{bucket}` variable (`bucket-A`) in `iam.authRequestWithAuthType`, while the I/O is performed against the traversed target (`evil-bucket`). A principal authorized for one bucket can therefore reach objects in another bucket it has no grant for. This breaks tenant isolation.\\n\\nThe same class of traversal applies to the Iceberg REST catalog's `{prefix}`, `{namespace}`, and `{table}` path variables.\\n\\n`%2e%2e`-encoded and `..\\\\` (backslash) variants are equivalent, because gorilla/mux URL-decodes captured variables and `NormalizeObjectKey` folds `\\\\` to `/` before the path is used.\\n\\n## Affected components\\n\\n- S3 API gateway (`weed s3`, and the S3 endpoint embedded in `weed server`)\\n- Iceberg REST catalog gateway\\n\\n## Affected versions\\n\\nAll releases prior to **4.30**.\\n\\n## Patched version\\n\\n**4.30** and later.\\n\\n## Proof of concept\\n\\nWith a bucket `evil-bucket` containing `secret.txt`, and a caller that only has (or needs no) access to `bucket-A`:\\n\\n```\\nGET /bucket-A/../evil-bucket/secret.txt HTTP/1.1\\nHost: <gateway>\\n```\\n\\nThe response returns the contents of `evil-bucket/secret.txt`. The encoded form `GET /bucket-A/%2e%2e/evil-bucket/secret.txt` behaves identically.\\n\\n## Remediation\\n\\nUpgrade to SeaweedFS **4.30** or later. The fix adds a validation middleware to both gateway routers that rejects any captured path variable containing a `.` or `..` segment, a NUL byte, an embedded slash/backslash in single-segment slots, or an empty captured value, before any handler runs.\\n\\n## Workarounds\\n\\nFor deployments that cannot upgrade immediately, place a reverse proxy in front of the gateway that normalizes the request path and rejects requests whose path contains `..`, `%2e%2e`, or backslash sequences. Note that disabling auth removes the only remaining barrier, so do not rely on `enableAuth=false` deployments being protected by anything.\\n\\n## Resources\\n\\n- Fix: https://github.com/seaweedfs/seaweedfs/pull/9687 (commit `dd1b428`)\\n\\n## Credits\\n\\nReported responsibly by **Denis Abashkin** ([@dadbravo](https://github.com/dadbravo)).\", \"epss\": {\"percentage\": 0.00384, \"percentile\": 0.31}, \"ghsa_id\": \"GHSA-w62w-66v9-vvgv\", \"github_reviewed_at\": \"2026-08-12T19:19:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-w62w-66v9-vvgv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w62w-66v9-vvgv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54917\"}], \"nvd_published_at\": \"2026-06-25T19:16:42Z\", \"published_at\": \"2026-08-12T19:19:54Z\", \"references\": [\"https://github.com/seaweedfs/seaweedfs/security/advisories/GHSA-w62w-66v9-vvgv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54917\", \"https://github.com/seaweedfs/seaweedfs/pull/9687\", \"https://github.com/seaweedfs/seaweedfs/commit/dd1b4287899eed3dfd73c2f3b1de001996fda229\", \"https://github.com/advisories/GHSA-w62w-66v9-vvgv\"], \"repository_advisory_url\": \"https://api.github.com/repos/seaweedfs/seaweedfs/security-advisories/GHSA-w62w-66v9-vvgv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/seaweedfs/seaweedfs\", \"summary\": \"SeaweedFS: Path traversal in the S3 and Iceberg REST gateways allows cross-bucket access\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-12T19:19:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-w62w-66v9-vvgv\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260526080459-dd1b4287899e\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/seaweedfs/seaweedfs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260526080459-dd1b4287899e\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w62w-66v9-vvgv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/seaweedfs/seaweedfs: < 0.0.0-20260526080459-dd1b4287899e"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54917"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/seaweedfs/seaweedfs"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-12T19:29:35.049453Z",
+  "provenance": {
+    "content_sha256": "0b1e3205120c98fb98f5751df3fe89d1e1af77478a7ba4d7cd21c2aedab80838",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-12T19:19:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w62w-66v9-vvgv",
+  "status": "active",
+  "title": "SeaweedFS: Path traversal in the S3 and Iceberg REST gateways allows cross-bucket access",
+  "updated_at": "2026-08-12T19:19:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w62w-66v9-vvgv"
+}
