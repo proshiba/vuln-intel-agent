@@ -19,6 +19,32 @@
 | **非公開アドレスの拒否** | プライベート・ループバック・リンクローカルを拒否（自組織資産の混入防止） |
 | **ドキュメント用レンジの拒否** | `192.0.2.0/24` などを拒否。実在しない指標を書くときにモデルが選びがちな値のため、**捏造検知としても働く** |
 
+## 準備
+
+調査を始める前に、環境とブランチをこの順で用意します。
+
+```bash
+python3.12 -m venv .venv
+# 検証（後述）で pytest を使うため dev extra が要る。`-e .` だけでは入らない。
+.venv/bin/python -m pip install -e '.[dev]'
+
+git fetch origin main
+git checkout -B bot/threat-intel-daily origin/main
+```
+
+前日以前の PR が未マージのまま残っている場合、`origin/main` から作り直すとその調査結果が消えます。失わないよう、リモートに `bot/threat-intel-daily` があれば台帳だけ引き継ぎます。
+
+```bash
+# rev-parse はリモート追跡 ref を見るため、先に fetch しないと
+# ブランチが実在しても失敗する。ls-remote で実在を確かめてから取得する。
+if git ls-remote --exit-code --heads origin bot/threat-intel-daily >/dev/null 2>&1; then
+    git fetch origin bot/threat-intel-daily
+    git checkout origin/bot/threat-intel-daily -- vulndb/iocs vulndb/exports
+fi
+```
+
+すでに main へマージ済みのブランチが残っていることもあります（その場合この復元は差分ゼロの no-op になります）。リモートにブランチが無ければ復元は不要で、そのまま進めて構いません。
+
 ## 調査対象の選び方
 
 全件を調べる必要はありません。次の順で絞ります。
@@ -68,6 +94,8 @@ PY
 | 被害組織側の資産 | 記事に出てくる侵害されたサーバの IP・ホスト名 | 攻撃者インフラではなく被害の記述。公開すると被害組織の特定に繋がる |
 | スキャン基盤・研究者 | Shodan、Censys、ZoomEye、研究機関のスキャナ | 悪用ではなく観測 |
 | サンドボックス観測ノイズ | 解析環境が出した DNS 問い合わせ先、Windows Update などの OS 通信 | 検体の挙動ではない |
+| 予約・ドキュメント用ドメイン | `example.com`、`*.example`、`*.test`、`*.invalid`、`*.localhost` | RFC 2606 / 6761 の予約名で、実在しない。IP 側の `192.0.2.0/24` と同じく **捏造検知の観点でも取り込まない**（ただしドメインは `apply` が弾かないため、ルーチン側で落とす） |
+| 記事内の仮想シナリオ | 「想定される攻撃の流れ」「fictional scenario」として書かれた値、`10.0.0.0/8` などを使った構成図中のホスト | 実観測ではなく解説用の作り話。IOC 表の体裁で載っていることがある |
 
 判断に迷う場合は**取り込まない**でください。落とした指標は次回の調査で拾い直せますが、誤って入れた指標は下流のブロックリストまで流れます。
 
