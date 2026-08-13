@@ -1,31 +1,35 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-08-12T19:25:15.868475+00:00
-- Completed: 2026-08-12T19:34:56.682210+00:00
+- Started: 2026-08-13T19:25:18.484087+00:00
+- Completed: 2026-08-13T19:35:32.098537+00:00
 
 ## Changes
 
-- new: 334
-- quarantined: 2
-- unchanged: 2090
-- updated: 212
+- new: 231
+- quarantined: 3
+- unchanged: 2045
+- updated: 524
 
 ## Priorities
 
-- INFO: 2383
-- P1: 52
+- INFO: 2586
+- P1: 5
 - P2: 1
-- P3: 202
+- P3: 211
 
 ## Source outcomes
 
-- failed: 2
+- failed: 3
 - not_modified: 75
 - partial: 0
-- success: 89
+- success: 88
 
 ## Unsuccessful sources
+
+- dell_technologies (failed, browser): records=0, parse_failures=0 — browser: dell_technologies: browser navigation failed: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("a[href*='/support/kbdoc/'][href*='/dsa-']")
 
 - osv (failed, osv_global): records=0, parse_failures=0 — osv_global: osv: OSV modified index is not sorted newest-first
 - tp_link (failed, html): records=0, parse_failures=0 — html: tp_link: 2 advisory detail fetch(es) failed: tp_link: host is not allowed: support.omadanetworks.com
