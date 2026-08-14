@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "680cb15cfd31a5e6e275a29f1369d25b5884ea84bb95fcbb163eff308d2abff6",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"DshtAnger\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/14113449?v=4\", \"events_url\": \"https://api.github.com/users/DshtAnger/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DshtAnger/followers\", \"following_url\": \"https://api.github.com/users/DshtAnger/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DshtAnger/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DshtAnger\", \"id\": 14113449, \"login\": \"DshtAnger\", \"node_id\": \"MDQ6VXNlcjE0MTEzNDQ5\", \"organizations_url\": \"https://api.github.com/users/DshtAnger/orgs\", \"received_events_url\": \"https://api.github.com/users/DshtAnger/received_events\", \"repos_url\": \"https://api.github.com/users/DshtAnger/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DshtAnger/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DshtAnger/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DshtAnger\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73539\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-88\"], \"cwes\": [{\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"Gitea built external-renderer commands by substituting `$GITEA_PREFIX_SRC` / `$GITEA_PREFIX_RAW` with a URL derived from the caller-controlled markup `Context` field, then split that string with `go-shellquote.Split` and passed the result to `exec.CommandContext`.\\r\\n\\r\\nThe markup handler assigned the branch path from `Context` to `CurrentRefSubURL` without path escaping, despite the documented contract that callers must supply an already-escaped value. Other call sites honored that contract; this one did not. Characters such as single quotes in `Context` could therefore be interpreted as shell-quote syntax, allowing a client to inject additional command-line arguments (for example, pandoc `--lua-filter=<path>`).\\r\\n\\r\\nOn a public repository with default settings, the markup endpoint was reachable without authentication. Combined with Gitea's repository upload mechanism, a user with write access could upload a malicious filter file to a predictable on-disk path and then trigger the renderer to load it. The child process ran as the Gitea OS user.\\r\\n\\r\\n## Affected Versions\\r\\n\\r\\nConfirmed on **1.27.1** with pandoc as the external renderer. All versions using `[markup.*]` external renderers with `$GITEA_PREFIX_SRC` or `$GITEA_PREFIX_RAW` in `RENDER_COMMAND` should be assumed affected until verified otherwise.\\r\\n\\r\\n## Impact\\r\\n\\r\\n**Who was affected:** Instances with external markup rendering enabled and a `RENDER_COMMAND` that included `$GITEA_PREFIX_SRC` or `$GITEA_PREFIX_RAW`.\\r\\n\\r\\n**What broke:** A repository writer (or, on instances with open registration, an attacker-created account) could achieve arbitrary code execution as the Gitea process user by chaining a crafted markup request with a prior file upload. Public repositories exposed the markup endpoint to unauthenticated callers; exploitation still required write access to upload the filter payload.\\r\\n\\r\\n**Severity:** Remote code execution under the Gitea service account, with access to instance data, repository contents, and CI configuration available to that process.\\r\\n\\r\\n| Component | Role |\\r\\n|-----------|------|\\r\\n| `POST /{owner}/{repo}/markup` | Injection point via unescaped `Context` field |\\r\\n| `POST /{owner}/{repo}/upload-file` | Predictable on-disk landing path for filter payload |\\r\\n| `modules/markup/external/external.go` | Placeholder substitution, `shellquote.Split`, and `exec` |\\r\\n\\r\\n## Preconditions\\r\\n\\r\\nAll of the following were required for exploitation:\\r\\n\\r\\n1. A `[markup.*]` section enabled with `RENDER_COMMAND` containing `$GITEA_PREFIX_SRC` or `$GITEA_PREFIX_RAW`.\\r\\n2. Filesystem-backed `APP_DATA_PATH` (Docker default `/data/gitea/data`).\\r\\n3. An account with repository write access (default: open registration).\\r\\n\\r\\nMarkup injection alone did not write the filter file; upload supplied the path that an injected flag could reference.\\r\\n\\r\\n## Root Cause\\r\\n\\r\\n**1. Unescaped `Context` → `CurrentRefSubURL`**\\r\\n\\r\\nIn `routers/common/markup.go`, the branch path extracted from the caller-supplied `Context` field was assigned to `CurrentRefSubURL` without calling `util.PathEscapeSegments`, unlike other call sites.\\r\\n\\r\\n**2. Escape contract not applied when building the base link**\\r\\n\\r\\nIn `models/renderhelper/repo_file.go`, `CurrentRefSubURL` is documented as a sub-URL path already escaped by callers. `ResolveLink` joined it into the base URL without escaping, while only the tree path component was escaped.\\r\\n\\r\\n**3. Placeholder substitution → shell splitting → execution**\\r\\n\\r\\nIn `modules/markup/external/external.go`, the substituted command string was parsed with `go-shellquote.Split` and executed directly. Attacker-influenced content in the prefix URL could therefore become separate argv tokens.\\r\\n\\r\\n**4. Predictable upload path**\\r\\n\\r\\nUploaded files were stored under `{APP_DATA_PATH}/tmp/repo-uploads/{uuid[0]}/{uuid[1]}/{uuid}`, a deterministic path returned to the uploader. Renderers such as pandoc accepted `--lua-filter` pointing at extensionless files in that location.\\r\\n\\r\\n## Credits\\r\\n\\r\\nCodeBuddy Security of Tencent Yunding Lab.\", \"ghsa_id\": \"GHSA-579w-82gf-89m2\", \"html_url\": \"https://github.com/go-gitea/gitea/security/advisories/GHSA-579w-82gf-89m2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-579w-82gf-89m2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73539\"}], \"private_fork\": null, \"published_at\": \"2026-08-14T16:34:36Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75789103?v=4\", \"events_url\": \"https://api.github.com/users/bircni/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bircni/followers\", \"following_url\": \"https://api.github.com/users/bircni/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bircni/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bircni\", \"id\": 75789103, \"login\": \"bircni\", \"node_id\": \"MDQ6VXNlcjc1Nzg5MTAz\", \"organizations_url\": \"https://api.github.com/users/bircni/orgs\", \"received_events_url\": \"https://api.github.com/users/bircni/received_events\", \"repos_url\": \"https://api.github.com/users/bircni/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bircni/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bircni/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bircni\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Remote Code Execution via unescaped markup `Context` into external renderer argv\", \"updated_at\": \"2026-08-14T16:34:36Z\", \"url\": \"https://api.github.com/repos/go-gitea/gitea/security-advisories/GHSA-579w-82gf-89m2\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"\", \"name\": \"gitea\"}, \"patched_versions\": \"1.27.2\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.27.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "gitea:ghsa-579w-82gf-89m2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitea: <= 1.27.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-73539"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [
+      "gitea: 1.27.2"
+    ],
+    "mitigations": [],
+    "products": [
+      "gitea"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-14T19:26:17.966962Z",
+  "provenance": {
+    "content_sha256": "7d1e2010185400e2da9950600e144ed80b423193448831358630cb4645a5fcd3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-14T16:34:36Z",
+  "schema_version": 1,
+  "source_id": "gitea_github",
+  "source_url": "https://github.com/go-gitea/gitea/security/advisories/GHSA-579w-82gf-89m2",
+  "status": "active",
+  "title": "Remote Code Execution via unescaped markup `Context` into external renderer argv",
+  "updated_at": "2026-08-14T16:34:36Z",
+  "vendor": "Gitea",
+  "vendor_advisory_id": "GHSA-579w-82gf-89m2"
+}

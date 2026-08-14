@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/136657682?v=4\", \"events_url\": \"https://api.github.com/users/MatiasTilleriasLey/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MatiasTilleriasLey/followers\", \"following_url\": \"https://api.github.com/users/MatiasTilleriasLey/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MatiasTilleriasLey/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MatiasTilleriasLey\", \"id\": 136657682, \"login\": \"MatiasTilleriasLey\", \"node_id\": \"U_kgDOCCU7Eg\", \"organizations_url\": \"https://api.github.com/users/MatiasTilleriasLey/orgs\", \"received_events_url\": \"https://api.github.com/users/MatiasTilleriasLey/received_events\", \"repos_url\": \"https://api.github.com/users/MatiasTilleriasLey/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MatiasTilleriasLey/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MatiasTilleriasLey/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MatiasTilleriasLey\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73654\", \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"## Summary\\n\\nThe run-metadata update endpoint `PUT /api/v1/runs/:runId/metadata` applies client-supplied\\n\\\"operations\\\" by passing the **attacker-controlled `operation.key`** straight into\\n`new JSONHeroPath(operation.key).set(newMetadata, value)`\\n(`packages/core/src/v3/runMetadata/operations.ts:22-23`), with **no prototype-pollution guard**\\n(`@jsonhero/path@^1.0.21` does not reject `__proto__`/`constructor`/`prototype`).\\n\\nA request with `key: \\\"$.__proto__.polluted\\\"` sets **`Object.prototype.polluted`** in the webapp\\nprocess. Because every plain object then inherits that property, it corrupts unrelated code\\n**process-wide and across tenants** — including Prisma query building and the Prometheus metrics\\nclient — causing query failures, **broken authentication for other tenants' workers**, and an\\n`uncaughtException` (denial of service). Only a normal, low-privilege environment API key is\\nrequired (one request).\\n\\n## Severity\\n\\nA single request from any holder of a normal environment API key contaminates `Object.prototype`\\nin the shared webapp process, breaking other tenants' workers (scope change) and degrading/\\ncrashing the process (high availability impact). Prototype pollution is also a primitive for\\nfurther gadget chains (integrity/confidentiality).\\n\\n## Affected versions\\n\\n- **Introduced** in commit `34f8bd588` (\\\"Add ability to update parent and root run metadata from\\n  children\\\", PR #1563, 2025-01-08) — the `JSONHeroPath(operation.key).set()` sink is present from\\n  the first commit of `operations.ts`. SDK was at `3.3.8` at that time.\\n- **Still present at HEAD** (SDK `4.5.0-rc.7`); `operations.ts` unchanged since 2025-05, and\\n  `@jsonhero/path` is pinned at `^1.0.21` (no proto-guard) throughout.\\n- **Affected range:** `>= v3.3.8` (metadata operations API) through `v4-beta` / current v4.x —\\n  **fixed: 4.5.6**.\\n\\n## Root cause\\n\\n`packages/core/src/v3/runMetadata/operations.ts` — `applyMetadataOperations()` builds a path from\\nthe **untrusted** `operation.key` and writes to it, for every operation type (`set`, `append`,\\n`increment`, …):\\n\\n```ts\\nconst path = new JSONHeroPath(operation.key);   // operation.key fully attacker-controlled\\npath.set(newMetadata, operation.value);         // no __proto__/constructor/prototype rejection\\n```\\n\\nThe request schema (`UpdateMetadataRequestBody`) types `key` as a plain string with no validation,\\nand `@jsonhero/path@1.0.21` walks `__proto__` as an ordinary segment → the assignment lands on\\n`Object.prototype`.\\n\\n## Proof of Concept\\n\\nSelf-host `ghcr.io/triggerdotdev/trigger.dev:v4-beta`. Authenticated with a **normal environment\\nAPI key** (`tr_dev_…`) and any run id of that environment.\\n\\n```bash\\ncurl -X PUT \\\"http://localhost:8030/api/v1/runs/run_cmqr2bsyo00013js2twwhdsfu/metadata\\\" \\\\\\n  -H \\\"Authorization: Bearer tr_dev_<env_key>\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  --data '{\\\"operations\\\":[{\\\"type\\\":\\\"set\\\",\\\"key\\\":\\\"$.__proto__.polluted\\\",\\\"value\\\":\\\"PWNED\\\"}]}'\\n```\\n\\n**Result — `Object.prototype.polluted = \\\"PWNED\\\"` process-wide.** Observed in the webapp logs:\\n\\n1. **The request's own query is corrupted** — `polluted:\\\"PWNED\\\"` injected into every object Prisma\\n   enumerates:\\n   ```\\n   prisma.taskRun.updateMany({ where:{ id:\\\"…\\\", metadataVersion:2, polluted:\\\"PWNED\\\" },\\n     data:{ …, metadataVersion:{ increment:1, polluted:\\\"PWNED\\\" }, polluted:\\\"PWNED\\\" }, polluted:\\\"PWNED\\\" })\\n   -> Unknown argument `polluted`\\n   ```\\n2. **Cross-tenant authentication break** — the *next* request from a different client (a worker's\\n   `POST /engine/v1/dev/dequeue`) fails inside `findEnvironmentByApiKey`:\\n   ```\\n   prisma.runtimeEnvironment.findFirst({ where:{ apiKey:\\\"…\\\", polluted:\\\"PWNED\\\" },\\n     include:{ project:true, …, polluted:\\\"PWNED\\\" } })  -> PrismaClientValidationError\\n   ```\\n   i.e. one tenant's request **breaks authentication for other tenants' workers** → their jobs stop\\n   being dequeued/processed.\\n3. **Denial of service — full process crash.** The `uncaughtException` in prom-client\\n   (`Error: Added label \\\"polluted\\\" is not included in initial labelset: [ 'kind' ]`) **crashes the\\n   webapp process**. Demonstrated with a second tenant: Tenant B (a *different* org/env, with its\\n   own API key) had a working request (`POST /engine/v1/dev/dequeue` → HTTP 400, auth OK) **before**\\n   the attack; **immediately after Tenant A's single attack request, B's request returned HTTP 000\\n   (no response) — the whole multi-tenant webapp was down**. Logs show the crash at 20:53:41 and the\\n   process auto-restarting ~3s later (`FairQueue/ScheduleEngine started`). Repeating the attack in a\\n   loop yields a **crash-loop = sustained DoS for all tenants**.\\n\\n*(Note: the metadata endpoint itself swallows the Prisma failure with `ignoreError:true` and still\\nreturns HTTP 200 — the damage is the process-wide contamination observed in the logs, not the\\nendpoint's status code.)*\\n\\n## Impact\\n\\nA low-privilege caller (one normal environment API key, one request) pollutes `Object.prototype`\\nin the shared multi-tenant webapp process, causing:\\n\\n- **Full cross-tenant denial of service** — the resulting `uncaughtException` **crashes the webapp\\n  process**, taking the service down for **all tenants** (demonstrated: a second tenant's request\\n  returned HTTP 000 immediately after the attack). Repeating the request produces a **crash-loop /\\n  sustained DoS**. Even without the crash, contaminated Prisma queries break other tenants' worker\\n  authentication, halting job processing.\\n- **A prototype-pollution primitive** usable for further gadget chains (auth/logic bypass, etc.).\\n\\n## Suggested remediation\\n\\n1. **Reject dangerous path segments** in `operation.key` before building the path — block\\n   `__proto__`, `constructor`, `prototype` (and validate the `$.`-rooted JSONHero path shape).\\n2. **Build metadata on a null-prototype object** (`Object.create(null)`) and/or use a\\n   pollution-safe setter, so `__proto__` cannot reach `Object.prototype`.\\n3. Upgrade/replace `@jsonhero/path` for a version that is prototype-pollution safe, or wrap its\\n   `.set()` with a guard.\", \"ghsa_id\": \"GHSA-p28v-f755-9qrg\", \"github_reviewed_at\": \"2026-08-13T20:54:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-p28v-f755-9qrg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p28v-f755-9qrg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73654\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-13T20:54:11Z\", \"references\": [\"https://github.com/triggerdotdev/trigger.dev/security/advisories/GHSA-p28v-f755-9qrg\", \"https://github.com/triggerdotdev/trigger.dev/pull/4316\", \"https://github.com/triggerdotdev/trigger.dev/commit/6997aeb05e27d2db47f9eda01fdc8a17c81a1ae0\", \"https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.6\", \"https://github.com/advisories/GHSA-p28v-f755-9qrg\"], \"repository_advisory_url\": \"https://api.github.com/repos/triggerdotdev/trigger.dev/security-advisories/GHSA-p28v-f755-9qrg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/triggerdotdev/trigger.dev\", \"summary\": \"Trigger.dev: Prototype pollution via run metadata operations → process-wide cross-tenant DoS\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-13T20:54:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-p28v-f755-9qrg\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@trigger.dev/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.3.8, <= 4.5.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p28v-f755-9qrg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@trigger.dev/core: >= 3.3.8, <= 4.5.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-73654"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@trigger.dev/core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-14T19:26:26.124299Z",
+  "provenance": {
+    "content_sha256": "c82e1f7f7a261f5fcb51e809e46b4a9650df26b6d1a4ece558b1d3fc2fa226b7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-13T20:54:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p28v-f755-9qrg",
+  "status": "active",
+  "title": "Trigger.dev: Prototype pollution via run metadata operations → process-wide cross-tenant DoS",
+  "updated_at": "2026-08-13T20:54:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p28v-f755-9qrg"
+}
