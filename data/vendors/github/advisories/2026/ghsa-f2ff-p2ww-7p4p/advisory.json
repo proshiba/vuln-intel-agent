@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/38028036?v=4\", \"events_url\": \"https://api.github.com/users/sanktjodel/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sanktjodel/followers\", \"following_url\": \"https://api.github.com/users/sanktjodel/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sanktjodel/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sanktjodel\", \"id\": 38028036, \"login\": \"sanktjodel\", \"node_id\": \"MDQ6VXNlcjM4MDI4MDM2\", \"organizations_url\": \"https://api.github.com/users/sanktjodel/orgs\", \"received_events_url\": \"https://api.github.com/users/sanktjodel/received_events\", \"repos_url\": \"https://api.github.com/users/sanktjodel/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sanktjodel/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sanktjodel/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sanktjodel\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87267521?v=4\", \"events_url\": \"https://api.github.com/users/mohammedix88/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mohammedix88/followers\", \"following_url\": \"https://api.github.com/users/mohammedix88/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mohammedix88/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mohammedix88\", \"id\": 87267521, \"login\": \"mohammedix88\", \"node_id\": \"MDQ6VXNlcjg3MjY3NTIx\", \"organizations_url\": \"https://api.github.com/users/mohammedix88/orgs\", \"received_events_url\": \"https://api.github.com/users/mohammedix88/received_events\", \"repos_url\": \"https://api.github.com/users/mohammedix88/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mohammedix88/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mohammedix88/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mohammedix88\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-71491\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\nA comment-only statement (`-- c\\\\n`*n) may cause a Denial of Service (DoS).\\n\\n### Details\\nLocation: [sqlparse/engine/grouping.py:331-341](https://github.com/andialbrecht/sqlparse/blob/f80af6a4007f11ada847218df8c29dc859238290/sqlparse/engine/grouping.py#L332) (`group_comments`), invoked first in `group()` at `grouping.py:439`. Reachable via `sqlparse.parse()` and `sqlparse.format(sql, strip_comments=True)`.\\n\\nA statement made of many single-line comments (`'-- c\\\\n'` repeated) lexes in O(n) but `group_comments` is O(n²):\\n\\n```python\\ndef group_comments(tlist):\\n    tidx, token = tlist.token_next_by(t=T.Comment)\\n    while token:\\n        eidx, end = tlist.token_not_matching(\\n            lambda tk: imt(tk, t=T.Comment) or tk.is_newline, idx=tidx)\\n        ...\\n        tidx, token = tlist.token_next_by(t=T.Comment, idx=tidx)\\n```\\n\\nThe `while` loop runs n times and each `token_next_by` / `token_not_matching` rescans the O(n) remaining tokens. When all tokens are comments/newlines nothing ever groups, yet the full scan is repeated per token.\\n\\nTwo following factors increase the severity:\\n\\n1. `group_comments` runs first in `group()` (`grouping.py:439`), before the `_group_matching` token-count guard (`grouping.py:34-39`). So the entire quadratic cost is paid even on oversized input. `MAX_GROUPING_TOKENS` does not provide protection on this vector.\\n2. It sits on the primary sanitizer path: `format(sql, strip_comments=True)`, used by query loggers, SQL firewalls, ORMs, and migration tools.\\n\\n### PoC\\nTested using Python 3.14:\\n\\n```python\\nimport time, sqlparse\\nfor n in (1000, 2000, 4000):\\n    s = \\\"-- c\\\\n\\\" * n\\n    t = time.perf_counter()\\n    sqlparse.format(s, strip_comments=True)\\n    print(f\\\"n={n:5d}  format(strip_comments)={1000*(time.perf_counter()-t):7.1f} ms\\\")\\n```\\n\\nOutput:\\n\\n```\\nn= 1000  format(strip_comments)=  106.0 ms\\nn= 2000  format(strip_comments)=  403.3 ms\\nn= 4000  format(strip_comments)= 1602.8 ms\\n```\\n\\nTime increase of ~4× per 2× input (quadratic). `parse()` shows the identical curve. Instrumented scan counts are exactly 1.0M / 4.0M / 16.0M tokens for n=1000/2000/4000. A ~250 KB comment-only payload forces minutes of CPU regardless of the 10000 token cap.\\n\\n### Impact\\nDenial of Service\", \"ghsa_id\": \"GHSA-f2ff-p2ww-7p4p\", \"github_reviewed_at\": \"2026-08-17T17:21:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-f2ff-p2ww-7p4p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f2ff-p2ww-7p4p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-71491\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-17T17:21:00Z\", \"references\": [\"https://github.com/andialbrecht/sqlparse/security/advisories/GHSA-f2ff-p2ww-7p4p\", \"https://github.com/andialbrecht/sqlparse/commit/ef2012a5eeb491e604dea2b00d516904a3830c87\", \"https://github.com/advisories/GHSA-f2ff-p2ww-7p4p\"], \"repository_advisory_url\": \"https://api.github.com/repos/andialbrecht/sqlparse/security-advisories/GHSA-f2ff-p2ww-7p4p\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/andialbrecht/sqlparse\", \"summary\": \"sqlparse: Quadratic O(n²) DoS in group_comments\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-17T17:21:02Z\", \"url\": \"https://api.github.com/advisories/GHSA-f2ff-p2ww-7p4p\", \"vulnerabilities\": [{\"first_patched_version\": \"0.6.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"sqlparse\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f2ff-p2ww-7p4p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "sqlparse: <= 0.5.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-71491"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "sqlparse"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-17T19:17:27.187098Z",
+  "provenance": {
+    "content_sha256": "c6f510b66a240378df2908d11772df3c9ae383b00778ff8cfa912c043f3a5773",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-17T17:21:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f2ff-p2ww-7p4p",
+  "status": "active",
+  "title": "sqlparse: Quadratic O(n²) DoS in group_comments",
+  "updated_at": "2026-08-17T17:21:02Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f2ff-p2ww-7p4p"
+}
