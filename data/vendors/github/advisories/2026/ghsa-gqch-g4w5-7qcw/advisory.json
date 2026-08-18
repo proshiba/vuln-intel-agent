@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69148\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\nThe `_validate_source_run` and `_validate_source_model` functions in `mlflow/server/handlers.py` verify that a model version source path is within the artifact directory of a specified run or logged model, but do not check whether the caller has READ permission on that run or model. An authenticated MLflow user can therefore reference another user's run_id in `CreateModelVersion`, creating a model version whose artifact URI points at the victim's artifact directory. If the calling user has MANAGE permission on the registered model (which they do after creation), they can then read arbitrary files from the victim's artifact directory via `GET /model-versions/get-artifact`, bypassing the experiment-level READ permission gate on `GET /get-artifact`.\\n\\n### Details\\n\\n`POST /api/2.0/mlflow/model-versions/create` is protected: the caller must have UPDATE permission on the registered model. However, the source/run_id validation performed inside `_validate_source_run` only verifies path containment, not caller authorization:\\n\\n```python\\n# mlflow/server/handlers.py  _validate_source_run()\\ndef _validate_source_run(source: str, run_id: str) -> None:\\n    if is_local_uri(source):\\n        if run_id:\\n            store = _get_tracking_store()\\n            run = store.get_run(run_id)          # <-- no permission check on run_id\\n            source = pathlib.Path(local_file_uri_to_path(source)).resolve()\\n            if is_local_uri(run.info.artifact_uri):\\n                run_artifact_dir = pathlib.Path(...).resolve()\\n                if run_artifact_dir in [source, *source.parents]:\\n                    return                       # validation passes\\n        raise MlflowException(...)\\n```\\n\\nAfter creation, the model version's `source` and `run_id` point at the victim's artifact directory. The caller can read files from that directory via the model version artifact handler, which derives the artifact path from the stored `source`:\\n\\n```\\nGET /model-versions/get-artifact?name=<model>&version=<v>&path=<file>\\n```\\n\\nThis bypass matters in deployments where experiment-level permissions are explicitly restricted -- i.e., where the default_permission is NO_PERMISSIONS or the target experiment has no grant for the attacker. Without the bypass, `GET /get-artifact` for the victim's run would return 403; via the model version artifact handler it returns 200.\\n\\n### PoC\\n\\nPrerequisites: MLflow v3.13.0, `--app-name basic-auth`, default_permission=NO_PERMISSIONS (or alice's experiment restricted). Alice owns experiment 2 and run ALICE_RUN_ID. Bob owns experiment 4. Bob has READ on his own resources but NOT on alice's experiment.\\n\\n1. Alice uploads a private file:\\n\\n```bash\\n# file is at /mlruns/2/ALICE_RUN_ID/artifacts/secret_weights.txt\\necho \\\"ALICE_SECRET_MODEL_WEIGHTS=0.42\\\" > secret_weights.txt\\n```\\n\\n2. Bob directly tries to read alice's artifact -- blocked:\\n\\n```\\nGET /get-artifact?run_id=ALICE_RUN_ID&path=secret_weights.txt HTTP/1.1\\nAuthorization: Basic <bob credentials>\\n```\\n\\nResponse: HTTP 403 (when alice's experiment is private)\\n\\n3. Bob creates a model version referencing alice's run_id as source anchor:\\n\\n```\\nPOST /api/2.0/mlflow/model-versions/create HTTP/1.1\\nAuthorization: Basic <bob credentials>\\nContent-Type: application/json\\n\\n{\\\"name\\\":\\\"bob-model\\\",\\\"source\\\":\\\"/mlruns/2/ALICE_RUN_ID/artifacts\\\",\\\"run_id\\\":\\\"ALICE_RUN_ID\\\"}\\n```\\n\\nResponse: HTTP 200\\n```json\\n{\\\"model_version\\\":{\\\"name\\\":\\\"bob-model\\\",\\\"version\\\":\\\"1\\\",\\\"source\\\":\\\"/mlruns/2/ALICE_RUN_ID/artifacts\\\",\\\"run_id\\\":\\\"ALICE_RUN_ID\\\"}}\\n```\\n\\n4. Bob reads alice's private file via the model version artifact handler:\\n\\n```\\nGET /model-versions/get-artifact?name=bob-model&version=1&path=secret_weights.txt HTTP/1.1\\nAuthorization: Basic <bob credentials>\\n```\\n\\nResponse: HTTP 200 -- body contains `ALICE_SECRET_MODEL_WEIGHTS=0.42`\\n\\nLive-validated on v3.13.0 with default_permission=READ (the file download is confirmed 200 OK); impact escalates to a true bypass when default_permission=NO_PERMISSIONS.\\n\\n### Impact\\n\\nAn authenticated user who can create registered models can read arbitrary files from any other user's artifact directory, bypassing the experiment-level READ permission gate. Model weights, training data samples, and evaluation reports stored in a run's artifact directory are accessible. The attacker needs UPDATE (or MANAGE) permission on at least one registered model; with default_permission=READ, that is automatically granted to the model creator.\", \"ghsa_id\": \"GHSA-gqch-g4w5-7qcw\", \"github_reviewed_at\": \"2026-08-17T21:59:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-gqch-g4w5-7qcw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gqch-g4w5-7qcw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69148\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-17T21:59:09Z\", \"references\": [\"https://github.com/mlflow/mlflow/security/advisories/GHSA-gqch-g4w5-7qcw\", \"https://github.com/mlflow/mlflow/pull/24293\", \"https://github.com/mlflow/mlflow/commit/4bb7474771c3be808cd9e129defef9305f2869be\", \"https://github.com/mlflow/mlflow/releases/tag/v3.15.0\", \"https://github.com/advisories/GHSA-gqch-g4w5-7qcw\"], \"repository_advisory_url\": \"https://api.github.com/repos/mlflow/mlflow/security-advisories/GHSA-gqch-g4w5-7qcw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/mlflow/mlflow\", \"summary\": \"MLflow: CreateModelVersion source validation does not check READ permission on referenced run_id\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-17T21:59:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-gqch-g4w5-7qcw\", \"vulnerabilities\": [{\"first_patched_version\": \"3.15.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"mlflow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.15.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gqch-g4w5-7qcw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mlflow: < 3.15.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-69148"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mlflow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-18T19:18:49.984919Z",
+  "provenance": {
+    "content_sha256": "5d7957e336008957aad66de2aa352c0978fe2966890e17bac37606beacba7123",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-17T21:59:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gqch-g4w5-7qcw",
+  "status": "active",
+  "title": "MLflow: CreateModelVersion source validation does not check READ permission on referenced run_id",
+  "updated_at": "2026-08-17T21:59:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gqch-g4w5-7qcw"
+}
