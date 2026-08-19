@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/288231323?v=4\", \"events_url\": \"https://api.github.com/users/sour-exploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sour-exploit/followers\", \"following_url\": \"https://api.github.com/users/sour-exploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sour-exploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sour-exploit\", \"id\": 288231323, \"login\": \"sour-exploit\", \"node_id\": \"U_kgDOES4Pmw\", \"organizations_url\": \"https://api.github.com/users/sour-exploit/orgs\", \"received_events_url\": \"https://api.github.com/users/sour-exploit/received_events\", \"repos_url\": \"https://api.github.com/users/sour-exploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sour-exploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sour-exploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sour-exploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-71322\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n \\nThe `CertificateExport` handler in `lemur/certificates/views.py` nests its entire ownership / `CertificatePermission` check inside an `if plugin.requires_key:` branch. When the selected export plugin advertises `requires_key = False`, the authorization check is skipped entirely and any authenticated user can invoke `plugin.export(cert.body, cert.chain, cert.private_key, options)` against a certificate they do not own. The handler additionally writes a `\\\"key_view\\\"` audit-log event for every call, regardless of whether the plugin actually accessed the private key, polluting the audit trail with false positives.\\n \\n## Root Cause\\n \\n`lemur/certificates/views.py:1573`:\\n \\n```python\\nif plugin.requires_key:\\n    if not cert.private_key:\\n        return (..., 400)\\n    else:\\n        if g.current_user != cert.user:\\n            owner_role = role_service.get_by_name(cert.owner)\\n            permission = CertificatePermission(owner_role, [x.name for x in cert.roles])\\n            if not permission.can():\\n                return (..., 403)\\n \\nlog_service.create(g.current_user, \\\"key_view\\\", certificate=cert)   # always logged\\nextension, passphrase, data = plugin.export(\\n    cert.body, cert.chain, cert.private_key, options\\n)\\n```\\n \\nThe authorization gate is structurally inside the `if plugin.requires_key:` block. With `requires_key = False`, control falls straight through to `plugin.export(...)` with no ownership check. The `cert.private_key` is passed to the plugin regardless of the flag — the flag only describes what the plugin *advertises* it needs, not what it actually receives.\\n \\nThe only currently shipping `ExportPlugin` with `requires_key = False` is `JavaTruststoreExportPlugin` (`lemur/plugins/lemur_jks/plugin.py`), whose `export()` ignores the `key` argument and emits a public-only Java truststore. The present-day data exposure is therefore limited to public certificate material. The bug is nonetheless filed as a real authorization gap because:\\n \\n1. The structural defect is latent and silent - any future `requires_key = False` `ExportPlugin` that *does* read `cert.private_key` will inherit the bypass with no test or code-review signal.\\n2. The unconditional `log_service.create(..., \\\"key_view\\\", ...)` call falsely records key-view events for callers who never viewed a key, weakening incident-response signal.\\n \\n## Affected Endpoints\\n \\n| Method | Path | Source |\\n|---|---|---|\\n| POST | /api/1/certificates/`<id>`/export | lemur/certificates/views.py:1573 |\\n \\n## Impact\\n \\nIn the current codebase:\\n \\n- Any authenticated user can mint a Java truststore (`java-truststore-jks` plugin) containing any certificate's public body and chain, without owning the certificate or holding a role with permission over it.\\n- The audit log records a `key_view` event for the calling user against that certificate, despite no private key having been accessed. Defenders investigating apparent key-view events will encounter false positives that they cannot distinguish from genuine accesses.\\n \\nLatent risk:\\n \\n- A future `ExportPlugin` author who sets `requires_key = False` because their plugin can *operate* without a key (e.g., for a fall-back code path) but still uses the key when one is provided will silently leak private keys to any authenticated user. The same code review that approves the plugin will not flag this — the authorization invariant is held by a structurally distant `if`-branch in the view, not by the plugin itself.\\n \\n## Remediation\\n \\nLift the authorization check out of the `if plugin.requires_key:` block so it runs for every export call:\\n \\n```python\\n# Authorization first, unconditionally.\\nif g.current_user != cert.user:\\n    owner_role = role_service.get_by_name(cert.owner)\\n    permission = CertificatePermission(owner_role, [x.name for x in cert.roles])\\n    if not permission.can():\\n        return (dict(message=\\\"You are not authorized to export this certificate.\\\"), 403)\\n \\nif plugin.requires_key:\\n    if not cert.private_key:\\n        return (dict(message=\\\"Plugin requires a key but none is present.\\\"), 400)\\n    log_service.create(g.current_user, \\\"key_view\\\", certificate=cert)   # only when key actually accessed\\n \\nextension, passphrase, data = plugin.export(\\n    cert.body, cert.chain, cert.private_key, options\\n)\\n```\\n \\nThis makes the authorization gate independent of the plugin's `requires_key` flag and correctly scopes the `key_view` audit event to calls that actually involve key access.\\n \\n## Steps to Reproduce\\n \\n1. Set up Lemur with default configuration. Create an admin user `admin` and a non-admin user `eve` with the `read-only` role (or any role without certificate permissions).\\n \\n2. As `admin`, issue a certificate. Note its `id`.\\n \\n3. As `eve`, invoke export with the `java-truststore-jks` plugin:\\n````\\n   curl -X POST https://lemur.local/api/1/certificates/<cert_id>/export \\\\\\n        -H \\\"Authorization: Bearer <eve_jwt>\\\" \\\\\\n        -H \\\"Content-Type: application/json\\\" \\\\\\n        -d '{\\n              \\\"plugin\\\": {\\n                \\\"slug\\\": \\\"java-truststore-jks\\\",\\n                \\\"plugin_options\\\": [\\n                  {\\\"name\\\": \\\"passphrase\\\", \\\"value\\\": \\\"test\\\"}\\n                ]\\n              }\\n            }'\\n````\\n \\n4. Observe HTTP 200 with a base64-encoded JKS truststore in the response. `eve` had no permission over `admin`'s certificate, yet successfully exported its public material.\\n \\n5. Inspect the audit log table or `lemur logs list`:\\n````\\n   psql lemur -c \\\"SELECT user_id, log_type, certificate_id, logged_at FROM logs\\n                  WHERE certificate_id = <cert_id> ORDER BY logged_at DESC LIMIT 1;\\\"\\n````\\n   The log row shows `log_type = 'key_view'` for `eve` against `admin`'s certificate, despite no private key actually being accessed by the truststore plugin - confirming the audit-log pollution facet of the bug.\", \"ghsa_id\": \"GHSA-4h97-p9wq-chqj\", \"github_reviewed_at\": \"2026-08-18T20:51:42Z\", \"html_url\": \"https://github.com/advisories/GHSA-4h97-p9wq-chqj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4h97-p9wq-chqj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-71322\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-18T20:51:42Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-4h97-p9wq-chqj\", \"https://github.com/Netflix/lemur/commit/5683bbea8b10cce07f9a8abf1e4a7d3b2031c585\", \"https://github.com/Netflix/lemur/releases/tag/v1.9.3\", \"https://github.com/advisories/GHSA-4h97-p9wq-chqj\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-4h97-p9wq-chqj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur: Missing authorization check on POST /certificates/<id>/export for plugins with requires_key = False\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-18T20:51:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-4h97-p9wq-chqj\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4h97-p9wq-chqj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: < 1.9.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-71322"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-19T19:20:53.006856Z",
+  "provenance": {
+    "content_sha256": "92e7a2f294a8535d1e3991699ac2ab08b02ed3c2a2dec4e2ab8aa420f775b5e8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-18T20:51:42Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4h97-p9wq-chqj",
+  "status": "active",
+  "title": "Lemur: Missing authorization check on POST /certificates/<id>/export for plugins with requires_key = False",
+  "updated_at": "2026-08-18T20:51:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4h97-p9wq-chqj"
+}
