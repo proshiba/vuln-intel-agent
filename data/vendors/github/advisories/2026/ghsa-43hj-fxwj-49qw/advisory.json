@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10851084?v=4\", \"events_url\": \"https://api.github.com/users/varsill/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/varsill/followers\", \"following_url\": \"https://api.github.com/users/varsill/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/varsill/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/varsill\", \"id\": 10851084, \"login\": \"varsill\", \"node_id\": \"MDQ6VXNlcjEwODUxMDg0\", \"organizations_url\": \"https://api.github.com/users/varsill/orgs\", \"received_events_url\": \"https://api.github.com/users/varsill/received_events\", \"repos_url\": \"https://api.github.com/users/varsill/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/varsill/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/varsill/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/varsill\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16493463?v=4\", \"events_url\": \"https://api.github.com/users/mat-hek/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mat-hek/followers\", \"following_url\": \"https://api.github.com/users/mat-hek/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mat-hek/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mat-hek\", \"id\": 16493463, \"login\": \"mat-hek\", \"node_id\": \"MDQ6VXNlcjE2NDkzNDYz\", \"organizations_url\": \"https://api.github.com/users/mat-hek/orgs\", \"received_events_url\": \"https://api.github.com/users/mat-hek/received_events\", \"repos_url\": \"https://api.github.com/users/mat-hek/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mat-hek/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mat-hek/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mat-hek\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53423\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.9, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n\\n`membrane_mp4_plugin` interns every 4-byte MP4 box name as a BEAM atom while parsing container headers, with no validation against an allow-list. Any code path that calls `Membrane.MP4.Container.parse/1` (or the bang variant) on attacker-controlled MP4 bytes can be made to exhaust the BEAM atom table, which is uncapped at the source but bounded by the runtime ceiling (around 1,048,576 atoms) and never garbage-collected. Once the ceiling is hit, the entire BEAM node aborts.\\n\\n### Details\\n\\nThe MP4 container parser walks the input stream box-by-box. For each box, `Membrane.MP4.Container.Header.parse/1` in `lib/membrane_mp4/container/header.ex` extracts the 4-byte name field and delegates to the private helper `parse_box_name/1`, which trims trailing spaces and passes the bytes through `String.to_atom/1`. Because `String.to_atom/1` creates a new atom unconditionally, every distinct attacker-chosen 4-byte sequence becomes a permanent allocation in the global atom table. Atoms are not subject to garbage collection, so unique names accumulate for the lifetime of the node.\\n\\nThe fix replaces the unsafe interning with `String.to_existing_atom/1` and treats unknown names as the `:unknown` atom downstream (with related plumbing in `parse_helper.ex`, `serialize_helper.ex`, and the ISOM/CMAF demuxer engines so the new error variant flows through cleanly).\\n\\n### PoC\\n\\n1. Generate an MP4-shaped payload of roughly 1.1 million minimal box headers, each 8 bytes long (4-byte size of 8, followed by a unique 4-byte ASCII name produced by enumerating combinations in the printable range).\\n2. Concatenate them into a single binary (~8 MB total).\\n3. Call `Membrane.MP4.Container.parse!/1` on the binary inside any process running under the target BEAM node.\\n4. The node aborts once the atom table ceiling is reached.\\n\\n### Impact\\n\\nAn attacker who can get a single crafted MP4 file in front of any system that demuxes user-supplied media with `membrane_mp4_plugin` can crash the entire BEAM node hosting that pipeline, taking down every Erlang/Elixir application sharing the runtime. No authentication, network position, or user interaction is required beyond delivering the file to whatever processing path eventually calls the parser.\\n\\n### References\\n\\n* Introduction commit: https://github.com/membraneframework/membrane_mp4_plugin/commit/ae4bf04c393aa1562f3df3d33e20bc5cb8130de2\\n* Patch commit: https://github.com/membraneframework/membrane_mp4_plugin/commit/56373d1ddc86968e55fbde795c14eeba24357b57\", \"epss\": {\"percentage\": 0.00126, \"percentile\": 0.02631}, \"ghsa_id\": \"GHSA-43hj-fxwj-49qw\", \"github_reviewed_at\": \"2026-08-18T20:16:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-43hj-fxwj-49qw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-43hj-fxwj-49qw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53423\"}], \"nvd_published_at\": \"2026-06-11T12:16:31Z\", \"published_at\": \"2026-08-18T20:16:29Z\", \"references\": [\"https://github.com/membraneframework/membrane_mp4_plugin/security/advisories/GHSA-43hj-fxwj-49qw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-53423\", \"https://github.com/membraneframework/membrane_mp4_plugin/commit/56373d1ddc86968e55fbde795c14eeba24357b57\", \"https://cna.erlef.org/cves/CVE-2026-53423.html\", \"https://osv.dev/vulnerability/EEF-CVE-2026-53423\", \"https://github.com/advisories/GHSA-43hj-fxwj-49qw\"], \"repository_advisory_url\": \"https://api.github.com/repos/membraneframework/membrane_mp4_plugin/security-advisories/GHSA-43hj-fxwj-49qw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/membraneframework/membrane_mp4_plugin\", \"summary\": \"membrane_mp4_plugin has an unauthenticated denial-of-service via BEAM atom table exhaustion\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-18T20:16:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-43hj-fxwj-49qw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.36.7\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"membrane_mp4_plugin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.36.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-43hj-fxwj-49qw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "membrane_mp4_plugin: < 0.36.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53423"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "membrane_mp4_plugin"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-19T19:20:53.069330Z",
+  "provenance": {
+    "content_sha256": "72fcdbf24fb64ab61d5112f81fe5c4af391db7bb37ceb8bfcc06ef38fe6ac971",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-18T20:16:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-43hj-fxwj-49qw",
+  "status": "active",
+  "title": "membrane_mp4_plugin has an unauthenticated denial-of-service via BEAM atom table exhaustion",
+  "updated_at": "2026-08-18T20:16:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-43hj-fxwj-49qw"
+}
