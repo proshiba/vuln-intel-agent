@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/146064974?v=4\", \"events_url\": \"https://api.github.com/users/meifukun/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/meifukun/followers\", \"following_url\": \"https://api.github.com/users/meifukun/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/meifukun/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/meifukun\", \"id\": 146064974, \"login\": \"meifukun\", \"node_id\": \"U_kgDOCLTGTg\", \"organizations_url\": \"https://api.github.com/users/meifukun/orgs\", \"received_events_url\": \"https://api.github.com/users/meifukun/received_events\", \"repos_url\": \"https://api.github.com/users/meifukun/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/meifukun/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/meifukun/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/meifukun\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75526\", \"cvss\": {\"score\": 4.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nWhen plugin rendering fails in edit mode, django CMS renders a `cms-rendering-exception` block so editors can see that a placeholder could not be rendered. Older code built that block's heading by interpolating the exception message, placeholder/source strings, and the failing plugin's short description directly into an HTML string, then returned the placeholder output as safe markup.\\n\\nIf an editor could store HTML in data used by a plugin's `get_short_description()` (or in other values interpolated into the exception message), and that plugin later raised during edit-mode rendering, the payload was parsed as HTML in the staff user's browser. This is a stored XSS condition in the CMS editing context.\\n\\n## Impact\\n\\nThe vulnerable path is only reached when placeholder rendering catches a plugin rendering exception:\\n\\n```python\\ntry:\\n    placeholder_content = \\\"\\\".join(plugin_content)\\nexcept Exception as e:\\n    context[\\\"exc_info\\\"] = sys.exc_info()\\n    placeholder_content = self.render_exception(\\\"rendering placeholder\\\", context, placeholder, editable)\\n```\\n\\n`render_exception()` constructs a `message` from values that can include stored content:\\n\\n- `value` - the exception message.\\n- `placeholder` - the placeholder string representation.\\n- `placeholder.source` - the source object string representation, such as page content.\\n- `instance.get_short_description()` - plugin-provided summary text, often derived from plugin model fields.\\n\\nIn the vulnerable implementation, that message was embedded directly into an HTML heading. The final placeholder content was later returned through `mark_safe`, so Django template autoescaping did not protect the heading.\\n\\n`settings.DEBUG` does not mitigate the issue: it only controls whether Django's traceback HTML is appended. The custom heading is rendered in edit mode regardless of `DEBUG`.\\n\\n## Patch\\n\\nEscape the custom exception heading before returning it as safe placeholder markup. The current fixed code uses `format_html`, which escapes `message` before inserting it into the heading:\\n\\n```python\\nheading = format_html('<h2 class=\\\"cms-rendering-exception-title\\\">{}</h2>', message)\\n```\\n\\nThe traceback HTML from `ExceptionReporter.get_traceback_html()` should remain separate from django CMS's custom heading; Django's traceback escaping does not protect additional HTML assembled by django CMS.\\n\\n## Workarounds\\n\\nUntil patched, reduce exposure by ensuring only fully trusted staff can edit plugins whose stored fields are included in `get_short_description()`, and fix or disable plugins that can be made to raise during edit-mode rendering. This is only a partial mitigation because the escaping bug is in the shared exception-rendering path.\\n\\n## References\\n\\n- `cms/plugin_rendering.py` - `ContentRenderer.render_placeholder`\\n- `cms/plugin_rendering.py` - `ContentRenderer.render_exception`\\n- Fixed code: `heading = format_html('<h2 class=\\\"cms-rendering-exception-title\\\">{}</h2>', message)`\\n- Regression tests:\\n  `cms.tests.test_plugin_renderers.TestExceptionCatchers.test_exception_in_plugin_render_escapes_user_content_in_edit_mode`,\\n  `cms.tests.test_plugin_renderers.TestLegacyRendererExceptionCatcher.test_exception_in_plugin_render_escapes_user_content_in_edit_mode`\", \"ghsa_id\": \"GHSA-hvq6-2r72-p2x7\", \"github_reviewed_at\": \"2026-08-20T18:42:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-hvq6-2r72-p2x7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hvq6-2r72-p2x7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75526\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-20T18:42:36Z\", \"references\": [\"https://github.com/django-cms/django-cms/security/advisories/GHSA-hvq6-2r72-p2x7\", \"https://github.com/django-cms/django-cms/pull/8711\", \"https://github.com/django-cms/django-cms/commit/b56a568844ff3702495945f73a31d0868285bf88\", \"https://github.com/django-cms/django-cms/releases/tag/5.0.9\", \"https://github.com/advisories/GHSA-hvq6-2r72-p2x7\"], \"repository_advisory_url\": \"https://api.github.com/repos/django-cms/django-cms/security-advisories/GHSA-hvq6-2r72-p2x7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/django-cms/django-cms\", \"summary\": \"django CMS: Stored XSS in edit-mode plugin exception rendering\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T18:42:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-hvq6-2r72-p2x7\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"django-cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.8, < 5.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hvq6-2r72-p2x7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "django-cms: >= 5.0.8, < 5.0.9"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-75526"
+    ],
+    "cvss_score": 4.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "django-cms"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-20T19:19:23.879217Z",
+  "provenance": {
+    "content_sha256": "2713f19dfa3c110a9180da4c707b0ebf0706e592fa599deda31d3aca4d408ca5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T18:42:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hvq6-2r72-p2x7",
+  "status": "active",
+  "title": "django CMS: Stored XSS in edit-mode plugin exception rendering",
+  "updated_at": "2026-08-20T18:42:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hvq6-2r72-p2x7"
+}

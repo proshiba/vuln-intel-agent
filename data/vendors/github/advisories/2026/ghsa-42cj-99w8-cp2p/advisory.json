@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5067549?v=4\", \"events_url\": \"https://api.github.com/users/pellared/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/pellared/followers\", \"following_url\": \"https://api.github.com/users/pellared/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/pellared/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/pellared\", \"id\": 5067549, \"login\": \"pellared\", \"node_id\": \"MDQ6VXNlcjUwNjc1NDk=\", \"organizations_url\": \"https://api.github.com/users/pellared/orgs\", \"received_events_url\": \"https://api.github.com/users/pellared/received_events\", \"repos_url\": \"https://api.github.com/users/pellared/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/pellared/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/pellared/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/pellared\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5543599?v=4\", \"events_url\": \"https://api.github.com/users/MrAlias/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrAlias/followers\", \"following_url\": \"https://api.github.com/users/MrAlias/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrAlias/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrAlias\", \"id\": 5543599, \"login\": \"MrAlias\", \"node_id\": \"MDQ6VXNlcjU1NDM1OTk=\", \"organizations_url\": \"https://api.github.com/users/MrAlias/orgs\", \"received_events_url\": \"https://api.github.com/users/MrAlias/received_events\", \"repos_url\": \"https://api.github.com/users/MrAlias/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrAlias/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrAlias/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrAlias\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-45404\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.9, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-362\", \"name\": \"Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')\"}, {\"cwe_id\": \"CWE-667\", \"name\": \"Improper Locking\"}], \"description\": \"### Summary\\n\\n`go.opentelemetry.io/otel/bridge/opentracing` introduced an unsynchronized `extraBaggageItems` map on `bridgeSpan`. One goroutine can write this map through `Span.SetBaggageItem` while another goroutine reads and iterates it during correlation baggage propagation, which can trigger Go's fatal concurrent map access panic and crash the process. The finding is low severity because exploitation requires a specific OpenTracing bridge configuration and concurrent use of the same span.\\n\\nIntroduced in commit: 8cddf30\\n\\n### Details\\n\\n`bridge/opentracing/bridge.go:80-85` adds `extraBaggageItems map[string]string` to `bridgeSpan` without a mutex or other synchronization primitive. `bridge/opentracing/bridge.go:219-234` shows `SetBaggageItem` calling `updateOtelContext`, which lazily creates the map and writes `s.extraBaggageItems[restrictedKey] = value` without locking. `bridge/opentracing/bridge.go:359-377` shows `correlationGetHook` reading `bSpan.extraBaggageItems`, checking `len(items)`, and iterating `for k, v := range items` without locking. The finding evidence also identifies `api/correlation/context.go:160-165` as the path where `correlation.MapFromContext` invokes the get hook, allowing a read path to run concurrently with baggage writes.\\n\\nBecause Go maps are not safe for concurrent read/write access, concurrent `SetBaggageItem` and `correlation.MapFromContext` calls on the same hooked `bridgeSpan` can terminate the process with a runtime error such as `fatal error: concurrent map read and map write` or `fatal error: concurrent map iteration and map write`.\\n\\n### PoC\\n\\n[validation-artifact.zip](https://github.com/user-attachments/files/27494614/validation-artifact.zip)\\n\\n\\nThe validation artifact contains a PoC at `validation-artifact.tar:validation_poc_concurrent_map.go` and supporting notes at `validation-artifact.tar:validation_poc_README.txt`.\\n\\nUse a checkout of `pellared/opentelemetry-go` at commit `8cddf30` with Go module downloads enabled. The local validation environment could not complete the run because `GOPROXY=off` blocked dependency resolution; that blocked output is saved in `validation-artifact.tar:validation_poc_run.log`.\\n\\nCommands:\\n\\n```sh\\ncd /path/to/opentelemetry-go\\ngit checkout 8cddf30\\ntar -xOf /path/to/finding-directory/validation-artifact.tar validation_poc_concurrent_map.go > ./validation_poc_concurrent_map.go\\nGOPROXY=https://proxy.golang.org,direct go run ./validation_poc_concurrent_map.go\\n```\\n\\nThe PoC starts a `BridgeTracer`, creates a span, installs correlation hooks with `tracer.NewHookedContext(ctx)`, initializes baggage once, then runs one goroutine repeatedly calling `span.SetBaggageItem(...)` while another repeatedly calls `otelcorrelation.MapFromContext(ctx)`. A vulnerable build is expected to terminate with a Go runtime concurrent map access error, for example:\\n\\n```text\\nfatal error: concurrent map read and map write\\n```\\n\\nor:\\n\\n```text\\nfatal error: concurrent map iteration and map write\\n```\\n\\n\\n### Impact\\n\\nThis is a race condition / improper synchronization vulnerability in a shared Go map. Applications using the OpenTelemetry OpenTracing bridge with correlation hooks can crash if the same `bridgeSpan` is accessed concurrently, with one execution path setting baggage and another propagating correlation baggage. The practical impact is denial of service for the affected application process; exposure depends on whether application request handling or internal concurrency can trigger those operations on the same span.\", \"ghsa_id\": \"GHSA-42cj-99w8-cp2p\", \"github_reviewed_at\": \"2026-08-20T17:26:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-42cj-99w8-cp2p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-42cj-99w8-cp2p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-45404\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-20T17:26:14Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-42cj-99w8-cp2p\", \"https://github.com/open-telemetry/opentelemetry-go/pull/8693\", \"https://github.com/open-telemetry/opentelemetry-go/commit/93a693edeed0e07ce5ebd1dfe67af42d1e2055d8\", \"https://github.com/open-telemetry/opentelemetry-go/releases/tag/v1.45.0\", \"https://github.com/advisories/GHSA-42cj-99w8-cp2p\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-go/security-advisories/GHSA-42cj-99w8-cp2p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-go\", \"summary\": \"OpenTelemetry-Go: Unsynchronized baggage map can panic under concurrent access\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T17:26:47Z\", \"url\": \"https://api.github.com/advisories/GHSA-42cj-99w8-cp2p\", \"vulnerabilities\": [{\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/bridge/opentracing\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.11.0, < 1.45.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-42cj-99w8-cp2p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.opentelemetry.io/otel/bridge/opentracing: >= 0.11.0, < 1.45.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45404"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.opentelemetry.io/otel/bridge/opentracing"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-20T19:19:23.980038Z",
+  "provenance": {
+    "content_sha256": "d7bf20420fd481eb918ff637721416796690c4aa548fddef00a09ccd144c697f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T17:26:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-42cj-99w8-cp2p",
+  "status": "active",
+  "title": "OpenTelemetry-Go: Unsynchronized baggage map can panic under concurrent access",
+  "updated_at": "2026-08-20T17:26:47Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-42cj-99w8-cp2p"
+}
