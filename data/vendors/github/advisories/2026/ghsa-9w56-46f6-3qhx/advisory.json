@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95119705?v=4\", \"events_url\": \"https://api.github.com/users/thegr1ffyn/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thegr1ffyn/followers\", \"following_url\": \"https://api.github.com/users/thegr1ffyn/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thegr1ffyn/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thegr1ffyn\", \"id\": 95119705, \"login\": \"thegr1ffyn\", \"node_id\": \"U_kgDOBatpWQ\", \"organizations_url\": \"https://api.github.com/users/thegr1ffyn/orgs\", \"received_events_url\": \"https://api.github.com/users/thegr1ffyn/received_events\", \"repos_url\": \"https://api.github.com/users/thegr1ffyn/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thegr1ffyn/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thegr1ffyn/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thegr1ffyn\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}, {\"cwe_id\": \"CWE-749\", \"name\": \"Exposed Dangerous Method or Function\"}, {\"cwe_id\": \"CWE-913\", \"name\": \"Improper Control of Dynamically-Managed Code Resources\"}], \"description\": \"### Summary\\nWith its default configuration (numpy enabled, `import` disabled), asteval's `Interpreter` lets an attacker-controlled expression obtain a raw **arbitrary process-memory read and write** primitive, without using `import`, any `__dunder__` attribute, or `eval`/`exec`/`getattr`. Arbitrary in-process read/write is equivalent to arbitrary code execution and is a complete escape of the sandbox whose entire purpose is \\\"untrusted string in, no arbitrary execution out.\\\" Any application that feeds untrusted input to asteval with numpy installed (the default) is affected.\\n\\n### Details\\nasteval's attribute filter (`asteval/astutils.py: safe_getattr`) blocks every `__dunder__` name and blocks objects whose attribute value is *identity-equal* to one of the modules in `UNSAFE_MODULES = {io, os, sys, ctypes}`. The `ctypes` **module** entry was added recently (commit 9d9d430) and correctly blocks `ndarray.ctypes._ctypes`.\\n\\nHowever, the module check is identity-only against the ctypes *module*. It does not cover ctypes **type objects** and their metaclass methods, which are reachable through numpy's `ndarray.ctypes` wrapper using only ordinary (non-dunder) attribute names:\\n\\n    zeros(1, dtype=int32).ctypes.shape._type_      ->  <class 'ctypes.c_long'>\\n\\n`ndarray.ctypes` exposes `.shape` (a ctypes array) whose element type `._type_` is `ctypes.c_long`. None of `ctypes`, `.shape`, `._type_` is a dunder, none is in `UNSAFE_ATTRS`, and the returned value is a *type*, not the ctypes module, so `safe_getattr` permits all of them.\\n\\nOn that ctypes type, the metaclass method `from_address` is reachable (non-dunder, not in `UNSAFE_ATTRS`; it is not even listed by `dir()`, which is likely why it was missed):\\n\\n* **Arbitrary read:** `c_long.from_address(addr).value` reads 8 bytes at any address. `id()` (a permitted builtin) supplies arbitrary object addresses.\\n* **Arbitrary write:** `cell = c_long.from_address(addr); cell.value = X` writes 8 bytes to any address. The write half rides asteval's **unfiltered `setattr`** in `Interpreter.node_assign` (the `ast.Attribute` branch performs `setattr(self.run(node.value), node.attr, val)` with no attribute-name check).\\n\\nRoot cause is two gaps:\\n\\n1. `safe_getattr` blocks the ctypes *module* but not ctypes *types* / metaclass methods (`from_address`, `from_buffer`, `from_buffer_copy`, `in_dll`, `from_param`) reachable via `ndarray.ctypes ... ._type_`.\\n2. `node_assign` performs attribute writes (`setattr`) and deletes (`delattr`) with no attribute-name filtering.\\n\\nThis belongs to the known \\\"numpy is a large attack surface\\\" class (the docs already note `open()` read and `ndarray.tofile()` write), but this specific arbitrary memory read/write chain is undocumented and bypasses the most recent ctypes-module hardening. All previously reported escapes (CVE-2025-24359 / GHSA-3wwr-3g9f-9gc7, GHSA-vp47-9734-prjw, reduce/reduce_ex, classic `__subclasses__` traversal) are patched on the current code; this one is live.\\n\\n### PoC\\nSelf contained POC here: https://gist.github.com/thegr1ffyn/16b67c5f9b5339a7e2bdc91423ff09e3\\nEnvironment: `pip install asteval numpy` (verified on asteval 1.0.8, numpy 2.4.6, CPython 3.12.3; the chain is numpy-1.x/2.x robust). Default `Interpreter` (`use_numpy=True`, `import` disabled).\\n\\nMinimal one-expression arbitrary read (reads 8 bytes at an attacker-chosen address):\\n\\n    zeros(1,dtype=int32).ctypes.shape._type_.from_address(id(zeros(1))).value\\n\\nMinimal arbitrary write (writes 0x4142434445464748 to a chosen address; here our own array buffer, observed back through numpy):\\n\\n    a = zeros(2, dtype=int32)\\n    cell = a.ctypes.shape._type_.from_address(a.ctypes.data)\\n    cell.value = 0x4142434445464748        # -> a[0]=0x45464748, a[1]=0x41424344\\n\\nA full self-contained script is attached (poc_asteval_ctypes.py); running it prints the recovered PyObject header of a private object (arbitrary read) and confirms a raw write landing at a chosen pointer (arbitrary write), all from a default, import-disabled interpreter.\\n\\n### Impact\\nSandbox escape / protection-mechanism failure leading to arbitrary in-process native memory read and write (RCE-equivalent). Impact:\\n\\n* Disclosure of any data in the host process's address space (secrets, keys, other users' data).\\n* Corruption of arbitrary memory -> control-flow hijack / arbitrary code execution and/or process crash (DoS).\\n\\nAffected: any application that evaluates untrusted/attacker-influenced expressions with asteval while numpy is installed (the default). No authentication and no special configuration is required; `import` does not need to be enabled. Mitigation until patched: construct the interpreter with `use_numpy=False`.\", \"ghsa_id\": \"GHSA-9w56-46f6-3qhx\", \"github_reviewed_at\": \"2026-08-20T17:26:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-9w56-46f6-3qhx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9w56-46f6-3qhx\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-20T17:26:52Z\", \"references\": [\"https://github.com/lmfit/asteval/security/advisories/GHSA-9w56-46f6-3qhx\", \"https://github.com/lmfit/asteval/pull/153\", \"https://github.com/lmfit/asteval/commit/a3e56e7f8ed567a4817684d94213b290359077b4\", \"https://github.com/lmfit/asteval/releases/tag/1.0.9\", \"https://github.com/advisories/GHSA-9w56-46f6-3qhx\"], \"repository_advisory_url\": \"https://api.github.com/repos/lmfit/asteval/security-advisories/GHSA-9w56-46f6-3qhx\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/lmfit/asteval\", \"summary\": \"asteval Sandbox Escape: arbitrary native memory read/write via numpy ctypes in default asteval Interpreter\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T17:26:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-9w56-46f6-3qhx\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"asteval\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9w56-46f6-3qhx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "asteval: < 1.0.9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-24359"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "asteval"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-20T19:19:23.970933Z",
+  "provenance": {
+    "content_sha256": "4dcd8180a60d55e968e33309594fa001c908e3cb4a4bea0be0249e7aa9d2af2c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T17:26:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9w56-46f6-3qhx",
+  "status": "active",
+  "title": "asteval Sandbox Escape: arbitrary native memory read/write via numpy ctypes in default asteval Interpreter",
+  "updated_at": "2026-08-20T17:26:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9w56-46f6-3qhx"
+}

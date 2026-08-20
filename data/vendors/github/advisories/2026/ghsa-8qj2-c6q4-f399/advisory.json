@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/117797567?v=4\", \"events_url\": \"https://api.github.com/users/doanmanhducz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/doanmanhducz/followers\", \"following_url\": \"https://api.github.com/users/doanmanhducz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/doanmanhducz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/doanmanhducz\", \"id\": 117797567, \"login\": \"doanmanhducz\", \"node_id\": \"U_kgDOBwVyvw\", \"organizations_url\": \"https://api.github.com/users/doanmanhducz/orgs\", \"received_events_url\": \"https://api.github.com/users/doanmanhducz/received_events\", \"repos_url\": \"https://api.github.com/users/doanmanhducz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/doanmanhducz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/doanmanhducz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/doanmanhducz\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61663\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe django-cms frontend-editing structure endpoint\\n\\n```\\nGET /<lang>/admin/cms/placeholder/object/<content_type_id>/structure/<object_id>/\\n```\\n\\ndid not perform an object-level authorization check for **non-`PageContent`** objects. Any authenticated, active staff user could request the structure endpoint for a frontend-editable object (a model using `PlaceholderRelationField`) and read its placeholder/plugin structure, even without permission to change that object and without the `cms.use_structure` permission that the toolbar UI requires before offering structure mode.\\n\\n`PageContent` objects were already protected (a page-view check added in GHSA/PR #8644); this advisory covers the remaining non-`PageContent` branch of the same view.\\n\\n## Severity\\n\\nThe issue is staff-gated and read-only, disclosing CMS structure metadata (placeholder slot names, plugin tree, plugin identifiers/labels, object existence) rather than write access or arbitrary field data.\\n\\n## Affected versions\\n\\n- django-cms `>= 4.0.0, <= 5.0.x` and `5.1.0a1`\\n  (the vulnerable non-`PageContent` branch was introduced with the frontend-editing endpoints in 4.0)\\n\\n## Patched versions\\n\\n- django-cms TODO: 5.0.9\\n\\n## Preconditions\\n\\n- An authenticated, active staff account (`is_staff=True`).\\n- The deployment exposes a non-`PageContent` model with django-cms placeholders / frontend editing (e.g. via `PlaceholderRelationField`).\\n- The attacker can guess or enumerate the target `content_type_id` and object id.\\n- The attacker needs **no** model/object change permission and **no** `cms.use_structure` permission.\\n\\n## Impact\\n\\nA low-privileged staff user can read the editorial placeholder/plugin structure of non-`PageContent` objects they are not authorized to edit through the toolbar. Depending on the installed plugins and templates this may reveal placeholder names, plugin layout, plugin identifiers and the existence of objects owned by other staff users or teams. This is most relevant for deployments using third-party or custom django-cms apps that expose frontend-editable objects outside the page tree.\\n\\n## Proof of concept\\n\\nUsing django-cms' own test model `placeholder_relation_field_app.FancyPoll` (a non-`PageContent` model with a `PlaceholderRelationField`):\\n\\n```python\\ntarget = FancyPoll.objects.create(name=\\\"private-fancy-poll\\\")\\nplaceholder = rescan_placeholders_for_obj(target)[\\\"content\\\"]\\nattacker = self._create_user(\\\"low_staff\\\", is_staff=True, is_superuser=False)\\n# attacker has neither change_fancypoll nor cms.use_structure\\n\\nwith self.login_user_context(attacker):\\n    response = self.client.get(get_object_structure_url(target, language=\\\"en\\\"))\\n\\n# Before fix: HTTP 200, body contains '\\\"placeholder_id\\\": \\\"<pk>\\\"'\\n# After fix:  HTTP 404, structure not disclosed\\n```\\n\\n## Patch\\n\\n`render_object_structure` now authorizes the non-`PageContent` branch, mirroring\\n`Placeholder.has_change_permission` at the object level (honouring a custom\\n`has_placeholder_change_permission` hook, otherwise falling back to the model/object\\nchange permission) and returning `404` when the user is not authorized:\\n\\n```python\\nelse:\\n    content_type_obj = content_type.get_object_for_this_type(pk=object_id)\\n    if not _can_change_placeholder_object(request.user, content_type_obj):\\n        raise Http404\\n```\\n\\n## Workarounds\\n\\nNo configuration workaround. Deployments that do not register any non-`PageContent`\\nfrontend-editable model are not affected. Otherwise, upgrade to a patched release.\\n\\n## Credit\\n\\nReported by **doanmanhducz**.\", \"ghsa_id\": \"GHSA-8qj2-c6q4-f399\", \"github_reviewed_at\": \"2026-08-20T18:42:50Z\", \"html_url\": \"https://github.com/advisories/GHSA-8qj2-c6q4-f399\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8qj2-c6q4-f399\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61663\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-20T18:42:50Z\", \"references\": [\"https://github.com/django-cms/django-cms/security/advisories/GHSA-8qj2-c6q4-f399\", \"https://github.com/django-cms/django-cms/pull/8703\", \"https://github.com/django-cms/django-cms/commit/9c82abfeb25471583e23906ea1ebef9202527b04\", \"https://github.com/django-cms/django-cms/releases/tag/5.0.9\", \"https://github.com/advisories/GHSA-8qj2-c6q4-f399\"], \"repository_advisory_url\": \"https://api.github.com/repos/django-cms/django-cms/security-advisories/GHSA-8qj2-c6q4-f399\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/django-cms/django-cms\", \"summary\": \"django CMS: Missing authorization in `render_object_structure` discloses non-PageContent placeholder structure to low-privileged staff\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T18:42:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-8qj2-c6q4-f399\", \"vulnerabilities\": [{\"first_patched_version\": \"5.0.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"django-cms\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 5.0.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8qj2-c6q4-f399",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "django-cms: < 5.0.9"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-61663"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "django-cms"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-20T19:19:23.874987Z",
+  "provenance": {
+    "content_sha256": "e95b49a7fa5981e606beafe2ba08c19bc65774dedad48d41796914cfed36e53a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T18:42:50Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8qj2-c6q4-f399",
+  "status": "active",
+  "title": "django CMS: Missing authorization in `render_object_structure` discloses non-PageContent placeholder structure to low-privileged staff",
+  "updated_at": "2026-08-20T18:42:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8qj2-c6q4-f399"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/186786330?v=4\", \"events_url\": \"https://api.github.com/users/decsecre583/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/decsecre583/followers\", \"following_url\": \"https://api.github.com/users/decsecre583/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/decsecre583/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/decsecre583\", \"id\": 186786330, \"login\": \"decsecre583\", \"node_id\": \"U_kgDOCyIiGg\", \"organizations_url\": \"https://api.github.com/users/decsecre583/orgs\", \"received_events_url\": \"https://api.github.com/users/decsecre583/received_events\", \"repos_url\": \"https://api.github.com/users/decsecre583/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/decsecre583/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/decsecre583/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/decsecre583\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55445\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\n\\nThe init guard middleware in Qinglong only checks `/api/user/init` paths but not `/open/user/init`, which is whitelisted from JWT authentication and rewritten to `/api/user/init` after the guard has already passed, allowing unauthenticated admin credential reset on initialized instances.\\n\\n### Affected Package\\n\\n- **Ecosystem:** npm\\n- **Package:** whyour/qinglong\\n- **Affected versions:** < 6bec52dca158\\n- **Patched versions:** >= 6bec52dca158\\n\\n### Severity\\n\\nMedium\\n\\n### CWE\\n\\nCWE-287 — Improper Authentication\\n\\n### Details\\n\\nThe Qinglong panel has an initialization endpoint (`/api/user/init`) that allows setting admin credentials. Once the system is initialized, an init guard middleware is supposed to block further calls. The middleware in `back/loaders/express.ts` only checks:\\n\\n```javascript\\n!['/api/user/init', '/api/user/notification/init'].includes(pathLower)\\n```\\n\\nHowever, the application also has a URL rewrite rule: `rewrite('/open/*', '/api/$1')`. The `/open/*` paths are whitelisted from JWT authentication.\\n\\nThe middleware ordering creates the bypass: first, JWT auth sees `/open/*` paths match the whitelist regex and skips authentication. Second, the init guard only checks for `/api/user/init` -- `/open/user/init` passes through as \\\"not an init path\\\". Third, the URL rewrite transforms `/open/user/init` to `/api/user/init` after the guard has already passed.\\n\\nThis means an unauthenticated attacker can send `PUT /open/user/init` with new credentials to reset the admin account on any Qinglong panel instance, gaining full administrative access.\\n\\n### PoC\\n\\n```javascript\\n/**\\n * CVE-2026-3965 - Qinglong Panel /open/user/init Auth Bypass\\n *\\n * The init guard middleware only checks /api/user/init paths.\\n * But /open/user/init is whitelisted from JWT auth and rewritten\\n * to /api/user/init via express-urlrewrite AFTER the guard.\\n */\\n\\n\\\"use strict\\\";\\n\\n// Simulate the init guard middleware exactly as in the source\\nfunction initGuardMiddleware(reqPath, authInfo) {\\n  const pathLower = reqPath.toLowerCase();\\n  // Exact check from the vulnerable source\\n  if (!['/api/user/init', '/api/user/notification/init'].includes(pathLower)) {\\n    return { action: \\\"next\\\" }; // passes through\\n  }\\n\\n  let isInitialized = true;\\n  if (\\n    Object.keys(authInfo).length === 2 &&\\n    authInfo.username === 'admin' &&\\n    authInfo.password === 'admin'\\n  ) {\\n    isInitialized = false;\\n  }\\n\\n  if (isInitialized) {\\n    return { action: \\\"block\\\", code: 450, message: \\\"Error\\\" };\\n  } else {\\n    return { action: \\\"next\\\" };\\n  }\\n}\\n\\nconst authInfo = { username: \\\"realAdmin\\\", password: \\\"str0ngP@ss!\\\" };\\nconsole.log(\\\"System state: initialized (non-default credentials)\\\");\\n\\n// Test 1: Direct /api/user/init is blocked\\nconst test1 = initGuardMiddleware(\\\"/api/user/init\\\", authInfo);\\nconsole.log(\\\"\\\\n[Test 1] PUT /api/user/init:\\\");\\nconsole.log(\\\"  Guard result:\\\", test1.action);\\nconsole.log(\\\"  Blocked:\\\", test1.action === \\\"block\\\");\\n\\n// Test 2: /open/user/init BYPASSES init guard\\nconst test2 = initGuardMiddleware(\\\"/open/user/init\\\", authInfo);\\nconsole.log(\\\"\\\\n[Test 2] PUT /open/user/init:\\\");\\nconsole.log(\\\"  Guard result:\\\", test2.action);\\nconsole.log(\\\"  Bypassed guard:\\\", test2.action === \\\"next\\\");\\n\\nif (test2.action === \\\"next\\\") {\\n  const rewrittenPath = \\\"/open/user/init\\\".replace(/^\\\\/open\\\\//, \\\"/api/\\\");\\n  console.log(\\\"  After rewrite:\\\", rewrittenPath);\\n  console.log(\\\"  Reaches init handler: true\\\");\\n}\\n\\nif (test1.action === \\\"block\\\" && test2.action === \\\"next\\\") {\\n  console.log(\\\"\\\\nVULNERABILITY CONFIRMED: /open/user/init bypasses the init guard\\\");\\n  console.log(\\\"An attacker can reset admin credentials on an initialized instance.\\\");\\n  process.exit(0);\\n} else {\\n  console.log(\\\"\\\\nVULNERABILITY NOT CONFIRMED\\\");\\n  process.exit(1);\\n}\\n```\\n\\n**Steps to reproduce:**\\n1. `git clone https://github.com/whyour/qinglong /tmp/qinglong_test`\\n2. `cd /tmp/qinglong_test && git checkout 6bec52dc~1`\\n3. `node poc.js`\\n\\n**Expected output:**\\n```\\nVULNERABILITY CONFIRMED\\n/open/user/init bypasses the init guard; the guard only checks /api/user/init but /open/ path is whitelisted and rewritten after.\\n```\\n\\n### Impact\\n\\nAn unauthenticated attacker can send `PUT /open/user/init` with new credentials to reset the admin account on any Qinglong panel instance. This provides full administrative access, enabling the attacker to execute arbitrary cron jobs and scripts on the server.\\n\\n### Suggested Remediation\\n\\nAdd `/open/user/init` and `/open/user/notification/init` to the init guard check list. Alternatively, move the URL rewrite middleware to run before the init guard. Consider implementing the init guard at the handler level rather than as path-based middleware.\\n\\n### References\\n\\n- Incomplete fix commit: https://github.com/whyour/qinglong/commit/6bec52dca158481258315ba0fc2f11206df7b719\\n- Original CVE: CVE-2026-3965\", \"epss\": {\"percentage\": 0.00404, \"percentile\": 0.33515}, \"ghsa_id\": \"GHSA-v667-gc2r-2xm7\", \"github_reviewed_at\": \"2026-08-20T18:36:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-v667-gc2r-2xm7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v667-gc2r-2xm7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55445\"}], \"nvd_published_at\": \"2026-07-15T22:17:26Z\", \"published_at\": \"2026-08-20T18:36:59Z\", \"references\": [\"https://github.com/whyour/qinglong/security/advisories/GHSA-v667-gc2r-2xm7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55445\", \"https://github.com/whyour/qinglong/pull/2941\", \"https://github.com/whyour/qinglong/commit/6bec52dca158481258315ba0fc2f11206df7b719\", \"https://github.com/advisories/GHSA-v667-gc2r-2xm7\"], \"repository_advisory_url\": \"https://api.github.com/repos/whyour/qinglong/security-advisories/GHSA-v667-gc2r-2xm7\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/whyour/qinglong\", \"summary\": \"Qinglong has an incomplete fix for CVE-2026-3965: Improper Authentication\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T18:37:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-v667-gc2r-2xm7\", \"vulnerabilities\": [{\"first_patched_version\": \"2.20.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@whyour/qinglong\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.20.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v667-gc2r-2xm7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@whyour/qinglong: < 2.20.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-3965",
+      "CVE-2026-55445"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@whyour/qinglong"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-08-20T19:19:23.921571Z",
+  "provenance": {
+    "content_sha256": "07f274f928284a2de9210a8dba9c38c68716ce4dfc57afcbda97f47caae2893a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T18:36:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v667-gc2r-2xm7",
+  "status": "active",
+  "title": "Qinglong has an incomplete fix for CVE-2026-3965: Improper Authentication",
+  "updated_at": "2026-08-20T18:37:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v667-gc2r-2xm7"
+}
