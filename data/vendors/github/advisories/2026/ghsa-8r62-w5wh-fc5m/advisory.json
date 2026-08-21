@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-67448\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-177\", \"name\": \"Improper Handling of URL Encoding (Hex Encoding)\"}, {\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-346\", \"name\": \"Origin Validation Error\"}], \"description\": \"## Summary\\n\\nThe cross-site WebSocket hijacking fix was reimplemented as an origin check gated on a raw-URI prefix test, but Go's ServeMux routes on the percent-decoded path, so requesting /%61pi/events reaches the WebSocket handler while skipping the only origin control, and the upgrader itself accepts every origin. Confirmed at HEAD 408b30d. Affects 1.29.0 through 1.30.5.\\n\\n## The defect\\n\\nTwo halves that were each correct in isolation. server/websockets/client.go accepts any origin and delegates the check elsewhere:\\n\\n```go\\nvar upgrader = websocket.Upgrader{                       // line 33\\n    ...\\n    CheckOrigin: func(_ *http.Request) bool {            // line 37\\n        // origin is checked via server.go's CORS settings\\n        return true                                      // line 39\\n    },\\n}\\n```\\n\\nserver/server.go performs that check but keys it on the RAW request target:\\n\\n```go\\nif strings.HasPrefix(r.RequestURI, config.Webroot+\\\"api/\\\") || htmlPreviewRouteRe.MatchString(r.RequestURI) {   // line 320\\n    if allowed := corsOriginAccessControl(r); !allowed {\\n        http.Error(w, \\\"Blocked due to CORS violation\\\", http.StatusForbidden)\\n        return\\n    }\\n```\\n\\nr.RequestURI is the untouched wire target; Go's ServeMux routes on the percent-DECODED path. So for /%61pi/events: `strings.HasPrefix(\\\"/%61pi/events\\\", \\\"/api/\\\")` is FALSE (origin check skipped), ServeMux decodes %61 to \\\"a\\\" and routes to /api/events, and the upgrader's CheckOrigin returns true.\\n\\nMeasured, default config, no auth: /api/events with `Origin: https://evil.example` returns 403; /%61pi/events with the same Origin returns 101 Switching Protocols and begins streaming. With a message delivered over SMTP while the cross-origin socket was open, the attacker origin received the ID, Message-Id, From, To, Cc, Bcc, Subject (\\\"SECRET password reset token abc123\\\"), size, tags, and body Snippet, live. WebSockets are not subject to CORS response-header enforcement, so the absent Access-Control-Allow-Origin header provides no protection once the upgrade succeeds.\\n\\nRegression provenance: commit 6f1f4f3 (2026-01-10, v1.28.2) fixed CVE-2026-22689 by DELETING CheckOrigin; commit a63bcd9 (2026-01-31, first in v1.29.0) reintroduced CheckOrigin returning true and replaced the protection with the bypassable raw-prefix test.\\n\\n## Attacker model and verification\\n\\nAny website the developer visits while Mailpit is running. No credentials, no ability to send mail, no interaction beyond visiting a page. Requires Mailpit without --ui-auth-file (the default, and the same precondition as the original CVE). The bypass was measured live against a real Mailpit instance on loopback, including the 403-versus-101 control pair; authentication still holds (the encoded path returns 401 when --ui-auth-file is set); browser reachability was confirmed against the WHATWG URL parser, which preserves %61.\\n\\n## Suggested fix\\n\\nDo not make security decisions on r.RequestURI. Key the check on r.URL.Path, the decoded value the router uses, so the gate and the route agree. Better, restore a real CheckOrigin on the upgrader so the WebSocket carries its own origin enforcement rather than depending on a middleware prefix match. Secondary (Low, not claimed as XSS): server/apiv1/message.go lines 154-155 echo an attacker-chosen Content-Type with Content-Disposition: inline; this is blocked today by the nonce CSP.\\n\\n## Tooling\\n\\nI used AI assistance while investigating. The bypass was measured live against a real Mailpit instance on loopback, including the 403-versus-101 control pair and the authenticated 401 case, and I separately confirmed at HEAD the CheckOrigin returning true with its delegating comment and the RequestURI-keyed prefix gate.\", \"ghsa_id\": \"GHSA-8r62-w5wh-fc5m\", \"github_reviewed_at\": \"2026-08-20T21:34:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-8r62-w5wh-fc5m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8r62-w5wh-fc5m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-67448\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-20T21:34:58Z\", \"references\": [\"https://github.com/axllent/mailpit/security/advisories/GHSA-8r62-w5wh-fc5m\", \"https://github.com/axllent/mailpit/commit/fbe5e006c3f1682b819df58b4a932d7a84920be9\", \"https://github.com/axllent/mailpit/releases/tag/v1.30.6\", \"https://github.com/advisories/GHSA-8r62-w5wh-fc5m\"], \"repository_advisory_url\": \"https://api.github.com/repos/axllent/mailpit/security-advisories/GHSA-8r62-w5wh-fc5m\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/axllent/mailpit\", \"summary\": \"Mailpit: WebSocket origin check bypass via percent-encoded path (regression of CVE-2026-22689)\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-20T21:35:00Z\", \"url\": \"https://api.github.com/advisories/GHSA-8r62-w5wh-fc5m\", \"vulnerabilities\": [{\"first_patched_version\": \"1.30.6\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/axllent/mailpit\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.29.0, <= 1.30.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8r62-w5wh-fc5m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/axllent/mailpit: >= 1.29.0, <= 1.30.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-22689",
+      "CVE-2026-67448"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/axllent/mailpit"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-21T19:17:19.871719Z",
+  "provenance": {
+    "content_sha256": "ca3256c7c7c628be6f53740162babaa4c4796558889dbb9d579580d5c6501135",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-20T21:34:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8r62-w5wh-fc5m",
+  "status": "active",
+  "title": "Mailpit: WebSocket origin check bypass via percent-encoded path (regression of CVE-2026-22689)",
+  "updated_at": "2026-08-20T21:35:00Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8r62-w5wh-fc5m"
+}
