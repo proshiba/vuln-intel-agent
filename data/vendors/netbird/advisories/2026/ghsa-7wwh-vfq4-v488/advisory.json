@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "43a3e1e72879a675eca9a5ff77ee3c70cc28e4615d363a77145bca6d69b7e240",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-1327\"], \"cwes\": [{\"cwe_id\": \"CWE-1327\", \"name\": \"Binding to an Unrestricted IP Address\"}], \"description\": \"# Advisory 10 — [H06] Netstack SOCKS5 proxy binds to all interfaces (0.0.0.0) instead of loopback\\r\\n\\r\\n- **Severity:** Medium\\r\\n- **CVSS 4.0 Base Score:** **5.4**\\r\\n- **CVSS 4.0 Vector:** `CVSS:4.0/AV:A/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:L/SI:L/SA:L`\\r\\n- **CWE:** [CWE-1327](https://cwe.mitre.org/data/definitions/1327.html) (Binding to an Unrestricted IP Address)\\r\\n- **Affected product:** `github.com/netbirdio/netbird` v0.74.3\\r\\n- **Affected component(s):** socks5\\r\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet · Securin Inc. — `arjun.basnet@securin.io`\\r\\n\\r\\n---\\r\\n\\r\\n## Overview\\r\\n\\r\\n```go\\r\\n// client/iface/netstack/env.go\\r\\nfunc listenAddr(port int) string {\\r\\n\\treturn fmt.Sprintf(\\\"0.0.0.0:%d\\\", port) // binds to all interfaces\\r\\n}\\r\\n```\\r\\n\\r\\nIn netstack mode (`NB_USE_NETSTACK_MODE=true`) the client starts a SOCKS5 proxy\\r\\nthat bridges local host applications into the userspace WireGuard stack. The\\r\\nlistener address is built by `listenAddr`, which binds to `0.0.0.0` (all\\r\\ninterfaces) instead of loopback.\\r\\n\\r\\nThe proxy has no authentication. That is acceptable for a service reachable only\\r\\nfrom the local host, but because it is bound to all interfaces, any machine on\\r\\nthe same network can connect and relay traffic through the client into its\\r\\nNetBird overlay. The root cause is the unrestricted bind address, not the\\r\\nabsence of authentication: an unauthenticated proxy bound to `127.0.0.1` is safe.\\r\\n\\r\\n---\\r\\n\\r\\n## Affected Location\\r\\n\\r\\n- `client/iface/netstack/env.go` — `listenAddr` binds the SOCKS5 listener to `0.0.0.0`.\\r\\n- `client/iface/netstack/proxy.go:24` — `socks5.NewServer(socks5.WithDial(...))` creates the proxy with no authenticator (relevant only because the listener is exposed beyond loopback).\\r\\n\\r\\n---\\r\\n\\r\\n## Vulnerable Code\\r\\n\\r\\n```go\\r\\n// client/iface/netstack/env.go\\r\\nfunc listenAddr(port int) string {\\r\\n\\treturn fmt.Sprintf(\\\"0.0.0.0:%d\\\", port)\\r\\n}\\r\\n\\r\\n// client/iface/netstack/proxy.go\\r\\nserver := socks5.NewServer(\\r\\n\\tsocks5.WithDial(dialer.Dial),\\r\\n\\t// no authenticator configured\\r\\n)\\r\\n```\\r\\n\\r\\n---\\r\\n\\r\\n## Reproduction\\r\\n\\r\\nStarting the client in netstack mode is sufficient to create the listening\\r\\nsocket bound to `0.0.0.0`. From another host on the same network, connect to the\\r\\nproxy port (default `1080`) and issue a SOCKS5 CONNECT; traffic is relayed into\\r\\nthe victim's NetBird overlay without any credentials.\\r\\n\\r\\n---\\r\\n\\r\\n## Impact\\r\\n\\r\\nAny host that can reach the proxy port can use the victim client as an\\r\\nunauthenticated SOCKS5 relay into its NetBird overlay, reaching peers and\\r\\ninternal resources with the victim's network position. Concrete consequences and\\r\\nCIA breakdown are captured in the CVSS 4.0 vector:\\r\\n`CVSS:4.0/AV:A/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:L/SI:L/SA:L`.\\r\\n\\r\\n---\\r\\n\\r\\n## Remediation\\r\\n\\r\\nBind the listener to `127.0.0.1` by default so the proxy is reachable only from\\r\\nthe local host. If cross-host reachability is genuinely required (e.g. a\\r\\ncontainer gateway), gate it behind an explicit opt-in (environment variable),\\r\\nunderstanding that this exposes an unauthenticated proxy on that address.\\r\\n\\r\\n---\\r\\n\\r\\n## Credit\\r\\n\\r\\nReported by **Arjun Basnet** — [Securin Inc.](https://securin.io) — via GitHub [@SecurinDisclose](https://github.com/SecurinDisclose).\\r\\nCoordinated disclosure timeline: **90 days** — public disclosure on or after **2026-10-11** unless extended by mutual agreement.\\r\\n\\r\\n*Advisory 10/38 in the NetBird 0.74.3 coordinated disclosure bundle.*\\r\\n\\r\\n---\\r\\n\\r\\n## Private Audit Bundle\\r\\n\\r\\nFull reproduction bundle (labs, PoCs, live-target evidence, cross-referenced advisories) is available at:\\r\\n\\r\\n**https://github.com/SecurinDisclose/netbird-0.74.3-audit** (private — request read access via GitHub or email `arjun.basnet@securin.io`).\\r\\n\\r\\nThe private repo mirrors `securin0days_audit/report/` and contains:\\r\\n- `labs/{finding-id}/` — README + `poc_test.go` + `reproduce.sh` for each of the 52 confirmed findings\\r\\n- `advisories/` — all 38 CVE-candidate drafts + `INDEX.md`\\r\\n- `LIVE_TARGET_REPORT.md` — 8 findings validated against `forge.securin.dev` on 2026-07-13\\r\\n- `VENDOR_DISCLOSURE.md` — coordination master document\\r\\n- `REPRODUCE_ALL.sh` — one-shot batch runner (Go 1.25.11 toolchain, ~5 min)\\r\\n\\r\\n## Coordinated Disclosure\\r\\n\\r\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet, Securin Inc.\\r\\n- **Contact:** `arjun.basnet@securin.io`\\r\\n- **Public-disclosure deadline:** 2026-10-11 (90 days from 2026-07-13)\\r\\n- **This is one of 38 advisories** — see `advisories/INDEX.md` in the private repo for the full set.\\r\\n\", \"ghsa_id\": \"GHSA-7wwh-vfq4-v488\", \"html_url\": \"https://github.com/netbirdio/netbird/security/advisories/GHSA-7wwh-vfq4-v488\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7wwh-vfq4-v488\"}], \"private_fork\": null, \"published_at\": \"2026-08-24T14:44:00Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/17948409?v=4\", \"events_url\": \"https://api.github.com/users/lixmal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lixmal/followers\", \"following_url\": \"https://api.github.com/users/lixmal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lixmal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lixmal\", \"id\": 17948409, \"login\": \"lixmal\", \"node_id\": \"MDQ6VXNlcjE3OTQ4NDA5\", \"organizations_url\": \"https://api.github.com/users/lixmal/orgs\", \"received_events_url\": \"https://api.github.com/users/lixmal/received_events\", \"repos_url\": \"https://api.github.com/users/lixmal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lixmal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lixmal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lixmal\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"[H06] Netstack SOCKS5 proxy binds to all interfaces (0.0.0.0), exposing an unauthenticated proxy into the NetBird overlay\", \"updated_at\": \"2026-08-24T14:44:00Z\", \"url\": \"https://api.github.com/repos/netbirdio/netbird/security-advisories/GHSA-7wwh-vfq4-v488\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/netbirdio/netbird\"}, \"patched_versions\": \"0.74.7\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.74.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "netbird:ghsa-7wwh-vfq4-v488",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/netbirdio/netbird: <= 0.74.6"
+    ],
+    "cves": [],
+    "fixed_versions": [
+      "github.com/netbirdio/netbird: 0.74.7"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/netbirdio/netbird"
+    ],
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-24T19:19:00.284835Z",
+  "provenance": {
+    "content_sha256": "aa6824985336e182fe22c7f81b7eb628bce2fa80f0ff027d0ee6ded19b848ed1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-24T14:44:00Z",
+  "schema_version": 1,
+  "source_id": "netbird_github",
+  "source_url": "https://github.com/netbirdio/netbird/security/advisories/GHSA-7wwh-vfq4-v488",
+  "status": "active",
+  "title": "[H06] Netstack SOCKS5 proxy binds to all interfaces (0.0.0.0), exposing an unauthenticated proxy into the NetBird overlay",
+  "updated_at": "2026-08-24T14:44:00Z",
+  "vendor": "NetBird",
+  "vendor_advisory_id": "GHSA-7wwh-vfq4-v488"
+}
