@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/98982131?v=4\", \"events_url\": \"https://api.github.com/users/vndasunkid/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/vndasunkid/followers\", \"following_url\": \"https://api.github.com/users/vndasunkid/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/vndasunkid/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/vndasunkid\", \"id\": 98982131, \"login\": \"vndasunkid\", \"node_id\": \"U_kgDOBeZY8w\", \"organizations_url\": \"https://api.github.com/users/vndasunkid/orgs\", \"received_events_url\": \"https://api.github.com/users/vndasunkid/received_events\", \"repos_url\": \"https://api.github.com/users/vndasunkid/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/vndasunkid/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/vndasunkid/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/vndasunkid\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55535\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-367\", \"name\": \"Time-of-check Time-of-use (TOCTOU) Race Condition\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\nThe `webhook_url` field in the Jobs API silently passes validation when DNS resolution fails (`socket.gaierror`), enabling DNS rebinding attacks. An attacker's domain can initially resolve to a public IP (passing validation) then switch to an internal IP before the server makes the HTTP request.\\n\\n### Details\\nThe validator catches `socket.gaierror` and silently allows the URL:\\n\\n```python\\n# src/praisonai/praisonai/jobs/models.py:55\\ntry:\\n    ip = socket.gethostbyname(hostname)\\n    ip_obj = ipaddress.ip_address(ip)\\n    if ip_obj.is_private or ip_obj.is_loopback:\\n        raise ValueError(\\\"private address\\\")\\nexcept socket.gaierror:\\n    pass  # BUG: DNS failure silently ignored → SSRF bypass\\n```\\n\\nThe HTTP call is made later with no re-validation:\\n\\n```python\\n# src/praisonai/praisonai/jobs/executor.py:402\\nasync with httpx.AsyncClient() as client:\\n    await client.post(job.webhook_url, ...)  # no second IP check\\n```\\n\\n### Proof of Concept\\n\\n**DNS rebinding flow:**\\n1. Register `attacker.com` with TTL=1s → resolves to `1.2.3.4` (public IP)\\n2. Submit job: `webhook_url=http://attacker.com/callback`\\n3. Validation passes (public IP)\\n4. Switch DNS: `attacker.com` → `127.0.0.1`\\n5. Job completes → server POSTs to `127.0.0.1` → internal SSRF\\n\\n**Unresolvable domain bypass (no DNS rebinding required):**\\n\\n```bash\\ncurl -X POST http://:8005/api/v1/runs \\\\\\n  -d '{\\\"prompt\\\":\\\"run\\\",\\\"webhook_url\\\":\\\"http://unresolvable.internal/cb\\\",\\\"agent_yaml\\\":\\\"...\\\"}'\\n# Validation: gaierror → pass → URL accepted\\n```\\n\\n### Impact\\nSSRF to internal HTTP services: admin panels, databases, and cloud metadata APIs (e.g., `http://169.254.169.254/`). Exploitable without authentication.\", \"ghsa_id\": \"GHSA-hmfx-4v44-9qw9\", \"github_reviewed_at\": \"2026-08-25T15:02:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-hmfx-4v44-9qw9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hmfx-4v44-9qw9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55535\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-25T15:02:04Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-hmfx-4v44-9qw9\", \"https://github.com/MervinPraison/PraisonAI/commit/2f9677abb2ea68eab864ee8b6a828fd0141612e1\", \"https://github.com/MervinPraison/PraisonAI/releases/tag/v4.6.58\", \"https://github.com/advisories/GHSA-hmfx-4v44-9qw9\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-hmfx-4v44-9qw9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI vulnerable to Server-Side Request Forgery via DNS rebinding bypass in webhook_url validation\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T15:02:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-hmfx-4v44-9qw9\", \"vulnerabilities\": [{\"first_patched_version\": \"4.6.58\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"PraisonAI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.6.48\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hmfx-4v44-9qw9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "PraisonAI: <= 4.6.48"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55535"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "PraisonAI"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-25T19:19:12.994224Z",
+  "provenance": {
+    "content_sha256": "18ed3eb109012feadecbca57f3adcd847fd49655688c8b5b5ea72f156d2787fb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-25T15:02:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hmfx-4v44-9qw9",
+  "status": "active",
+  "title": "PraisonAI vulnerable to Server-Side Request Forgery via DNS rebinding bypass in webhook_url validation",
+  "updated_at": "2026-08-25T15:02:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hmfx-4v44-9qw9"
+}

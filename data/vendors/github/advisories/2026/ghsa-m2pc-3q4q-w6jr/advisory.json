@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/142202920?v=4\", \"events_url\": \"https://api.github.com/users/nnfrog/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/nnfrog/followers\", \"following_url\": \"https://api.github.com/users/nnfrog/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/nnfrog/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/nnfrog\", \"id\": 142202920, \"login\": \"nnfrog\", \"node_id\": \"U_kgDOCHnYKA\", \"organizations_url\": \"https://api.github.com/users/nnfrog/orgs\", \"received_events_url\": \"https://api.github.com/users/nnfrog/received_events\", \"repos_url\": \"https://api.github.com/users/nnfrog/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/nnfrog/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/nnfrog/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/nnfrog\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/275458242?v=4\", \"events_url\": \"https://api.github.com/users/yuvalmo-jfrog/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/yuvalmo-jfrog/followers\", \"following_url\": \"https://api.github.com/users/yuvalmo-jfrog/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/yuvalmo-jfrog/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/yuvalmo-jfrog\", \"id\": 275458242, \"login\": \"yuvalmo-jfrog\", \"node_id\": \"U_kgDOEGsowg\", \"organizations_url\": \"https://api.github.com/users/yuvalmo-jfrog/orgs\", \"received_events_url\": \"https://api.github.com/users/yuvalmo-jfrog/received_events\", \"repos_url\": \"https://api.github.com/users/yuvalmo-jfrog/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/yuvalmo-jfrog/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/yuvalmo-jfrog/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/yuvalmo-jfrog\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55419\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-434\", \"name\": \"Unrestricted Upload of File with Dangerous Type\"}], \"description\": \"## Summary\\n\\nThe Reachy Mini daemon exposes the “/api/media/sounds/upload” endpoint without authentication and file validation mechanisms.  \\nAn attacker can use this endpoint to upload malicious files into the file system that will propagate in future attacks.\\n\\n## Compromise Chain: Unauthenticated to Full Root Access\\n\\nThis issue is part of a full compromise chain allowing an unauthenticated user to gain root access on the Reachy’s operating system:\\n\\n1. Unrestricted File Upload in Media Sounds Upload API \\\\<= current finding  \\n2. Bluetooth Authentication Bypass  \\n3. Bluetooth Directory Traversal\\n\\n\\n## Description\\n\\nThe root cause of the issue is at the handler located in “***src/daemon/app/routers/media.py***” file at the “upload\\\\_sound” method:\\n\\n```py\\n@router.post(\\\"/sounds/upload\\\")\\nasync def upload_sound(\\n    file: UploadFile = File(...),\\n) -> dict[str, str]:\\n    \\\"\\\"\\\"Upload a sound file to the daemon's temporary sound directory.\\n    The file is saved to ``/tmp/reachy_mini_sounds/<original_filename>``.\\n    If a file with the same name already exists it is overwritten.\\n    Returns:\\n        JSON with the absolute *path* of the saved file on the daemon.\\n    \\\"\\\"\\\"\\n    if not file.filename:\\n        raise HTTPException(status_code=400, detail=\\\"Filename is required\\\")\\n    # Reject path traversal\\n    filename = Path(file.filename).name\\n    if not filename or filename in (\\\".\\\", \\\"..\\\"):\\n        raise HTTPException(status_code=400, detail=\\\"Invalid filename\\\")\\n    os.makedirs(SOUNDS_TMP_DIR, exist_ok=True)\\n    dest = os.path.join(SOUNDS_TMP_DIR, filename)\\n    content = await file.read()\\n    with open(dest, \\\"wb\\\") as f:\\n        f.write(content)\\n    return {\\\"status\\\": \\\"ok\\\", \\\"path\\\": dest}\\n```\\n\\nThis endpoint lacks multiple defence mechanisms:\\n\\n1. No authentication mechanism.  \\n2. No file extension validation.  \\n3. No file content/size validation.\\n\\nAdditionally, the daemon is bound to the 0.0.0.0 network interfaces (a.k.a. all network interfaces) by default along with permissive CORS ( allow\\\\_origins=\\\\[“\\\\*”\\\\] ) meaning the following API endpoint is exposed to every network interface the daemon is connected to.\\n\\n# PoC\\n\\n1. Start the daemon in simulation mode (command depends on the installed environment):\\n\\n```shell\\n .venv/bin/mjpython -m reachy_mini.daemon.app.main --sim --no-media\\n```\\n\\n2. After that check that the media upload API endpoint is activated and you can upload a wav file:\\n\\n```shell\\ncurl -X POST http://<daemon_domain>:<daemon_port>/api/media/sounds/upload \\\\\\n    -F \\\"file=@/path/to/your/file.wav\\\"\\n```\\n\\n3. Now attempt to create a “.sh” file containing a script and upload it:\\n\\n```shell\\ncurl -X POST http://<daemon_domain>:<daemon_port>/api/media/sounds/upload \\\\\\n    -F \\\"file=@/path/to/your/script.sh\\\"\\n```\\n\\n4. Now error message will be received and you will see that the script file was successfully uploaded to disk.\\n\\n# Impact\\n\\nDue to this issue, an attacker can upload malicious files instead of the intended sounds files, harming the integrity of the stored data and allowing an attacker to propagate a foothold in cases another vulnerabilities would arise.\\n\\n## Fix suggestion\\n\\nPerform the following check on the API endpoint:\\n\\n1. Validate that the file extension contains only desired extensions (allow-list approach).  \\n2. Validate that the uploaded file’s content matches the desired extension (Magic numbers, and known file structure per file type).  \\n3. Enforce authentication on the file upload endpoint.\\n\\n## Credit\\n\\nThe vulnerability was discovered by Natan Nehorai of the JFrog Vulnerability Research team.\", \"ghsa_id\": \"GHSA-m2pc-3q4q-w6jr\", \"github_reviewed_at\": \"2026-08-25T17:38:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-m2pc-3q4q-w6jr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m2pc-3q4q-w6jr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55419\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-25T17:38:43Z\", \"references\": [\"https://github.com/pollen-robotics/reachy_mini/security/advisories/GHSA-m2pc-3q4q-w6jr\", \"https://github.com/pollen-robotics/reachy_mini/commit/984c7723b3ec5da63f4e0a2bcf9f120ceb563e04\", \"https://github.com/advisories/GHSA-m2pc-3q4q-w6jr\"], \"repository_advisory_url\": \"https://api.github.com/repos/pollen-robotics/reachy_mini/security-advisories/GHSA-m2pc-3q4q-w6jr\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pollen-robotics/reachy_mini\", \"summary\": \"reachy_mini Allows Unrestricted Upload of File with Dangerous Type\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T17:38:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-m2pc-3q4q-w6jr\", \"vulnerabilities\": [{\"first_patched_version\": \"1.8.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"reachy-mini\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.8.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m2pc-3q4q-w6jr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "reachy-mini: < 1.8.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55419"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "reachy-mini"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-25T19:19:12.884257Z",
+  "provenance": {
+    "content_sha256": "33acac35328095b973c892b625e6e18da1ed62d839c52c0415310d1a95518480",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-25T17:38:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m2pc-3q4q-w6jr",
+  "status": "active",
+  "title": "reachy_mini Allows Unrestricted Upload of File with Dangerous Type",
+  "updated_at": "2026-08-25T17:38:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m2pc-3q4q-w6jr"
+}

