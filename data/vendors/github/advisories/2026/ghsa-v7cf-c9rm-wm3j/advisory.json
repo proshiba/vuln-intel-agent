@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/46104508?v=4\", \"events_url\": \"https://api.github.com/users/kq5y/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kq5y/followers\", \"following_url\": \"https://api.github.com/users/kq5y/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kq5y/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kq5y\", \"id\": 46104508, \"login\": \"kq5y\", \"node_id\": \"MDQ6VXNlcjQ2MTA0NTA4\", \"organizations_url\": \"https://api.github.com/users/kq5y/orgs\", \"received_events_url\": \"https://api.github.com/users/kq5y/received_events\", \"repos_url\": \"https://api.github.com/users/kq5y/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kq5y/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kq5y/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kq5y\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1413412?v=4\", \"events_url\": \"https://api.github.com/users/SebTardif/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SebTardif/followers\", \"following_url\": \"https://api.github.com/users/SebTardif/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SebTardif/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SebTardif\", \"id\": 1413412, \"login\": \"SebTardif\", \"node_id\": \"MDQ6VXNlcjE0MTM0MTI=\", \"organizations_url\": \"https://api.github.com/users/SebTardif/orgs\", \"received_events_url\": \"https://api.github.com/users/SebTardif/received_events\", \"repos_url\": \"https://api.github.com/users/SebTardif/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SebTardif/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SebTardif/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SebTardif\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-9769\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}], \"description\": \"### Summary\\n\\njusthtml through 1.9.1 allows denial of service via deeply nested HTML. During parsing, `JustHTML.__init__()` always reaches `TreeBuilder.finish()`, which unconditionally calls `_populate_selectedcontent()`. That function recursively traverses the DOM via `_find_elements()` / `_find_element()` without a depth bound, allowing attacker-controlled deeply nested input to trigger an unhandled `RecursionError` on CPython. Depending on the host application's exception handling, this can abort parsing, fail requests, or terminate a worker/process.\\n\\n### Details\\n\\n`TreeBuilder.finish()` ([`treebuilder.py#L476`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/treebuilder.py#L476)) unconditionally calls `_populate_selectedcontent(self.document)` at [line 494](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/treebuilder.py#L494). `_populate_selectedcontent()` ([`treebuilder.py#L1243`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/treebuilder.py#L1243)) calls `_find_elements()` ([`treebuilder.py#L1280`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/treebuilder.py#L1280)) to recursively search the DOM tree for `<select>` elements:\\n\\n```python\\ndef _find_elements(self, node: Any, name: str, result: list[Any]) -> None:\\n    \\\"\\\"\\\"Recursively find all elements with given name.\\\"\\\"\\\"\\n    if node.name == name:\\n        result.append(node)\\n    if node.has_child_nodes():\\n        for child in node.children:\\n            self._find_elements(child, name, result)  # recursive call\\n```\\n\\nWhen the DOM tree depth exceeds CPython's default recursion limit (1000), this raises an unhandled `RecursionError`. The full call path is:\\n\\n`JustHTML(html)` → `tokenizer.run()` → `tree_builder.finish()` → `_populate_selectedcontent(document)` → `_find_elements(root, \\\"select\\\", selects)` (recursive)\\n\\nDeeply nested DOM trees can be produced by nesting `<div>` tags ~1000 levels deep. On CPython with the default recursion limit, approximately 11 KB of `<div>` nesting is sufficient to trigger the error. The exact depth threshold is environment-dependent (CPython version, recursion limit setting, call stack depth at invocation).\\n\\nAdditional recursive functions are affected on already-parsed deep trees:\\n- `Node.clone_node(deep=True)` ([`node.py#L523`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/node.py#L523)) — called during sanitization\\n- `_node_to_html()` ([`serialize.py#L580`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/serialize.py#L580)) — used by `to_html(pretty=True)`\\n- `_to_markdown_walk()` ([`node.py#L817`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/node.py#L817)) — used by `to_markdown()`\\n\\nNote: the library already uses iterative traversal in several comparable functions (e.g., `_node_to_html_compact` at [`serialize.py#L197`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/serialize.py#L197), `_to_text_collect` at [`node.py#L161`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/node.py#L161), `_is_blocky_element` at [`serialize.py#L405`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/serialize.py#L405), `apply_to_children` at [`transforms.py#L1642`](https://github.com/EmilStenstrom/justhtml/blob/a866b6077770d9ec4cb6b6f9bfe7c918f98455e4/src/justhtml/transforms.py#L1642)), demonstrating the correct pattern.\\n\\n### PoC\\n\\n```python\\nfrom justhtml import JustHTML\\n\\nhtml = \\\"<div>\\\" * 1000 + \\\"x\\\" + \\\"</div>\\\" * 1000\\ndoc = JustHTML(html)  # raises RecursionError\\n```\\n\\nTest environment: CPython 3.14.3, macOS ARM64 (Apple Silicon), justhtml 1.9.1, default recursion limit (1000)\\n\\n| Input | Size | Result |\\n|-------|------|--------|\\n| `<div>` × 500 | 5,501 bytes | OK |\\n| `<div>` × 800 | 8,801 bytes | OK |\\n| `<div>` × 1000 | 11,001 bytes | RecursionError |\\n\\nThe error occurs with both `sanitize=True` (default) and `sanitize=False`.\\n\\n### Impact\\n\\nAn attacker who can supply HTML for parsing can trigger an unhandled `RecursionError` during `JustHTML()` construction. The error is triggered during construction and is not avoided by `justhtml` configuration alone; mitigating it requires host-application exception handling or input constraints. Depending on the host application's exception handling, this can abort parsing, fail requests, or terminate a worker/process.\\n\\n### Suggested Fix\\n\\nConvert the recursive tree traversal functions to iterative implementations using an explicit stack. Example for `_find_elements`:\\n\\n```python\\ndef _find_elements(self, node: Any, name: str, result: list[Any]) -> None:\\n    stack = [node]\\n    while stack:\\n        current = stack.pop()\\n        if current.name == name:\\n            result.append(current)\\n        if current.has_child_nodes():\\n            stack.extend(reversed(current.children))\\n```\\n\\nThe same conversion should be applied to `_find_element`, `clone_node(deep=True)`, `_node_to_html()`, and `_to_markdown_walk()`.\", \"epss\": {\"percentage\": 0.00278, \"percentile\": 0.19743}, \"ghsa_id\": \"GHSA-v7cf-c9rm-wm3j\", \"github_reviewed_at\": \"2026-03-17T14:07:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-v7cf-c9rm-wm3j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v7cf-c9rm-wm3j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-9769\"}], \"nvd_published_at\": null, \"published_at\": \"2026-03-17T14:07:38Z\", \"references\": [\"https://github.com/EmilStenstrom/justhtml/security/advisories/GHSA-v7cf-c9rm-wm3j\", \"https://github.com/EmilStenstrom/justhtml/releases/tag/v1.10.0\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-9769\", \"https://www.vulncheck.com/advisories/justhtml-before-denial-of-service-via-deeply-nested-html\", \"https://github.com/advisories/GHSA-v7cf-c9rm-wm3j\"], \"repository_advisory_url\": \"https://api.github.com/repos/EmilStenstrom/justhtml/security-advisories/GHSA-v7cf-c9rm-wm3j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/EmilStenstrom/justhtml\", \"summary\": \"Uncontrolled recursion DoS in JustHTML() via deeply nested HTML\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T16:40:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-v7cf-c9rm-wm3j\", \"vulnerabilities\": [{\"first_patched_version\": \"1.10.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"justhtml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.9.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v7cf-c9rm-wm3j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "justhtml: <= 1.9.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-9769"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "justhtml"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-25T19:19:12.900799Z",
+  "provenance": {
+    "content_sha256": "f546b4cd279c2b5f0064b8aef0e9a48639815404dc71030afa30d7ec5add257c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-03-17T14:07:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v7cf-c9rm-wm3j",
+  "status": "active",
+  "title": "Uncontrolled recursion DoS in JustHTML() via deeply nested HTML",
+  "updated_at": "2026-08-25T16:40:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v7cf-c9rm-wm3j"
+}

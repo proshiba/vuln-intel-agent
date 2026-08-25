@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55530\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**Target:** PraisonAI (`MervinPraison/PraisonAI`)\\n**Affected component:** `praisonaiagents/tools/ast_grep_tool.py` — `ast_grep_rewrite`\\n**Affected versions:** master at `ce97667156a116c50b4a3d1aa21e09f048903fda`; reproduced against the current `praisonaiagents` PyPI release (`praisonaiagents` <= 1.6.52).\\n\\n## Summary\\n\\nTools in `praisonaiagents/tools/` that modify on-disk state or run code are uniformly wrapped with `@require_approval`, which routes the call through an interactive approval flow before the body runs and fails closed — on denial (or with no approval backend configured) it raises `PermissionError` and the side effect does not occur. This is applied at every sibling mutation entry point:\\n\\n| File | Line | Symbol | Risk level |\\n|---|---|---|---|\\n| `file_tools.py` | 212 | `copy_file` | high |\\n| `file_tools.py` | 239 | `move_file` | high |\\n| `file_tools.py` | 266 | `delete_file` | high |\\n| `edit_tools.py` | 38 | `EditTools.edit_file` | high |\\n| `edit_tools.py` | 155 | `edit_file` | high |\\n| `shell_tools.py` | 32 | `execute_command` | critical |\\n| `python_tools.py` | 352 | `execute_code` | critical |\\n\\n`ast_grep_tool.py:149` `ast_grep_rewrite` is structurally a sibling of these but has no decorator and no `from ..approval import require_approval` import. With `dry_run=False` (LLM-controllable), it builds `sg --pattern <P> --rewrite <R> --lang <L> --update-all <path>` (lines 204–211) and calls `subprocess.run(cmd, ...)` (line 215), modifying every file under `path` matching the pattern. There is no approval gate, no `_validate_path` workspace check, and no `cwd=` sandboxing. The function is registered as a top-level tool (`__init__.py:182`) and exposed via the `code_intelligence` built-in profile (`profiles.py`).\\n\\nA secondary defect: on the `dry_run=False` path `ast_grep_rewrite` returns the literal string `No changes made` to the caller even when it modified files (the \\\"No changes made\\\" return at `ast_grep_tool.py:230` is reached on this path), so an operator inspecting tool output sees no record that a write occurred.\\n\\n## Proof of concept\\n\\nSingle script, clean venv, `praisonaiagents` from PyPI, `ast-grep` CLI installed. `PRAISONAI_AUTO_APPROVE` is removed from the environment first, so no env-bypass is in play.\\n\\n```python\\nimport os, tempfile, textwrap\\nos.environ.pop(\\\"PRAISONAI_AUTO_APPROVE\\\", None)\\n\\nworkdir = tempfile.mkdtemp(prefix=\\\"poc-\\\")\\ntarget = os.path.join(workdir, \\\"target.py\\\")\\nopen(target, \\\"w\\\").write(textwrap.dedent(\\\"\\\"\\\"\\n    def safe_function(x):\\n        return x + 1\\n\\n    def hello(name):\\n        return 'hi ' + name\\n\\\"\\\"\\\"))\\n\\n# Positive: undecorated tool rewrites the file.\\nfrom praisonaiagents.tools.ast_grep_tool import ast_grep_rewrite\\nast_grep_rewrite(\\n    pattern=\\\"def $FN($$$): return $$$\\\",\\n    replacement=\\\"def $FN($$$): import os; os.environ['POC_CANARY']='1'; return $$$\\\",\\n    lang=\\\"python\\\", path=workdir, dry_run=False,\\n)\\n\\n# Negative control: decorated sibling triggers the approval flow.\\nfrom praisonaiagents.tools.edit_tools import edit_file\\nedit_file(file_path=target, old_text=\\\"def hello(name):\\\", new_text=\\\"def hello(name):  # X\\\")\\n```\\n\\nResult, verified: `ast_grep_rewrite` rewrote `target.py` to contain the injected `import os; os.environ['POC_CANARY']='1'` payload, no approval prompt fired, and the call returned `No changes made`. The subsequent `edit_file` call in the same process rendered the Tool Approval Required panel and, on denial, raised `PermissionError(\\\"Execution of edit_file denied: User denied\\\")` without modifying its target. Same process, same approval backend — the only difference is the missing decorator on `ast_grep_rewrite`.\\n\\n## Threat model\\n\\nAn LLM agent running locally whose tool surface includes `ast_grep_rewrite` (via the `code_intelligence` profile or direct import). Triggers: the operator asks the agent to refactor code, or prompt-injection in fetched docs / RAG context / any LLM-visible input steers the agent to call `ast_grep_rewrite` with attacker-chosen `pattern`, `replacement`, and `path` (the `dry_run` field is in the LLM-visible tool schema, so `dry_run=False` is requestable). The agent can then rewrite any file the host process can write — source trees, build configs, dotfiles, the agent's own source. With `path=\\\"/\\\"` the rewrite is filesystem-wide. Because the rewrite injects arbitrary text, pointing it at a file that is later imported or executed turns this write primitive into code execution — the basis for the escalation noted in the CVSS line. No operator prompt and no audit record of the modification.\\n\\n## Suggested fix\\n\\n```diff\\n--- a/praisonaiagents/tools/ast_grep_tool.py\\n+++ b/praisonaiagents/tools/ast_grep_tool.py\\n@@\\n from praisonaiagents._logging import get_logger\\n from typing import Optional, List\\n+from ..approval import require_approval\\n@@\\n+@require_approval(risk_level=\\\"high\\\")\\n def ast_grep_rewrite(\\n     pattern: str,\\n     replacement: str,\\n```\\n\\n`high` matches the file-modifying siblings; `critical` is defensible given the write→exec escalation. In the same patch: add a `_validate_path` workspace boundary check (cf. `edit_tools.py:27`); fix the `No changes made` return so it reflects actual modifications; apply the decorator to `ast_grep_scan` (`ast_grep_tool.py:243`) if it can write. `ast_grep_search` is read-only and can stay undecorated. A regression test asserting `ast_grep_rewrite` requires approval (alongside the other mutation tools) would have caught this at review time.\\n\\n## Coordinated disclosure\\n\\n- Kai Aizen / SnailSploit — `kai@snailsploit.com` — PGP on request.\", \"ghsa_id\": \"GHSA-cfxv-8fw8-rwpv\", \"github_reviewed_at\": \"2026-08-25T14:46:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-cfxv-8fw8-rwpv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cfxv-8fw8-rwpv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55530\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-25T14:46:13Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-cfxv-8fw8-rwpv\", \"https://github.com/MervinPraison/PraisonAI/commit/2f9677abb2ea68eab864ee8b6a828fd0141612e1\", \"https://github.com/MervinPraison/PraisonAI/releases/tag/v4.6.58\", \"https://github.com/advisories/GHSA-cfxv-8fw8-rwpv\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-cfxv-8fw8-rwpv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"praisonaiagents: ast_grep_rewrite rewrites arbitrary files without the @require_approval gate enforced on every sibling mutation tool\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T14:46:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-cfxv-8fw8-rwpv\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.58\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.6.58\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cfxv-8fw8-rwpv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: < 1.6.58"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55530"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-25T19:19:13.007973Z",
+  "provenance": {
+    "content_sha256": "11c7d5b9e2d96a676f71dfb8ab522951643a0a11fa061618bdcbbdabd296d6b7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-25T14:46:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cfxv-8fw8-rwpv",
+  "status": "active",
+  "title": "praisonaiagents: ast_grep_rewrite rewrites arbitrary files without the @require_approval gate enforced on every sibling mutation tool",
+  "updated_at": "2026-08-25T14:46:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cfxv-8fw8-rwpv"
+}

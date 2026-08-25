@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10426523?v=4\", \"events_url\": \"https://api.github.com/users/PJUllrich/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PJUllrich/followers\", \"following_url\": \"https://api.github.com/users/PJUllrich/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PJUllrich/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PJUllrich\", \"id\": 10426523, \"login\": \"PJUllrich\", \"node_id\": \"MDQ6VXNlcjEwNDI2NTIz\", \"organizations_url\": \"https://api.github.com/users/PJUllrich/orgs\", \"received_events_url\": \"https://api.github.com/users/PJUllrich/received_events\", \"repos_url\": \"https://api.github.com/users/PJUllrich/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PJUllrich/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PJUllrich/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PJUllrich\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16843419?v=4\", \"events_url\": \"https://api.github.com/users/polvalente/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/polvalente/followers\", \"following_url\": \"https://api.github.com/users/polvalente/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/polvalente/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/polvalente\", \"id\": 16843419, \"login\": \"polvalente\", \"node_id\": \"MDQ6VXNlcjE2ODQzNDE5\", \"organizations_url\": \"https://api.github.com/users/polvalente/orgs\", \"received_events_url\": \"https://api.github.com/users/polvalente/received_events\", \"repos_url\": \"https://api.github.com/users/polvalente/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/polvalente/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/polvalente/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/polvalente\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-48854\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-770\", \"name\": \"Allocation of Resources Without Limits or Throttling\"}], \"description\": \"### Summary\\n\\n`'Elixir.GRPC.Server.Adapters.Cowboy.Handler':read_full_body/3` accumulates every received chunk into a single growing binary with no size cap. When the client omits the `grpc-timeout` header, the read timeout resolves to `:infinity`, allowing a slow-trickle attacker to hold the connection open indefinitely while memory grows. A single unauthenticated connection is sufficient to exhaust BEAM memory and crash the node.\\n\\n### Details\\n\\nThe read loop in `lib/grpc/server/adapters/cowboy/handler.ex` calls `:cowboy_req.read_body/2` in a recursive loop, concatenating each chunk: `body <> data`. There is no running-total check and no configurable maximum body size. As the loop drains the receive buffer, cowboy issues fresh HTTP/2 `WINDOW_UPDATE` frames, so the client can keep pushing data indefinitely.\\n\\nThe `grpc-timeout` header is attacker-supplied and optional. When absent, `timeout_left_opt(nil)` returns `:infinity`, so the per-chunk read also has no deadline. The two missing controls compound: a fast client can blast multi-gigabyte payloads directly into memory; a slow client can trickle data forever.\\n\\n### PoC\\n\\n1. Start any `grpc` server exposing a unary RPC (no special configuration required).\\n2. Open an HTTP/2 connection and send a POST to any unary RPC path with `Content-Type: application/grpc+proto` — omit the `grpc-timeout` header.\\n3. Stream a large body (e.g. 1 GiB) in chunks without sending the final `END_STREAM` flag immediately.\\n4. Observe BEAM memory growing proportionally to uploaded data with no server-side cap.\\n\\n### Impact\\n\\nAffects `grpc` ≥ 0.3.1. No authentication, no special configuration, and no specific RPC method required, the unbounded read is on the default unary ingress path.\\n\\n### References\\n\\n* Introduction commit: https://github.com/elixir-grpc/grpc/commit/d1abe70a6cad6dac4a3f8235d883d7c896989560\\n* Patch commit: https://github.com/elixir-grpc/grpc/commit/49e18c3ec6bb9afe2f712caad3dbab5c56a68a00\", \"epss\": {\"percentage\": 0.00344, \"percentile\": 0.26902}, \"ghsa_id\": \"GHSA-q8gf-9rvj-gmgj\", \"github_reviewed_at\": \"2026-08-25T18:12:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-q8gf-9rvj-gmgj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-q8gf-9rvj-gmgj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-48854\"}], \"nvd_published_at\": \"2026-06-15T23:16:45Z\", \"published_at\": \"2026-08-25T18:12:05Z\", \"references\": [\"https://github.com/elixir-grpc/grpc/security/advisories/GHSA-q8gf-9rvj-gmgj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-48854\", \"https://github.com/elixir-grpc/grpc/pull/542\", \"https://github.com/elixir-grpc/grpc/commit/49e18c3ec6bb9afe2f712caad3dbab5c56a68a00\", \"https://cna.erlef.org/cves/CVE-2026-48854.html\", \"https://github.com/elixir-grpc/grpc/releases/tag/v1.0.0\", \"https://osv.dev/vulnerability/EEF-CVE-2026-48854\", \"https://github.com/advisories/GHSA-q8gf-9rvj-gmgj\"], \"repository_advisory_url\": \"https://api.github.com/repos/elixir-grpc/grpc/security-advisories/GHSA-q8gf-9rvj-gmgj\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/elixir-grpc/grpc\", \"summary\": \"gRPC Erlang package has unbounded request body accumulation in `read_full_body/3`\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-25T18:12:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-q8gf-9rvj-gmgj\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.0\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"grpc\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.3.1, < 1.0.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-q8gf-9rvj-gmgj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "grpc: >= 0.3.1, < 1.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-48854"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "grpc"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-25T19:19:12.861014Z",
+  "provenance": {
+    "content_sha256": "3d943a42c703dcbeabc26a88e2bd373124a61c2ea9c7d60d09680de92148596a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-25T18:12:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-q8gf-9rvj-gmgj",
+  "status": "active",
+  "title": "gRPC Erlang package has unbounded request body accumulation in `read_full_body/3`",
+  "updated_at": "2026-08-25T18:12:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-q8gf-9rvj-gmgj"
+}

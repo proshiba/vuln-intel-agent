@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/810505?v=4\", \"events_url\": \"https://api.github.com/users/ottenhoff/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ottenhoff/followers\", \"following_url\": \"https://api.github.com/users/ottenhoff/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ottenhoff/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ottenhoff\", \"id\": 810505, \"login\": \"ottenhoff\", \"node_id\": \"MDQ6VXNlcjgxMDUwNQ==\", \"organizations_url\": \"https://api.github.com/users/ottenhoff/orgs\", \"received_events_url\": \"https://api.github.com/users/ottenhoff/received_events\", \"repos_url\": \"https://api.github.com/users/ottenhoff/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ottenhoff/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ottenhoff/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ottenhoff\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54050\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\n\\nThe Sakai REST API endpoint `DELETE /api/users/{userId}/profile/image` does not verify that the requesting user is authorized to modify the target user's profile. Any authenticated user can delete the profile image of any other user, including administrators, by supplying a different `userId` in the path. The service layer has no authorization check, and the delete cascades through Content Hosting Service (CHS) with a security advisor that bypasses all CHS permission checks.\\n\\n### Details\\n`ProfileController.removeProfileImage()` in the webapi module retrieves the current user's session but performs no comparison between the authenticated user and the target `userId` path parameter:\\n\\n```java\\n@DeleteMapping(value = \\\"/users/{userId}/profile/image\\\")\\npublic ResponseEntity<String> removeProfileImage(@PathVariable String userId) {\\n    String currentUserId = checkSakaiSession().getUserId();\\n    if (currentUserId == null) {\\n        return ResponseEntity.status(HttpStatus.FORBIDDEN).build();\\n    }\\n    profileService.removeProfileImage(userId);  // userId is attacker-controlled\\n    return ResponseEntity.ok().build();\\n}\\n```\\n\\n`ProfileServiceImpl.removeProfileImage()` delegates directly to `dao.removeProfileImage(userUuid)` with no authorization check. The DAO calls `profileImageUploadedRepository.deleteById(userId)`, removing the `profile_images_t` row unconditionally.\\n\\nFor contrast, the upload endpoint `setProfileImage()` correctly verifies ownership:\\n\\n```java\\nif (!sakaiProxy.isSuperUser() && !StringUtils.equals(currentUserUuid, userUuid)) {\\n    throw new SecurityException(\\\"Not allowed to save.\\\");\\n}\\n```\\n\\nThis asymmetry means any authenticated user can delete but not upload over another user's profile image.\\n\\nAdditionally, the pronunciation recording delete endpoint (`DELETE /api/users/{userId}/profile/pronunciation`) has no `checkSakaiSession()` call at all, making it accessible without any authentication.\\n\\n\\n**Setup:**\\n- Admin user: `admin`, with a custom profile image uploaded\\n- Attacker: `student2` (unprivileged user, SAKAIID cookie from authenticated session)\\n\\n**Step 1 - Admin uploads profile image (confirm non-default state):**\\n\\n```\\nPOST /api/users/admin/profile/image HTTP/1.1\\nCookie: SAKAIID=<admin-session>\\nContent-Type: application/x-www-form-urlencoded\\n\\nbase64=<base64-encoded-png>\\n```\\n\\nResponse: `{\\\"status\\\":\\\"SUCCESS\\\"}`\\n\\n**Step 2 - Verify image exists in database:**\\n\\n```sql\\nSELECT USER_UUID, RESOURCE_MAIN FROM profile_images_t WHERE USER_UUID='admin';\\n-- Result: admin | /private/profileImages/admin/1/eb92b129-9b00-4978-aec3-be840455d8e9\\n```\\n\\n**Step 3 - Attacker (student2) deletes admin's profile image:**\\n\\n```\\nDELETE /api/users/admin/profile/image HTTP/1.1\\nHost: localhost:9107\\nCookie: SAKAIID=974996f4-e9c1-441c-9ab9-d3646aa5c754.9799861f31fb\\n```\\n\\nResponse: `HTTP/1.1 200`\\n\\n**Step 4 - Verify image is gone from database:**\\n\\n```sql\\nSELECT USER_UUID, RESOURCE_MAIN FROM profile_images_t WHERE USER_UUID='admin';\\n-- Result: (empty - row deleted)\\n```\\n\\nThe attack succeeds. Student2's session is accepted by `checkSakaiSession()` (non-blank userId), and the target userId (`admin`) is passed directly to the service without any ownership check.\\n\\n### Impact\\n\\nAny authenticated user (student, guest) can:\\n- Permanently delete the profile image of any other user, including administrators and instructors\\n- Repeatedly trigger deletion to prevent a target user from maintaining a profile picture\\n- In a university context where profile photos are used for identity verification in proctored exams or student directories, this could disrupt identity management workflows\\n\\nThe attack is trivially scriptable and can target all users on the platform in bulk.\\n\\n### Suggested Remediation\\n\\nIn `ProfileController.removeProfileImage()`, add an ownership check before calling the service:\\n\\n```java\\n@DeleteMapping(value = \\\"/users/{userId}/profile/image\\\")\\npublic ResponseEntity<String> removeProfileImage(@PathVariable String userId) {\\n    Session session = checkSakaiSession();\\n    String currentUserId = session.getUserId();\\n    if (currentUserId == null) {\\n        return ResponseEntity.status(HttpStatus.FORBIDDEN).build();\\n    }\\n    // Add this check:\\n    if (!sakaiProxy.isSuperUser() && !currentUserId.equals(userId)) {\\n        return ResponseEntity.status(HttpStatus.FORBIDDEN).build();\\n    }\\n    profileService.removeProfileImage(userId);\\n    return ResponseEntity.ok().build();\\n}\\n```\\n\\nApply the same ownership check in `ProfileServiceImpl.removeProfileImage()` for defense-in-depth, mirroring the pattern in `setProfileImage()`.\\n\\nFor the pronunciation endpoint, add `checkSakaiSession()` and the same ownership check.\\n\\n### Status / timeline:\\n- 2026-06-02: Fix committed to master (`a092dbf3dc6bf343131f50007c207a9abd95e852`)\\n- Release pending.\", \"epss\": {\"percentage\": 0.00044, \"percentile\": 0.13977}, \"ghsa_id\": \"GHSA-9284-fjc3-fmmj\", \"github_reviewed_at\": \"2026-08-24T19:40:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-9284-fjc3-fmmj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9284-fjc3-fmmj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54050\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-24T19:40:37Z\", \"references\": [\"https://github.com/sakaiproject/sakai/security/advisories/GHSA-9284-fjc3-fmmj\", \"https://github.com/sakaiproject/sakai/commit/a092dbf3dc6bf343131f50007c207a9abd95e852\", \"https://github.com/sakaiproject/sakai/releases/tag/23.5\", \"https://github.com/advisories/GHSA-9284-fjc3-fmmj\"], \"repository_advisory_url\": \"https://api.github.com/repos/sakaiproject/sakai/security-advisories/GHSA-9284-fjc3-fmmj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sakaiproject/sakai\", \"summary\": \"Sakai Profile Image Deletion has an IDOR\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-24T19:40:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-9284-fjc3-fmmj\", \"vulnerabilities\": [{\"first_patched_version\": \"23.5\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.profile2:profile2-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0, < 23.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.profile2:profile2-api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 25.0, <= 25.2\"}, {\"first_patched_version\": \"23.5\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.profile2:profile2-impl\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0, < 23.5\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.sakaiproject.profile2:profile2-impl\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 25.0, <= 25.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9284-fjc3-fmmj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.sakaiproject.profile2:profile2-api: >= 23.0, < 23.5",
+      "org.sakaiproject.profile2:profile2-api: >= 25.0, <= 25.2",
+      "org.sakaiproject.profile2:profile2-impl: >= 23.0, < 23.5",
+      "org.sakaiproject.profile2:profile2-impl: >= 25.0, <= 25.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-54050"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.sakaiproject.profile2:profile2-api",
+      "org.sakaiproject.profile2:profile2-impl"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-25T19:19:13.091990Z",
+  "provenance": {
+    "content_sha256": "ee1a7d6dd364ac184ae6f7b49c21b6e3f36b9187b9106f47bfc9bb2f10405869",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-24T19:40:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9284-fjc3-fmmj",
+  "status": "active",
+  "title": "Sakai Profile Image Deletion has an IDOR",
+  "updated_at": "2026-08-24T19:40:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9284-fjc3-fmmj"
+}
