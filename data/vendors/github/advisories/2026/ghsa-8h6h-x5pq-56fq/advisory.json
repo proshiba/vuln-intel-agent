@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-54511\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-93\", \"name\": \"Improper Neutralization of CRLF Sequences ('CRLF Injection')\"}, {\"cwe_id\": \"CWE-117\", \"name\": \"Improper Output Neutralization for Logs\"}], \"description\": \"`@logtape/syslog` contains two related output-encoding bugs in the structured data formatting code. Both only affect deployments with `includeStructuredData: true`, which is non-default.\\n\\n## 1. Unescaped C0 control characters in structured data values\\n\\n`escapeStructuredDataValue()` in `packages/syslog/src/syslog.ts` escapes `\\\\`, `\\\"`, and `]` per RFC 5424 but does not escape newline (`\\\\n`), carriage return (`\\\\r`), or any other C0 control characters (U+0000–U+001F):\\n\\n```typescript\\nfunction escapeStructuredDataValue(value: string): string {\\n  return value\\n    .replace(/\\\\\\\\/g, \\\"\\\\\\\\\\\\\\\\\\\")\\n    .replace(/\\\"/g, '\\\\\\\\\\\"')\\n    .replace(/]/g, \\\"\\\\\\\\]\\\");\\n  // \\\\n, \\\\r, and other C0 control characters are not escaped\\n}\\n```\\n\\nTCP syslog commonly uses `\\\\n` as a frame delimiter (RFC 6587, non-transparent framing). If an attacker-controlled value contains a literal newline, that newline terminates the current syslog frame. Bytes following the newline begin a new frame, and if they form a valid RFC 5424 header (`<PRI>1 …`), a downstream collector will accept them as a separate, authentic-looking syslog record.\\n\\n## 2. Unvalidated SD-NAME keys\\n\\nStructured data parameter keys are inserted into the message without validation or escaping:\\n\\n```typescript\\nelements.push(`${key}=\\\"${escapedValue}\\\"`);\\n```\\n\\nRFC 5424 defines SD-NAME as printable US-ASCII characters excluding `=`, `]`, `\\\"`, and space, with a maximum length of 32. A key containing any of those characters, control characters, or exceeding the length limit will produce malformed structured data. If the key itself contains an embedded `]`, it can prematurely close the structured-data element.\\n\\nIn typical usage, property keys are developer-defined string literals and therefore safe. However, if an application forwards attacker-controlled keys as log properties—for example by spreading request headers or arbitrary metadata into a log record—this becomes a second injection path.\\n\\n## Proof of concept\\n\\nThe following Node.js snippet (no dependencies, no network required) demonstrates that the escaped value still contains a literal newline:\\n\\n```javascript\\nfunction escapeStructuredDataValue(value) {\\n  return value\\n    .replace(/\\\\\\\\/g, \\\"\\\\\\\\\\\\\\\\\\\")\\n    .replace(/\\\"/g, '\\\\\\\\\\\"')\\n    .replace(/]/g, \\\"\\\\\\\\]\\\");\\n}\\n\\nconst payload =\\n  'normal\\\\n<134>1 2026-01-01T00:00:00Z forged evil - - - INJECTED';\\n\\nconst result = escapeStructuredDataValue(payload);\\nconsole.log(\\\"Newline present after escape:\\\", result.includes(\\\"\\\\n\\\")); // true\\n```\\n\\nTested with Node.js 22.17.1.\\n\\n## Impact\\n\\nAn attacker who controls log property values can:\\n\\n- forge syslog records attributed to arbitrary hosts, applications, or process IDs;\\n- insert records with arbitrary severity or facility levels;\\n- obscure malicious activity by injecting misleading entries around legitimate ones;\\n- break downstream log parsers or SIEM correlation rules that rely on log integrity.\\n\\nAffected downstream collectors include rsyslog, syslog-ng, Splunk, Elastic Stack, and any other system using RFC 6587 non-transparent framing.\\n\\n## Suggested fix\\n\\n### Structured data values\\n\\nEscape all C0 control characters (U+0000–U+001F) in addition to `\\\\`, `\\\"`, and `]`. RFC 5424 does not define an escape sequence for control characters in PARAM-VALUE; the most interoperable approach is to strip or replace them:\\n\\n```typescript\\nfunction escapeStructuredDataValue(value: string): string {\\n  return value\\n    .replace(/\\\\\\\\/g, \\\"\\\\\\\\\\\\\\\\\\\")\\n    .replace(/\\\"/g, '\\\\\\\\\\\"')\\n    .replace(/]/g, \\\"\\\\\\\\]\\\")\\n    .replace(/[\\\\x00-\\\\x1f]/g, (c) =>\\n      `\\\\\\\\x${c.charCodeAt(0).toString(16).padStart(2, \\\"0\\\")}`\\n    );\\n}\\n```\\n\\nAlternatively, strip them entirely: `.replace(/[\\\\x00-\\\\x1f]/g, \\\"\\\")`. The right choice depends on whether downstream consumers need some representation of the original value.\\n\\n### SD-NAME keys\\n\\nValidate each key against the RFC 5424 SD-NAME grammar before including it. Keys that fail validation should be skipped or sanitized:\\n\\n```typescript\\n// SD-NAME: printable US-ASCII, excluding '=', ']', '\\\"', SP; max 32 chars\\nconst SD_NAME_RE = /^[!-<>-Z\\\\\\\\^-z|~]{1,32}$/;\\n\\nfor (const [key, value] of Object.entries(record.properties)) {\\n  if (!SD_NAME_RE.test(key)) continue;\\n  const escapedValue = escapeStructuredDataValue(String(value));\\n  elements.push(`${key}=\\\"${escapedValue}\\\"`);\\n}\\n```\", \"ghsa_id\": \"GHSA-8h6h-x5pq-56fq\", \"github_reviewed_at\": \"2026-08-26T14:28:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-8h6h-x5pq-56fq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8h6h-x5pq-56fq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54511\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-26T14:28:04Z\", \"references\": [\"https://github.com/dahlia/logtape/security/advisories/GHSA-8h6h-x5pq-56fq\", \"https://github.com/dahlia/logtape/commit/7a6e5b9ddf7915edfff78fa129bc17c979b2a623\", \"https://github.com/dahlia/logtape/releases/tag/1.3.11\", \"https://github.com/dahlia/logtape/releases/tag/2.0.14\", \"https://github.com/dahlia/logtape/releases/tag/2.1.5\", \"https://github.com/advisories/GHSA-8h6h-x5pq-56fq\"], \"repository_advisory_url\": \"https://api.github.com/repos/dahlia/logtape/security-advisories/GHSA-8h6h-x5pq-56fq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/dahlia/logtape\", \"summary\": \"@logtape/syslog: syslog log injection via unescaped control characters and unvalidated SD-NAME keys\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-26T14:28:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-8h6h-x5pq-56fq\", \"vulnerabilities\": [{\"first_patched_version\": \"2.1.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@logtape/syslog\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.1.0, <= 2.1.4\"}, {\"first_patched_version\": \"2.0.14\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@logtape/syslog\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, < 2.0.14\"}, {\"first_patched_version\": \"1.3.11\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@logtape/syslog\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.3.11\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8h6h-x5pq-56fq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@logtape/syslog: < 1.3.11",
+      "@logtape/syslog: >= 2.0.0, < 2.0.14",
+      "@logtape/syslog: >= 2.1.0, <= 2.1.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54511"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@logtape/syslog"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-26T19:40:49.651642Z",
+  "provenance": {
+    "content_sha256": "703153d0295c4662f83ea97124b6acd4bb8e99ebc87fe3f7c1d14ff1e8c27ecd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-26T14:28:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8h6h-x5pq-56fq",
+  "status": "active",
+  "title": "@logtape/syslog: syslog log injection via unescaped control characters and unvalidated SD-NAME keys",
+  "updated_at": "2026-08-26T14:28:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8h6h-x5pq-56fq"
+}

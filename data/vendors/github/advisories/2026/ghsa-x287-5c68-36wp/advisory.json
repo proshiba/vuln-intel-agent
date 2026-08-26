@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4536990?v=4\", \"events_url\": \"https://api.github.com/users/dizconnectz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dizconnectz/followers\", \"following_url\": \"https://api.github.com/users/dizconnectz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dizconnectz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dizconnectz\", \"id\": 4536990, \"login\": \"dizconnectz\", \"node_id\": \"MDQ6VXNlcjQ1MzY5OTA=\", \"organizations_url\": \"https://api.github.com/users/dizconnectz/orgs\", \"received_events_url\": \"https://api.github.com/users/dizconnectz/received_events\", \"repos_url\": \"https://api.github.com/users/dizconnectz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dizconnectz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dizconnectz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dizconnectz\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/841044?v=4\", \"events_url\": \"https://api.github.com/users/nemesifier/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/nemesifier/followers\", \"following_url\": \"https://api.github.com/users/nemesifier/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/nemesifier/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/nemesifier\", \"id\": 841044, \"login\": \"nemesifier\", \"node_id\": \"MDQ6VXNlcjg0MTA0NA==\", \"organizations_url\": \"https://api.github.com/users/nemesifier/orgs\", \"received_events_url\": \"https://api.github.com/users/nemesifier/received_events\", \"repos_url\": \"https://api.github.com/users/nemesifier/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/nemesifier/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/nemesifier/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/nemesifier\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nOpenWISP IPAM is multi-tenant: every `Subnet` belongs to an `organization`, and API access is scoped to the organizations a user belongs to. The CSV **export** endpoint, `ExportSubnetView`, omits the organization-membership check that its **import** sibling performs, and loads the subnet by primary key with no organization filter. An authenticated user who is a member of one organization can therefore export a subnet belonging to **another** organization — its name, CIDR, organization slug and every IP address in it — by issuing an export request for that subnet's id.\\n\\n## Details\\n\\n`ImportSubnetView.post()` authorizes first, by calling `assert_organization_permissions()`:\\n\\n```python\\n# openwisp_ipam/api/views.py  (ImportSubnetView)\\ndef post(self, request, *args, **kwargs):\\n    self.assert_organization_permissions(request)        # <-- org-membership check\\n    file = request.FILES[\\\"csvfile\\\"]\\n    ...\\n    self.subnet_model().import_csv(file)\\n```\\n```python\\n# openwisp_ipam/api/utils.py:16  (AuthorizeCSVImport)\\ndef assert_organization_permissions(self, request):\\n    if request.user.is_superuser:\\n        return\\n    # ... otherwise verifies the user belongs to the target organization\\n```\\n\\n`ExportSubnetView.post()` performs **no** such check. It is declared with `IpAddressOrgMixin` (whose organization scoping lives in `get_queryset()`), but its overridden `post()` never calls `get_queryset()` **or** `assert_organization_permissions()` — it goes straight to `export_csv()`:\\n\\n```python\\n# openwisp_ipam/api/views.py:246\\nclass ExportSubnetView(ProtectedAPIMixin, IpAddressOrgMixin, CreateAPIView):\\n    subnet_model = Subnet\\n    def post(self, request, *args, **kwargs):\\n        response = HttpResponse(content_type=\\\"text/csv\\\")\\n        response[\\\"Content-Disposition\\\"] = 'attachment; filename=\\\"ip_address.csv\\\"'\\n        writer = csv.writer(response)\\n        self.subnet_model().export_csv(kwargs[\\\"subnet_id\\\"], writer)   # no org check reached\\n        return response\\n```\\n\\n`export_csv()` resolves the subnet by primary key with no organization filter and writes its full contents:\\n\\n```python\\n# openwisp_ipam/base/models.py:242\\ndef export_csv(self, subnet_id, writer):\\n    ipaddress_model = load_model(\\\"openwisp_ipam\\\", \\\"IpAddress\\\")\\n    subnet = load_model(\\\"openwisp_ipam\\\", \\\"Subnet\\\").objects.get(pk=subnet_id)   # any org's subnet\\n    # ... writes subnet name, CIDR, organization slug, and every IpAddress (address, description, …)\\n```\\n\\nThe `subnet_id` is a random `UUIDField` (`migrations/0001_initial.py`: `models.UUIDField(default=uuid.uuid4)`), so an attacker must **obtain** the target subnet's id rather than enumerate it — hence **Attack Complexity: High**. This is a genuine missing-authorization flaw regardless: the import/export asymmetry shows the check was intended, and subnet ids routinely appear in URLs, logs, shared CSV exports and support tickets, from which a cross-organization id can leak.\\n\\nThe same single-object pattern (resolving the subnet by `subnet_id` outside the org-scoped queryset) also appears in `AvailableIpView.get()` and `RequestIPView.post()` (the latter additionally **writes** an IP into the target subnet); these are worth reviewing alongside the export fix.\\n\\n## Proof of concept\\n\\nPrerequisites: an OpenWISP IPAM instance with two organizations **OrgA** and **OrgB**; a normal (non-superuser) user who is a member of **OrgB** only; a subnet in **OrgA** whose id `S` is known to the attacker (e.g. leaked via a URL/log/shared export).\\n\\n1. As the OrgB user, authenticate to the API.\\n2. `POST /api/v1/subnet/{S}/export/` (OrgA's subnet id).\\n3. **Result:** a CSV download containing OrgA's subnet name, CIDR, organization slug and every IP address in it — even though the user belongs only to OrgB.\\n4. **Control (proves it's an oversight):** the corresponding import endpoint `POST /api/v1/import-subnet/` with OrgA data is rejected for the same user by `assert_organization_permissions()`.\\n\\n*(Reported from a first-hand source review of the current `master`: the missing check in `ExportSubnetView.post`, the guarded `ImportSubnetView.post` sibling, the un-filtered `Subnet.objects.get(pk=…)` in `export_csv`, and the `UUIDField` primary key were each verified by hand. The fix is a one-line authorization call, so a maintainer can confirm trivially with two organizations.)*\\n\\n## Impact\\n\\nA member of one organization can read the complete contents of another organization's subnet — its IP allocation inventory (addresses, descriptions, organization slug, CIDR). In a WISP / network-management deployment this discloses another tenant's network topology and host inventory. Exploitation requires obtaining the target subnet's UUID (AC:H), but the authorization check is missing outright. (`RequestIPView` shares the pattern and additionally allows writing an IP into another organization's subnet — a separate integrity concern for the maintainer to confirm.)\\n\\n## Remediation\\n\\nAdd the organization-membership check to `ExportSubnetView.post()` — call `self.assert_organization_permissions(request)` (as `ImportSubnetView` does), or resolve the subnet through the org-scoped `get_queryset()` / `get_object()` and return 404 when it isn't in the caller's organizations. Apply the same to `AvailableIpView` and `RequestIPView`.\", \"ghsa_id\": \"GHSA-x287-5c68-36wp\", \"github_reviewed_at\": \"2026-08-26T14:38:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-x287-5c68-36wp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x287-5c68-36wp\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-26T14:38:10Z\", \"references\": [\"https://github.com/openwisp/openwisp-ipam/security/advisories/GHSA-x287-5c68-36wp\", \"https://github.com/openwisp/openwisp-ipam/pull/220\", \"https://github.com/openwisp/openwisp-ipam/commit/04a2ef949498c6591f9ac35713d7451fb9f75362\", \"https://github.com/openwisp/openwisp-ipam/commit/a4b272461bfa7a1762baf0b1fd76b4f5b681586b\", \"https://github.com/openwisp/openwisp-ipam/releases/tag/1.2.1\", \"https://github.com/advisories/GHSA-x287-5c68-36wp\"], \"repository_advisory_url\": \"https://api.github.com/repos/openwisp/openwisp-ipam/security-advisories/GHSA-x287-5c68-36wp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/openwisp/openwisp-ipam\", \"summary\": \"OpenWISP IPAM has broken object-level authorization: ExportSubnetView lets a member of one organization export another organization's subnet and all its IP addresses\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-26T14:38:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-x287-5c68-36wp\", \"vulnerabilities\": [{\"first_patched_version\": \"1.2.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"openwisp-ipam\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.2.0.post1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x287-5c68-36wp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "openwisp-ipam: <= 1.2.0.post1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "openwisp-ipam"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-26T19:40:49.640145Z",
+  "provenance": {
+    "content_sha256": "a15a9dc5555d769dd866fbac7144f2ee0b3da9acae54c4bf8f855ea3b10030eb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-26T14:38:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x287-5c68-36wp",
+  "status": "active",
+  "title": "OpenWISP IPAM has broken object-level authorization: ExportSubnetView lets a member of one organization export another organization's subnet and all its IP addresses",
+  "updated_at": "2026-08-26T14:38:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x287-5c68-36wp"
+}

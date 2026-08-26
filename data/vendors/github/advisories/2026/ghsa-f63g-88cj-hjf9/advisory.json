@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6706818?v=4\", \"events_url\": \"https://api.github.com/users/sectroyer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sectroyer/followers\", \"following_url\": \"https://api.github.com/users/sectroyer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sectroyer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sectroyer\", \"id\": 6706818, \"login\": \"sectroyer\", \"node_id\": \"MDQ6VXNlcjY3MDY4MTg=\", \"organizations_url\": \"https://api.github.com/users/sectroyer/orgs\", \"received_events_url\": \"https://api.github.com/users/sectroyer/received_events\", \"repos_url\": \"https://api.github.com/users/sectroyer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sectroyer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sectroyer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sectroyer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54550\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nIzPack's `UnpackerBase.unpack()` resolves pack-file target paths without any\\ncanonical-path or directory-containment check. An attacker who distributes a\\ntrojanized installer JAR (the format is unsigned) can include pack entries whose\\n`targetPath` contains `../` sequences. When a victim runs the installer the\\nfile is written to an attacker-chosen location on disk under the victim's\\nprivileges — including startup folders, PATH directories, or system locations.\\n\\n### Details\\n\\n**Vulnerable method:** `com.izforge.izpack.installer.unpacker.UnpackerBase.unpack()`\\n**Source file:** `izpack-installer/src/main/java/com/izforge/izpack/installer/unpacker/UnpackerBase.java`\\n**Vulnerable lines (5.2.4):** ~618–627\\n\\nThe relevant code path is:\\n\\n```java\\nString targetPath = packFile.getTargetPath();             // attacker-controlled\\nString path       = IoHelper.translatePath(targetPath, variables); // separator swap ONLY\\nFile   target     = new File(path);                       // no canonical check\\n// ... mkdirs() then file is written to `target`\\n```\\n\\n`IoHelper.translatePath()` (source: `izpack-util/.../IoHelper.java`) performs\\n**only** file-separator character conversion (`'/'` ↔ `File.separatorChar`) and\\ncontains no security validation whatsoever. There is no call to\\n`getCanonicalPath()`, no `startsWith(installDir)` containment check, and no\\nnormalisation of `..` segments.\\n\\nBecause IzPack installer JARs carry **no digital signature**, an attacker can\\nrepack any legitimate installer with malicious `PackFile` entries. The file\\nformat is a standard ZIP with serialised resources — no integrity protection.\\n\\n**Confirmed unpatched in HEAD (fetched from GitHub, 2025):**\\n```\\ngit show HEAD:izpack-installer/src/main/java/com/izforge/izpack/installer/unpacker/UnpackerBase.java \\\\\\n  | grep -n 'getCanonicalPath\\\\|startsWith.*install\\\\|traversal'\\n# (no output — fix not present)\\n```\\n\\n### PoC\\n\\n```bash\\n# 1. Clone IzPack source and view the vulnerable code directly\\ngit clone --depth=1 --branch izpack-5.2.4 https://github.com/izpack/izpack.git\\nsed -n '615,650p' izpack/izpack-installer/src/main/java/com/izforge/izpack/installer/unpacker/UnpackerBase.java\\n\\n# 2. Compile and run the following Java reproducer (no IzPack classpath needed):\\n```\\n\\n```java\\n// TestPathTraversal.java\\nimport java.io.*;\\n\\npublic class TestPathTraversal {\\n    // Exact replication of IoHelper.translatePath() — separator swap, no security\\n    static String translatePath(String destination) {\\n        return destination.replace('/', File.separatorChar);\\n    }\\n\\n    public static void main(String[] args) throws Exception {\\n        String installDir   = \\\"/tmp/izpack_install\\\";\\n        String maliciousPath = installDir + \\\"/../../../tmp/ESCAPED_FILE\\\";\\n\\n        // This is what UnpackerBase does:\\n        String path   = translatePath(maliciousPath);\\n        File   target = new File(path);           // resolves traversal\\n        target.getParentFile().mkdirs();\\n        try (FileWriter fw = new FileWriter(target)) {\\n            fw.write(\\\"Written outside install dir via IzPack path traversal\\\\n\\\");\\n        }\\n        System.out.println(\\\"File written to: \\\" + target.getCanonicalPath());\\n        System.out.println(\\\"Inside installDir: \\\" +\\n            target.getCanonicalPath().startsWith(new File(installDir).getCanonicalPath()));\\n    }\\n}\\n```\\n\\n```bash\\njavac TestPathTraversal.java && java TestPathTraversal\\n# Output: File written to: /tmp/ESCAPED_FILE\\n#         Inside installDir: false\\n```\\n\\n### Impact\\n\\nAny user who runs an IzPack-generated installer is affected. The attacker only\\nneeds to distribute a repackaged installer — a common social-engineering vector.\\nOn Windows (the primary IzPack platform) the victim typically runs the installer\\nas a local administrator, so the attacker can write to `%APPDATA%\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\Startup`,\\n`%SystemRoot%\\\\System32`, or any other location reachable by the victim user.\\nOn Linux/macOS the same applies for user-writable locations.\\n\\nNo authentication, no special privileges and no interaction beyond running the\\ninstaller are required on the victim side.\\n\\n### Credits\\nThis issue was identified by Michał Majchrowicz, Marcin Wyczechowski, and Paweł Zdunek, members of the AFINE Team.\", \"ghsa_id\": \"GHSA-f63g-88cj-hjf9\", \"github_reviewed_at\": \"2026-08-26T14:24:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-f63g-88cj-hjf9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f63g-88cj-hjf9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54550\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-26T14:24:40Z\", \"references\": [\"https://github.com/izpack/izpack/security/advisories/GHSA-f63g-88cj-hjf9\", \"https://github.com/izpack/izpack/pull/1193\", \"https://github.com/izpack/izpack/commit/4233ba38d0f1825f9cf3e0204e5261a5498e29d8\", \"https://github.com/izpack/izpack/commit/8b7c6792c4fe85e3b1759c106aae39b904848466\", \"https://github.com/advisories/GHSA-f63g-88cj-hjf9\"], \"repository_advisory_url\": \"https://api.github.com/repos/izpack/izpack/security-advisories/GHSA-f63g-88cj-hjf9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/izpack/izpack\", \"summary\": \"IzPack has Path Traversal in UnpackerBase that allows writing files outside the installation directory via malicious pack entries\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-26T14:24:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-f63g-88cj-hjf9\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.codehaus.izpack:izpack-installer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.2.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f63g-88cj-hjf9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.codehaus.izpack:izpack-installer: <= 5.2.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54550"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.codehaus.izpack:izpack-installer"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-26T19:40:49.653973Z",
+  "provenance": {
+    "content_sha256": "47131f719407041f466f1a28d69735062006ef94c3fdcd823bf027feb52861c7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-26T14:24:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f63g-88cj-hjf9",
+  "status": "active",
+  "title": "IzPack has Path Traversal in UnpackerBase that allows writing files outside the installation directory via malicious pack entries",
+  "updated_at": "2026-08-26T14:24:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f63g-88cj-hjf9"
+}
