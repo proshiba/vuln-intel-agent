@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/136704191?v=4\", \"events_url\": \"https://api.github.com/users/Jaden-Furtado/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Jaden-Furtado/followers\", \"following_url\": \"https://api.github.com/users/Jaden-Furtado/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Jaden-Furtado/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Jaden-Furtado\", \"id\": 136704191, \"login\": \"Jaden-Furtado\", \"node_id\": \"U_kgDOCCXwvw\", \"organizations_url\": \"https://api.github.com/users/Jaden-Furtado/orgs\", \"received_events_url\": \"https://api.github.com/users/Jaden-Furtado/received_events\", \"repos_url\": \"https://api.github.com/users/Jaden-Furtado/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Jaden-Furtado/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Jaden-Furtado/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Jaden-Furtado\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/52862591?v=4\", \"events_url\": \"https://api.github.com/users/JadenFurtado/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JadenFurtado/followers\", \"following_url\": \"https://api.github.com/users/JadenFurtado/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JadenFurtado/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JadenFurtado\", \"id\": 52862591, \"login\": \"JadenFurtado\", \"node_id\": \"MDQ6VXNlcjUyODYyNTkx\", \"organizations_url\": \"https://api.github.com/users/JadenFurtado/orgs\", \"received_events_url\": \"https://api.github.com/users/JadenFurtado/received_events\", \"repos_url\": \"https://api.github.com/users/JadenFurtado/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JadenFurtado/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JadenFurtado/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JadenFurtado\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-54591\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"| | |\\n|---|---|\\n| Product | asyncssh (all versions through 2.23.0) |\\n| Related | CVE-2019-6111 (same class in OpenSSH) |\\n| Fix | AsyncSSH 2.23.1 |\\n\\nA malicious SSH server can write arbitrary files on the asyncssh SCP client's filesystem by sending filenames containing `../` traversal sequences. The SCP receive path does not currently sanitize server-provided filenames. By chaining directory traversals via the `D` (directory) action, an attacker can escape any target directory and overwrite `~/.bashrc`, `~/.ssh/rc`, or `~/.ssh/authorized_keys`, achieving code execution. This is the same vulnerability class as CVE-2019-6111. The mitigation applied in OpenSSH does not appear to have been adopted in asyncssh.\\n\\n---\\n\\n**Steps to exploit:**\\n\\n**Step 1 - Normal usage:** Application calls `await asyncssh.scp((conn, 'file'), '/home/user/downloads/')`. This is the standard, documented API.\\n\\n**Step 2 - SCP protocol:** asyncssh opens an SSH exec channel, runs `scp -f file`. The server controls the filename field:\\n\\n```\\nC0644 100 ../pwned.txt\\\\n       (simple traversal)\\n\\nD0755 0 ..\\\\n                   (traverse up, repeat as needed)\\nC0644 47 .bashrc\\\\n             (write payload)\\nE\\\\n\\n```\\n\\n**Step 3 - `_parse_cd_args`** (`scp.py:134-142`) returns the filename verbatim:\\n\\n```python\\ndef _parse_cd_args(args: bytes) -> Tuple[int, int, bytes]:\\n    permissions, size, name = args.split(None, 2)\\n    return int(permissions, 8), int(size), name  # no sanitization\\n```\\n\\nThe returned `name` is not passed through `basename()` and is not checked for `..` or `/` components.\\n\\n**Step 4 - `_recv_files`** (`scp.py:706-713`) joins the unsanitized name:\\n\\n```python\\nnew_dstpath = posixpath.join(dstpath, name)\\n```\\n\\nWith `dstpath=b'/home/user/downloads/subdir'` and `name=b'../pwned.txt'`, this resolves to `/home/user/downloads/pwned.txt`, outside the target.\\n\\n**Step 5 - File write:** `_recv_file` opens the traversed path via `self._fs.open(dstpath, 'wb')` and writes attacker-controlled content. The resolved path is not checked against the target directory boundary.\\n\\n**Step 6 - RCE chains:**\\n\\n| Target | Execution trigger | Reliability |\\n|---|---|---|\\n| `~/.bashrc` | Next terminal open | High |\\n| `~/.profile` | Next login | High |\\n| `~/.ssh/rc` | Next SSH connection (requires sshd) | High |\\n| `~/.ssh/authorized_keys` | Attacker logs in with `command=` | Medium |\\n\\n---\\n\\n**Reproduction:**\\n\\nLink to reproduction script: [path_traversal_poc.zip](https://github.com/user-attachments/files/28160665/path_traversal_poc.zip)\\n\\n```bash\\ndocker build -t asyncssh-scp-traversal -f Dockerfile .\\ndocker run --rm asyncssh-scp-traversal\\n```\\n\\nThe attached `poc_scp_traversal.py` starts a malicious SSH server in-process using asyncssh's own API, then downloads from it via `asyncssh.scp()`.\\n\\n*Expected Output:*\\n\\n<img width=\\\"1400\\\" height=\\\"815\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/496745e4-d11d-4ed8-bddd-d15dd13d1751\\\" />\", \"epss\": {\"percentage\": 0.00492, \"percentile\": 0.40046}, \"ghsa_id\": \"GHSA-2wxc-x7rj-hg8f\", \"github_reviewed_at\": \"2026-08-26T15:34:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-2wxc-x7rj-hg8f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2wxc-x7rj-hg8f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-54591\"}], \"nvd_published_at\": \"2026-07-08T21:16:49Z\", \"published_at\": \"2026-08-26T15:34:22Z\", \"references\": [\"https://github.com/ronf/asyncssh/security/advisories/GHSA-2wxc-x7rj-hg8f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-54591\", \"https://github.com/ronf/asyncssh/commit/d730803b8e4e94c20c7580d90f94d1e05f9f58de\", \"https://github.com/ronf/asyncssh/releases/tag/v2.23.1\", \"https://github.com/advisories/GHSA-2wxc-x7rj-hg8f\"], \"repository_advisory_url\": \"https://api.github.com/repos/ronf/asyncssh/security-advisories/GHSA-2wxc-x7rj-hg8f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/ronf/asyncssh\", \"summary\": \"asyncssh has SCP Path Traversal to Arbitrary File Write\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-26T15:34:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-2wxc-x7rj-hg8f\", \"vulnerabilities\": [{\"first_patched_version\": \"2.23.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"asyncssh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.23.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2wxc-x7rj-hg8f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "asyncssh: <= 2.23.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2019-6111",
+      "CVE-2026-54591"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "asyncssh"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-26T19:40:49.605805Z",
+  "provenance": {
+    "content_sha256": "31719c08040981b3d99c5acc11d1a14c90ca8c93cbd25946a0fdf033087b72f9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-26T15:34:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2wxc-x7rj-hg8f",
+  "status": "active",
+  "title": "asyncssh has SCP Path Traversal to Arbitrary File Write",
+  "updated_at": "2026-08-26T15:34:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2wxc-x7rj-hg8f"
+}
