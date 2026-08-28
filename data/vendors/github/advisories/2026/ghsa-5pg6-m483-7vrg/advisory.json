@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/37509456?v=4\", \"events_url\": \"https://api.github.com/users/hoangperry/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hoangperry/followers\", \"following_url\": \"https://api.github.com/users/hoangperry/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hoangperry/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hoangperry\", \"id\": 37509456, \"login\": \"hoangperry\", \"node_id\": \"MDQ6VXNlcjM3NTA5NDU2\", \"organizations_url\": \"https://api.github.com/users/hoangperry/orgs\", \"received_events_url\": \"https://api.github.com/users/hoangperry/received_events\", \"repos_url\": \"https://api.github.com/users/hoangperry/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hoangperry/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hoangperry/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hoangperry\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55066\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"## Summary\\n\\nThe kanban endpoint `POST /api/v1/projects/{project}/views/{view}/buckets/{bucket}/tasks`\\nmoves a task into a bucket. The task is identified by `task_id` in the **request\\nbody**. The endpoint's authorization check (`TaskBucket.CanUpdate`) only verifies\\nthat the caller may update the *project/view/bucket named in the URL* — it never\\nchecks any permission on `task_id`.\\n\\nAny authenticated user can therefore supply another user's task ID (task IDs are\\na global, sequential integer space) against a kanban bucket in their **own**\\nproject. The server loads that victim task with no authorization check, returns\\nits full contents in the response, and — when the target bucket is a \\\"done\\\"\\nbucket — writes to the victim task's row.\\n\\nThis is the same vulnerability class Vikunja has already remediated for task\\nrelations (CVE-2026-33676), task attachments (CVE-2026-33678), task comments\\n(CVE-2026-33313) and CalDAV task read (CVE-2026-35598). `TaskBucket` is the\\ntask-child operation that was missed.\\n\\n---\\n\\n## Root cause\\n\\n### 1. `task_id` is body-controlled and never permission-checked\\n\\n`pkg/models/kanban_task_bucket.go:32`:\\n\\n    type TaskBucket struct {\\n        BucketID      int64 `... json:\\\"bucket_id\\\" param:\\\"bucket\\\"`\\n        TaskID        int64 `... json:\\\"task_id\\\"`              // body-bound only — no param tag\\n        ProjectViewID int64 `... json:\\\"project_view_id\\\" param:\\\"view\\\"`\\n        ProjectID     int64 `xorm:\\\"-\\\" json:\\\"-\\\" param:\\\"project\\\"`\\n        ...\\n    }\\n\\nThe web handler `UpdateWeb` (`pkg/web/handler/update.go`) populates the struct via\\n`ctx.Bind`, which binds both URL path params (`param:` tags) **and** the JSON body.\\n`BucketID`, `ProjectViewID`, `ProjectID` come from the trusted URL; `TaskID` comes\\nentirely from the attacker-controlled body.\\n\\n### 2. `CanUpdate` authorizes the URL, not the task\\n\\n`pkg/models/kanban_task_bucket.go:52`:\\n\\n    func (b *TaskBucket) CanUpdate(s *xorm.Session, a web.Auth) (bool, error) {\\n        bucket := Bucket{ID: b.BucketID, ProjectID: b.ProjectID, ProjectViewID: b.ProjectViewID}\\n        return bucket.canDoBucket(s, a)\\n    }\\n\\n`canDoBucket` (`pkg/models/kanban_permissions.go:46`) resolves the bucket/view and\\nends in `Project{ID: pv.ProjectID}.CanUpdate(s, a)` — a permission check on the\\n**project from the URL**. `b.TaskID` is never referenced. The attacker owns that\\nproject, so the check passes.\\n\\n### 3. The task is loaded and mutated with no authorization\\n\\n`updateTaskBucket` (`pkg/models/kanban_task_bucket.go:119`):\\n\\n    task := &Task{ID: b.TaskID}\\n    err = task.ReadOne(s, a)            // loads ANY task by ID — no permission check\\n\\n`Task.ReadOne` (`pkg/models/tasks.go:1967`) calls `GetTaskByIDSimple` +\\n`addMoreInfoToTasks`; it performs no authorization (authorization normally lives\\nin the separate `Task.CanRead`, which this internal call path bypasses).\\n\\n- **Read:** the fully populated victim task is assigned to `b.Task` (line 227) and\\n  returned by the `Update` handler in the response `\\\"task\\\"` field.\\n- **Write:** if the target bucket is the view's done bucket\\n  (`view.DoneBucketID == b.BucketID && !task.Done`, line 141), the handler sets\\n  `task.Done = true` and persists it to the victim's task row:\\n\\n      _, err = s.Where(\\\"id = ?\\\", task.ID).\\n          Cols(\\\"done\\\", \\\"due_date\\\", \\\"start_date\\\", \\\"end_date\\\", \\\"done_at\\\").\\n          Update(task)\\n\\n---\\n\\n## Proof of Concept\\n\\nThe attacker is any normal authenticated user. They first create their own kanban\\nproject/view/bucket (free for every user), then:\\n\\n    POST /api/v1/projects/{ATTACKER_PROJECT}/views/{ATTACKER_VIEW}/buckets/{ATTACKER_BUCKET}/tasks HTTP/1.1\\n    Host: TARGET\\n    Authorization: Bearer {ATTACKER_JWT}\\n    Content-Type: application/json\\n\\n    {\\\"task_id\\\": {VICTIM_TASK_ID}}\\n\\nThe `200` response body contains the victim task in full under `\\\"task\\\"` — title,\\ndescription, dates, assignees, labels, attachment list, reactions. Task IDs are a\\nglobal sequential counter, so iterating `task_id` enumerates every task on the\\ninstance.\\n\\nIf `ATTACKER_BUCKET` is the done bucket of `ATTACKER_VIEW`, the same request also\\nflips the victim task to done (`done = true`, `done_at` set).\\n\\n---\\n\\n## Impact\\n\\nAny authenticated low-privilege user can:\\n\\n- **Read any task on the instance** by sequential ID, across every other user,\\n  project and organization — a full cross-tenant information disclosure of task\\n  titles, descriptions, assignees, labels and attachment metadata.\\n- **Modify any task's done state**, marking arbitrary victims' tasks done (or\\n  clearing it) and altering `done_at`.\\n\\nVikunja's permission model is built specifically to isolate projects between\\nusers; this endpoint defeats that isolation. It is the same impact and class that\\nwarranted CVEs for task relations, attachments and comments.\\n\\n---\\n\\n## Suggested fix\\n\\nIn `TaskBucket.CanUpdate`, after the bucket/project check, also verify the caller's\\npermission on the body-supplied task — mirroring the remediation already applied\\nto task relations and attachments:\\n\\n    task := &Task{ID: b.TaskID}\\n    canUpdateTask, err := task.CanUpdate(s, a)\\n    if err != nil || !canUpdateTask {\\n        return false, err\\n    }\\n\\n(Use `CanRead` if moving a readable-but-not-writable task into a bucket is intended;\\n`CanUpdate` is the safer default since the operation can change the task's done\\nstate.)\\n\\n---\\n\\n## References\\n\\n- CWE-639 Authorization Bypass Through User-Controlled Key\\n- CWE-284 Improper Access Control\\n- OWASP A01:2021 Broken Access Control\\n- CVE-2026-33676, CVE-2026-33678, CVE-2026-33313, CVE-2026-35598 — the same\\n  missing-authorization-on-task-child class, already remediated; this report is\\n  the un-remediated `TaskBucket` sibling.\\n\\n## Additional notes\\n\\n- **The v2 API is affected too.** The same endpoint is exposed under `/api/v2/...`,\\n  and both versions route through the shared model `TaskBucket.CanUpdate` /\\n  `updateTaskBucket` in `pkg/models/kanban_task_bucket.go`. A model-level fix\\n  closes v1 and v2 simultaneously; the regression test should assert both.\\n\\n- **Two fix altitudes.** The minimal fix checks the body-supplied `task_id` in\\n  `TaskBucket.CanUpdate` (`task.CanUpdate`/`CanRead`). A broader fix makes\\n  `Task.ReadOne` itself permission-aware, which also hardens other internal call\\n  paths that rely on it — higher blast radius, weigh accordingly.\\n\\n- Side effects of the cross-tenant write confirmed across reports: flipping `done`\\n  rewrites `done_at`/`due_date`/`start_date`/`end_date`, inserts a `task_buckets`\\n  row, propagates done-state to other kanban views with a done bucket in the\\n  victim's project, and triggers `updateDone` rescheduling for repeating tasks.\", \"ghsa_id\": \"GHSA-5pg6-m483-7vrg\", \"github_reviewed_at\": \"2026-08-28T16:52:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-5pg6-m483-7vrg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5pg6-m483-7vrg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55066\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T16:52:16Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-5pg6-m483-7vrg\", \"https://github.com/go-vikunja/vikunja/pull/3239\", \"https://github.com/go-vikunja/vikunja/commit/36cdc2ce2be0b8ccc74227d178b92047d59cd65f\", \"https://github.com/go-vikunja/vikunja/releases/tag/v2.4.0\", \"https://github.com/advisories/GHSA-5pg6-m483-7vrg\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-5pg6-m483-7vrg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja has cross-tenant IDOR in kanban move-task endpoint via unauthorized body task_id\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T16:52:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-5pg6-m483-7vrg\", \"vulnerabilities\": [{\"first_patched_version\": \"2.4.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5pg6-m483-7vrg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: <= 2.3.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-33313",
+      "CVE-2026-33676",
+      "CVE-2026-33678",
+      "CVE-2026-35598",
+      "CVE-2026-55066"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.642177Z",
+  "provenance": {
+    "content_sha256": "81977677d46ee1332a7202bce78e156465824ab401aba33242538ef25862b2ed",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T16:52:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5pg6-m483-7vrg",
+  "status": "active",
+  "title": "Vikunja has cross-tenant IDOR in kanban move-task endpoint via unauthorized body task_id",
+  "updated_at": "2026-08-28T16:52:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5pg6-m483-7vrg"
+}

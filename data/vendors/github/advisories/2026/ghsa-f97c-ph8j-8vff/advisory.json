@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/56912333?v=4\", \"events_url\": \"https://api.github.com/users/dhairya7760/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dhairya7760/followers\", \"following_url\": \"https://api.github.com/users/dhairya7760/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dhairya7760/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dhairya7760\", \"id\": 56912333, \"login\": \"dhairya7760\", \"node_id\": \"MDQ6VXNlcjU2OTEyMzMz\", \"organizations_url\": \"https://api.github.com/users/dhairya7760/orgs\", \"received_events_url\": \"https://api.github.com/users/dhairya7760/received_events\", \"repos_url\": \"https://api.github.com/users/dhairya7760/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dhairya7760/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dhairya7760/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dhairya7760\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55212\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"### Summary\\nThe Studio API class definition creation endpoint in `pimcore/studio-backend-bundle` is guarded by the `objects` permission instead of the `classes` permission, allowing any standard editor-level user to create class definitions without admin privileges. Class definition creation is a structural admin operation that generates new database tables and PHP class files on the server. Additionally, the API layer performs no format validation on the `uid` field before passing it to the model layer, relying solely on model-level validation that exists downstream in `ClassDefinition::saveClassInternal()`.\\n\\n### Details\\n\\n### Issue 1 — Incorrect permission guard on CreateController\\n\\n`studio-backend-bundle/src/Class/Controller/DefinitionConfiguration/CreateController.php`:\\n\\n```php\\n#[IsGranted(UserPermissions::DATA_OBJECTS->value)]\\n```\\n\\nThe endpoint `POST /pimcore-studio/api/class/definition/configuration-view/detail/create` is protected by `DATA_OBJECTS` (the `objects` permission), which is a standard editor-level permission granted to content editors for creating and editing data objects. Class definition creation is a structural admin operation equivalent to schema modification, it creates new database tables and generates PHP class files on the server. This operation should require the `classes` permission, which is the permission Pimcore enforces for class definition management in the Classic Admin.\\n\\nAny authenticated user with object editing rights can call this endpoint and create new class definitions, bypassing the intended admin-only restriction. The same user cannot perform this action through the Classic Admin UI, confirming the Studio API enforces a weaker permission check than the existing interface.\\n\\n**Correct guard:**\\n```php\\n#[IsGranted(UserPermissions::CLASSES->value)]\\n```\\n\\n### Issue 2 — No UID format validation at the API layer\\n\\n`studio-backend-bundle/src/Class/MappedParameter/CreateClassDefinitionParameters.php`:\\n\\n```php\\npublic function __construct(\\n    private string $name,\\n    private string $uid\\n) {\\n    if (trim($name) === '' || trim($uid) === '') {\\n        throw new InvalidArgumentException('Class name and UID cannot be empty.');\\n    }\\n}\\n```\\n\\nOnly an empty-string check is performed on `uid` at the API boundary before the value is passed to the model layer. While `ClassDefinition::saveClassInternal()` now validates the UID format via anchored regex, no equivalent validation exists in `CreateClassDefinitionParameters`. A malformed UID passes through the API layer without any format check and only fails deep in the model layer, returning an unformatted internal exception to the caller rather than a clean 400 API validation response, which can expose internal stack traces depending on server configuration.\\n\\nDefense-in-depth requires validation at the API boundary consistent with the model layer. The same regex now applied in `ClassDefinition.php` should also be enforced here:\\n\\n```php\\nif (!preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_]*$/', trim($this->uid))) {\\n    throw new InvalidArgumentException(\\n        sprintf('Invalid UID for class definition: %s', $this->uid)\\n    );\\n}\\n```\\n\\n**Affected files in `pimcore/studio-backend-bundle`:**\\n- `src/Class/Controller/DefinitionConfiguration/CreateController.php`\\n- `src/Class/MappedParameter/CreateClassDefinitionParameters.php`\\n\\n**Vulnerable endpoint:**\\n`POST /pimcore-studio/api/class/definition/configuration-view/detail/create`\\n\\n### PoC\\n\\n**Prerequisites:**\\n- Pimcore 2026.1.x with Studio API enabled\\n- A user `editor` with only the `objects` permission and no `classes` permission\\n\\n**Step 1 — Authenticate as the editor user:**\\n\\n```bash\\ncurl -s -c /tmp/cookies.txt -X POST \\\\\\n  \\\"https://your-pimcore/pimcore-studio/api/login\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"username\\\":\\\"editor\\\",\\\"password\\\":\\\"password\\\"}'\\n```\\n\\nExpected response:\\n```json\\n{\\\"message\\\": \\\"Login successful\\\"}\\n```\\n\\n**Step 2 — Confirm the user has no class management access in Classic Admin**\\n\\nLog into Classic Admin as `editor`. Verify the Classes menu is not visible and\\nthe user cannot access Settings > Classes. This confirms the `classes` permission\\nis not granted to this user.\\n\\n**Step 3 — Create a class definition via the Studio API despite lacking the classes permission:**\\n\\n```bash\\ncurl -s -b /tmp/cookies.txt -X POST \\\\\\n  \\\"https://your-pimcore/pimcore-studio/api/class/definition/configuration-view/detail/create\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"name\\\":\\\"UnauthorizedClass\\\",\\\"uid\\\":\\\"testuid1\\\"}'\\n```\\n\\nExpected response (vulnerable):\\n```json\\n{\\\"id\\\": \\\"testuid1\\\", \\\"name\\\": \\\"UnauthorizedClass\\\", ...}\\n```\\n\\nThe class definition is created successfully by a user with no `classes` permission.\\nThe Studio API accepts the request where the Classic Admin would deny it entirely.\\n\\nExpected response (patched):\\n```json\\n{\\\"status\\\": 403, \\\"detail\\\": \\\"Access denied.\\\"}\\n```\\n\\n### Impact\\nAny authenticated Pimcore user with the standard `objects` permission can create class definitions via the Studio API, bypassing the `classes` permission restriction enforced in the Classic Admin. This is a privilege escalation from editor level to\\na capability that should be restricted to administrators. Class definition creation generates new database tables and PHP class files on the server, giving an unprivileged user the ability to modify the application schema, introduce malformed class structures, and trigger downstream processing outside their permission scope.\\n\\nThe missing API-layer UID validation compounds this by allowing malformed UIDs to reach the model layer, producing unhandled internal exceptions that may expose stack traces depending on server debug configuration.\\n\\n- **Authentication required from attacker:** Yes - valid Pimcore session with  `objects` permission required\\n- **Authentication required from victim:** No - no victim action needed\\n- **What is accessible:** Full class definition creation capability including database table generation and PHP class file creation on the server\", \"epss\": {\"percentage\": 0.00351, \"percentile\": 0.27747}, \"ghsa_id\": \"GHSA-f97c-ph8j-8vff\", \"github_reviewed_at\": \"2026-08-28T19:05:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-f97c-ph8j-8vff\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f97c-ph8j-8vff\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55212\"}], \"nvd_published_at\": \"2026-07-09T21:16:56Z\", \"published_at\": \"2026-08-28T19:05:25Z\", \"references\": [\"https://github.com/pimcore/pimcore/security/advisories/GHSA-f97c-ph8j-8vff\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55212\", \"https://github.com/pimcore/studio-backend-bundle/pull/1886\", \"https://github.com/pimcore/studio-backend-bundle/commit/d1a4788c0f159c360d550c34256c8abbbd633ae0\", \"https://github.com/pimcore/studio-backend-bundle/releases/tag/v2025.4.6\", \"https://github.com/pimcore/studio-backend-bundle/releases/tag/v2026.1.6\", \"https://github.com/advisories/GHSA-f97c-ph8j-8vff\"], \"repository_advisory_url\": \"https://api.github.com/repos/pimcore/pimcore/security-advisories/GHSA-f97c-ph8j-8vff\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pimcore/pimcore\", \"summary\": \"Pimcore: Insufficient Permission Check on Class Definition Creation Endpoint Allows Privilege Escalation\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T19:05:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-f97c-ph8j-8vff\", \"vulnerabilities\": [{\"first_patched_version\": \"2026.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pimcore/studio-backend-bundle\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2025.4.6\"}, {\"first_patched_version\": \"2026.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"pimcore/studio-backend-bundle\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2026.1.0, < 2026.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f97c-ph8j-8vff",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pimcore/studio-backend-bundle: < 2025.4.6",
+      "pimcore/studio-backend-bundle: >= 2026.1.0, < 2026.1.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55212"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pimcore/studio-backend-bundle"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.511600Z",
+  "provenance": {
+    "content_sha256": "6a474b19cfaff4cc9950dd8504f4e25d3dab6f41fe734ba9021b909167fe7591",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T19:05:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f97c-ph8j-8vff",
+  "status": "active",
+  "title": "Pimcore: Insufficient Permission Check on Class Definition Creation Endpoint Allows Privilege Escalation",
+  "updated_at": "2026-08-28T19:05:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f97c-ph8j-8vff"
+}

@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55834\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"### Summary\\nThe OIDC authorization page in the pocket-id frontend redirects the browser to an attacker-controlled URL without consulting the backend redirect_uri allow-list when the request uses prompt=none. An attacker who knows a valid client_id can craft an /authorize link that sends a victim (or a victim's browser doing a silent re-auth) to any external https URL, enabling phishing and OAuth response smuggling. The backend allow-list validation that protects the normal authenticated flow is bypassed because this path is handled entirely client-side.\\n\\n### Details\\nFor an OIDC authorization request with prompt=none, the SvelteKit frontend short-circuits the flow before the backend ever validates the redirect_uri against the client's registered callback list.\\n\\nFile: frontend/src/routes/authorize/+page.ts (line 14) parses the raw redirect_uri query parameter from the incoming URL.\\n\\nFile: frontend/src/routes/authorize/+page.svelte - in onMount(), when the request carries prompt=none and the user cannot be silently authorized (for example the visitor is not logged in, so login_required must be returned), the page builds the callback URL from the raw redirect_uri and performs:\\n\\n    window.location.href = `${callbackURL}?error=login_required...`\\n\\nThe callbackURL is taken directly from the user-supplied redirect_uri. The only filtering applied is a scheme check that blocks javascript: and data: URLs; any http: or https: origin passes through. The backend allow-list validator GetCallbackURLFromList (which the authenticated code path uses to confirm the redirect_uri matches one of the client's registered callback URLs) is never invoked on this branch.\\n\\nThis means the per-client redirect_uri allow-list, the central control that makes redirect_uri safe in OAuth/OIDC, is not enforced for the prompt=none error-return path. A client_id is not a secret: client metadata is retrievable at /api/oidc/clients/:id/meta, and client_ids appear in any integration's authorization links.\\n\\nConfirmation that the bypass is purely frontend: an unauthenticated POST to the backend /api/oidc/authorize endpoint correctly returns 401 ({\\\"error\\\":\\\"You are not signed in\\\"}), so the backend never authorizes the request. The redirect nonetheless happens in the browser because +page.svelte issues window.location.href before/without a successful backend authorization.\\n\\nA second variant exists for an authenticated victim: when prompt=none is combined with a first-time (not yet consented) authorization of a client, the same client-side path can be reached.\\n\\nContrast: the standard interactive flow (no prompt=none) posts to the backend, which validates redirect_uri against the registered list before returning a callback. The defect is specific to the client-side prompt=none short-circuit.\\n\\n### PoC\\nPrerequisites: a running pocket-id instance, a registered OIDC client whose client_id is known to the attacker (obtainable from /api/oidc/clients/:id/meta or any existing integration), and a victim whose browser opens the link (the victim need not be logged in for the login_required branch).\\n\\n1. Attacker constructs an authorization URL pointing at the victim's pocket-id, supplying an external redirect_uri and prompt=none:\\n\\n   https://idp.victim.example/authorize?client_id=<known_client_id>&redirect_uri=https://attacker.example/collect&response_type=code&scope=openid&prompt=none\\n\\n2. Victim opens the link. The frontend authorize page loads, determines the silent auth cannot succeed (login_required), and executes:\\n\\n   window.location.href = \\\"https://attacker.example/collect?error=login_required&state=...\\\"\\n\\n3. The browser is redirected to https://attacker.example/collect. Expected result on a fixed build: the page would refuse the redirect because redirect_uri does not match the client's registered callback list and would render an error in place instead of navigating off-origin.\\n\\nValidation level: code-level confirmation at commit fc42f62. This is a browser-side window.location.href redirect, so it is not reproducible with curl; the backend was confirmed to reject the unauthenticated request (401) while the frontend performs the navigation regardless. Evidence notes saved to screenshots/001_open_redirect_evidence.txt.\\n\\n### Impact\\nUnauthenticated attacker, victim interaction required (clicking or being silently redirected). The trusted pocket-id domain is used to bounce a victim to an arbitrary external site, which is effective for credential phishing (the user trusts the IdP origin in the initial link) and for leaking OIDC error/state parameters to an attacker endpoint. Integrity impact is limited to redirection; no confidentiality or availability loss of pocket-id itself. Note: an abandoned PR (#1450) addressed a related protocol-relative URL issue in a different email-redirect path but was not merged and does not cover this authorize-page path.\", \"ghsa_id\": \"GHSA-2wvm-8mvp-22qv\", \"github_reviewed_at\": \"2026-08-28T16:28:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-2wvm-8mvp-22qv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2wvm-8mvp-22qv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55834\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T16:28:20Z\", \"references\": [\"https://github.com/pocket-id/pocket-id/security/advisories/GHSA-2wvm-8mvp-22qv\", \"https://github.com/pocket-id/pocket-id/commit/8a7577497131229badb35cb4b3a4227b1300afff\", \"https://github.com/pocket-id/pocket-id/releases/tag/v2.9.0\", \"https://github.com/advisories/GHSA-2wvm-8mvp-22qv\"], \"repository_advisory_url\": \"https://api.github.com/repos/pocket-id/pocket-id/security-advisories/GHSA-2wvm-8mvp-22qv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pocket-id/pocket-id\", \"summary\": \"Pocket-ID has an Open Redirect on the OIDC /authorize page via unvalidated redirect_uri with prompt=none\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T16:28:20Z\", \"url\": \"https://api.github.com/advisories/GHSA-2wvm-8mvp-22qv\", \"vulnerabilities\": [{\"first_patched_version\": \"2.9.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/pocket-id/pocket-id/backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.6.0, <= 2.8.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2wvm-8mvp-22qv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/pocket-id/pocket-id/backend: >= 2.6.0, <= 2.8.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55834"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/pocket-id/pocket-id/backend"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.658828Z",
+  "provenance": {
+    "content_sha256": "55e1543bef48264b2b190852b509ff676e28d2ac1c2fd6fc85cbe4b7bda7a59b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T16:28:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2wvm-8mvp-22qv",
+  "status": "active",
+  "title": "Pocket-ID has an Open Redirect on the OIDC /authorize page via unvalidated redirect_uri with prompt=none",
+  "updated_at": "2026-08-28T16:28:20Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2wvm-8mvp-22qv"
+}

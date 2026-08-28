@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/127619974?v=4\", \"events_url\": \"https://api.github.com/users/mamdouhmahfouz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mamdouhmahfouz/followers\", \"following_url\": \"https://api.github.com/users/mamdouhmahfouz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mamdouhmahfouz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mamdouhmahfouz\", \"id\": 127619974, \"login\": \"mamdouhmahfouz\", \"node_id\": \"U_kgDOB5tThg\", \"organizations_url\": \"https://api.github.com/users/mamdouhmahfouz/orgs\", \"received_events_url\": \"https://api.github.com/users/mamdouhmahfouz/received_events\", \"repos_url\": \"https://api.github.com/users/mamdouhmahfouz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mamdouhmahfouz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mamdouhmahfouz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mamdouhmahfouz\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55462\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"### Impact\\nAn authenticated user with only `users.view` can open another user's detail page and see assigned license, accessory, and consumable data even though the same account is denied direct access to the Licenses, Accessories, and Consumables modules. The leaked data includes software license names, purchase order/order values, accessory and consumable names, assignment notes, and purchase costs.\\n\\n### Attacker Model\\n\\nAuthenticated user with only:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ json\\n{\\\"users.view\\\":\\\"1\\\"}\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nThe attacker does not have:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ json\\n{\\n  \\\"licenses.view\\\": \\\"1\\\",\\n  \\\"accessories.view\\\": \\\"1\\\",\\n  \\\"consumables.view\\\": \\\"1\\\",\\n  \\\"assets.view\\\": \\\"1\\\"\\n}\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\n### Affected Component\\n\\n-   `app/Http/Controllers/Users/UsersController.php`\\n\\n-   `resources/views/users/view.blade.php`\\n\\n-   `resources/views/users/print.blade.php`\\n\\n-   Endpoints:\\n\\n    -   `GET /users/{user}`\\n\\n    -   `GET /users/{user}/print`\\n\\n### Root Cause\\n\\n`UsersController::show()` authorizes only viewing the user, then loads inventory relationships:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ php\\n$this->authorize('view', $user);\\n\\n$user = User::with([\\n    'consumables',\\n    'accessories',\\n    'licenses',\\n    'userloc',\\n    'groups',\\n])\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\n`resources/views/users/view.blade.php` renders those relationships without checking the corresponding module permissions. The license table renders name, purchase cost, purchase order, and order number. The accessory and consumable tables render item names, notes, and unit costs.\\n\\n`UsersController::printInventory()` similarly authorizes only `view` on `User::class` and the target user, then renders `resources/views/users/print.blade.php`, which outputs assigned inventory names.\\n\\n### Proof of Concept\\n\\n1.  Create a user with only `users.view`.\\n\\n2.  Create a target user with assigned license/accessory/consumable records containing recognizable test values.\\n\\n3.  Log in as the `users.view`-only user.\\n\\n4.  Confirm direct module access is denied:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nGET /licenses\\nGET /accessories\\nGET /consumables\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nObserved for each:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nHTTP/1.1 403 Forbidden\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\n1.  Request the target user's page:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nGET /users/<target-user-id> HTTP/1.1\\nHost: <snipe-it-host>\\nCookie: snipeit_session=<attacker-session>\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nObserved:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nHTTP/1.1 200 OK\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nThe response contained assigned inventory data from modules the attacker could not directly access, including license name, purchase order/order values, accessory name/note/cost, and consumable name/note/cost.\\n\\n1.  Request the print view:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nGET /users/<target-user-id>/print HTTP/1.1\\nHost: <snipe-it-host>\\nCookie: snipeit_session=<attacker-session>\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nObserved:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ http\\nHTTP/1.1 200 OK\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nThe response contained assigned inventory names.\\n\\n### Evidence\\n\\nThe `users.view`-only test account was confirmed to lack direct inventory permissions:\\n\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ json\\n{\\n  \\\"has_users_view\\\": true,\\n  \\\"has_licenses_view\\\": false,\\n  \\\"has_accessories_view\\\": false,\\n  \\\"has_consumables_view\\\": false,\\n  \\\"has_assets_view\\\": false\\n}\\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\n\\nDirect access to `/licenses`, `/accessories`, and `/consumables` returned `403 Forbidden`.\\n\\nThe same account received `200 OK` from `/users/<target-user-id>` and the response included assigned inventory data that should have been protected by the corresponding inventory module permissions.\\n\\n### Negative Controls\\n\\nDenied direct module responses did not include the test inventory strings. The same data was only disclosed through the user detail and user print views.\\n\\n### Impact\\n\\nOrganizations may use separate permissions to allow HR/helpdesk-style users to view people records without exposing license, accessory, or consumable inventories and cost/order metadata. This issue bypasses those module-specific permissions and leaks assigned inventory information through the user view.\\n\\n\\n### Patches\\nPatched in 374f426f0c\", \"epss\": {\"percentage\": 0.00342, \"percentile\": 0.26708}, \"ghsa_id\": \"GHSA-fc33-6w3q-538h\", \"github_reviewed_at\": \"2026-08-28T17:57:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-fc33-6w3q-538h\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fc33-6w3q-538h\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55462\"}], \"nvd_published_at\": \"2026-07-10T20:16:46Z\", \"published_at\": \"2026-08-28T17:57:40Z\", \"references\": [\"https://github.com/grokability/snipe-it/security/advisories/GHSA-fc33-6w3q-538h\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55462\", \"https://github.com/grokability/snipe-it/commit/374f426f0c6bb7a4f129f7b85051cc1da753a0f5\", \"https://github.com/grokability/snipe-it/releases/tag/v8.6.2\", \"https://github.com/advisories/GHSA-fc33-6w3q-538h\"], \"repository_advisory_url\": \"https://api.github.com/repos/grokability/snipe-it/security-advisories/GHSA-fc33-6w3q-538h\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/grokability/snipe-it\", \"summary\": \"Snipe-IT has an authorization bypass on print inventory page\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T17:57:41Z\", \"url\": \"https://api.github.com/advisories/GHSA-fc33-6w3q-538h\", \"vulnerabilities\": [{\"first_patched_version\": \"8.6.1\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"snipe/snipe-it\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 8.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fc33-6w3q-538h",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "snipe/snipe-it: <= 8.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55462"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "snipe/snipe-it"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.599963Z",
+  "provenance": {
+    "content_sha256": "f36d6e7aa548aa41e1a986180d6398d00093d8d1a9bf0144223761d6c3a35c7e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T17:57:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fc33-6w3q-538h",
+  "status": "active",
+  "title": "Snipe-IT has an authorization bypass on print inventory page",
+  "updated_at": "2026-08-28T17:57:41Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fc33-6w3q-538h"
+}
