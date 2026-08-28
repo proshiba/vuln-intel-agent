@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/89955380?v=4\", \"events_url\": \"https://api.github.com/users/lucquach/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lucquach/followers\", \"following_url\": \"https://api.github.com/users/lucquach/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lucquach/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lucquach\", \"id\": 89955380, \"login\": \"lucquach\", \"node_id\": \"MDQ6VXNlcjg5OTU1Mzgw\", \"organizations_url\": \"https://api.github.com/users/lucquach/orgs\", \"received_events_url\": \"https://api.github.com/users/lucquach/received_events\", \"repos_url\": \"https://api.github.com/users/lucquach/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lucquach/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lucquach/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lucquach\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55521\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\nMultiple Missing Function Level Access Control vulnerabilities exist in the Yamcs Core API. These vulnerabilities allow any authenticated user, regardless of their assigned roles or privileges (e.g., an unprivileged \\\"Guest\\\"), to bypass intended access controls. An attacker can exploit these flaws to extract sensitive telemetry metadata, disrupt satellite communication link protocols (COP-1), and manipulate the global simulation time, severely impacting the confidentiality, integrity, and availability of the system.\\n\\n### Details\\nYamcs utilizes a robust Role-Based Access Control (RBAC) model with `SystemPrivilege` and `ObjectPrivilege` to restrict administrative actions and data retrieval. However, three critical API controllers completely omit these authorization checks before executing internal business logic:\\n\\n1.  **`IndexesApi.java` (Information Disclosure):** Unlike `PacketsApi.java`, which filters results using `ctx.user.hasObjectPrivilege(ObjectPrivilegeType.ReadPacket, packetName)`, methods in `IndexesApi` (such as `listPacketIndex` and `listEventIndex`) directly retrieve and return archive records from the `CcsdsTmIndex` without verifying if the user has the required Object Privileges.\\n2.  **`Cop1Api.java` (Denial of Service / Integrity):** Modifying the COP-1 telecommand protocol state is an administrative action requiring `SystemPrivilege.ControlLinks`. However, endpoints in `Cop1Api` (e.g., `disable`, `resume`, `initialize`, `updateConfig`) process link state alterations without calling `ctx.checkSystemPrivilege(...)`.\\n3.  **`TimeApi.java` (Denial of Service / Integrity):** The `setTime` method allows modification of the global `SimulationTimeService` (affecting all processors, telemetry, and tests in that instance). This endpoint fails to assert any system privileges before applying the requested simulation speed or time jumps.\\n\\n### PoC\\n**Prerequisite:** Obtain valid credentials for a completely unprivileged user (e.g., `user_without_priv:password` with no roles assigned).\\n\\n**PoC 1: Extracting Packet Indexes (`IndexesApi`)**\\n```bash\\ncurl -s -X GET \\\"http://localhost:8090/api/archive/simulator/packet-index\\\" \\\\\\n     -u \\\"user_without_priv:password\\\"\\n```\\n*Result:* Returns HTTP 200 OK with a full JSON array of packet indexes, bypassing Object Privilege checks and leaking system metadata.\\n\\n**PoC 2: Disabling COP-1 Protocol (`Cop1Api`)**\\n```bash\\ncurl -s -X POST \\\"http://localhost:8090/api/cop1/simulator/tc_sim:disable\\\" \\\\\\n     -u \\\"user_without_priv:password\\\" \\\\\\n     -H \\\"Content-Type: application/json\\\" -d '{}'\\n```\\n*Result:* The server processes the request past the authorization layer. Depending on the link configuration, it will either successfully disable COP-1 or return `400 BadRequestException` confirming the link does not support COP-1. The absence of a `403 Forbidden` confirms the authorization bypass.\\n\\n**PoC 3: Manipulating Simulation Time (`TimeApi`)**\\n```bash\\ncurl -s -X POST \\\"http://localhost:8090/api/instances/simulator:setTime\\\" \\\\\\n     -u \\\"user_without_priv:password\\\" \\\\\\n     -H \\\"Content-Type: application/json\\\" -d '{\\\"speed\\\": 10.0}'\\n```\\n*Result:* The server processes the request past the authorization layer. It changes the global simulation speed if the service is active, or returns `400 BadRequestException: Cannot set time for a non-simulation TimeService`. The absence of a `403 Forbidden` confirms the authorization bypass.\\n\\n### Impact\\nThe vulnerability impacts instances of Yamcs exposing the REST API. \\n*   **Confidentiality:** Unprivileged users can enumerate all historical telemetry packet and event metadata.\\n*   **Integrity & Availability:** Attackers can disable critical satellite telecommand protocols (COP-1) causing command transmission failures. They can also manipulate the global simulation time, disrupting processors, automated tests, and all other users relying on the simulation environment.\\n\\n### PoC Images:\\n- Check user permission\\n<img width=\\\"1218\\\" height=\\\"951\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/fa7b1f1b-70fc-4796-805a-70acb84686d3\\\" />\\n\\n- Check admin permission and access API:\\n<img width=\\\"1768\\\" height=\\\"555\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/844364f7-5e26-4c15-8809-6512f10ffbab\\\" />\\n\\n- Check user no permission - get response same with user admin:\\n<img width=\\\"1264\\\" height=\\\"885\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/8773cef6-f940-48f7-a382-0eb87b8767d4\\\" />\\n<img width=\\\"1243\\\" height=\\\"358\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/3288f092-7114-48d6-9e5c-9aeaf20d95d4\\\" />\", \"ghsa_id\": \"GHSA-962x-ccwf-8x6p\", \"github_reviewed_at\": \"2026-08-28T17:09:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-962x-ccwf-8x6p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-962x-ccwf-8x6p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55521\"}], \"nvd_published_at\": null, \"published_at\": \"2026-08-28T17:09:35Z\", \"references\": [\"https://github.com/yamcs/yamcs/security/advisories/GHSA-962x-ccwf-8x6p\", \"https://github.com/advisories/GHSA-962x-ccwf-8x6p\"], \"repository_advisory_url\": \"https://api.github.com/repos/yamcs/yamcs/security-advisories/GHSA-962x-ccwf-8x6p\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/yamcs/yamcs\", \"summary\": \"Yamcs Core API has Multiple Missing Function Level Access Control vulnerabilities\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T17:09:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-962x-ccwf-8x6p\", \"vulnerabilities\": [{\"first_patched_version\": \"5.13.2\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.yamcs:yamcs-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.13.0, <= 5.13.1\"}, {\"first_patched_version\": \"5.12.8\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.yamcs:yamcs-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.12.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-962x-ccwf-8x6p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.yamcs:yamcs-core: <= 5.12.7",
+      "org.yamcs:yamcs-core: >= 5.13.0, <= 5.13.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55521"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.yamcs:yamcs-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-28T21:56:46.627624Z",
+  "provenance": {
+    "content_sha256": "40877c48ed1fe5685c677b0d2c0eae1c6756ac1965901ecbce4b2168093ec1d3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T17:09:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-962x-ccwf-8x6p",
+  "status": "active",
+  "title": "Yamcs Core API has Multiple Missing Function Level Access Control vulnerabilities",
+  "updated_at": "2026-08-28T17:09:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-962x-ccwf-8x6p"
+}
