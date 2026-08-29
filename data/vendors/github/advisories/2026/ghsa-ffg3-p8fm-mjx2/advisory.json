@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/25514920?v=4\", \"events_url\": \"https://api.github.com/users/Neroli-realy/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Neroli-realy/followers\", \"following_url\": \"https://api.github.com/users/Neroli-realy/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Neroli-realy/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Neroli-realy\", \"id\": 25514920, \"login\": \"Neroli-realy\", \"node_id\": \"MDQ6VXNlcjI1NTE0OTIw\", \"organizations_url\": \"https://api.github.com/users/Neroli-realy/orgs\", \"received_events_url\": \"https://api.github.com/users/Neroli-realy/received_events\", \"repos_url\": \"https://api.github.com/users/Neroli-realy/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Neroli-realy/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Neroli-realy/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Neroli-realy\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1215784?v=4\", \"events_url\": \"https://api.github.com/users/dataflake/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dataflake/followers\", \"following_url\": \"https://api.github.com/users/dataflake/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dataflake/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dataflake\", \"id\": 1215784, \"login\": \"dataflake\", \"node_id\": \"MDQ6VXNlcjEyMTU3ODQ=\", \"organizations_url\": \"https://api.github.com/users/dataflake/orgs\", \"received_events_url\": \"https://api.github.com/users/dataflake/received_events\", \"repos_url\": \"https://api.github.com/users/dataflake/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dataflake/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dataflake/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dataflake\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/59153204?v=4\", \"events_url\": \"https://api.github.com/users/taisehub/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/taisehub/followers\", \"following_url\": \"https://api.github.com/users/taisehub/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/taisehub/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/taisehub\", \"id\": 59153204, \"login\": \"taisehub\", \"node_id\": \"MDQ6VXNlcjU5MTUzMjA0\", \"organizations_url\": \"https://api.github.com/users/taisehub/orgs\", \"received_events_url\": \"https://api.github.com/users/taisehub/received_events\", \"repos_url\": \"https://api.github.com/users/taisehub/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/taisehub/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/taisehub/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/taisehub\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55830\", \"cvss\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-184\", \"name\": \"Incomplete List of Disallowed Inputs\"}], \"description\": \"### Impact\\n\\nRestrictedPython rewrites sensitive operations to go through guard hooks. Attribute access becomes `_getattr_(obj, name)`, item access becomes `_getitem_(obj, key)`, writes go through `_write_`, and print goes through `_print_`. The embedding application supplies these hooks to enforce its policy.\\n\\nArgument-name validation rejects these protected names for regular arguments, `*args`, `**kwargs`, and keyword-only arguments, but it misses positional-only arguments (the ones before `/`). So a function like:\\n\\n```python\\ndef f(_getattr_=evil, /):\\n    return o.x\\n```\\n\\nmakes `_getattr_` a local that shadows the policy hook, and the rewritten access calls `evil` instead. The same works for `_getitem_`, `_write_`, and `_print_`. Shadowing `_print_` can also be used to capture the internal `_getattr_` hook that RestrictedPython passes in.\\n\\nThe result is that sandboxed code can bypass the access policy the embedding application relies on. In applications that also handle sandbox-controlled objects unsafely (for example serializing them with pickle), this primitive can be chained further, up to remote code execution. That part depends on the embedding application, but the underlying guard bypass is in RestrictedPython.\\n\\n### Proof of concept\\n\\nOn an unpatched RestrictedPython this prints `shadowed` and an empty `calls` list, meaning the policy `_getattr_` never ran. With the fix, `compile_restricted` rejects the code.\\n\\n```python\\nfrom RestrictedPython import compile_restricted\\nfrom RestrictedPython.Guards import safe_globals, safer_getattr\\n\\ncalls = []\\ndef policy_getattr(obj, name, default=None):\\n    calls.append(name)  # the real guard records every access\\n    return safer_getattr(obj, name, default)\\n\\nsrc = \\\"\\\"\\\"\\ndef f(o, _getattr_=lambda obj, name: \\\"shadowed\\\", /):\\n    return o.x\\n\\\"\\\"\\\"\\n\\ncode = compile_restricted(src, \\\"<s>\\\", \\\"exec\\\")   # currently compiles, should be rejected\\ng = dict(safe_globals)\\ng[\\\"_getattr_\\\"] = policy_getattr\\nexec(code, g)\\n\\nclass O:\\n    x = \\\"secret\\\"\\n\\nprint(g[\\\"f\\\"](O()))   # -> \\\"shadowed\\\"   (attacker's local was used)\\nprint(calls)         # -> []           (policy _getattr_ never ran)\\n```\\n\\n### Patches\\n\\nThe fix validates positional-only argument names the same way the other argument kinds are already validated. It will ship in the next release.\\n\\n### Workarounds\\n\\nNone other than upgrading. If you cannot upgrade immediately, reject any submitted code whose function or lambda definitions use positional-only parameters with leading-underscore names before compiling.\", \"epss\": {\"percentage\": 0.00401, \"percentile\": 0.32915}, \"ghsa_id\": \"GHSA-ffg3-p8fm-mjx2\", \"github_reviewed_at\": \"2026-08-28T22:51:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-ffg3-p8fm-mjx2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-ffg3-p8fm-mjx2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55830\"}], \"nvd_published_at\": \"2026-07-08T22:17:15Z\", \"published_at\": \"2026-08-28T22:51:35Z\", \"references\": [\"https://github.com/zopefoundation/RestrictedPython/security/advisories/GHSA-ffg3-p8fm-mjx2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55830\", \"https://github.com/zopefoundation/RestrictedPython/commit/3737596ec9f28c34a073cc845bd2f4c0a80cb671\", \"https://github.com/advisories/GHSA-ffg3-p8fm-mjx2\"], \"repository_advisory_url\": \"https://api.github.com/repos/zopefoundation/RestrictedPython/security-advisories/GHSA-ffg3-p8fm-mjx2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/zopefoundation/RestrictedPython\", \"summary\": \"RestrictedPython guard hooks can be shadowed via positional-only arguments\", \"type\": \"reviewed\", \"updated_at\": \"2026-08-28T22:51:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-ffg3-p8fm-mjx2\", \"vulnerabilities\": [{\"first_patched_version\": \"8.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"RestrictedPython\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 8.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-ffg3-p8fm-mjx2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "RestrictedPython: <= 8.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-55830"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "RestrictedPython"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-08-29T19:12:02.128505Z",
+  "provenance": {
+    "content_sha256": "42306ee691081135773a0be6a9e3efd0ce39f8c4691c4645f5625eece29b2785",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-28T22:51:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-ffg3-p8fm-mjx2",
+  "status": "active",
+  "title": "RestrictedPython guard hooks can be shadowed via positional-only arguments",
+  "updated_at": "2026-08-28T22:51:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-ffg3-p8fm-mjx2"
+}
