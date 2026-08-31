@@ -21,7 +21,13 @@ from vulnwatch.models import (
     RunManifest,
     StrictModel,
 )
-from vulnwatch.risk import RISK_LEVELS, RiskAssessment, assess_risk, load_source_catalog
+from vulnwatch.risk import (
+    RISK_LEVELS,
+    RiskAssessment,
+    assess_risk,
+    load_source_catalog,
+    severity_of,
+)
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
 SEVERITY_ORDER = ("Critical", "High", "Moderate", "その他")
@@ -86,24 +92,7 @@ class ReportSummaryArtifact(StrictModel):
 
 
 def _severity(advisory: Advisory) -> str:
-    score = advisory.facts.cvss_score
-    if score is not None:
-        if score >= 9.0:
-            return "Critical"
-        if score >= 7.0:
-            return "High"
-        if score >= 4.0:
-            return "Moderate"
-        return "その他"
-
-    vendor_severity = (advisory.facts.vendor_severity or "").strip().casefold()
-    if vendor_severity == "critical":
-        return "Critical"
-    if vendor_severity in {"high", "important"}:
-        return "High"
-    if vendor_severity in {"medium", "moderate"}:
-        return "Moderate"
-    return "その他"
+    return severity_of(advisory.facts.cvss_score, advisory.facts.vendor_severity)
 
 
 def resolve_advisory_path(root: Path, change: ChangeRecord) -> Path:

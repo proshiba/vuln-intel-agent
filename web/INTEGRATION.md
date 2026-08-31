@@ -137,9 +137,18 @@ GET https://proshiba.github.io/vuln-intel-agent/api/v1/search.json
 | 10 | `upd` | string | 更新日 `YYYY-MM-DD` |
 | 11 | `asc` | string | 初期アクセス面の分類 ID。該当なしは空文字 |
 | 12 | `lag` | number \| "" | CISA KEV 掲載より何日早く悪用を観測できたか |
-| 13 | `prefix` | number | `prefix_dictionary` への添字（`-1` は不明） |
+| 13 | `risk` | string | リスク区分 `緊急`/`高`/`中`/`低`。後述 |
+| 14 | `rscore` | number | リスクスコア 0〜100。後述 |
+| 15 | `prefix` | number | `prefix_dictionary` への添字（`-1` は不明） |
 
 `rows` は**更新日の新しい順**に並んでいます。
+
+列は将来も増える可能性があります。**添字を直書きせず、`fields` 配列から位置を引いてください。**
+
+```js
+const at = Object.fromEntries(data.fields.map((name, index) => [name, index]));
+const risk = row[at.risk];
+```
 
 ### flags のビットマスク
 
@@ -284,11 +293,19 @@ medium (1,000)  LOW (784)  important (613)  Important (591)  critical (388) ...
 
 大文字小文字が混在し、Red Hat 系の `Important` / `Moderate` 語彙も混ざります。**`cvss` から判定するか、`toLowerCase()` したうえで `important`→High、`moderate`→Medium として正規化してください。** postMessage 応答の `severity` は正規化済みなので、そちらを使う手もあります。
 
-### `prio` は現在すべて `INFO`
+### リスク（`risk` / `rscore`）は索引の生成時に算出される
+
+深刻度、悪用確認、PoC 公開、修正提供状況、**公開からの経過日数**、初期アクセス面などを加点した 0〜100 のスコアと、その区分です。閾値は 70 以上=緊急、50 以上=高、30 以上=中、それ未満=低。件数は `meta.stats.risks` にあります。
+
+`prio` と違い、**自組織の資産台帳に依存しないため全件で意味のある値**が入ります。重要度で並べる画面を作るなら、まずこれを使ってください。
+
+**注意:** 経過日数を含むため、同じ脆弱性でも日が経てば値が下がります。台帳には保存せず、索引を作るたびに算出しているので、**`rscore` を長期保存して比較しないでください**。比較するならその時点の索引どうしで行ってください。
+
+### `prio` は資産台帳に依存する
 
 優先度は「自組織の資産台帳（`config/products.yaml`）と一致するか」で決まります。`P1`/`P2`/`P3` になる条件はすべて資産一致を前提としており、現在この台帳は空（`products: []`）のため、**全 42,171 件が `INFO`** です。台帳を再生成しても変わりません。解消するには `config/products.yaml` に自組織の製品を登録する必要があります。
 
-それまでは優先度を軸にした画面を作っても意味を持ちません。重要度は `CVSS`・`flags`・`攻撃面` から組み立ててください。
+重要度を軸にした画面には、優先度ではなく上記の `risk` / `rscore` を使ってください。
 
 ### 欠損は珍しくない
 

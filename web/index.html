@@ -163,6 +163,10 @@
       .sev-High { color: #fff; background: var(--high); }
       .sev-Moderate { color: #221; background: var(--mod); }
       .sev-Low, .sev- { color: var(--muted); border-color: var(--border); }
+      .risk { border-color: var(--border); color: var(--muted); }
+      .risk-緊急 { color: #fff; background: var(--crit); }
+      .risk-高 { color: #fff; background: var(--high); }
+      .risk-中 { color: #221; background: var(--mod); }
       .prio { border-color: var(--border); color: var(--muted); }
       .prio-P1 { color: #fff; background: var(--crit); }
       .prio-P2 { color: #fff; background: var(--high); }
@@ -207,10 +211,17 @@
             <option value="upd">更新日が新しい順</option>
             <option value="pub">公開日が新しい順</option>
             <option value="cvss">CVSSが高い順</option>
+            <option value="risk">リスクが高い順</option>
             <option value="prio">優先度が高い順</option>
           </select>
         </div>
         <div class="row">
+          <select id="risk">
+            <option value="">リスク: すべて</option>
+            <option value="緊急">緊急</option>
+            <option value="高">高以上</option>
+            <option value="中">中以上</option>
+          </select>
           <select id="prio">
             <option value="">優先度: すべて</option>
             <option value="P1">P1</option>
@@ -248,6 +259,7 @@
               <th>CVE / ID</th>
               <th class="hide-sm">ベンダー</th>
               <th class="num">CVSS</th>
+              <th>リスク</th>
               <th>優先度</th>
               <th>状態</th>
               <th>タイトル</th>
@@ -290,22 +302,33 @@
       }
       const PRIO_RANK = { P1: 0, P2: 1, P3: 2, INFO: 3 };
 
-      function makeRow(r) {
-        // [id, cve, vendors, products, title, cvss, sev, prio, flags, pub, upd, asc, lag]
-        return { id: r[0], cve: r[1], vendors: r[2], products: r[3], title: r[4],
-          cvss: r[5], sev: r[6], prio: r[7], flags: r[8], pub: r[9], upd: r[10], asc: r[11] || "",
-          lag: typeof r[12] === "number" ? r[12] : null, prefix: r[13],
-          hay: (r[1] + " " + r[2] + " " + r[3] + " " + r[4] + " " + r[0]).toLowerCase() };
+      // 列は fields から引く。番号を直書きすると、索引に列が増えたときに
+      // 別の値を読んでいることに気づけない。
+      function rowMapper(fields) {
+        const at = {};
+        fields.forEach((name, index) => { at[name] = index; });
+        return function (r) {
+          return { id: r[at.id], cve: r[at.cve], vendors: r[at.vendors], products: r[at.products],
+            title: r[at.title], cvss: r[at.cvss], sev: r[at.sev], prio: r[at.prio],
+            flags: r[at.flags], pub: r[at.pub], upd: r[at.upd], asc: r[at.asc] || "",
+            lag: typeof r[at.lag] === "number" ? r[at.lag] : null,
+            risk: r[at.risk] || "", rscore: typeof r[at.rscore] === "number" ? r[at.rscore] : 0,
+            prefix: r[at.prefix],
+            hay: (r[at.cve] + " " + r[at.vendors] + " " + r[at.products] + " " + r[at.title]
+              + " " + r[at.id]).toLowerCase() };
+        };
       }
 
       function tiles(s) {
         const p = s.priorities || {};
+        const k = s.risks || {};
         const t = [
           ["総登録数", nf.format(s.total), ""],
+          ["リスク緊急", nf.format(k["緊急"] || 0), "kev"],
+          ["リスク高", nf.format(k["高"] || 0), "poc"],
           ["CISA KEV", nf.format(s.kev), "kev"],
           ["悪用確認", nf.format(s.exploited), "kev"],
           ["PoC公開", nf.format(s.poc), "poc"],
-          ["修正あり", nf.format(s.fixed), "fixed"],
           ["P1 / P2", (p.P1 || 0) + " / " + (p.P2 || 0), ""],
         ];
         $("tiles").innerHTML = t.map(([l, n, c]) =>
@@ -316,6 +339,7 @@
         const q = $("q").value.trim().toLowerCase();
         const terms = q ? q.split(/\s+/) : [];
         const prio = $("prio").value;
+        const risk = $("risk").value;
         const vendor = $("vendor").value.toLowerCase();
         const minc = parseFloat($("cvss").value) || 0;
         const sinceDays = parseInt($("since").value, 10) || 0;
@@ -328,6 +352,8 @@
         let out = state.data.rows.filter((r) => {
           if (terms.length && !terms.every((t) => r.hay.includes(t))) return false;
           if (prio && r.prio !== prio) return false;
+          // 「高以上」のように、選んだ区分とそれより重いものを残す。
+          if (risk && (RISK_RANK[r.risk] ?? 9) > RISK_RANK[risk]) return false;
           if (vendor && !r.vendors.toLowerCase().includes(vendor)) return false;
           if (minc && !(typeof r.cvss === "number" && r.cvss >= minc)) return false;
           if (sinceDate && !(r.pub && r.pub >= sinceDate)) return false;
@@ -342,6 +368,7 @@
         out.sort((a, b) => {
           if (sort === "cvss") return (b.cvss || -1) - (a.cvss || -1);
           if (sort === "pub") return b.pub < a.pub ? -1 : b.pub > a.pub ? 1 : 0;
+          if (sort === "risk") return (b.rscore || 0) - (a.rscore || 0) || (b.cvss || -1) - (a.cvss || -1);
           if (sort === "prio") return (PRIO_RANK[a.prio] ?? 9) - (PRIO_RANK[b.prio] ?? 9) || (b.cvss || -1) - (a.cvss || -1);
           return b.upd < a.upd ? -1 : b.upd > a.upd ? 1 : 0;
         });
@@ -370,6 +397,12 @@
         if (!r.lag) return "";
         return `<span class="badge f-lag" title="CISA KEV 掲載より早く悪用を観測">KEVより${r.lag}日早く観測</span>`;
       }
+      const RISK_RANK = { "緊急": 0, "高": 1, "中": 2, "低": 3 };
+      function riskBadge(r) {
+        if (!r.risk) return "-";
+        return `<span class="badge risk risk-${esc(r.risk)}" title="リスクスコア ${r.rscore}">`
+          + `${esc(r.risk)}</span>`;
+      }
       function surfaceBadge(r) {
         if (!r.asc) return "";
         return `<span class="badge f-surface" title="初期アクセス面">${esc(SURFACE[r.asc] || r.asc)}</span>`;
@@ -385,6 +418,7 @@
             `<td class="cve">${esc(r.cve || r.id)}</td>` +
             `<td class="vendors hide-sm">${esc(r.vendors || "-")}</td>` +
             `<td class="num">${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"}</td>` +
+            `<td>${riskBadge(r)}</td>` +
             `<td><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span></td>` +
             `<td>${flagBadges(r)}${surfaceBadge(r)}${lagBadge(r)}</td>` +
             `<td class="title">${esc(r.title)} ${badgeSev(r)}</td>` +
@@ -410,12 +444,13 @@
         }
         const d = document.createElement("tr");
         d.className = "detail";
-        d.innerHTML = `<td colspan="7"><dl class="detail-grid">
+        d.innerHTML = `<td colspan="8"><dl class="detail-grid">
           <dt>タイトル</dt><dd>${esc(r.title)}</dd>
           <dt>CVE / 内部ID</dt><dd class="cve">${esc(r.cve || "-")} / ${esc(r.id)}</dd>
           <dt>ベンダー</dt><dd>${esc(r.vendors || "-")}</dd>
           <dt>製品</dt><dd>${esc(r.products || "-")}</dd>
           <dt>CVSS / 深刻度</dt><dd>${typeof r.cvss === "number" ? r.cvss.toFixed(1) : "-"} ${badgeSev(r)}</dd>
+          <dt>リスク</dt><dd>${riskBadge(r)}${r.risk ? ` スコア ${r.rscore}` : ""}</dd>
           <dt>優先度 / 状態</dt><dd><span class="badge prio prio-${esc(r.prio)}">${esc(r.prio)}</span> ${flagBadges(r)}</dd>
           <dt>攻撃対象面</dt><dd>${r.asc ? esc(SURFACE[r.asc] || r.asc) : "-"}</dd>
           <dt>KEV速報性</dt><dd>${r.lag ? `CISA KEV 掲載より ${r.lag} 日早く悪用を観測` : "-"}</dd>
@@ -458,7 +493,7 @@
       // 残っていると、ポータル側が指定していない条件で結果が変わってしまうため。
       function resetControls() {
         $("q").value = "";
-        for (const id of ["prio", "vendor", "cvss", "since", "surface"]) $(id).value = "";
+        for (const id of ["prio", "risk", "vendor", "cvss", "since", "surface"]) $(id).value = "";
         for (const id of ["f_kev", "f_exp", "f_poc", "f_ransom", "f_fixed"]) {
           $(id).checked = false;
         }
@@ -478,6 +513,7 @@
         if (query.q !== undefined) set("q", query.q);
         const f = query.filters || {};
         set("prio", f.priority);
+        set("risk", f.risk);
         set("vendor", f.vendor);
         set("cvss", f.minCvss);
         set("since", f.sinceDays);
@@ -503,6 +539,7 @@
       function externalRow(r) {
         return { id: r.id, cve: r.cve, vendors: r.vendors, products: r.products,
           title: r.title, cvss: r.cvss, severity: severity(r.cvss, r.sev), priority: r.prio,
+          risk: r.risk || null, riskScore: r.rscore || null,
           attackSurface: r.asc || null, kevLagDays: r.lag, published: r.pub, updated: r.upd,
           kev: !!(r.flags & F.kev), exploited: !!(r.flags & F.exp), poc: !!(r.flags & F.poc),
           ransomware: !!(r.flags & F.ransom), fixed: !!(r.flags & F.fixed),
@@ -543,7 +580,7 @@
           const res = await fetch("api/v1/viewer.json");
           if (!res.ok) throw new Error("HTTP " + res.status);
           const raw = await res.json();
-          raw.rows = raw.rows.map(makeRow);
+          raw.rows = raw.rows.map(rowMapper(raw.fields));
           state.data = raw;
           state.meta = await fetch("api/v1/meta.json").then((r) => r.json()).catch(() => null);
           $("genat").textContent = "更新: " + (raw.generated_at || "").slice(0, 16).replace("T", " ");
@@ -556,7 +593,7 @@
           $("surface").insertAdjacentHTML("beforeend",
             Object.entries(surfaces).map(([id, label]) =>
               `<option value="${esc(id)}">${esc(label)}（${nf.format(surfaceCounts[id] || 0)}）</option>`).join(""));
-          for (const id of ["q", "sort", "prio", "vendor", "cvss", "since", "surface", "f_kev", "f_exp", "f_poc", "f_ransom", "f_fixed"]) {
+          for (const id of ["q", "sort", "prio", "risk", "vendor", "cvss", "since", "surface", "f_kev", "f_exp", "f_poc", "f_ransom", "f_fixed"]) {
             const el = $(id);
             el.addEventListener(id === "q" ? "input" : "change", () => {
               clearTimeout(state.t);
