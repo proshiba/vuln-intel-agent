@@ -48,20 +48,28 @@ def _write_report_input(tmp_path: Path, advisories: list[Advisory]) -> None:
 
 
 def test_generate_report_adds_matrix_and_orders_by_risk(tmp_path: Path, advisory_factory) -> None:
+    # このテストが見ているのは表の描画とリスク順の並びで、新しさの加点ではない。
+    # 既定の公開日はレポート基準時刻から日が浅く全件が加点対象になり、リスク区分が
+    # 揃ってしまって並びの検証にならないため、加点が付かない日付に固定する。
+    # 新しさの加点そのものは tests/test_risk.py で検証している。
+    long_ago = datetime(2025, 1, 1, tzinfo=UTC)
     advisories = [
         advisory_factory(
             canonical_id="example:moderate",
             title="Moderate advisory",
+            published_at=long_ago,
             facts=AdvisoryFacts(cves=["CVE-2026-10003"], cvss_score=5.5, known_exploited=True),
         ),
         advisory_factory(
             canonical_id="example:other",
             title="Other advisory",
+            published_at=long_ago,
             facts=AdvisoryFacts(poc_public=True),
         ),
         advisory_factory(
             canonical_id="example:critical",
             title="Critical advisory",
+            published_at=long_ago,
             facts=AdvisoryFacts(
                 cves=["CVE-2026-10001"],
                 cvss_score=9.8,
@@ -72,6 +80,7 @@ def test_generate_report_adds_matrix_and_orders_by_risk(tmp_path: Path, advisory
         advisory_factory(
             canonical_id="example:high",
             title="High advisory",
+            published_at=long_ago,
             facts=AdvisoryFacts(cves=["CVE-2026-10002"], cvss_score=8.1),
         ),
     ]
