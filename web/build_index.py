@@ -52,9 +52,64 @@ FIELDS = [
     "upd",
     "asc",
     "lag",
+    "risk",
+    "rscore",
     "prefix",
 ]
 FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
+
+
+def _load_risk(classifier):
+    """台帳の1行を採点する関数を返す。パッケージが無い環境では None。
+
+    リスクは公開・修正からの経過日数を含むため、日が経てば同じデータでも値が変わる。
+    台帳に保存すると翌日には古くなるので、索引を作るたびにその場で採点する。
+
+    分類器は呼び出し側から受け取る。行ごとに読み直すと設定 YAML を数万回パースする
+    ことになり、索引の生成が現実的な時間で終わらない。
+    """
+
+    try:
+        from vulnwatch.risk import RiskSignals, score_risk, severity_of
+    except ModuleNotFoundError:
+        return None
+
+    def assess(row: dict[str, str], surface_class: str, now: datetime) -> tuple[str, int]:
+        try:
+            cvss: float | None = float(row["cvss_score"])
+        except (TypeError, ValueError, KeyError):
+            cvss = None
+        reach = (
+            classifier.reach_of(surface_class) if classifier is not None and surface_class else None
+        )
+        result = score_risk(
+            RiskSignals(
+                severity=severity_of(cvss, row.get("vendor_severity")),
+                cisa_kev=row.get("cisa_kev") == "true",
+                exploited=row.get("known_exploited") == "true",
+                poc_public=row.get("poc_public") == "true",
+                has_fix=row.get("fixed") == "true",
+                published_at=_timestamp(row.get("published_at")),
+                # 台帳の updated_at は当方が最後にこのエントリへ触れた時刻で、
+                # 脆弱性そのものの新しさではない。公開日だけを使う。
+                surface_class=surface_class or None,
+                surface_reach=reach,
+            ),
+            now,
+        )
+        return result.level, result.score
+
+    return assess
+
+
+def _timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _load_webapi():
@@ -126,6 +181,8 @@ def main() -> int:
         return 1
     csv.field_size_limit(10_000_000)
     classifier = _load_classifier()
+    assess_row = _load_risk(classifier)
+    now = datetime.now(UTC)
     rows: list[list[object]] = []
     vendors_set: set[str] = set()
     stats = {
@@ -139,6 +196,7 @@ def main() -> int:
     }
     prio_counts: dict[str, int] = {}
     surface_counts: dict[str, int] = {}
+    risk_counts: dict[str, int] = {}
     with CSV_PATH.open(encoding="utf-8", newline="") as handle:
         for r in csv.DictReader(handle):
             flags = 0
@@ -179,6 +237,11 @@ def main() -> int:
                 asc = r.get("attack_surface_class", "") or ""
             if asc:
                 surface_counts[asc] = surface_counts.get(asc, 0) + 1
+            if assess_row is not None:
+                risk_level, risk_score = assess_row(r, asc, now)
+                risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
+            else:
+                risk_level, risk_score = "", 0
             rows.append(
                 [
                     r["vuln_id"],
@@ -194,6 +257,8 @@ def main() -> int:
                     _day(r["updated_at"]),
                     asc,
                     lag,
+                    risk_level,
+                    risk_score,
                     -1,  # placeholder; replaced with the prefix-dictionary index below
                 ]
             )
@@ -222,7 +287,12 @@ def main() -> int:
             "kev": FLAG_KEV,
             "ransomware": FLAG_RANSOMWARE,
         },
-        "stats": {**stats, "priorities": prio_counts, "surfaces": surface_counts},
+        "stats": {
+            **stats,
+            "priorities": prio_counts,
+            "surfaces": surface_counts,
+            "risks": risk_counts,
+        },
         "attack_surfaces": surfaces,
         "prefix_dictionary": prefix_dictionary,
         "vendors": sorted(vendors_set),
@@ -242,7 +312,13 @@ def main() -> int:
         repository=REPOSITORY,
         site_url=SITE_URL,
         ref=REF,
-        stats={**stats, **entity_counts, "priorities": prio_counts, "surfaces": surface_counts},
+        stats={
+            **stats,
+            **entity_counts,
+            "priorities": prio_counts,
+            "surfaces": surface_counts,
+            "risks": risk_counts,
+        },
         fields=FIELDS,
         flags=payload["flags"],
         attack_surfaces=surfaces,
