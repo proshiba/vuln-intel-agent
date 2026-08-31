@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "188eea2fc1c9797bc7c317470ba4b1feee5cf40b69c052e8ce60101f06e4460b",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwe_ids\": [\"CWE-502\"], \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"# Advisory 19 — [H16] Relay HMAC unmarshalToken runs gob.Decoder on unauth bytes before signature check\\n\\n- **Severity:** Medium (reassessed by NetBird; see Impact)\\n- **CVSS 4.0 Base Score:** **6.3** (reassessed by NetBird)\\n- **CVSS 4.0 Vector:** `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`\\n- **CWE:** [CWE-502](https://cwe.mitre.org/data/definitions/502.html) (CWE-502)\\n- **Affected product:** `github.com/netbirdio/netbird` — relay server, `>= 0.29.0, < 0.75.0` (reported against v0.74.3)\\n- **Affected component(s):** relay server pre-authentication handshake\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet · Securin Inc. — `arjun.basnet@securin.io`\\n\\n---\\n\\n## Overview\\n\\n```go\\nfunc unmarshalToken(raw []byte) (*Token, error) {\\n    var t Token\\n    if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&t); err != nil {\\n        return nil, err\\n    }\\n    return &t, nil\\n}\\n```\\n\\nThe relay accepts attacker-supplied bytes and hands them to `gob.NewDecoder`\\nbefore any HMAC signature verification. Any future gob decoder CVE (or existing\\nresource-exhaustion primitive) is directly reachable pre-auth by an anonymous\\nnetwork client.\\n\\nThe reachable path is the deprecated `Hello` handshake. `handshakeReceive`\\ndispatched a `MsgTypeHello` message to `handleHelloMsg`, which called the\\nvalidator's `ValidateHelloMsgType` — the gob path — before any peer was\\nauthenticated. The `Auth` handshake that every client has used since v0.29.1\\nnever invoked gob.\\n\\n---\\n\\n## Affected Location\\n\\nPaths and line numbers as of v0.74.7, the last affected release:\\n\\n- `shared/relay/auth/hmac/token.go:21` — `unmarshalToken` uses `gob.Decoder`.\\n- `shared/relay/auth/hmac/validator.go:22-33` — signature check runs AFTER decode.\\n- `shared/relay/auth/validator.go` — `ValidateHelloMsgType` delegates to the above.\\n- `relay/server/handshake.go` — `handshakeReceive` accepts `MsgTypeHello` pre-authentication and routes it to `handleHelloMsg`.\\n\\n---\\n\\n## Vulnerable Code\\n\\n```go\\nfunc unmarshalToken(raw []byte) (*Token, error) {\\n    var t Token\\n    if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&t); err != nil {\\n        return nil, err\\n    }\\n    return &t, nil\\n}\\n```\\n\\n```go\\nfunc (a *TimedHMACValidator) Validate(credentials any) error {\\n    b, ok := credentials.([]byte)\\n    if !ok {\\n        return fmt.Errorf(\\\"invalid credentials type\\\")\\n    }\\n    c, err := unmarshalToken(b)                 // gob decode of unauthenticated bytes\\n    if err != nil {\\n        return err\\n    }\\n    return a.TimedHMAC.Validate(sha256.New, c)  // signature verified afterwards\\n}\\n```\\n\\n---\\n\\n## Reproduction\\n\\nSending a `Hello` handshake message to a relay server older than v0.75.0 reaches\\nthe gob decoder without credentials.\\n\\n### PoC output\\n\\n```\\n=== RUN   TestH16_GobDecoderSurface\\n    poc_test.go:37: crafted payload 128MB nested slices -> peak alloc 1.9GB\\n    poc_test.go:42: server accepted decode before signature check\\n--- PASS: TestH16_GobDecoderSurface\\n```\\n\\nThe reported allocation figure comes from calling `unmarshalToken` directly. Over\\nthe wire the payload is bounded — see Impact.\\n\\n---\\n\\n## Impact\\n\\nReaching the decoder needs no credentials, but the achievable input is small.\\n`handshakeReceive` reads into a buffer of `messages.MaxHandshakeSize` (212\\nbytes), and the pre-authentication phase is bounded by a 10-second timeout, so at\\nmost a couple of hundred attacker-controlled bytes ever reach `gob.Decode`. The\\n128 MB payload in the PoC is not reachable through the server, and there is no\\nconfidentiality or integrity impact.\\n\\nWhat the path did expose is `encoding/gob` itself, which has had denial-of-service\\nvulnerabilities — for example CVE-2024-34156, stack exhaustion on deeply nested\\ninput, fixed in Go 1.22.7 and 1.23.1. A relay server built with an affected Go\\ntoolchain would have reached that from an unauthenticated connection, before any\\nsignature check.\\n\\nNetBird therefore rates this Medium (CVSS 4.0 base score 6.3) rather than the\\nreported High (7.7). The difference is in the availability metrics: the report\\nassumes a high availability impact on the relay and on subsequent systems, which\\nthe 212-byte handshake bound does not support. What remains is a low availability\\nimpact, contingent on a separate decoder vulnerability and so marked as attack\\nrequirements present. It stays network-reachable and pre-authentication, which is\\nwhy it does not fall lower. CIA breakdown is captured in the reassessed CVSS 4.0\\nvector: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`.\\n\\n---\\n\\n## Fix\\n\\nFixed in v0.75.0 ([#6783](https://github.com/netbirdio/netbird/pull/6783)). The\\nrelay server no longer accepts the `Hello` message type, and the gob-based token\\nand message decoding behind it was deleted along with the legacy validator\\nwiring. Handshake authentication now runs only through the `Auth` message, whose\\ntoken is parsed by `v2.UnmarshalToken` — a fixed-layout byte reader with explicit\\nlength checks — and whose signature is verified against the declared algorithm's\\ndigest size. No gob decoding remains on the relay server's handshake path.\\n\\nThe `Hello` handshake shipped in v0.29.0 and was superseded by the `Auth`\\nhandshake in v0.29.1. From v0.29.1 onward no NetBird client used it; the server\\nkept the path solely for backwards compatibility with pre-v0.29.1 clients, which\\nis why it could be removed outright rather than reordered.\\n\\nOperators running a relay server older than v0.75.0 should upgrade. No\\nconfiguration change is required, and no client action is needed.\\n\\n---\\n\\n## Remediation\\n\\n1. HMAC-verify the raw bytes before ever calling `gob.Decode`.\\n2. Prefer a length-bounded, schema-driven format (protobuf) over gob for network payloads.\\n3. Cap decoder input size and nesting depth defensively.\\n\\n---\\n\\n## References & Evidence\\n\\n- **CWE definitions:** [CWE-502](https://cwe.mitre.org/data/definitions/502.html)\\n- **CVSS 4.0 calculator:** https://www.first.org/cvss/calculator/4-0\\n- **Fix:** [#6783](https://github.com/netbirdio/netbird/pull/6783)\\n\\n---\\n\\n## Credit\\n\\nReported by **Arjun Basnet** — [Securin Inc.](https://securin.io) — via GitHub [@SecurinDisclose](https://github.com/SecurinDisclose).\\nCoordinated disclosure timeline: **90 days** — public disclosure on or after **2026-10-11** unless extended by mutual agreement.\\n\\n---\\n\\n## Private Audit Bundle\\n\\nFull reproduction bundle (labs, PoCs, live-target evidence, cross-referenced advisories) is available at:\\n\\n**https://github.com/SecurinDisclose/netbird-0.74.3-audit** (private — request read access via GitHub or email `arjun.basnet@securin.io`).\\n\\n## Coordinated Disclosure\\n\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet, Securin Inc.\\n- **Contact:** `arjun.basnet@securin.io`\\n- **Public-disclosure deadline:** 2026-10-11 (90 days from 2026-07-13)\\n\\n\", \"ghsa_id\": \"GHSA-v5w2-pqxj-6r94\", \"html_url\": \"https://github.com/netbirdio/netbird/security/advisories/GHSA-v5w2-pqxj-6r94\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v5w2-pqxj-6r94\"}], \"private_fork\": null, \"published_at\": \"2026-08-31T14:38:58Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/17948409?v=4\", \"events_url\": \"https://api.github.com/users/lixmal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lixmal/followers\", \"following_url\": \"https://api.github.com/users/lixmal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lixmal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lixmal\", \"id\": 17948409, \"login\": \"lixmal\", \"node_id\": \"MDQ6VXNlcjE3OTQ4NDA5\", \"organizations_url\": \"https://api.github.com/users/lixmal/orgs\", \"received_events_url\": \"https://api.github.com/users/lixmal/received_events\", \"repos_url\": \"https://api.github.com/users/lixmal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lixmal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lixmal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lixmal\", \"user_view_type\": \"public\"}, \"severity\": \"medium\", \"state\": \"published\", \"submission\": null, \"summary\": \"[H16] Relay server gob-decoded unauthenticated Hello handshake bytes before verifying the HMAC signature\", \"updated_at\": \"2026-08-31T15:00:49Z\", \"url\": \"https://api.github.com/repos/netbirdio/netbird/security-advisories/GHSA-v5w2-pqxj-6r94\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/netbirdio/netbird\"}, \"patched_versions\": \"0.75.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.29.0, < 0.75.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "netbird:ghsa-v5w2-pqxj-6r94",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/netbirdio/netbird: >= 0.29.0, < 0.75.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2024-34156"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [
+      "github.com/netbirdio/netbird: 0.75.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/netbirdio/netbird"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-08-31T19:12:37.551868Z",
+  "provenance": {
+    "content_sha256": "fe50b635bd880682c90eb9bf6aa43a3df36fb7d97e7af8fad03ff947c2fa6a65",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-08-31T14:38:58Z",
+  "schema_version": 1,
+  "source_id": "netbird_github",
+  "source_url": "https://github.com/netbirdio/netbird/security/advisories/GHSA-v5w2-pqxj-6r94",
+  "status": "active",
+  "title": "[H16] Relay server gob-decoded unauthenticated Hello handshake bytes before verifying the HMAC signature",
+  "updated_at": "2026-08-31T15:00:49Z",
+  "vendor": "NetBird",
+  "vendor_advisory_id": "GHSA-v5w2-pqxj-6r94"
+}
