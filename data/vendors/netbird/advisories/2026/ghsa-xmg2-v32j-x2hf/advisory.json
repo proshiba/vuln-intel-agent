@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "1ea8ce1a179b254915ceaa382d2ee11bb529abfcde21912f44586e9001c4549b",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [], \"credits_detailed\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-78\", \"CWE-116\"], \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}, {\"cwe_id\": \"CWE-116\", \"name\": \"Improper Encoding or Escaping of Output\"}], \"description\": \"# Advisory 23 — [H28] SSH config Match line injection via peer FQDN / hostname\\n\\n- **Severity:** High\\n- **CVSS 4.0 Base Score:** **8.5**\\n- **CVSS 4.0 Vector:** `CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H`\\n- **CWE:** [CWE-78](https://cwe.mitre.org/data/definitions/78.html), [CWE-116](https://cwe.mitre.org/data/definitions/116.html) (CWE-78, CWE-116)\\n- **Affected versions:** `github.com/netbirdio/netbird` `>= 0.60.0, < 0.74.7` (desktop clients; see Affected platforms)\\n- **Patched in:** 0.74.7 — https://github.com/netbirdio/netbird/pull/6805\\n- **Affected component(s):** ssh config injection\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet · Securin Inc. — `arjun.basnet@securin.io`\\n\\n\\n---\\n\\n## Overview\\n\\n```go\\nfmt.Fprintf(w, `Match host \\\"%s\\\" exec \\\"netbird auth ...\\\"`+\\\"\\\\n\\\", peerFQDN)\\n```\\n\\n`peerFQDN` is embedded into a double-quoted OpenSSH `Match host` directive\\nwithout escaping. A peer whose FQDN contains a `\\\"` breaks out of the quoted\\ncontext and can inject arbitrary SSH config directives — including additional\\n`exec` commands. The next time a user on that machine runs `ssh`, the injected\\ncommands execute locally.\\n\\nThe file written is the system-wide drop-in\\n`/etc/ssh/ssh_config.d/99-netbird.conf` (on Windows, the same file under\\n`%PROGRAMDATA%\\\\ssh\\\\ssh_config.d`), not a per-user `~/.ssh/config`. The daemon\\nwrites it with its own privileges, so an injected directive applies to every\\nuser on the host who runs `ssh`.\\n\\n---\\n\\n## Affected Location\\n\\n- `client/ssh/config/manager.go:193` — `Match host \\\"%s\\\" exec \\\"...\\\"` formatting.\\n\\n---\\n\\n## Vulnerable Code\\n\\n```go\\nfmt.Fprintf(w, `Match host \\\"%s\\\" exec \\\"netbird auth ...\\\"`+\\\"\\\\n\\\", peerFQDN)\\n```\\n\\n---\\n\\n## Reproduction\\n\\nA peer whose FQDN or hostname carries a `\\\"` is enough: once it reaches the\\nvictim's network map, the generated config breaks out of the quoted pattern\\nlist.\\n\\n### PoC output\\n\\n```\\n=== RUN   TestH28_SSHConfigInjection\\n    poc_test.go:47: peerFQDN='evil\\\" exec \\\"id > /tmp/pwn\\\" #' rendered as:\\n        Match host \\\"evil\\\" exec \\\"id > /tmp/pwn\\\" #\\\" exec \\\"netbird auth ...\\\"\\n    poc_test.go:53: /tmp/pwn contained uid=1000(victim)\\n--- PASS\\n```\\n\\n\\n---\\n\\n## Impact\\n\\nThe vulnerability enables the attack described in the Overview. Concrete consequences and CIA breakdown are captured in the CVSS 4.0 vector: `CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H`.\\n\\n---\\n\\n## Fix\\n\\nFixed in 0.74.7 ([#6805](https://github.com/netbirdio/netbird/pull/6805)).\\nPeer-supplied names are validated before they reach the config, rather than\\nescaped on the way out: `buildHostPatterns` in `client/ssh/config/manager.go`\\nadmits an FQDN or hostname only if it is a plain DNS name\\n(`domain.IsValidDomainNoWildcard`), and skips it with a warning otherwise. That\\nrejects embedded quotes, whitespace, newlines, the `,` pattern separator, and\\nthe `*` / `?` pattern metacharacters in one check, so no quoted context can be\\nbroken out of and no unintended host can be matched.\\n\\n## Affected platforms\\n\\nDesktop clients on Linux, macOS, Windows and FreeBSD. The Android and iOS apps\\nare not affected: the config target is a system directory the apps cannot write\\n(`/etc/ssh/ssh_config.d`), the write error is logged and discarded, and neither\\napp ships an OpenSSH client that would consume the file.\\n\\n---\\n\\n## Remediation\\n\\n1. Validate `peerFQDN` against a strict RFC-1123 hostname regex.\\n2. Escape `\\\"` and `\\\\` (or reject them) before templating.\\n3. Prefer non-template config generation (e.g. write via a config API that\\n   sanitises input).\\n\\n---\\n\\n## References & Evidence\\n\\n- **CWE definitions:** [CWE-78](https://cwe.mitre.org/data/definitions/78.html), [CWE-116](https://cwe.mitre.org/data/definitions/116.html)\\n- **CVSS 4.0 calculator:** https://www.first.org/cvss/calculator/4-0#CVSS:4.0/AV:N/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H\\n- **Fix:** [#6805](https://github.com/netbirdio/netbird/pull/6805)\\n\\n---\\n\\n## Credit\\n\\nReported by **Arjun Basnet** — [Securin Inc.](https://securin.io) — via GitHub [@SecurinDisclose](https://github.com/SecurinDisclose).\\nCoordinated disclosure timeline: **90 days** — public disclosure on or after **2026-10-11** unless extended by mutual agreement.\\n\\n---\\n\\n## Private Audit Bundle\\n\\nFull reproduction bundle (labs, PoCs, live-target evidence, cross-referenced advisories) is available at:\\n\\n**https://github.com/SecurinDisclose/netbird-0.74.3-audit** (private — request read access via GitHub or email `arjun.basnet@securin.io`).\\n\\n## Coordinated Disclosure\\n\\n- **Reporter:** [@SecurinDisclose](https://github.com/SecurinDisclose) — Arjun Basnet, Securin Inc.\\n- **Contact:** `arjun.basnet@securin.io`\\n- **Public-disclosure deadline:** 2026-10-11 (90 days from 2026-07-13)\\n\\n\\n\", \"ghsa_id\": \"GHSA-xmg2-v32j-x2hf\", \"html_url\": \"https://github.com/netbirdio/netbird/security/advisories/GHSA-xmg2-v32j-x2hf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xmg2-v32j-x2hf\"}], \"private_fork\": null, \"published_at\": \"2026-09-01T14:29:17Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/17948409?v=4\", \"events_url\": \"https://api.github.com/users/lixmal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lixmal/followers\", \"following_url\": \"https://api.github.com/users/lixmal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lixmal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lixmal\", \"id\": 17948409, \"login\": \"lixmal\", \"node_id\": \"MDQ6VXNlcjE3OTQ4NDA5\", \"organizations_url\": \"https://api.github.com/users/lixmal/orgs\", \"received_events_url\": \"https://api.github.com/users/lixmal/received_events\", \"repos_url\": \"https://api.github.com/users/lixmal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lixmal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lixmal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lixmal\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"[H28] SSH config Match line injection via peer FQDN / hostname\", \"updated_at\": \"2026-09-01T14:29:17Z\", \"url\": \"https://api.github.com/repos/netbirdio/netbird/security-advisories/GHSA-xmg2-v32j-x2hf\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/netbirdio/netbird\"}, \"patched_versions\": \"0.74.7\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.60.0, < 0.74.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "netbird:ghsa-xmg2-v32j-x2hf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/netbirdio/netbird: >= 0.60.0, < 0.74.7"
+    ],
+    "cves": [],
+    "fixed_versions": [
+      "github.com/netbirdio/netbird: 0.74.7"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/netbirdio/netbird"
+    ],
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-01T19:13:54.376881Z",
+  "provenance": {
+    "content_sha256": "3eba35f570fefa45e67fc10de6deac8900bbb00bef12d5d650878366996c3a7e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T14:29:17Z",
+  "schema_version": 1,
+  "source_id": "netbird_github",
+  "source_url": "https://github.com/netbirdio/netbird/security/advisories/GHSA-xmg2-v32j-x2hf",
+  "status": "active",
+  "title": "[H28] SSH config Match line injection via peer FQDN / hostname",
+  "updated_at": "2026-09-01T14:29:17Z",
+  "vendor": "NetBird",
+  "vendor_advisory_id": "GHSA-xmg2-v32j-x2hf"
+}

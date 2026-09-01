@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/286391906?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/followers\", \"following_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut-from-NightWolf-Team\", \"id\": 286391906, \"login\": \"iaohkut-from-NightWolf-Team\", \"node_id\": \"U_kgDOERH-Yg\", \"organizations_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73088\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}, {\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"## Vulnerability Details\\n\\n**File**: `node.js`\\n**Function**: `normalizeStats()` (line ~214), reached from `getStat()` (called\\n**unconditionally** on every `browserslist()` call) and `loadStat()`\\n\\n### Root Cause\\n```js\\nfunction normalizeStats(data, stats) {\\n  if (!data) { data = {} }\\n  if (stats && 'dataByBrowser' in stats) { stats = stats.dataByBrowser }\\n  if (typeof stats !== 'object') return undefined\\n\\n  var normalized = {}\\n  for (var i in stats) {\\n    var versions = Object.keys(stats[i])\\n    if (versions.length === 1 && data[i] && data[i].versions.length === 1) {\\n      var normal = data[i].versions[0]\\n      normalized[i] = {}\\n      normalized[i][normal] = stats[i][versions[0]]\\n    } else {\\n      normalized[i] = stats[i]\\n    }\\n  }\\n  return normalized\\n}\\n```\\n`stats` is untrusted: it comes from `JSON.parse()`-ing a\\n`browserslist-stats.json` file — auto-discovered by walking up the directory\\ntree from the project root **on every `browserslist()` call, regardless of\\nthe query** (`env.getStat(opts, browserslist.data)` runs unconditionally\\ninside `browserslist()`) — or from `opts.stats` passed programmatically /\\nvia the CLI's `--stats=` flag. `data` is `browserslist.data`, a plain object\\npopulated only with real browser names.\\n\\nTwo independent bugs from the same root cause (unguarded `for...in` over\\nuntrusted keys used with plain-object bracket access/assignment):\\n\\n1. **Crash**: `data[i]` has no `hasOwnProperty` guard. If `stats` contains a\\n   key that also happens to be an inherited `Object.prototype` member name —\\n   `\\\"__proto__\\\"`, `\\\"toString\\\"`, `\\\"valueOf\\\"`, `\\\"constructor\\\"`,\\n   `\\\"hasOwnProperty\\\"`, `\\\"isPrototypeOf\\\"`, etc. — `data[i]` resolves to that\\n   inherited function/object (always truthy), and the code then does\\n   `data[i].versions.length` → `undefined.length` → **uncaught `TypeError`**,\\n   for any such key whose JSON value has exactly one sub-key, e.g.:\\n   ```json\\n   { \\\"toString\\\": { \\\"onekey\\\": 5 }, \\\"chrome\\\": { \\\"100\\\": 50 } }\\n   ```\\n2. **Prototype write**: `normalized[i] = ...` on the fresh\\n   `normalized = {}` — if `i` is exactly `\\\"__proto__\\\"` (and `normalized` has\\n   no own property by that name yet), this computed assignment invokes the\\n   real `Object.prototype.__proto__` setter, changing `normalized`'s actual\\n   `[[Prototype]]` instead of creating a plain property.\\n\\nBecause this runs on **every** `browserslist()` call regardless of the\\nquery, simply committing a poisoned `browserslist-stats.json` anywhere in a\\nproject's directory tree breaks every subsequent Browserslist call in that\\nproject — including calls made by Autoprefixer, Babel `preset-env`,\\nStylelint, or PostCSS internally, for completely unrelated queries.\\n\\n### Attack Scenario\\n1. Attacker submits a PR (or a compromised dependency) adding a\\n   `browserslist-stats.json` file anywhere between the project root and\\n   filesystem root, containing e.g.\\n   `{\\\"toString\\\": {\\\"onekey\\\": 5}, \\\"chrome\\\": {\\\"100\\\": 50}}`.\\n2. The victim's build/CI pipeline runs any tool that calls `browserslist()`\\n   internally, for **any** query.\\n3. The auto-discovered poisoned file crashes the process with an uncaught\\n   `TypeError` on the very first call.\\n\\n### Measured Impact\\nConfirmed crash (real `browserslist()` call, v4.28.6) with `stats` keys:\\n`__proto__`, `toString`, `valueOf`, `hasOwnProperty`, `constructor`,\\n`isPrototypeOf` — each paired with a one-key JSON object — for any query,\\nincluding `browserslist('defaults')` which never mentions stats.\\n\\n### Recommended Fix (implemented and verified)\\n```js\\nvar normalized = Object.create(null)\\nfor (var i in stats) {\\n  var versions = Object.keys(stats[i])\\n  var known = Object.prototype.hasOwnProperty.call(data, i) && data[i]\\n  if (versions.length === 1 && known && known.versions.length === 1) {\\n    var normal = known.versions[0]\\n    normalized[i] = Object.create(null)\\n    normalized[i][normal] = stats[i][versions[0]]\\n  } else {\\n    normalized[i] = stats[i]\\n  }\\n}\\nreturn normalized\\n```\\n`normalized` uses `Object.create(null)` so a write to `\\\"__proto__\\\"` is an\\nordinary property set, never a `[[Prototype]]` change; `data[i]` is replaced\\nwith an explicit `hasOwnProperty` check so it never resolves to an inherited\\n`Object.prototype` member.\\n\\n**Verification**:\\n- `NODE_ENV=test npx uvu test .test.js` → 301/301 pass unmodified\\n  (`test/custom.test.js`, `test/shareable-stats.test.js`, `test/cover.test.js`\\n  exercise the stats-handling paths).\\n- All 6 previously crash-inducing keys, tested individually, now resolve\\n  without error.\\n- The realistic file-based auto-discovery scenario (poisoned\\n  `browserslist-stats.json` + an unrelated `browserslist('defaults')` call)\\n  now returns a normal result instead of crashing.\\n\\n### Impact\\n- **Who is affected**: Any project whose build/CI invokes Browserslist\\n  (directly or via Autoprefixer/Babel/Stylelint/PostCSS) in a directory tree\\n  an attacker can place a file into (external PR, compromised dependency),\\n  or any app that passes user-influenced data into `opts.stats`.\\n- **What an attacker achieves**: Immediate DoS — crashes the invoking\\n  process on the first Browserslist call after the file is present, for any\\n  query, no special syntax needed.\\n- **Conditions required**: No authentication — only the ability to add a\\n  file to the project's directory tree, or influence `opts.stats`.\\n\\n### Verification Environment\\nbrowserslist @ HEAD (== v4.28.6, current latest stable release) under local\\nNode.js v20.19.5. Pure JS library — executed directly, no server needed.\\n\\n### Note\\nFound via a systematic review of prototype-pollution-adjacent patterns in\\nthis codebase after confirming two unrelated algorithmic-complexity issues\\n(reported separately as GHSA-rrmg-cfrq-23vv and GHSA-g6p8-hj8g-x889) in the\\nsame research pass. A similar `for...in` + bracket-write pattern in\\n`index.js`'s `copyObject()` (used by `normalizeAndroidData`) was already\\nguarded against `__proto__`/`constructor`/`prototype` keys by a prior,\\nunrelated commit — that guard was never applied to this function.\", \"epss\": {\"percentage\": 0.00361, \"percentile\": 0.29042}, \"ghsa_id\": \"GHSA-73wf-gq98-2v4g\", \"github_reviewed_at\": \"2026-09-01T16:41:54Z\", \"html_url\": \"https://github.com/advisories/GHSA-73wf-gq98-2v4g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-73wf-gq98-2v4g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73088\"}], \"nvd_published_at\": \"2026-08-11T17:19:16Z\", \"published_at\": \"2026-09-01T16:41:54Z\", \"references\": [\"https://github.com/browserslist/browserslist/security/advisories/GHSA-73wf-gq98-2v4g\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73088\", \"https://github.com/browserslist/browserslist/commit/f9914ad9effc865ccc27d816255625890b31ca51\", \"https://github.com/browserslist/browserslist/releases/tag/4.28.7\", \"https://github.com/advisories/GHSA-73wf-gq98-2v4g\"], \"repository_advisory_url\": \"https://api.github.com/repos/browserslist/browserslist/security-advisories/GHSA-73wf-gq98-2v4g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/browserslist/browserslist\", \"summary\": \"Browserslist: Uncaught crash / prototype write via untrusted browserslist-stats.json custom stats (normalizeStats)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-01T16:41:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-73wf-gq98-2v4g\", \"vulnerabilities\": [{\"first_patched_version\": \"4.28.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"browserslist\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.28.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-73wf-gq98-2v4g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "browserslist: <= 4.28.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73088"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "browserslist"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-01T19:13:46.874629Z",
+  "provenance": {
+    "content_sha256": "472655badfa22cf6d502d3c97cc211cb18cb9ada0115260bedfbfe567a8dab63",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T16:41:54Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-73wf-gq98-2v4g",
+  "status": "active",
+  "title": "Browserslist: Uncaught crash / prototype write via untrusted browserslist-stats.json custom stats (normalizeStats)",
+  "updated_at": "2026-09-01T16:41:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-73wf-gq98-2v4g"
+}
