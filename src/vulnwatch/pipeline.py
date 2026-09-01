@@ -348,7 +348,7 @@ class Pipeline:
             self._write_success_state(next_state, selected_result, started)
 
         manifest.source_outcomes = [outcomes[source.id] for source in selected]
-        self._update_vulndb(manifest, coverage_changes, exploitation_reports)
+        self._update_vulndb(manifest, coverage_changes, exploitation_reports, kev)
         self.storage.rebuild_indexes()
         manifest.completed_at = datetime.now(UTC)
         write_json(
@@ -464,7 +464,9 @@ class Pipeline:
         enrichment.attack_surface_class, enrichment.attack_surface_reach = classify_with_reach(
             [source.vendor], facts.products
         )
-        listed = [entry for cve in facts.cves if (entry := kev.get(cve)) is not None]
+        kev_entries = {cve: entry for cve in facts.cves if (entry := kev.get(cve)) is not None}
+        listed = list(kev_entries.values())
+        enrichment.kev_entries = kev_entries
         enrichment.cisa_kev = bool(listed)
         # 複数CVEを含むアドバイザリでは、最も早い掲載日を代表値として保持する。
         dates = [entry.date_added for entry in listed if entry.date_added is not None]
@@ -498,6 +500,7 @@ class Pipeline:
         manifest: RunManifest,
         coverage_changes: list[Advisory] | None = None,
         exploitation_reports: list[ExploitationReport] | None = None,
+        kev: dict[str, KevEntry] | None = None,
     ) -> None:
         db = VulnDb(self.output_root)
         now = datetime.now(UTC)
@@ -526,6 +529,11 @@ class Pipeline:
             recorded, promoted = db.apply_exploitation_reports(exploitation_reports, now)
             manifest.exploitation_reports_recorded = recorded
             manifest.exploitation_promotions = promoted
+        if kev and db.initialized:
+            # 掲載は増えることも取り下げられることもあり、過去に誤って付いたフラグは
+            # そのエントリが再び更新されるまで残る。索引CSVの書き出しでどのみち全件を
+            # 読むので、毎回ここで整合させる。
+            manifest.kev_flags_added, manifest.kev_flags_removed = db.reconcile_kev(kev, now)
         db.write()
 
     def _handle_missing(
