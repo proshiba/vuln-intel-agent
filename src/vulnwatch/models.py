@@ -468,6 +468,7 @@ class RunManifest(StrictModel):
     exploitation_reports_recorded: int = 0
     exploitation_promotions: int = 0
     # KEV カタログとの突き合わせで掲載を付け直した件数・外した件数。
+    entries_backfilled: int = 0
     kev_flags_added: int = 0
     kev_flags_removed: int = 0
 
