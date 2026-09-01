@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from vulnwatch.attack_surface import classify as classify_attack_surface
 from vulnwatch.attack_surface import classify_with_reach
 from vulnwatch.collectors import CollectorError, create_collector
 from vulnwatch.collectors.osv import OSV_HOST, OSV_QUERY_URL
@@ -14,6 +15,7 @@ from vulnwatch.collectors.osv_global import (
 )
 from vulnwatch.config import load_products, load_sources
 from vulnwatch.identity import canonical_id, semantic_hash
+from vulnwatch.initial_access import is_potential_initial_access
 from vulnwatch.models import (
     Advisory,
     AdvisoryDraft,
@@ -529,6 +531,28 @@ class Pipeline:
             recorded, promoted = db.apply_exploitation_reports(exploitation_reports, now)
             manifest.exploitation_reports_recorded = recorded
             manifest.exploitation_promotions = promoted
+        if db.initialized:
+            # CVE 1件だけを扱うアドバイザリのベクタは、そのCVEのものと確定できる。
+            # 初期アクセス判定に要るので、未設定のエントリへ補う。
+            vector_by_cve: dict[str, str] = {}
+            initial_access_cves: set[str] = set()
+            for advisory in self.storage.all_advisories():
+                facts = advisory.facts
+                if len(facts.cves) != 1:
+                    continue
+                cve = facts.cves[0]
+                if facts.cvss_vector:
+                    vector_by_cve[cve] = facts.cvss_vector
+                if is_potential_initial_access(
+                    classify_attack_surface([advisory.vendor], facts.products),
+                    facts.cvss_vector,
+                    facts.remote,
+                    facts.authentication_required,
+                ):
+                    initial_access_cves.add(cve)
+            manifest.entries_backfilled = db.backfill_from_advisories(
+                vector_by_cve, initial_access_cves
+            )
         if kev and db.initialized:
             # 掲載は増えることも取り下げられることもあり、過去に誤って付いたフラグは
             # そのエントリが再び更新されるまで残る。索引CSVの書き出しでどのみち全件を

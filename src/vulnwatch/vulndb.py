@@ -11,6 +11,7 @@ from ruamel.yaml import YAML
 from vulnwatch.attack_surface import classify as classify_attack_surface
 from vulnwatch.attack_surface import default_classifier
 from vulnwatch.identity import slugify
+from vulnwatch.initial_access import is_potential_initial_access
 from vulnwatch.models import (
     Advisory,
     AdvisoryEnrichment,
@@ -56,6 +57,8 @@ CSV_COLUMNS = (
     "exploitation_report_sources",
     "attack_surface_class",
     "cvss_score",
+    "cvss_vector",
+    "potential_initial_access",
     "vendor_severity",
     "priority",
     "sources",
@@ -110,6 +113,11 @@ class VulnRecord(StrictModel):
     # OSINT のリサーチ記事が報じた実悪用。悪用確認の候補であり、確定ではない。
     exploitation_reports: list[ExploitationReport] = Field(default_factory=list)
     cvss_score: float | None = None
+    # CVE 1件だけを扱うアドバイザリから採ったベクタ。複数CVEをまとめたアドバイザリの
+    # ベクタは、どのCVEのものか分からないので採らない。
+    cvss_vector: str | None = None
+    # 初期アクセスの起点になりうるか。アドバイザリ単位で判定した結果を保持する。
+    potential_initial_access: bool = False
     vendor_severity: str | None = None
     priority: Priority = Priority.INFO
     sources: list[VulnSourceRef] = Field(default_factory=list)
@@ -299,6 +307,38 @@ class VulnDb:
         merged.extend(vuln_id for vuln_id in touched if vuln_id not in merged)
         self.registry.advisory_index[advisory.canonical_id] = merged
 
+    def backfill_from_advisories(
+        self, vector_by_cve: dict[str, str], initial_access_cves: set[str]
+    ) -> int:
+        """CVE単位で確定している事実を、既存エントリへ補う。
+
+        ベクタと初期アクセス判定は `_merge` が収集のたびに書き込むが、既存の
+        エントリはその収集で触られるまで空のままになる。索引CSVの書き出しで
+        どのみち全エントリを読むので、ここでまとめて補う。
+
+        いずれも出所が1つのCVEに確定しているアドバイザリ由来のものだけを使う。
+        """
+
+        filled = 0
+        for path in sorted(self.vulns_root.rglob("*.yaml")):
+            entry = self.load_entry(path.stem)
+            if entry is None or entry.cve is None:
+                continue
+            changed = False
+            if not entry.cvss_vector and entry.cve in vector_by_cve:
+                entry.cvss_vector = vector_by_cve[entry.cve]
+                changed = True
+            # タグは設定の変更で付いたり外れたりするため、毎回そのときの判定で
+            # 上書きする。片道にすると、面の定義から外した製品に付いたタグが残る。
+            tagged = entry.cve in initial_access_cves
+            if entry.potential_initial_access != tagged:
+                entry.potential_initial_access = tagged
+                changed = True
+            if changed:
+                self._dirty.add(entry.vuln_id)
+                filled += 1
+        return filled
+
     def reconcile_kev(self, kev: dict[str, KevEntry], now: datetime) -> tuple[int, int]:
         """全エントリの KEV 掲載状態を、その日の KEV カタログと突き合わせて直す。
 
@@ -441,6 +481,26 @@ class VulnDb:
             entry.cvss_score is None or facts.cvss_score > entry.cvss_score
         ):
             entry.cvss_score = facts.cvss_score
+        # ベクタは出所が曖昧でないものだけを採る。RHSA のように1本で数十のCVEを扱う
+        # アドバイザリのベクタは、その中のどのCVEのものか特定できない。
+        if len(facts.cves) == 1:
+            if facts.cvss_vector:
+                entry.cvss_vector = facts.cvss_vector
+            # 初期アクセスの判定もここで行う。台帳の vendors/products は複数ベンダーの
+            # 統合結果で「どのベンダーのどの製品か」の対応が失われており、そこから
+            # 分類すると別ベンダーの製品名と組み合わさって誤判定する。アドバイザリ
+            # 単位なら対応が保たれている。
+            # 分類は保存値ではなく、その場で求める。アドバイザリに保存された
+            # attack_surface_class は収集時点の設定で計算されたもので、面の定義を
+            # 増やしても古いエントリには反映されない。
+            entry.potential_initial_access = entry.potential_initial_access or (
+                is_potential_initial_access(
+                    default_classifier().classify([advisory.vendor], facts.products),
+                    facts.cvss_vector,
+                    facts.remote,
+                    facts.authentication_required,
+                )
+            )
         severity = (facts.vendor_severity or "").casefold()
         if severity in _SEVERITY_RANK and (
             entry.vendor_severity is None
@@ -537,6 +597,7 @@ class VulnDb:
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(CSV_COLUMNS)
         for record in sorted(entries, key=lambda item: _vuln_id_sort_key(item.vuln_id)):
+            surface = classify_attack_surface(record.vendors, record.products) or ""
             writer.writerow(
                 [
                     record.vuln_id,
@@ -559,8 +620,10 @@ class VulnDb:
                     _flag(record.ransomware_use),
                     len(record.exploitation_reports) or "",
                     ";".join(sorted({report.source_id for report in record.exploitation_reports})),
-                    classify_attack_surface(record.vendors, record.products) or "",
+                    surface,
                     record.cvss_score if record.cvss_score is not None else "",
+                    record.cvss_vector or "",
+                    _flag(record.potential_initial_access),
                     record.vendor_severity or "",
                     record.priority,
                     ";".join(source.canonical_id for source in record.sources),

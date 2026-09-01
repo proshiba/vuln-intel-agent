@@ -57,6 +57,7 @@ FIELDS = [
     "prefix",
 ]
 FLAG_FIXED, FLAG_POC, FLAG_EXPLOITED, FLAG_KEV, FLAG_RANSOMWARE = 1, 2, 4, 8, 16
+FLAG_INITIAL_ACCESS = 32
 
 
 def _load_risk(classifier):
@@ -193,6 +194,7 @@ def main() -> int:
         "fixed": 0,
         "ransomware": 0,
         "kev_lag": 0,
+        "initial_access": 0,
     }
     prio_counts: dict[str, int] = {}
     surface_counts: dict[str, int] = {}
@@ -237,6 +239,11 @@ def main() -> int:
                 asc = r.get("attack_surface_class", "") or ""
             if asc:
                 surface_counts[asc] = surface_counts.get(asc, 0) + 1
+            # 判定は収集時にアドバイザリ単位で行っている。台帳の vendors/products は
+            # 複数ベンダーの統合結果なので、ここで分類し直すと誤判定する。
+            if r.get("potential_initial_access") == "true":
+                flags |= FLAG_INITIAL_ACCESS
+                stats["initial_access"] += 1
             if assess_row is not None:
                 risk_level, risk_score = assess_row(r, asc, now)
                 risk_counts[risk_level] = risk_counts.get(risk_level, 0) + 1
@@ -286,6 +293,7 @@ def main() -> int:
             "exploited": FLAG_EXPLOITED,
             "kev": FLAG_KEV,
             "ransomware": FLAG_RANSOMWARE,
+            "potential-initial-access": FLAG_INITIAL_ACCESS,
         },
         "stats": {
             **stats,

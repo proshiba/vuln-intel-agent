@@ -139,6 +139,7 @@ GET https://proshiba.github.io/vuln-intel-agent/api/v1/search.json
 | 12 | `lag` | number \| "" | CISA KEV 掲載より何日早く悪用を観測できたか |
 | 13 | `risk` | string | リスク区分 `緊急`/`高`/`中`/`低`。後述 |
 | 14 | `rscore` | number | リスクスコア 0〜100。後述 |
+| — | — | — | `potential-initial-access` は `flags` のビット 32。後述 |
 | 15 | `prefix` | number | `prefix_dictionary` への添字（`-1` は不明） |
 
 `rows` は**更新日の新しい順**に並んでいます。
@@ -149,6 +150,19 @@ GET https://proshiba.github.io/vuln-intel-agent/api/v1/search.json
 const at = Object.fromEntries(data.fields.map((name, index) => [name, index]));
 const risk = row[at.risk];
 ```
+
+### `potential-initial-access` タグ
+
+`flags` のビット 32 です。**初期アクセス（侵入の起点）に使われうる脆弱性**を絞り込むためのもので、次の両方を満たすときだけ立ちます。
+
+1. **製品が外部公開されやすい面である** — `config/attack_surface.yaml` に登録された VPN 機器・境界機器・リモート管理基盤・メール/コラボ基盤などに該当する。
+2. **脆弱性自体が単体で侵入の起点になりうる** — CVSS ベクタが `AV:N`（ネットワーク越し）、`PR:N`（権限不要）、`UI:N`（利用者の操作不要）、`AC:L`（攻撃者の制御外の条件が不要）で、機密性か完全性に影響がある。
+
+片方だけでは付きません。外部公開製品に同梱された HTTP クライアントライブラリの不具合は 1 を満たしますが 2 を満たさず、内部ツールの認証不要 RCE は 2 を満たしますが 1 を満たしません。可用性だけに影響する DoS も除きます。
+
+**判定はアドバイザリ単位で行い、CVE 1件だけを扱うアドバイザリからしか採りません。** 台帳のエントリは複数ベンダーのアドバイザリを統合するため、`vendors` と `products` から後付けで判定すると、あるベンダー名と別ベンダーの製品名が組み合わさって誤判定します。そのぶん取りこぼしはありますが、絞り込みの信頼性を優先しています。
+
+件数は `meta.stats.initial_access` にあります。
 
 ### flags のビットマスク
 

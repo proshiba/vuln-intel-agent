@@ -583,3 +583,118 @@ def test_reconcile_lowers_a_priority_that_only_the_bad_kev_flag_justified(
     db.write()
 
     assert _read_csv(tmp_path)[0]["priority"] != "P1"
+
+
+def test_only_a_single_cve_advisory_supplies_the_cvss_vector(
+    tmp_path: Path, advisory_factory
+) -> None:
+    # 数十のCVEをまとめたアドバイザリのベクタは、そのうちどのCVEのものか分からない。
+    # 初期アクセス判定の根拠にするには出所が確定している必要がある。
+    ambiguous = advisory_factory(
+        canonical_id="example:many",
+        facts=AdvisoryFacts(
+            cves=["CVE-2026-11111", "CVE-2026-22222"],
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([ambiguous], NOW)
+    db.write()
+    assert all(row["cvss_vector"] == "" for row in _read_csv(tmp_path))
+
+    definite = advisory_factory(
+        canonical_id="example:one",
+        facts=AdvisoryFacts(
+            cves=["CVE-2026-11111"],
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([definite], LATER)
+    db.write()
+
+    by_cve = {row["cve"]: row for row in _read_csv(tmp_path)}
+    assert by_cve["CVE-2026-11111"]["cvss_vector"].startswith("CVSS:3.1/AV:N")
+    assert by_cve["CVE-2026-22222"]["cvss_vector"] == ""
+
+
+def test_the_initial_access_tag_needs_both_an_exposed_product_and_a_usable_flaw(
+    tmp_path: Path, advisory_factory
+) -> None:
+    entry_point = advisory_factory(
+        canonical_id="example:vpn",
+        vendor="Ivanti",
+        facts=AdvisoryFacts(
+            cves=["CVE-2026-11111"],
+            products=["Connect Secure"],
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    # 同じ攻撃条件でも、外部公開されやすい製品でなければ付かない。
+    internal = advisory_factory(
+        canonical_id="example:lib",
+        facts=AdvisoryFacts(
+            cves=["CVE-2026-22222"],
+            products=["Example Library"],
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([entry_point, internal], NOW)
+    db.write()
+
+    by_cve = {row["cve"]: row for row in _read_csv(tmp_path)}
+    assert by_cve["CVE-2026-11111"]["potential_initial_access"] == "true"
+    assert by_cve["CVE-2026-22222"]["potential_initial_access"] == "false"
+
+
+def test_backfill_fills_vectors_for_entries_written_before_the_column_existed(
+    tmp_path: Path, advisory_factory
+) -> None:
+    db = VulnDb(tmp_path)
+    db.apply([advisory_factory(facts=AdvisoryFacts(cves=["CVE-2026-12345"]))], NOW)
+    db.write()
+    assert _read_csv(tmp_path)[0]["cvss_vector"] == ""
+
+    db = VulnDb(tmp_path)
+    filled = db.backfill_from_advisories({"CVE-2026-12345": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N"}, set())
+    db.write()
+
+    assert filled == 1
+    assert _read_csv(tmp_path)[0]["cvss_vector"].startswith("CVSS:3.1")
+    # 2回目は何もしない。収集で入った値を上書きしないため。
+    db = VulnDb(tmp_path)
+    assert (
+        db.backfill_from_advisories({"CVE-2026-12345": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R"}, set()) == 0
+    )
+
+
+def test_the_tag_is_not_derived_from_the_merged_vendor_and_product_lists(
+    tmp_path: Path, advisory_factory
+) -> None:
+    # 同じCVEを複数ベンダーが扱うと、台帳の vendors/products は平坦に統合され
+    # 「どのベンダーのどの製品か」の対応が失われる。そこから分類し直すと、
+    # ライブラリの不具合が VPN 機器の脆弱性として扱われる。
+    library = advisory_factory(
+        canonical_id="example:lib",
+        facts=AdvisoryFacts(
+            cves=["CVE-2026-11111"],
+            products=["axios"],
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        ),
+    )
+    # 同じCVEを、VPN機器のベンダーが自製品の同梱ライブラリとして報告する。
+    bundled = advisory_factory(
+        canonical_id="example:vendor",
+        vendor="Ivanti",
+        facts=AdvisoryFacts(cves=["CVE-2026-11111"], products=["Connect Secure"]),
+    )
+    db = VulnDb(tmp_path)
+    db.apply([library, bundled], NOW)
+    db.write()
+
+    row = _read_csv(tmp_path)[0]
+    # 統合後の一覧には Ivanti と Connect Secure が入るが、攻撃条件を伴う
+    # アドバイザリはライブラリ側なので、タグは付かない。
+    assert "Ivanti" in row["vendors"]
+    assert row["potential_initial_access"] == "false"
