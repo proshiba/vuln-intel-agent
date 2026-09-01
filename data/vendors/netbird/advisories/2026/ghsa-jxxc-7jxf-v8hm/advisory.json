@@ -1,0 +1,68 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "be767f66023f920569561840cf395caca42a0665b9d67fbb2d387ba4d2452745",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"Faze-up\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/45031662?v=4\", \"events_url\": \"https://api.github.com/users/Faze-up/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Faze-up/followers\", \"following_url\": \"https://api.github.com/users/Faze-up/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Faze-up/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Faze-up\", \"id\": 45031662, \"login\": \"Faze-up\", \"node_id\": \"MDQ6VXNlcjQ1MDMxNjYy\", \"organizations_url\": \"https://api.github.com/users/Faze-up/orgs\", \"received_events_url\": \"https://api.github.com/users/Faze-up/received_events\", \"repos_url\": \"https://api.github.com/users/Faze-up/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Faze-up/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Faze-up/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Faze-up\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-400\"], \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"## Summary\\n\\nNetBird releases before 0.74.4 pinned `golang.org/x/crypto` below 0.52.0 while the\\nSSH peer-access feature routes attacker-controlled SSH traffic through\\n`golang.org/x/crypto/ssh` handshake, authentication, session and channel handling\\ncode.\\n\\nThe embedded SSH server is not enabled by default. It starts only when the local\\n`ServerSSHAllowed` setting is on *and* management enables SSH for the peer.\\n`client/internal/engine_ssh.go` then builds the server, binds the peer's NetBird\\noverlay address on the internal SSH port, and serves accepted connections through\\n`github.com/gliderlabs/ssh`, which calls `golang.org/x/crypto/ssh.NewServerConn`.\\nWhere it is enabled, the vulnerable parser and connection paths are reached\\nbefore shell, SFTP or port-forward authorization.\\n\\n## Reachable advisories\\n\\n`govulncheck` against `./client/ssh/...` at the v0.74.3 release commit reports\\nnine `golang.org/x/crypto` advisories fixed in 0.52.0. Four are reachable in the\\nserver role:\\n\\n| Advisory | CVE | Issue |\\n| --- | --- | --- |\\n| GO-2026-5013 | CVE-2026-46597 | AES-GCM packet decoder underflow, pre-authentication panic |\\n| GO-2026-5017 | CVE-2026-39830 | Server deadlock on unexpected client responses |\\n| GO-2026-5018 | CVE-2026-39829 | Pathological RSA/DSA parameters cause DoS |\\n| GO-2026-5020 | CVE-2026-39834 | Infinite loop on large channel writes |\\n\\nTwo are reachable in the client role, through `tryKnownHostsVerification` in\\n`client/ssh/client/client.go`, where a hostile SSH server is the attacker:\\n\\n| Advisory | CVE | Issue |\\n| --- | --- | --- |\\n| GO-2026-5015 | CVE-2026-39835 | Panic during `CheckHostKey` / `Authenticate` |\\n| GO-2026-5021 | CVE-2026-42508 | `@revoked` status not enforced in `ssh/knownhosts` |\\n\\nThe remaining three need authentication features this server does not configure.\\nIt registers no `PublicKeyHandler` and no certificate checker; authentication is\\noverlay source-IP validation plus optional JWT through a password handler:\\n\\n| Advisory | CVE | Requires |\\n| --- | --- | --- |\\n| GO-2026-5014 | CVE-2026-39828 | SSH certificate authentication |\\n| GO-2026-5019 | CVE-2026-39831 | FIDO/U2F security-key authentication |\\n| GO-2026-5023 | CVE-2026-46595 | `VerifiedPublicKeyCallback` |\\n\\nAll nine are cleared by the same dependency bump, so the distinction does not\\nchange the remediation.\\n\\n## Impact\\n\\nDenial of service against a peer running the SSH server. GO-2026-5013 is the\\nmost serious: the panic occurs pre-authentication, inside `x/crypto`'s own\\nconnection goroutines, so a single crafted connection takes down the whole\\nNetBird client daemon rather than only the SSH feature. Connectivity for that\\npeer is lost, not just SSH access to it.\\n\\nExposure is bounded. The SSH server must be enabled, the listener binds the\\nNetBird overlay address, and the connection validator rejects non-overlay source\\naddresses, so this is not reachable from outside the overlay. Within the\\noverlay, reach is limited to peers whose access-control policy permits the SSH\\nport.\\n\\n## Fix\\n\\nFixed in 0.74.4. `golang.org/x/crypto` was raised to v0.54.0, along with\\n`golang.org/x/net` v0.56.0 and the Go 1.25.12 toolchain, in\\n[#6709](https://github.com/netbirdio/netbird/pull/6709) on the `0.74.4-branch`\\nrelease branch; [#6727](https://github.com/netbirdio/netbird/pull/6727) carried\\nthe same change to `main`. After the bump `govulncheck` reports no remaining\\nreachable `x/crypto/ssh` advisories. Current releases carry v0.55.0.\\n\\nOperators running a client older than 0.74.4 should upgrade. On any version,\\ndisabling the SSH server removes the server-side exposure.\\n\\n## Affected platforms\\n\\nDesktop clients. The server-side exposure applies only where the SSH server has\\nbeen enabled; it is off by default, as `ServerSSHAllowed` defaults to false.\\n\\nAndroid exposes the same setting and also defaults it to false, so an Android\\npeer is affected only where its user has deliberately enabled the SSH server.\\nThe two client-role advisories do not apply on Android: its SSH client verifies\\nhost keys against the peer key from the network map and never falls back to\\n`known_hosts`. iOS exposes neither the SSH server setting nor an SSH client.\\n\\n## Credit\\n\\nReported by [@Faze-up](https://github.com/Faze-up).\\n\", \"ghsa_id\": \"GHSA-jxxc-7jxf-v8hm\", \"html_url\": \"https://github.com/netbirdio/netbird/security/advisories/GHSA-jxxc-7jxf-v8hm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jxxc-7jxf-v8hm\"}], \"private_fork\": null, \"published_at\": \"2026-09-01T14:41:58Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/17948409?v=4\", \"events_url\": \"https://api.github.com/users/lixmal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lixmal/followers\", \"following_url\": \"https://api.github.com/users/lixmal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lixmal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lixmal\", \"id\": 17948409, \"login\": \"lixmal\", \"node_id\": \"MDQ6VXNlcjE3OTQ4NDA5\", \"organizations_url\": \"https://api.github.com/users/lixmal/orgs\", \"received_events_url\": \"https://api.github.com/users/lixmal/received_events\", \"repos_url\": \"https://api.github.com/users/lixmal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lixmal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lixmal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lixmal\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"SSH server reaches vulnerable x/crypto/ssh paths fixed in 0.52.0\", \"updated_at\": \"2026-09-01T14:41:58Z\", \"url\": \"https://api.github.com/repos/netbirdio/netbird/security-advisories/GHSA-jxxc-7jxf-v8hm\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/netbirdio/netbird\"}, \"patched_versions\": \"0.74.4\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.20.8, < 0.74.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "netbird:ghsa-jxxc-7jxf-v8hm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/netbirdio/netbird: >= 0.20.8, < 0.74.4"
+    ],
+    "cves": [
+      "CVE-2026-39828",
+      "CVE-2026-39829",
+      "CVE-2026-39830",
+      "CVE-2026-39831",
+      "CVE-2026-39834",
+      "CVE-2026-39835",
+      "CVE-2026-42508",
+      "CVE-2026-46595",
+      "CVE-2026-46597"
+    ],
+    "fixed_versions": [
+      "github.com/netbirdio/netbird: 0.74.4"
+    ],
+    "mitigations": [],
+    "products": [
+      "github.com/netbirdio/netbird"
+    ],
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-01T19:13:54.373970Z",
+  "provenance": {
+    "content_sha256": "04e4434ac528bb51913a26003753c50b231caaac2e5b153fd424ffdf62c8d621",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T14:41:58Z",
+  "schema_version": 1,
+  "source_id": "netbird_github",
+  "source_url": "https://github.com/netbirdio/netbird/security/advisories/GHSA-jxxc-7jxf-v8hm",
+  "status": "active",
+  "title": "SSH server reaches vulnerable x/crypto/ssh paths fixed in 0.52.0",
+  "updated_at": "2026-09-01T14:41:58Z",
+  "vendor": "NetBird",
+  "vendor_advisory_id": "GHSA-jxxc-7jxf-v8hm"
+}
