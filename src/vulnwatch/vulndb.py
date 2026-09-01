@@ -9,14 +9,19 @@ from pydantic import Field
 from ruamel.yaml import YAML
 
 from vulnwatch.attack_surface import classify as classify_attack_surface
+from vulnwatch.attack_surface import default_classifier
 from vulnwatch.identity import slugify
 from vulnwatch.models import (
     Advisory,
+    AdvisoryEnrichment,
+    AdvisoryFacts,
     AdvisoryStatus,
     ExploitationReport,
+    KevEntry,
     Priority,
     StrictModel,
 )
+from vulnwatch.priority import decide_priority
 from vulnwatch.storage.filesystem import atomic_write_text, write_json
 
 VULNDB_DIRECTORY = "vulndb"
@@ -117,6 +122,36 @@ class VulnRegistry(StrictModel):
     sequences: dict[str, int] = Field(default_factory=dict)
     cve_index: dict[str, str] = Field(default_factory=dict)
     advisory_index: dict[str, list[str]] = Field(default_factory=dict)
+
+
+def _priority_from_entry(record: VulnRecord) -> Priority:
+    """台帳エントリ自身の事実から優先度を導き直す。
+
+    `_merge` は優先度を上げる方向にしか動かさないため、誤って付いた P1 は
+    そのままでは二度と下がらない。KEV の掲載状態を直したときは、ここで
+    エントリの現状に合わせて付け直す。
+
+    自組織資産との一致や攻撃経路はエントリに保持していないので加味できない。
+    それらを根拠とする優先度は、次回そのエントリに触れる収集で `_merge` が
+    上書きするため、ここで下げても失われない。
+    """
+
+    classifier = default_classifier()
+    surface = classifier.classify(record.vendors, record.products)
+    return decide_priority(
+        AdvisoryFacts(
+            known_exploited=record.known_exploited,
+            poc_public=record.poc_public,
+            cvss_score=record.cvss_score,
+            vendor_severity=record.vendor_severity,
+            fixed_versions=["fixed"] if record.fixed else [],
+        ),
+        AdvisoryEnrichment(
+            cisa_kev=record.cisa_kev,
+            attack_surface_class=surface,
+            attack_surface_reach=classifier.reach_of(surface),
+        ),
+    ).priority
 
 
 def _partition_vendor(record: VulnRecord) -> str:
@@ -264,6 +299,54 @@ class VulnDb:
         merged.extend(vuln_id for vuln_id in touched if vuln_id not in merged)
         self.registry.advisory_index[advisory.canonical_id] = merged
 
+    def reconcile_kev(self, kev: dict[str, KevEntry], now: datetime) -> tuple[int, int]:
+        """全エントリの KEV 掲載状態を、その日の KEV カタログと突き合わせて直す。
+
+        掲載は CISA 側で増えることも取り下げられることもあり、過去に誤って付いた
+        フラグは、そのエントリが再び更新されるまで残り続ける。索引CSVの書き出しで
+        どのみち全エントリを読むので、ここで毎回まとめて整合させる。
+
+        戻り値は (掲載として付け直した件数, 掲載でないとして外した件数)。
+        """
+
+        added = removed = 0
+        for path in sorted(self.vulns_root.rglob("*.yaml")):
+            entry = self.load_entry(path.stem)
+            if entry is None or entry.cve is None:
+                continue
+            listed = kev.get(entry.cve)
+            if listed is not None:
+                if entry.cisa_kev and entry.kev_listed_at is not None:
+                    continue
+                entry.cisa_kev = True
+                if listed.date_added is not None:
+                    entry.kev_listed_at = _aware(listed.date_added)
+                entry.ransomware_use = entry.ransomware_use or listed.ransomware
+                if not entry.known_exploited:
+                    entry.known_exploited = True
+                    entry.exploitation_observed_at = now
+                    entry.exploitation_source = "cisa_kev"
+                added += 1
+            elif entry.cisa_kev:
+                entry.cisa_kev = False
+                entry.kev_listed_at = None
+                # ランサムウェア悪用は KEV だけが根拠なので、掲載でなければ外す。
+                entry.ransomware_use = False
+                # 悪用確認が KEV 由来だけだった場合は取り消す。ベンダーが独自に
+                # 悪用を報告している場合（exploitation_source がソースID）は残す。
+                if entry.exploitation_source in {None, "", "cisa_kev"}:
+                    entry.known_exploited = False
+                    entry.exploitation_observed_at = None
+                    entry.exploitation_source = None
+                removed += 1
+            else:
+                continue
+            entry.kev_lag_days = _kev_lag_days(entry)
+            entry.priority = _priority_from_entry(entry)
+            entry.updated_at = now
+            self._dirty.add(entry.vuln_id)
+        return added, removed
+
     def apply_exploitation_reports(
         self, reports: list[ExploitationReport], now: datetime
     ) -> tuple[int, int]:
@@ -335,18 +418,24 @@ class VulnDb:
             entry.known_exploited = True
             entry.exploitation_observed_at = now
             entry.exploitation_source = advisory.source_id
-        if advisory.enrichment.cisa_kev:
+        # KEV はこのエントリのCVE自身が掲載されている場合にのみ適用する。アドバイザリ
+        # 単位の集約値を使うと、1本のRHSAが扱う他のCVEの掲載を、無関係なCVEまで
+        # 引き継いでしまう。
+        kev_entry = (
+            advisory.enrichment.kev_entries.get(entry.cve) if entry.cve is not None else None
+        )
+        if kev_entry is not None:
             if not entry.known_exploited:
                 entry.known_exploited = True
                 entry.exploitation_observed_at = now
                 entry.exploitation_source = "cisa_kev"
             entry.cisa_kev = True
-            listed = advisory.enrichment.kev_date_added
+            listed = kev_entry.date_added
             if listed is not None and (
                 entry.kev_listed_at is None or _aware(listed) < _aware(entry.kev_listed_at)
             ):
                 entry.kev_listed_at = _aware(listed)
-            entry.ransomware_use = entry.ransomware_use or advisory.enrichment.kev_ransomware
+            entry.ransomware_use = entry.ransomware_use or kev_entry.ransomware
         entry.kev_lag_days = _kev_lag_days(entry)
         if facts.cvss_score is not None and (
             entry.cvss_score is None or facts.cvss_score > entry.cvss_score
@@ -358,8 +447,19 @@ class VulnDb:
             or _SEVERITY_RANK[severity] < _SEVERITY_RANK.get(entry.vendor_severity.casefold(), 9)
         ):
             entry.vendor_severity = facts.vendor_severity
-        if _PRIORITY_RANK[advisory.decision.priority] < _PRIORITY_RANK[entry.priority]:
-            entry.priority = advisory.decision.priority
+        # 優先度もこのCVE自身のKEV状態で決め直す。アドバイザリの判定をそのまま使うと、
+        # 同居している別CVEのKEV掲載を根拠にP1が付いてしまう。
+        decision = decide_priority(
+            facts,
+            advisory.enrichment.model_copy(
+                update={
+                    "cisa_kev": kev_entry is not None,
+                    "kev_ransomware": kev_entry.ransomware if kev_entry is not None else False,
+                }
+            ),
+        )
+        if _PRIORITY_RANK[decision.priority] < _PRIORITY_RANK[entry.priority]:
+            entry.priority = decision.priority
         self._upsert_source(entry, advisory, now)
         if entry.sources and entry.sources[0].canonical_id == advisory.canonical_id:
             entry.title = advisory.title

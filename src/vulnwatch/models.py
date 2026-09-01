@@ -342,9 +342,14 @@ class ExploitationReport(StrictModel):
 
 
 class AdvisoryEnrichment(StrictModel):
+    # 以下3つはアドバイザリ単位の集約値。1本のアドバイザリが複数CVEを扱う場合、
+    # 「いずれかのCVEがKEV掲載」を表す。日次レポートの採点はこの粒度でよい。
     cisa_kev: bool = False
     kev_date_added: datetime | None = None
     kev_ransomware: bool = False
+    # CVE単位のKEV掲載情報。台帳はCVEごとにエントリを持つため、集約値をそのまま
+    # 配ると、同じアドバイザリに載っているだけの無関係なCVEまでKEV扱いになる。
+    kev_entries: dict[str, KevEntry] = Field(default_factory=dict)
     asset_match: bool = False
     matched_asset_ids: list[str] = Field(default_factory=list)
     internet_exposed: bool = False
@@ -462,6 +467,9 @@ class RunManifest(StrictModel):
     # OSINT 由来の実悪用報告のうち、台帳へ記録できた件数と悪用確認へ昇格した件数。
     exploitation_reports_recorded: int = 0
     exploitation_promotions: int = 0
+    # KEV カタログとの突き合わせで掲載を付け直した件数・外した件数。
+    kev_flags_added: int = 0
+    kev_flags_removed: int = 0
 
     @model_validator(mode="after")
     def validate_source_outcome_ids(self) -> RunManifest:
