@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}, {\"cwe_id\": \"CWE-1050\", \"name\": \"Excessive Platform Resource Consumption within a Loop\"}], \"description\": \"### Impact\\n\\n`AttributesExtension` ships with the library but must be explicitly registered on the `Environment`; it is not included in `CommonMarkConverter`, `GithubFlavoredMarkdownConverter`, or `GithubFlavoredMarkdownExtension`. **Applications that do not register `AttributesExtension` are not affected by this advisory.**\\n\\nTwo paths in the extension re-process every attribute a node has already collected each time another attribute is applied to it. When the attributes carry distinct names, the collected set grows by one on every step and is walked again in full, so a run of *n* attributes costs O(n²).\\n\\n**1. Attribute nodes resolving to a common target (affected from 1.5.0).**\\n\\n`AttributesListener::processDocument()` merges each attribute node into the set accumulated for its target, then filters the result. Both operations traverse that entire set: `AttributesHelper::mergeAttributes()` rebuilds it with `array_merge()`, and `AttributesHelper::filterAttributes()` matches a regular expression against every name in it. A run of attribute nodes sharing one target therefore re-walks a set that grows by a key per node.\\n\\nTwo input shapes reach this path: adjacent inline attributes at the start of a block (`{a0=\\\"v\\\"}{a1=\\\"v\\\"}…`, where quoting the values is what keeps them separate — an unquoted value swallows the `}{` that follows it), and a chain of attribute blocks held at their default target by reference definitions (`{a0=v}` / `[a]: u` / `{a1=v}` / `[a]: u` / …).\\n\\n256 KB of adjacent inline attributes takes 20.0 seconds to convert, against 0.09 seconds once patched.\\n\\n**2. Consecutive attribute-block lines (affected from 2.0.0).**\\n\\n`AttributesBlockContinueParser::tryContinue()` merges each continuation line into the block's accumulated attributes, again rebuilding the whole set on every line. One distinct attribute per line (`{a0=v}` / `{a1=v}` / …) grows it by a key each time.\\n\\n256 KB of such lines takes 1.9 seconds to convert while producing **zero bytes of output**, against 0.08 seconds once patched.\\n\\n**Relationship to GHSA-jjv6-8j6v-6j52.** The fix released in 2.9.1 for that advisory made the `class` attribute cheap to accumulate, but left every other attribute name on the original path. **Applications that upgraded to 2.9.1 or 2.9.2 remain exposed to this variant.**\\n\\n**Overall impact.** An unauthenticated attacker who can submit Markdown to an affected application can consume disproportionate CPU time with a comparatively small request, occupying PHP workers and preventing legitimate requests from completing. The impact is limited to availability: no data is disclosed, rendered output is unchanged, and no rendering restriction is bypassed.\\n\\n### Patches\\n\\nThe issue is patched in `2.10.0`. Both paths now fold each node — or each line — into the accumulated attributes at a cost proportional to that node or line alone, rather than re-merging and re-filtering everything gathered so far. Rendered output is unchanged, down to the order in which attributes appear.\\n\\nThe listener path affects `1.5.0` through `2.9.2`. The continuation-line path affects `2.0.0` through `2.9.2`. The 1.x release line is no longer supported, so its users must upgrade to `2.10.0` or later.\\n\\n### Workarounds\\n\\nIf you cannot upgrade immediately:\\n\\n- **Do not register `AttributesExtension`** when converting untrusted Markdown. This fully removes both paths.\\n- If the extension is required, **impose a strict maximum input length before conversion**. Because the cost is quadratic, the cap must be small to meaningfully bound worst-case CPU time.\\n\\nThe `attributes/allow` allow-list added in 2.7.0 is **not** a mitigation. A non-empty allow-list happens to bound the first path, because unlisted names are discarded before they accumulate, but it does nothing for the second: continuation lines are merged while parsing, before any filtering takes place.\\n\\nRestricting conversion to trusted users, applying strict execution-time limits, and rate-limiting requests reduce exposure but are not substitutes for upgrading.\", \"ghsa_id\": \"GHSA-8rr7-cvq3-gmfh\", \"github_reviewed_at\": \"2026-09-01T20:28:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-8rr7-cvq3-gmfh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8rr7-cvq3-gmfh\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-01T20:28:40Z\", \"references\": [\"https://github.com/thephpleague/commonmark/security/advisories/GHSA-8rr7-cvq3-gmfh\", \"https://github.com/thephpleague/commonmark/commit/f27eb720972490b5af4dbb635ad8634529faf9f2\", \"https://github.com/thephpleague/commonmark/releases/tag/2.10.0\", \"https://github.com/advisories/GHSA-8rr7-cvq3-gmfh\"], \"repository_advisory_url\": \"https://api.github.com/repos/thephpleague/commonmark/security-advisories/GHSA-8rr7-cvq3-gmfh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/thephpleague/commonmark\", \"summary\": \"league/commonmark: Denial of service via distinctly-named attributes in the Attributes extension\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-01T20:28:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-8rr7-cvq3-gmfh\", \"vulnerabilities\": [{\"first_patched_version\": \"2.10.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"league/commonmark\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, < 2.10.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8rr7-cvq3-gmfh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "league/commonmark: >= 1.5.0, < 2.10.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "league/commonmark"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-02T19:13:33.428495Z",
+  "provenance": {
+    "content_sha256": "9b724a0e23ed19f4cfec43483942e15a9c16314a4c182c5f0fec82c4b67b1e7d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T20:28:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8rr7-cvq3-gmfh",
+  "status": "active",
+  "title": "league/commonmark: Denial of service via distinctly-named attributes in the Attributes extension",
+  "updated_at": "2026-09-01T20:28:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8rr7-cvq3-gmfh"
+}

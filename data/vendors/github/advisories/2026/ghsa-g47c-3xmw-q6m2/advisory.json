@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/165761530?v=4\", \"events_url\": \"https://api.github.com/users/zainnadeem786/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zainnadeem786/followers\", \"following_url\": \"https://api.github.com/users/zainnadeem786/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zainnadeem786/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zainnadeem786\", \"id\": 165761530, \"login\": \"zainnadeem786\", \"node_id\": \"U_kgDOCeFR-g\", \"organizations_url\": \"https://api.github.com/users/zainnadeem786/orgs\", \"received_events_url\": \"https://api.github.com/users/zainnadeem786/received_events\", \"repos_url\": \"https://api.github.com/users/zainnadeem786/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zainnadeem786/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zainnadeem786/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zainnadeem786\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73229\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"Summary\\n\\nAdminRenderer may disclose data that would normally be protected by GET permissions when rendering a 400 Bad Request response for an invalid write request.\\n\\nIf a view allows POST (or another write method) but denies GET, an invalid request rendered through AdminRenderer can invoke the view's GET handler and include data from the GET representation in the generated HTML response.\\n\\nThis behavior appears to be specific to AdminRenderer and does not affect the normal JSON rendering path.\\n\\n\\n---\\n\\nDetails\\n\\nWhile investigating the AdminRenderer rendering flow, I observed that invalid write requests are rendered by temporarily overriding the request method and invoking the view's GET handler:\\n\\n```\\nwith override_method(view, request, \\\"GET\\\") as request:\\n    response = view.get(request, *view.args, **view.kwargs)\\n\\ndata = response.data\\n```\\n\\nThis execution path differs from a normal GET request.\\n\\nUnder normal request processing, a GET request flows through:\\n\\n```\\nAPIView.dispatch()\\n    └── APIView.initial()\\n            └── APIView.check_permissions()\\n```\\n\\nHowever, during AdminRenderer rendering, the renderer directly invokes:\\n\\nview.get(...)\\n\\nA view whose permission class explicitly allowed POST but denied GET still executed its GET handler while rendering an invalid POST request through AdminRenderer.\\n\\nAs a result, data intended to be available only through an authorized GET request was included in the generated HTML response.\\n\\n\\n---\\n\\nProof of Concept\\n\\nUsing a standard ListCreateAPIView.\\n\\nPermission class:\\n\\n```\\nclass ProbePermission(BasePermission):\\n    def has_permission(self, request, view):\\n        return request.method == \\\"POST\\\"\\n\\nView:\\n\\nclass View(ListCreateAPIView):\\n    renderer_classes = (AdminRenderer, JSONRenderer)\\n    permission_classes = (ProbePermission,)\\n    serializer_class = ProbeSerializer\\n\\n    def get_queryset(self):\\n        return [\\n            {\\n                \\\"name\\\": \\\"visible\\\",\\n                \\\"secret\\\": \\\"GET-ONLY-SECRET\\\",\\n            }\\n        ]\\n```\\n\\nExpected Behaviour\\n\\n```\\nGET request\\n→ 403 Forbidden\\n\\nInvalid POST request\\n→ 400 Bad Request\\n→ Response should contain only validation errors.\\n→ GET-only data should not be rendered.\\n\\n```\\nObserved Behaviour\\n\\n```\\nGET request\\n→ 403 Forbidden\\n\\nInvalid POST request rendered through AdminRenderer\\n→ 400 Bad Request\\n→ HTML response contains:\\n\\nGET-ONLY-SECRET\\n```\\n\\nTthe same behavior is shown using a minimal APIView implementation.\\n\\nObserved results:\\n\\n```\\nminimal.post_400.handler_calls =\\n[\\n    (\\\"post\\\", \\\"POST\\\"),\\n    (\\\"get\\\", \\\"GET\\\")\\n]\\n\\nminimal.post_400.contains_secret = True\\n```\\n\\nGeneric view reproduction:\\n\\n```\\ngeneric.direct_get.status = 403\\ngeneric.direct_get.contains_secret = False\\n\\ngeneric.post_400.status = 400\\ngeneric.post_400.contains_secret = True\\n\\ngeneric.post_400.permission_calls =\\n[\\n    (\\\"GenericAdminView\\\", \\\"POST\\\"),\\n    ...\\n    (\\\"GenericAdminView\\\", \\\"OPTIONS\\\")\\n]\\n\\ngeneric.post_400.queryset_calls =\\n[\\n    (\\\"GenericAdminView\\\", \\\"GET\\\"),\\n    ...\\n]\\n```\\n\\nThese observations indicate that direct GET requests are correctly denied, while the simulated GET used during AdminRenderer rendering can still retrieve the protected representation.\\n\\n\\n---\\n\\nImpact\\n\\nThis issue may result in information disclosure when all of the following conditions are met:\\n\\nAdminRenderer is enabled.\\n\\nThe client negotiates the HTML renderer (for example using Accept: text/html).\\n\\nThe application permits POST (or another write method).\\n\\nGET requests are denied by the configured permission class.\\n\\nThe invalid write request returns 400 Bad Request.\\n\\nThe GET representation contains information that the requester would normally not be permitted to access.\\n\\n\\nThis issue does not appear to affect:\\n\\nJSON rendering\\n\\nStandard API responses\\n\\nSuccessful write requests\\n\\n\\nThe behavior appears limited to the HTML rendering path used by AdminRenderer.\\n\\n\\n---\\n\\nSuggested Fix\\n\\nPossible approaches include:\\n\\nPerform equivalent permission checks before executing the simulated GET request.\\n\\nAvoid invoking view.get() when the corresponding GET request would not be permitted.\\n\\nFall back to rendering only serializer/form validation errors instead of retrieving the GET representation.\\n\\n\\nA regression test could create a permission class that allows POST while denying GET, then verify that an invalid POST rendered with AdminRenderer does not include data from the protected GET representation.\\n\\n\\n---\\n\\nEnvironment\\n\\nRepository:\\n\\n`encode/django-rest-framework`\\n\\nBranch tested:\\n\\n`security-audit-drf`\\n\\nCommit tested:\\n\\n`cf582fb58e9e5ffcc8ed78a2cb9aaa8f4865666a`\", \"epss\": {\"percentage\": 0.00274, \"percentile\": 0.19199}, \"ghsa_id\": \"GHSA-g47c-3xmw-q6m2\", \"github_reviewed_at\": \"2026-09-01T19:24:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-g47c-3xmw-q6m2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g47c-3xmw-q6m2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73229\"}], \"nvd_published_at\": \"2026-08-11T20:18:48Z\", \"published_at\": \"2026-09-01T19:24:29Z\", \"references\": [\"https://github.com/encode/django-rest-framework/security/advisories/GHSA-g47c-3xmw-q6m2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73229\", \"https://github.com/encode/django-rest-framework/pull/10012\", \"https://github.com/encode/django-rest-framework/commit/71f81946906e52f9dc8e5d22a0f3d2afa50c455e\", \"https://github.com/encode/django-rest-framework/commit/9e82afc98acfe6fc28c9bf78147f0c5b3f222cb5\", \"https://github.com/encode/django-rest-framework/releases/tag/3.17.2\", \"https://github.com/advisories/GHSA-g47c-3xmw-q6m2\"], \"repository_advisory_url\": \"https://api.github.com/repos/encode/django-rest-framework/security-advisories/GHSA-g47c-3xmw-q6m2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/encode/django-rest-framework\", \"summary\": \"Django REST framework: AdminRenderer may disclose GET-protected data when rendering invalid write requests\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-01T19:24:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-g47c-3xmw-q6m2\", \"vulnerabilities\": [{\"first_patched_version\": \"3.17.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"djangorestframework\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.17.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g47c-3xmw-q6m2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "djangorestframework: <= 3.17.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-73229"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "djangorestframework"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-02T19:13:33.666181Z",
+  "provenance": {
+    "content_sha256": "8da3036e4ba4088ddea332169de7ce725b1e163abd4cd7d5d27709018b9f0ce7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T19:24:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g47c-3xmw-q6m2",
+  "status": "active",
+  "title": "Django REST framework: AdminRenderer may disclose GET-protected data when rendering invalid write requests",
+  "updated_at": "2026-09-01T19:24:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g47c-3xmw-q6m2"
+}
