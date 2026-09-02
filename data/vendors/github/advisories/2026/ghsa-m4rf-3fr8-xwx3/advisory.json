@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-79675\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-88\", \"name\": \"Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')\"}], \"description\": \"## Vulnerability\\n\\nThe fix for CVE-2026-12841 (CWE-88, JVM argument injection) added `_validate_java_options()` to block dangerous JVM flags such as `-agentlib`, `-agentpath`, `-javaagent`, `-Xrunjdwp`, and `@argfile` references. However, the validation is only applied when setting global options via `config_java()`. The `java()` function's per-call `options` parameter -- added by PR #3683 (CVE-2026-12615 fix) -- passes options directly to `subprocess.Popen` without calling `_validate_java_options()`.\\n\\nAll four Stanford Java wrapper classes accept user-supplied `java_options` and route them through the unvalidated per-call path, bypassing the CVE-2026-12841 fix entirely.\\n\\n## Root Cause\\n\\nIn `nltk/internals.py`, the `java()` function (line 128) accepts an `options` keyword argument. When `options` is not None, it is converted to a list and prepended to the JVM command (lines 211-217) without any validation:\\n\\n```python\\n# nltk/internals.py, lines 211-217 (HEAD)\\nif options is None:\\n    java_options = _java_options       # validated by config_java()\\nelse:\\n    if isinstance(options, str):\\n        options = options.split()\\n    java_options = list(options)       # NO validation\\ncmd = [_java_bin] + java_options + cmd\\n```\\n\\nCompare with `config_java()` (line 92) which does validate:\\n\\n```python\\n# nltk/internals.py, lines 122-123\\n_validate_java_options(options)\\n_java_options[:] = options\\n```\\n\\nThe four affected wrapper classes store user-supplied `java_options` without validation and pass them through the unvalidated per-call path:\\n\\n1. `GenericStanfordParser` (`nltk/parse/stanford.py`): constructor parameter at line 39, stored at line 78, passed at lines 247 and 256\\n2. `StanfordTagger` (`nltk/tag/stanford.py`): constructor parameter at line 51, stored at line 79, passed at line 118\\n3. `StanfordTokenizer` (`nltk/tokenize/stanford.py`): constructor parameter at line 43, stored at line 66, passed at line 109\\n4. `StanfordSegmenter` (`nltk/tokenize/stanford_segmenter.py`): constructor parameter at line 68, stored at line 117, passed at line 337\\n\\n## Proof of Concept\\n\\n```python\\nfrom nltk.internals import config_java, java, _validate_java_options\\n\\n# 1. The global config_java() path correctly blocks dangerous flags:\\ntry:\\n    config_java(options=[\\\"-agentpath:/tmp/evil.so\\\"])\\nexcept ValueError as e:\\n    print(f\\\"config_java blocked: {e}\\\")   # blocked as expected\\n\\n# 2. The per-call options path does NOT block them:\\n# (Would execute if Java were installed)\\n# java([\\\"SomeClass\\\"], classpath=\\\".\\\", options=[\\\"-agentpath:/tmp/evil.so\\\"])\\n# This passes \\\"-agentpath:/tmp/evil.so\\\" directly to subprocess.Popen\\n\\n# 3. Stanford wrapper classes pass through without validation:\\n# from nltk.parse.stanford import StanfordParser\\n# parser = StanfordParser(java_options=\\\"-agentpath:/tmp/evil.so\\\")\\n# parser.parse(...)  # dangerous flag reaches JVM\\n\\n# Verify the gap directly:\\ndangerous_opts = [\\\"-agentpath:/tmp/evil.so\\\"]\\ntry:\\n    _validate_java_options(dangerous_opts)\\n    print(\\\"Would have been caught\\\")\\nexcept ValueError:\\n    print(\\\"Correctly rejected by _validate_java_options()\\\")\\n\\n# But java() itself never calls _validate_java_options():\\nimport inspect\\nsource = inspect.getsource(java)\\nassert \\\"_validate_java_options\\\" not in source, \\\"java() does not validate options\\\"\\nprint(\\\"Confirmed: java() does not call _validate_java_options()\\\")\\n```\\n\\n## Impact\\n\\nAn attacker who controls the `java_options` parameter to any NLTK Stanford wrapper class can inject arbitrary JVM flags, including:\\n\\n- `-agentpath:/path/to/malicious.so` -- loads a native agent, achieving arbitrary code execution\\n- `-javaagent:/path/to/malicious.jar` -- loads a Java agent for bytecode manipulation\\n- `-agentlib:jdwp=transport=dt_socket,server=y,address=*:5005` -- enables remote debugging, allowing remote code execution\\n- `@/path/to/argfile` -- expands an argument file, which can smuggle any of the above\\n\\nThis is exploitable in scenarios where NLTK is deployed as a service and `java_options` is derived from user input, configuration files, or environment variables. The PR #3647 commit message explicitly states the fix was intended to cover \\\"StanfordSegmenter, and GenericStanfordParser\\\" but the implementation only validates in `config_java()`.\\n\\n## Suggested Fix\\n\\nAdd `_validate_java_options()` to the `java()` function's per-call options handling:\\n\\n```python\\n# nltk/internals.py, in the java() function\\nif options is None:\\n    java_options = _java_options\\nelse:\\n    if isinstance(options, str):\\n        options = options.split()\\n    java_options = list(options)\\n    _validate_java_options(java_options)   # ADD THIS LINE\\ncmd = [_java_bin] + java_options + cmd\\n```\\n\\nThis single-line addition closes the bypass for all four Stanford wrapper classes and any future callers of `java(options=...)`.\\n\\n### AI tooling\\n\\nAI assistance was used for the code audit and for drafting this report. The finding were manually verified against the project's source at the location cited above before reporting it, and the severity and impact assessment are the reporters.\", \"epss\": {\"percentage\": 0.00403, \"percentile\": 0.33338}, \"ghsa_id\": \"GHSA-m4rf-3fr8-xwx3\", \"github_reviewed_at\": \"2026-09-01T20:38:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-m4rf-3fr8-xwx3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m4rf-3fr8-xwx3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-79675\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-01T20:38:22Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-m4rf-3fr8-xwx3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-79675\", \"https://github.com/nltk/nltk/commit/8fa9650b6009aacfdebbc33d2a08d32c0858ea6c\", \"https://github.com/nltk/nltk/releases/tag/v3.10.3\", \"https://www.vulncheck.com/advisories/nltk-before-jvm-argument-injection-via-per-call-options\", \"https://github.com/advisories/GHSA-m4rf-3fr8-xwx3\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-m4rf-3fr8-xwx3\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: JVM argument injection bypass via per-call options in the NLTK Stanford wrappers (incomplete fix of CVE-2026-12841)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-01T20:38:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-m4rf-3fr8-xwx3\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m4rf-3fr8-xwx3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-12615",
+      "CVE-2026-12841",
+      "CVE-2026-79675"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-02T19:13:33.422142Z",
+  "provenance": {
+    "content_sha256": "bce52a130a0b4b776a93a5b8fdb8c39efc9afadce99595648cb97d2ac88862f8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-01T20:38:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m4rf-3fr8-xwx3",
+  "status": "active",
+  "title": "NLTK: JVM argument injection bypass via per-call options in the NLTK Stanford wrappers (incomplete fix of CVE-2026-12841)",
+  "updated_at": "2026-09-01T20:38:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m4rf-3fr8-xwx3"
+}

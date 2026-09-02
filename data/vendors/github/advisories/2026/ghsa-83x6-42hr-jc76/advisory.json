@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91008976?v=4\", \"events_url\": \"https://api.github.com/users/Gal3m/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Gal3m/followers\", \"following_url\": \"https://api.github.com/users/Gal3m/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Gal3m/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Gal3m\", \"id\": 91008976, \"login\": \"Gal3m\", \"node_id\": \"MDQ6VXNlcjkxMDA4OTc2\", \"organizations_url\": \"https://api.github.com/users/Gal3m/orgs\", \"received_events_url\": \"https://api.github.com/users/Gal3m/received_events\", \"repos_url\": \"https://api.github.com/users/Gal3m/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Gal3m/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Gal3m/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Gal3m\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/78902717?v=4\", \"events_url\": \"https://api.github.com/users/mrostamipoor/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mrostamipoor/followers\", \"following_url\": \"https://api.github.com/users/mrostamipoor/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mrostamipoor/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mrostamipoor\", \"id\": 78902717, \"login\": \"mrostamipoor\", \"node_id\": \"MDQ6VXNlcjc4OTAyNzE3\", \"organizations_url\": \"https://api.github.com/users/mrostamipoor/orgs\", \"received_events_url\": \"https://api.github.com/users/mrostamipoor/received_events\", \"repos_url\": \"https://api.github.com/users/mrostamipoor/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mrostamipoor/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mrostamipoor/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mrostamipoor\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73845\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-625\", \"name\": \"Permissive Regular Expression\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe `ckan_get_mqa_quality` and `ckan_get_mqa_quality_details` tools restrict their `server_url` argument to `dati.gov.it` via a regular expression. The regex is anchored only at the start and places no boundary after the host, so any URL whose host merely **begins with** `dati.gov.it` — or that uses `dati.gov.it` as URL *userinfo* before an `@` — passes validation while actually targeting an attacker-controlled host.\\n\\n## Affected code\\n\\n```js\\n// src/tools/quality.ts\\nconst ALLOWED_SERVER_PATTERNS = [\\n  /^https?:\\\\/\\\\/(www\\\\.)?dati\\\\.gov\\\\.it/i        // <-- no end anchor / host boundary\\n];\\nexport function isValidMqaServer(serverUrl: string): boolean {\\n  return ALLOWED_SERVER_PATTERNS.some(pattern => pattern.test(serverUrl));\\n}\\n```\\n\\nAll of the following return `true`:\\n\\n| URL | Real host |\\n|-----|-----------|\\n| `https://dati.gov.it.attacker.com/x` | `dati.gov.it.attacker.com` (attacker) |\\n| `http://dati.gov.it.evil.example/api` | `dati.gov.it.evil.example` (attacker) |\\n| `https://dati.gov.it@attacker.com/x` | `attacker.com` (userinfo trick) |\\n\\nAfter passing this check, `server_url` flows into `getMqaQuality`/`getMqaQualityDetails`, which call `makeCkanRequest(serverUrl, \\\"package_show\\\", { id })`. The server therefore issues a request to the attacker-controlled host and returns its (parsed) response to the caller.\\n\\n## Impact\\n\\n- The intended \\\"dati.gov.it only\\\" trust boundary for the MQA tools is defeated; they can be driven against arbitrary external hosts.\\n- The attacker host receives the request (including the `dataset_id`) and controls the response body that is surfaced back to the model/user — enabling response spoofing and, in an agentic setting, indirect prompt-injection content delivered under the guise of a trusted-portal tool.\\n- Contributes to SSRF surface: while `makeCkanRequest` blocks private/internal IPs, this bypass removes the domain restriction that the code intends to enforce for these tools.\\n\\nThe `@`-userinfo variant is the most severe form because validation passes on a string whose *actual* host is fully attacker-chosen.\\n\\n## Proof of concept\\n\\n`poc/mqa-allowlist-poc.mjs` runs the verbatim regex over benign and malicious URLs:\\n\\n```\\naccepted  expected_legit  url\\ntrue      true            https://dati.gov.it/opendata          <- legit\\ntrue      false           https://dati.gov.it.attacker.com/x    <- BYPASS\\ntrue      false           http://dati.gov.it.evil.example/api   <- BYPASS\\ntrue      false           https://dati.gov.it@attacker.com/x    <- BYPASS\\n```\\n\\n## Remediation\\n\\nValidate the parsed host, not the raw string. For example:\\n\\n```js\\nfunction isValidMqaServer(serverUrl) {\\n  let u; try { u = new URL(serverUrl); } catch { return false; }\\n  if (u.protocol !== \\\"https:\\\") return false;\\n  const h = u.hostname.toLowerCase();\\n  return h === \\\"dati.gov.it\\\" || h === \\\"www.dati.gov.it\\\";\\n  // or: h === \\\"dati.gov.it\\\" || h.endsWith(\\\".dati.gov.it\\\")\\n}\\n```\\n\\nAnchoring the regex end-to-end (`/^https:\\\\/\\\\/(www\\\\.)?dati\\\\.gov\\\\.it(\\\\/|$)/i`) also closes the suffix trick, but URL-parsing + exact host comparison is the robust fix and also neutralizes the `@`-userinfo variant.\", \"epss\": {\"percentage\": 0.00224, \"percentile\": 0.13305}, \"ghsa_id\": \"GHSA-83x6-42hr-jc76\", \"github_reviewed_at\": \"2026-09-02T14:52:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-83x6-42hr-jc76\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-83x6-42hr-jc76\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73845\"}], \"nvd_published_at\": \"2026-08-14T17:20:36Z\", \"published_at\": \"2026-09-02T14:52:21Z\", \"references\": [\"https://github.com/ondata/ckan-mcp-server/security/advisories/GHSA-83x6-42hr-jc76\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73845\", \"https://github.com/ondata/ckan-mcp-server/commit/8e1522f9bbfa1f3b21550f17887f60f133e24151\", \"https://github.com/ondata/ckan-mcp-server/releases/tag/v0.4.112\", \"https://github.com/advisories/GHSA-83x6-42hr-jc76\"], \"repository_advisory_url\": \"https://api.github.com/repos/ondata/ckan-mcp-server/security-advisories/GHSA-83x6-42hr-jc76\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ondata/ckan-mcp-server\", \"summary\": \"CKAN MCP Server: MQA server allowlist bypass via unanchored regex (`isValidMqaServer`)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-02T14:52:22Z\", \"url\": \"https://api.github.com/advisories/GHSA-83x6-42hr-jc76\", \"vulnerabilities\": [{\"first_patched_version\": \"0.4.112\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@aborruso/ckan-mcp-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.4.112\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-83x6-42hr-jc76",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@aborruso/ckan-mcp-server: < 0.4.112"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73845"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@aborruso/ckan-mcp-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-02T19:13:32.985400Z",
+  "provenance": {
+    "content_sha256": "e256703776de7f5f6236ce4464e3c8a1f1542a39f127aa366eadacc0209f5ef6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-02T14:52:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-83x6-42hr-jc76",
+  "status": "active",
+  "title": "CKAN MCP Server: MQA server allowlist bypass via unanchored regex (`isValidMqaServer`)",
+  "updated_at": "2026-09-02T14:52:22Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-83x6-42hr-jc76"
+}
