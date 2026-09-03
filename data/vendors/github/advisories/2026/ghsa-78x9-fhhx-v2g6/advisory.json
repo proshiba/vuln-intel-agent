@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91008976?v=4\", \"events_url\": \"https://api.github.com/users/Gal3m/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Gal3m/followers\", \"following_url\": \"https://api.github.com/users/Gal3m/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Gal3m/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Gal3m\", \"id\": 91008976, \"login\": \"Gal3m\", \"node_id\": \"MDQ6VXNlcjkxMDA4OTc2\", \"organizations_url\": \"https://api.github.com/users/Gal3m/orgs\", \"received_events_url\": \"https://api.github.com/users/Gal3m/received_events\", \"repos_url\": \"https://api.github.com/users/Gal3m/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Gal3m/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Gal3m/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Gal3m\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/78902717?v=4\", \"events_url\": \"https://api.github.com/users/mrostamipoor/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mrostamipoor/followers\", \"following_url\": \"https://api.github.com/users/mrostamipoor/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mrostamipoor/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mrostamipoor\", \"id\": 78902717, \"login\": \"mrostamipoor\", \"node_id\": \"MDQ6VXNlcjc4OTAyNzE3\", \"organizations_url\": \"https://api.github.com/users/mrostamipoor/orgs\", \"received_events_url\": \"https://api.github.com/users/mrostamipoor/received_events\", \"repos_url\": \"https://api.github.com/users/mrostamipoor/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mrostamipoor/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mrostamipoor/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mrostamipoor\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73846\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}, {\"cwe_id\": \"CWE-436\", \"name\": \"Interpretation Conflict\"}], \"description\": \"## Summary\\n\\nThe response cache derives its key from an ambiguous string serialization of the request parameters. `canonicalizeParams` joins sorted `${key}=${value}` pairs with `&` and does not escape `&`, `=`, or the `|` field separators used in `buildCacheKey`. Two **different** logical parameter sets can therefore serialize to the **same** key and share one cache entry. Because the cached value is whatever the upstream returned for whichever request populated the entry first, an attacker can prime a colliding key so a victim's distinct query (same `server_url`) is served the attacker's cached response.\\n\\n## Affected code\\n\\n```js\\n// src/utils/cache.ts\\nexport function canonicalizeParams(params) {\\n  const keys = Object.keys(params).sort();\\n  const pairs = [];\\n  for (const key of keys) {\\n    const value = params[key];\\n    if (value === undefined || value === null) continue;\\n    const serialized = typeof value === \\\"object\\\" ? JSON.stringify(value) : String(value);\\n    pairs.push(`${key}=${serialized}`);        // value not escaped\\n  }\\n  return pairs.join(\\\"&\\\");                        // '&' delimiter, injectable\\n}\\n\\nexport async function buildCacheKey(serverUrl, action, params) {\\n  const raw = `${serverUrl}|${action}|${canonicalizeParams(params)}`;  // '|' also unescaped\\n  return sha1Hex(raw);\\n}\\n```\\n\\nConfirmed collisions (identical key):\\n\\n- `{ q: \\\"budget\\\", rows: 10 }`  ≡  `{ q: \\\"budget&rows=10\\\" }`  → both canonicalize to `q=budget&rows=10`\\n- `{ filters: { a: \\\"b\\\" } }`  ≡  `{ filters: '{\\\"a\\\":\\\"b\\\"}' }`  → both canonicalize to `filters={\\\"a\\\":\\\"b\\\"}` (object-vs-string ambiguity)\\n\\nAn attacker can reproduce **any** target canonical string by injecting it into the alphabetically-first parameter, so the collision is general, not incidental.\\n\\n## Impact\\n\\n- **Cache poisoning / confusion.** On a shared cache (caching is enabled by\\n  default; the Cloudflare Workers deployment uses the shared `caches.default`, and\\n  a Node HTTP instance shares one in-process LRU across all clients), an attacker\\n  primes a colliding entry so that another client's genuinely different query\\n  receives the attacker-chosen response for the same portal.\\n- **Integrity of results.** Victims receive data for a query they did not make\\n  (wrong dataset list, wrong record set), undermining trust in tool output.\\n- **Chains with indirect prompt injection (advisory #07).** The attacker's\\n  colliding request can be one whose upstream response surfaces an\\n  attacker-controlled dataset (with malicious `notes`/`title`); the victim's\\n  benign query then serves that poisoned content to the model — delivering prompt\\n  injection via the cache, without the victim ever querying the malicious dataset.\\n\\nConfidentiality impact is low (same-portal public data); the primary damage is\\nintegrity. `AC:H` reflects the need for caching to be enabled and a shared\\ninstance plus priming before the victim's request populates the entry.\\n\\n## Proof of concept\\n\\n`poc/cache-collision-poc.mjs` primes a single-param request and shows a victim's\\ndistinct two-param request being served the attacker-primed entry:\\n\\n```\\nattacker canonical : q=budget&rows=10\\nvictim   canonical : q=budget&rows=10\\nsame cache key      : true\\nvictim served from cache: true\\nvictim RECEIVED    : RESULT_FOR({\\\"q\\\":\\\"budget&rows=10\\\"})\\nvictim EXPECTED    : RESULT_FOR({\\\"q\\\":\\\"budget\\\",\\\"rows\\\":10})\\n```\\n\\n## Remediation\\n\\n- Build the cache key from an unambiguous, injection-proof encoding: hash a\\n  structured, canonical JSON (with typed values) or percent-encode/escape each key\\n  and value before joining, and use a separator that cannot appear in the encoded\\n  fields. Include a type tag so `{a:{...}}` (object) and `{a:\\\"...\\\"}` (string)\\n  never coincide.\\n- Consider partitioning the cache per client/tenant on shared deployments so one\\n  client cannot influence another's entries.\", \"epss\": {\"percentage\": 0.00137, \"percentile\": 0.03317}, \"ghsa_id\": \"GHSA-78x9-fhhx-v2g6\", \"github_reviewed_at\": \"2026-09-03T14:49:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-78x9-fhhx-v2g6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-78x9-fhhx-v2g6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73846\"}], \"nvd_published_at\": \"2026-08-14T17:20:36Z\", \"published_at\": \"2026-09-03T14:49:22Z\", \"references\": [\"https://github.com/ondata/ckan-mcp-server/security/advisories/GHSA-78x9-fhhx-v2g6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73846\", \"https://github.com/ondata/ckan-mcp-server/commit/8e1522f9bbfa1f3b21550f17887f60f133e24151\", \"https://github.com/ondata/ckan-mcp-server/releases/tag/v0.4.112\", \"https://github.com/advisories/GHSA-78x9-fhhx-v2g6\"], \"repository_advisory_url\": \"https://api.github.com/repos/ondata/ckan-mcp-server/security-advisories/GHSA-78x9-fhhx-v2g6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ondata/ckan-mcp-server\", \"summary\": \"CKAN MCP Server: Cache-key canonicalization collision enables cache confusion / poisoning\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T14:49:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-78x9-fhhx-v2g6\", \"vulnerabilities\": [{\"first_patched_version\": \"0.4.112\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@aborruso/ckan-mcp-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.4.112\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-78x9-fhhx-v2g6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@aborruso/ckan-mcp-server: < 0.4.112"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73846"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@aborruso/ckan-mcp-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-03T19:12:46.390848Z",
+  "provenance": {
+    "content_sha256": "3b6de8b440599abb157dbd24dd6ae29f927651857aed97378d680eb29f8adc9d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T14:49:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-78x9-fhhx-v2g6",
+  "status": "active",
+  "title": "CKAN MCP Server: Cache-key canonicalization collision enables cache confusion / poisoning",
+  "updated_at": "2026-09-03T14:49:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-78x9-fhhx-v2g6"
+}

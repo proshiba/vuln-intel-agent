@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/191876097?v=4\", \"events_url\": \"https://api.github.com/users/xttraa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/xttraa/followers\", \"following_url\": \"https://api.github.com/users/xttraa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/xttraa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/xttraa\", \"id\": 191876097, \"login\": \"xttraa\", \"node_id\": \"U_kgDOC2_MAQ\", \"organizations_url\": \"https://api.github.com/users/xttraa/orgs\", \"received_events_url\": \"https://api.github.com/users/xttraa/received_events\", \"repos_url\": \"https://api.github.com/users/xttraa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/xttraa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/xttraa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/xttraa\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62675\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}], \"description\": \"### Summary\\n\\nAn authenticated user can upload a crafted agent bundle that defines a server-side Python callable tool. The server validates the uploaded bundle, but it does not block dangerous `callable:` paths in untrusted user-provided agent configs.\\n\\nWhen the tool is invoked, the runner imports and executes that Python callable. A crafted bundle can point the tool at `subprocess.check_output`, which lets the attacker run a local command on the runner machine.\\n\\nThis is serious because hosted Omnigent deployments can have multiple users and shared or managed runner hosts. A normal logged-in user should not be able to make the runner execute arbitrary local commands.\\n\\n### Details\\n\\nThe uploaded bundle path is reachable through session creation. Omnigent supports custom agent bundles through multipart `POST /v1/sessions`; the Web UI uses this same endpoint for custom agents:\\n\\n[`Create custom agent` builds and uploads a bundle](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/ap-web/src/shell/NewChatDialog.tsx#L1265-L1277) \\n\\\\\\n[`createBundledSession` posts the bundle to `/v1/sessions`](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/ap-web/src/lib/sessionsApi.ts#L421-L460)\\n\\nA crafted bundle can also be submitted directly through the API/CLI when creating a session from agent YAML. The PoC below uses this direct bundle shape so the vulnerable trust boundary is easy to reproduce.\\n\\nOn the server, uploaded bundles are validated here:\\n[`validate_agent_bundle`](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/omnigent/server/bundles.py#L13-L75)\\n\\nThe validator already treats uploaded bundles as untrusted in some ways. For example, it disables server-side environment expansion and can enforce a policy-handler allowlist:\\n```python\\nspec = load(\\n    bundle_bytes,\\n    dest=Path(tmpdir) / \\\"agent\\\",\\n    expand_env=False,\\n    enforce_handler_allowlist=enforce_handler_allowlist,\\n)\\n```\\nHowever, the same validation does not reject `tools.<name>.callable` entries in an uploaded agent bundle. Python callable tools are an intended trusted/operator feature, but the upload path accepts them from tenant-provided bundles too.\\n\\nThe docs describe server-side Python callable tools here: [`Python function tool` docs](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/docs/AGENT_YAML_SPEC.md#L229-L246)\\n\\\\\\nLater, the runner resolves and executes those callables: [`_resolve_spec_callable` imports the dotted path](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/omnigent/runner/tool_dispatch.py#L444-L481)\\n```python\\nmod = importlib.import_module(module_name)\\nfn = getattr(mod, attr_name, None)\\n```\\n[`_execute_spec_callable_tool` calls the resolved function](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/omnigent/runner/tool_dispatch.py#L484-L511)\\n```python\\nresult = await asyncio.to_thread(resolved, **args)\\n```\\nThe high-level tool dispatcher falls back to this callable execution path: [`execute_tool` callable fallback](https://github.com/omnigent-ai/omnigent/blob/23d42d9a7d46a3b6a0b40d5bf4125b91193bf831/omnigent/runner/tool_dispatch.py#L3958-L3965)\\n```python\\noutput = await _execute_spec_callable_tool(tool_name, args, agent_spec=agent_spec)\\n```\\n\\nThe problem is the trust boundary. Python callables are a trusted local developer feature, but uploaded agent bundles can be user-controlled in a hosted/multi-user server. The upload validator blocks some trusted-only policy behavior, but it does not block trusted-only tool callables.\\n\\nSuggested fix: when validating HTTP-uploaded bundles on a shared/multi-user server, reject server-side Python callable tools unless they are explicitly allowlisted by the operator. A conservative fix would reject `callable:` tool paths for tenant-uploaded bundles, while keeping trusted local/operator-authored configs working.\\n\\n### Impact\\n\\nThis is authenticated RCE against the Omnigent runner environment. A normal authenticated user who can upload or create a custom agent bundle can declare a server-side Python callable and have the runner import and execute it.\\n\\nBecause the callable runs inside the runner process, the attacker-controlled code runs with the runner's permissions. In a hosted or multi-user deployment, this can expose runner-accessible files, environment variables, credentials, workspace data, internal services reachable from the runner, and runner availability.\\n\\nThis is high impact because it crosses the boundary from \\\"upload an agent config\\\" to \\\"execute local code on shared runner infrastructure\\\" without requiring admin/operator access.\", \"epss\": {\"percentage\": 0.00448, \"percentile\": 0.37458}, \"ghsa_id\": \"GHSA-756x-9hf6-q4h4\", \"github_reviewed_at\": \"2026-09-02T21:54:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-756x-9hf6-q4h4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-756x-9hf6-q4h4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62675\"}], \"nvd_published_at\": \"2026-08-21T18:16:49Z\", \"published_at\": \"2026-09-02T21:54:52Z\", \"references\": [\"https://github.com/omnigent-ai/omnigent/security/advisories/GHSA-756x-9hf6-q4h4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62675\", \"https://github.com/omnigent-ai/omnigent/pull/1430\", \"https://github.com/omnigent-ai/omnigent/commit/1f3f398f41cbf97b905133c21e848621c21da6e0\", \"https://github.com/omnigent-ai/omnigent/releases/tag/v0.3.0\", \"https://github.com/advisories/GHSA-756x-9hf6-q4h4\"], \"repository_advisory_url\": \"https://api.github.com/repos/omnigent-ai/omnigent/security-advisories/GHSA-756x-9hf6-q4h4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/omnigent-ai/omnigent\", \"summary\": \"Omnigent: Uploaded Agent Bundle Allows Authenticated Runner RCE via Python Callable Tools\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-02T21:54:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-756x-9hf6-q4h4\", \"vulnerabilities\": [{\"first_patched_version\": \"0.3.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"omnigent\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-756x-9hf6-q4h4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "omnigent: < 0.3.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-62675"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "omnigent"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-03T19:12:46.485832Z",
+  "provenance": {
+    "content_sha256": "289eb1f9a49c9cf5e4a9fb1cc2e6ca450b609bb57f9914c1bbcee05e75e32a99",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-02T21:54:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-756x-9hf6-q4h4",
+  "status": "active",
+  "title": "Omnigent: Uploaded Agent Bundle Allows Authenticated Runner RCE via Python Callable Tools",
+  "updated_at": "2026-09-02T21:54:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-756x-9hf6-q4h4"
+}

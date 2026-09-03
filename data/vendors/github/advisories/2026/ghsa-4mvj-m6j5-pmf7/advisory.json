@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/19756064?v=4\", \"events_url\": \"https://api.github.com/users/hayato1121/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hayato1121/followers\", \"following_url\": \"https://api.github.com/users/hayato1121/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hayato1121/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hayato1121\", \"id\": 19756064, \"login\": \"hayato1121\", \"node_id\": \"MDQ6VXNlcjE5NzU2MDY0\", \"organizations_url\": \"https://api.github.com/users/hayato1121/orgs\", \"received_events_url\": \"https://api.github.com/users/hayato1121/received_events\", \"repos_url\": \"https://api.github.com/users/hayato1121/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hayato1121/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hayato1121/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hayato1121\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-71428\", \"cvss\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nServer-Side Request Forgery in `unstructured`. The `url=` argument of `partition()`, `partition_html()`, and `partition_md()` is fetched via `requests.get()` with no host validation. The response body is returned as `Element` text, so this is a **full-read SSRF** — attackers reach loopback admin APIs, internal HTTP services, and cloud metadata endpoints, and read the response. \\n\\n`unstructured` is the de facto URL ingestion layer for LangChain `UnstructuredURLLoader`, LlamaIndex `UnstructuredReader`, Chainlit, and many agent frameworks — secure defaults must live in the library, not in every downstream caller.\\n\\n### Details\\n\\nThree sinks, all in `unstructured == 0.22.26` (verified on `main` at `199f255`):\\n\\n- `unstructured/partition/auto.py:303` — `file_and_type_from_url()`, reached via `partition(url=…)`.\\n- `unstructured/partition/html/partition.py:160` — `partition_html(url=…)`. Post-fetch `Content-Type` check runs after the request hits the target.\\n- `unstructured/partition/md.py:96` — `partition_md(url=…)`. No timeout (SSRF + slow-loris DoS).\\n\\nNone of `is_private`, `is_loopback`, `ipaddress`, `gethostbyname`, or `allow_redirects` appear in any of the three files. Three exploitation paths apply: direct private-IP target; redirect bypass (`allow_redirects=True` default); DNS rebinding (TOCTOU, closeable only by socket-pinning). Affected since `0.4.7` (Feb 2023) — ~219 releases, no validation ever introduced.\\n\\n### PoC\\n\\nLocal-only. `pip install unstructured==0.22.26 flask requests`.\\n\\n`internal_server.py`:\\n\\n```python\\nfrom flask import Flask, Response, jsonify\\napp = Flask(__name__)\\n\\n@app.route(\\\"/imds\\\")\\ndef imds(): return jsonify({\\\"AccessKeyId\\\": \\\"ASIA-FAKE\\\", \\\"SecretAccessKey\\\": \\\"FAKE/SECRET\\\"})\\n\\n@app.route(\\\"/internal.html\\\")\\ndef html(): return Response(\\\"<html><body><p>SK_LEAK_42</p></body></html>\\\", mimetype=\\\"text/html\\\")\\n\\n@app.route(\\\"/redir\\\")\\ndef redir(): return Response(\\\"\\\", 302, headers={\\\"Location\\\": \\\"http://127.0.0.1:9999/imds\\\"})\\n\\nif __name__ == \\\"__main__\\\": app.run(host=\\\"127.0.0.1\\\", port=9999)\\n```\\n\\n`exploit.py` — uses the public top-level API:\\n\\n```python\\n# Stub NLP helpers so the offline sandbox skips spaCy model download.\\n# Does NOT affect the SSRF (which lives in the URL fetcher, before NLP).\\nimport unstructured.nlp.tokenize as _tk, unstructured.partition.text_type as _tt\\n_tk.sent_tokenize = _tt.sent_tokenize = lambda t: [s for s in (t or \\\"\\\").split(\\\". \\\") if s]\\n_tk.word_tokenize = _tt.word_tokenize = lambda t: (t or \\\"\\\").split()\\n_tk.pos_tag       = _tt.pos_tag       = lambda t: [(w, \\\"NN\\\") for w in (t or \\\"\\\").split()]\\n\\nfrom unstructured.partition.auto import partition\\nL = \\\"http://127.0.0.1:9999\\\"\\n\\n# A: partition(url=...) leaks internal HTML body\\nassert \\\"SK_LEAK_42\\\" in \\\"\\\\n\\\".join(str(e) for e in partition(url=f\\\"{L}/internal.html\\\", languages=[\\\"eng\\\"]))\\n# B: redirect bypass reaches simulated IMDS\\nassert \\\"SecretAccessKey\\\" in \\\"\\\\n\\\".join(str(e) for e in partition(url=f\\\"{L}/redir\\\", languages=[\\\"eng\\\"]))\\nprint(\\\"PoC OK\\\")\\n```\\n\\nIn production the attacker substitutes `169.254.169.254`, `metadata.google.internal`, or any internal address.\\n\\n### Impact\\n\\nAttacker capabilities:\\n\\n- **Internal HTTP service read** — loopback admin consoles, internal Elasticsearch/Redis/Consul/etcd HTTP fronts, Kubernetes API server, social/internal microservices. This is the most broadly exploitable capability and is unaffected by any cloud-side hardening.\\n- **Cloud instance metadata access** — reads metadata services that respond to unauthenticated GETs: GCP (`metadata.google.internal`), Azure IMDS, Oracle Cloud, DigitalOcean, and EC2 instances still configured for IMDSv1 (which remains widely deployed in older accounts and in services that do not enforce IMDSv2-only). EC2 instances configured as IMDSv2-only are not exposed to direct credential theft via this SSRF, since IMDSv2 requires a `PUT` for token acquisition; the SSRF still reaches the endpoint for reconnaissance and surface-mapping.\\n- **Side-effecting GET endpoints** — magic-link consumers, job triggers, link-preview generators reachable on internal networks.\\n- **Internal network reconnaissance** — connection success/failure timing and error messages serve as a port and service scanner.\", \"epss\": {\"percentage\": 0.0025, \"percentile\": 0.16105}, \"ghsa_id\": \"GHSA-4mvj-m6j5-pmf7\", \"github_reviewed_at\": \"2026-09-03T17:02:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-4mvj-m6j5-pmf7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4mvj-m6j5-pmf7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-71428\"}], \"nvd_published_at\": \"2026-08-20T17:19:40Z\", \"published_at\": \"2026-09-03T17:02:46Z\", \"references\": [\"https://github.com/Unstructured-IO/unstructured/security/advisories/GHSA-4mvj-m6j5-pmf7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-71428\", \"https://github.com/Unstructured-IO/unstructured/pull/4388\", \"https://github.com/Unstructured-IO/unstructured/commit/445c95735c4045057f51f399bc04c657751923bd\", \"https://github.com/Unstructured-IO/unstructured/releases/tag/0.24.0\", \"https://github.com/advisories/GHSA-4mvj-m6j5-pmf7\"], \"repository_advisory_url\": \"https://api.github.com/repos/Unstructured-IO/unstructured/security-advisories/GHSA-4mvj-m6j5-pmf7\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/Unstructured-IO/unstructured\", \"summary\": \"unstructured: Server-Side Request Forgery in the URL-based partitioning\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T17:02:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-4mvj-m6j5-pmf7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.24.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"unstructured\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.4.7, < 0.24.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4mvj-m6j5-pmf7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "unstructured: >= 0.4.7, < 0.24.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-71428"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "unstructured"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-03T19:12:46.377489Z",
+  "provenance": {
+    "content_sha256": "e580e1043b9b2ad7eb583ddaf547d561d4adca739d6d1ce58920bcdee9e5c1b3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T17:02:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4mvj-m6j5-pmf7",
+  "status": "active",
+  "title": "unstructured: Server-Side Request Forgery in the URL-based partitioning",
+  "updated_at": "2026-09-03T17:02:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4mvj-m6j5-pmf7"
+}
