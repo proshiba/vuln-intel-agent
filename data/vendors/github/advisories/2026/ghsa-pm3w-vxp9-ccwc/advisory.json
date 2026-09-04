@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-68585\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-68585](https://nvd.nist.gov/vuln/detail/CVE-2026-68585).\\n\\n### Summary\\n\\nThe `/api/block/getBlockInfo` endpoint returns document root metadata including the document title (`rootTitle`) for a block in a publish-forbidden document, with no publish-access check. Its sibling `/api/block/getDocInfo` applies the publish-access filter, `getBlockInfo` does not. Both are gated by `CheckAuth` only, so `getBlockInfo` is reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`.\\n\\n### Details\\n\\nThe list/info side of this API is filtered while the block-info twin is not the asymmetry indicates an oversight rather than intended behavior:\\n\\n| Endpoint | Returns | Publish-access filter | Route |\\n|---|---|---|---|\\n| `getDocInfo` | document info/metadata | present | `CheckAuth` |\\n| `getBlockInfo` | `box, path, rootID, rootTitle, rootChildID, rootIcon` | none | `CheckAuth` |\\n\\n`getBlockInfo` takes a caller-supplied block ID, validates only its format, and returns the containing document's root metadata including `rootTitle` (the document title) with no `IsReadOnlyRoleContext` / publish-access check. Because `getDocInfo` performs the filtering for equivalent data, the boundary is clearly meant to apply here; `getBlockInfo` omits it.\\n\\n### Proof of Concept\\n\\nReproduced on a local instance (SiYuan running locally, publish mode enabled on port 6808, publish Basic Auth disabled). Setup: a publish-forbidden document `D` whose title is a unique marker, containing a block `BLOCKID`.\\n\\n**1. Mark the document publish-forbidden (admin action):**\\n```\\nPOST http://127.0.0.1:6806/api/filetree/setPublishAccess\\nAuthorization: Token <admin-token>\\n{\\\"id\\\":\\\"DOC\\\",\\\"visible\\\":false,\\\"password\\\":\\\"\\\",\\\"disable\\\":true}\\n```\\n\\n**2. Disclosure: the block-info endpoint returns the forbidden doc's title (anonymous, port 6808):**\\n```\\nPOST http://127.0.0.1:6808/api/block/getBlockInfo\\n{\\\"id\\\":\\\"BLOCKID\\\"}\\n```\\nReturns HTTP 200 with `data.rootTitle` set to the publish-forbidden document's title, along with `box`, `path`, `rootID`, and `rootIcon`. This document's title is not returned by the reader-facing filtered paths.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` can read the title and root metadata (notebook, path, root ID, icon) of a publish-forbidden document by supplying a block ID from it. This discloses the existence, title, and location of documents an administrator marked as excluded from publishing.\\n\\n**Precondition and scope (stated honestly):** the request requires a block ID from the target document; this endpoint does not enumerate arbitrary documents. The disclosure is limited to document metadata, title, notebook, path, root ID, icon — not the document body. Block IDs for forbidden documents are obtainable from other `CheckAuth`-only endpoints that lack the publish-access filter (reported separately). Impact is confidentiality-only, limited to metadata; no content body, no modification. Encrypted notebooks are out of scope.\\n\\n### Suggested fix\\n\\nApply the same publish-access check `getDocInfo` uses to `getBlockInfo` before returning root metadata, resolve the block's document and enforce `IsReadOnlyRoleContext` / the publish-access filter, consistent with the sibling endpoint.\", \"epss\": {\"percentage\": 0.00194, \"percentile\": 0.09491}, \"ghsa_id\": \"GHSA-pm3w-vxp9-ccwc\", \"github_reviewed_at\": \"2026-09-03T21:22:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-pm3w-vxp9-ccwc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pm3w-vxp9-ccwc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-68585\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T21:22:08Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-pm3w-vxp9-ccwc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-68585\", \"https://github.com/siyuan-note/siyuan/commit/ffde3b21eca49ae98828747ca126581a553cce8b\", \"https://www.vulncheck.com/advisories/siyuan-before-metadata-disclosure-via-getblockinfo\", \"https://github.com/advisories/GHSA-pm3w-vxp9-ccwc\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-pm3w-vxp9-ccwc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Cross-boundary metadata disclosure via getBlockInfo (publish mode): reader-reachable document title/root info for publish-forbidden docs; sibling getDocInfo is filtered\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T21:22:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-pm3w-vxp9-ccwc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260721014951-ffde3b21eca4\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260721014951-ffde3b21eca4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pm3w-vxp9-ccwc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260721014951-ffde3b21eca4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-68585"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.971902Z",
+  "provenance": {
+    "content_sha256": "94d0aa4c3b8ee4f16a7f94dc999adcbfcb03cd2cacc62d8685bc6adb095f4385",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T21:22:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pm3w-vxp9-ccwc",
+  "status": "active",
+  "title": "SiYuan: Cross-boundary metadata disclosure via getBlockInfo (publish mode): reader-reachable document title/root info for publish-forbidden docs; sibling getDocInfo is filtered",
+  "updated_at": "2026-09-03T21:22:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pm3w-vxp9-ccwc"
+}

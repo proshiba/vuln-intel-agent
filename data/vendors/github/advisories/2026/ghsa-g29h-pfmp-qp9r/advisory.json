@@ -1,0 +1,64 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/251119765?v=4\", \"events_url\": \"https://api.github.com/users/sai-sh/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sai-sh/followers\", \"following_url\": \"https://api.github.com/users/sai-sh/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sai-sh/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sai-sh\", \"id\": 251119765, \"login\": \"sai-sh\", \"node_id\": \"U_kgDODvfIlQ\", \"organizations_url\": \"https://api.github.com/users/sai-sh/orgs\", \"received_events_url\": \"https://api.github.com/users/sai-sh/received_events\", \"repos_url\": \"https://api.github.com/users/sai-sh/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sai-sh/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sai-sh/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sai-sh\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75857\", \"cvss\": {\"score\": 7.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 7.3, \"vector_string\": \"CVSS:4.0/AV:L/AC:H/AT:P/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}], \"description\": \"### Maintainer resolution\\n\\nThe CodeWhale maintainers validated this report. The affected package ranges are recorded in the advisory metadata. Version 0.8.64 contains the fix in commit 57f3c89471e27ac4032d9791f6885e5d4408c381. Users should upgrade to 0.8.64 or later. The original reporter analysis is preserved below.\\n\\n### Summary\\n`exec_shell` is correctly approval-gated. Its sibling `exec_shell_interact` returns `ApprovalRequirement::Auto`, so when the model writes input into a shell the user already approved (a `python3 -i` REPL, `mysql`, `ssh`, `sudo -i`, etc.), no prompt fires. Inside those processes, \\\"stdin\\\" is the command surface, so the model gets to run commands at whatever privilege that process holds. The user approved opening the shell once, for a stated purpose; the input that then runs in it is chosen by the model, and can be steered by any prompt injection the agent ingests afterward.\\n\\n### Details\\nThe vulnerability requires two ordinary preconditions: shell tools are enabled (the normal config for using CodeWhale as a coding agent), and the session already has one approved long-running interactive process. After that, any untrusted content the agent reads can drive a `exec_shell_interact` call.\\n\\n`crates/tui/src/tools/shell.rs:2834-2910`:\\n\\n```rust\\nfn capabilities(&self) -> Vec<ToolCapability> {\\n    vec![ToolCapability::ExecutesCode]\\n}\\n\\nfn approval_requirement(&self) -> ApprovalRequirement {\\n    ApprovalRequirement::Auto          // overrides the Required-for-ExecutesCode default\\n}\\n\\nasync fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {\\n    let task_id = required_task_id(&input)?;\\n    let close_stdin = optional_bool(&input, \\\"close_stdin\\\", false);\\n    let interaction_input = input\\n        .get(\\\"input\\\").or_else(|| input.get(\\\"stdin\\\")).or_else(|| input.get(\\\"data\\\"))  // LLM-controlled\\n        .and_then(serde_json::Value::as_str).unwrap_or(\\\"\\\");\\n    {\\n        let mut manager = context.shell_manager.lock()...;\\n        if !interaction_input.is_empty() || close_stdin {\\n            manager.write_stdin(task_id, interaction_input, close_stdin)...;          // no prompt\\n        }\\n    }\\n    ...\\n}\\n```\\n\\nSame gate as the `rlm_eval` finding: the `Auto` at `approval_requirement()` makes `approval_required` false at `engine.rs:845`, so the `--approval-policy` is never consulted for the stdin write. The trait default at `spec.rs:632` would have been `Required`. The tool is registered unconditionally (`registry.rs:527`), and an alias `exec_interact` on the same struct is registered at `registry.rs:530`, so a fix must cover both names (it does, since they share `ShellInteractTool`).\\n\\n### PoC\\n1. User asks the agent to open a REPL; the model calls `exec_shell command=\\\"python3 -i\\\"`; the user sees and approves it once.\\n2. Later in the session, untrusted content (a fetched page, an MCP result, a repo `AGENTS.md`) instructs the model to send a payload to the open REPL.\\n3. The model calls `exec_shell_interact task_id=<repl> input=\\\"import os; os.system('...')\\\\n\\\"`. No prompt fires; Python runs it.\\n\\nDriving the interactive TUI through a pty and scanning the output for an approval dialog shows the only `Approval needed:` lines are for the initial `exec_shell`; `exec_shell_interact` never produces one, while a sentinel file proves the injected input ran.\\n\\nWhen the approved process is privileged, the reach scales with it: `mysql -u root` becomes arbitrary SQL, `ssh host` becomes commands on the remote host, `sudo -i` becomes root — none re-prompted.\\n\\n### Impact\\nCode or command execution inside an already-approved process, at that process's privilege level, with no prompt for the escalating input. Lower severity than the `rlm_eval` finding because it needs a prior user approval of an interactive shell, but higher reach when that shell is privileged.\\n\\n### Credit\\n\\n[sai-sh](https://github.com/sai-sh)\", \"epss\": {\"percentage\": 0.00121, \"percentile\": 0.02274}, \"ghsa_id\": \"GHSA-g29h-pfmp-qp9r\", \"github_reviewed_at\": \"2026-09-04T18:02:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-g29h-pfmp-qp9r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g29h-pfmp-qp9r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75857\"}], \"nvd_published_at\": \"2026-08-18T16:18:21Z\", \"published_at\": \"2026-09-04T18:02:10Z\", \"references\": [\"https://github.com/Hmbown/CodeWhale/security/advisories/GHSA-g29h-pfmp-qp9r\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-75857\", \"https://github.com/Hmbown/CodeWhale/commit/57f3c89471e27ac4032d9791f6885e5d4408c381\", \"https://www.vulncheck.com/advisories/codewhale-before-privilege-escalation-via-exec-shell-interact\", \"https://github.com/advisories/GHSA-g29h-pfmp-qp9r\"], \"repository_advisory_url\": \"https://api.github.com/repos/Hmbown/Codewhale/security-advisories/GHSA-g29h-pfmp-qp9r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Hmbown/CodeWhale\", \"summary\": \"CodeWhale: exec_shell_interact sends LLM-controlled input to a running shell without an approval prompt (privilege escalation)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T18:02:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-g29h-pfmp-qp9r\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.3.10, <= 0.8.41\"}, {\"first_patched_version\": \"0.8.41\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.3.10, < 0.8.41\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"codewhale-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"codewhale\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g29h-pfmp-qp9r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "codewhale-tui: >= 0.8.41, < 0.8.64",
+      "codewhale: >= 0.8.41, < 0.8.64",
+      "deepseek-tui: >= 0.3.10, < 0.8.41",
+      "deepseek-tui: >= 0.3.10, <= 0.8.41"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-75857"
+    ],
+    "cvss_score": 7.0,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "codewhale",
+      "codewhale-tui",
+      "deepseek-tui"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.887666Z",
+  "provenance": {
+    "content_sha256": "69cf5d853fd90677254fee6bf5453ecd015270c562bf07734a5da0fbc5dde9a4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T18:02:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g29h-pfmp-qp9r",
+  "status": "active",
+  "title": "CodeWhale: exec_shell_interact sends LLM-controlled input to a running shell without an approval prompt (privilege escalation)",
+  "updated_at": "2026-09-04T18:02:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g29h-pfmp-qp9r"
+}

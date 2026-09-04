@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-68587\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-68587](https://nvd.nist.gov/vuln/detail/CVE-2026-68587).\\n\\n### Summary\\n\\nThree \\\"heading transaction\\\" endpoints `/api/block/getHeadingDeleteTransaction`, `/api/block/getHeadingLevelTransaction`, and `/api/block/getHeadingInsertTransaction` return the rendered block DOM of a heading and its subtree in the computed transaction payload, with no publish-access check. They are gated by `CheckAuth` only, so they are reachable by the publish `RoleReader` token, and by the anonymous account when `Publish.Auth.Enable` is `false`.\\n\\nDespite their write-implying names, these endpoints perform no mutation on this path, they compute a transaction object and return it, and that object contains `RenderNodeBlockDOM` output. As a result, an anonymous reader who supplies a heading block ID can read the full rendered content of a document that has been explicitly marked publish-disabled by an administrator, content that the reader-facing `/api/filetree/getDoc` path correctly refuses to return.\\n\\n### Details\\n\\n**Route / auth tier.** All three routes are registered `CheckAuth`-only (no `CheckAdminRole`). `CheckAuth` admits `RoleReader`, and the publish proxy forwards port-6808 traffic with a Reader JWT (anonymous account when publish auth is disabled). Anonymous/reader reachable.\\n\\n**No publish-access filter.** `GetHeadingDeleteTransaction` / `GetHeadingLevelTransaction` / `GetHeadingInsertTransaction` load the heading's block tree and render its DOM into the returned transaction's operation data. None of the three invokes `IsReadOnlyRoleContext` / the publish-access filter that the reader-safe content path (`getDoc`) applies. The reader-facing content endpoints (`getDoc`, and the `CheckAdminRole`-gated `getBlockDOM`/`getBlockKramdown`) treat rendered block DOM as gated content; these three transaction endpoints return the same rendered DOM without that gate.\\n\\n**Write-implying name, read behavior.** On this code path the endpoints only *compute* the transaction (e.g. the `undoOperations` a delete would produce) and return it; nothing is deleted or modified. The returned operation data includes the rendered HTML of the heading subtree. This mismatch, mutation-shaped name, content-returning behavior is why the gap is easy to miss.\\n\\n### Proof of Concept\\n\\nReproduced on a local instance (SiYuan running locally, publish mode enabled on port 6808, publish Basic Auth disabled). `DOC` is a document containing a heading `HEADING` whose body contains the unique marker `UNIQUE_MARKER_99`, and `DOC` is marked publish-disabled by the administrator.\\n\\n**1. Confirm the document is publish-disabled (admin action, the boundary that should block reads):**\\n```\\nPOST http://127.0.0.1:6806/api/filetree/setPublishAccess\\nAuthorization: Token <admin-token>\\n{\\\"id\\\":\\\"DOC\\\",\\\"visible\\\":false,\\\"password\\\":\\\"\\\",\\\"disable\\\":true}\\n```\\n\\n**2. Baseline: the reader-safe content path correctly blocks it (anonymous, port 6808):**\\n```\\nPOST http://127.0.0.1:6808/api/filetree/getDoc\\n{\\\"id\\\":\\\"DOC\\\"}\\n```\\nReturns the blocked/placeholder response, the publish filter is applied, no content.\\n\\n**3. Disclosure: the transaction endpoint returns the content (anonymous, port 6808):**\\n```\\nPOST http://127.0.0.1:6808/api/block/getHeadingDeleteTransaction\\n{\\\"id\\\":\\\"HEADING\\\"}\\n```\\nReturns HTTP 200; `data.undoOperations[].data` contains the rendered HTML of the heading subtree, including the hidden body text `UNIQUE_MARKER_99`. Nothing is deleted — the endpoint only computes the transaction. This is the full content of a publish-disabled document returned to an anonymous reader.\\n\\n**4. Sibling endpoints: same disclosure, same input:**\\n```\\nPOST http://127.0.0.1:6808/api/block/getHeadingLevelTransaction\\n{\\\"id\\\":\\\"HEADING\\\",\\\"level\\\":2}\\n\\nPOST http://127.0.0.1:6808/api/block/getHeadingInsertTransaction\\n{\\\"id\\\":\\\"HEADING\\\"}\\n```\\nBoth return the rendered DOM of the heading subtree in their operation data.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` who supplies a heading block ID can read the full rendered content of a publish-disabled document, defeating a boundary the administrator explicitly configured.\\n\\n**Precondition:** the request requires the target heading's block ID. Block IDs are high-entropy and are not returned by this endpoint, so this endpoint alone does not permit untargeted enumeration of arbitrary documents. However, block/heading IDs for publish-disabled documents are obtainable from other `CheckAuth`-only endpoints that lack the publish-access filter (the publish-boundary handler set reported separately, e.g. `getHeadingChildrenIDs`). Chained with such an ID source, this yields end-to-end unauthenticated full-content disclosure of publish-disabled documents. Presented standalone, the attacker must already possess the heading ID.\\n\\nImpact is confidentiality-only: these endpoints return content but do not (on this path) modify data. No admin role, CSRF token, or write permission is required. Encrypted notebooks are out of scope.\\n\\n### Suggested fix\\n\\nApply the same publish-access check the content path uses `IsReadOnlyRoleContext` / the publish-access filter used by `getDoc` to all three `getHeading*Transaction` handlers, or gate them behind `CheckAdminRole` consistent with `getBlockDOM`/`getBlockKramdown`. Any endpoint that returns rendered block DOM should enforce the same publish boundary as the primary content path.\", \"epss\": {\"percentage\": 0.00245, \"percentile\": 0.15832}, \"ghsa_id\": \"GHSA-69mh-gvh4-8gp7\", \"github_reviewed_at\": \"2026-09-03T21:19:41Z\", \"html_url\": \"https://github.com/advisories/GHSA-69mh-gvh4-8gp7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-69mh-gvh4-8gp7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-68587\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T21:19:41Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-69mh-gvh4-8gp7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-68587\", \"https://github.com/siyuan-note/siyuan/commit/69db783b782aea865ea70a1c5ab656e5c0f3dadb\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-getheading-transaction\", \"https://github.com/advisories/GHSA-69mh-gvh4-8gp7\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-69mh-gvh4-8gp7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Full-content disclosure of publish-disabled documents via getHeading*Transaction endpoints (publish mode): reader-reachable rendered DOM with no publish-access check\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T21:19:42Z\", \"url\": \"https://api.github.com/advisories/GHSA-69mh-gvh4-8gp7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260721013353-69db783b782a\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260721013353-69db783b782a\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-69mh-gvh4-8gp7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260721013353-69db783b782a"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-68587"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.980709Z",
+  "provenance": {
+    "content_sha256": "d2a1bf8c6af2946c75b405e880e73ca3cb7f846366866dd9f8632fb161468aad",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T21:19:41Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-69mh-gvh4-8gp7",
+  "status": "active",
+  "title": "SiYuan: Full-content disclosure of publish-disabled documents via getHeading*Transaction endpoints (publish mode): reader-reachable rendered DOM with no publish-access check",
+  "updated_at": "2026-09-03T21:19:42Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-69mh-gvh4-8gp7"
+}

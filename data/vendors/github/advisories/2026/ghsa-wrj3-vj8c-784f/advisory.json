@@ -1,0 +1,65 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/251119765?v=4\", \"events_url\": \"https://api.github.com/users/sai-sh/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sai-sh/followers\", \"following_url\": \"https://api.github.com/users/sai-sh/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sai-sh/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sai-sh\", \"id\": 251119765, \"login\": \"sai-sh\", \"node_id\": \"U_kgDODvfIlQ\", \"organizations_url\": \"https://api.github.com/users/sai-sh/orgs\", \"received_events_url\": \"https://api.github.com/users/sai-sh/received_events\", \"repos_url\": \"https://api.github.com/users/sai-sh/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sai-sh/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sai-sh/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sai-sh\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75858\", \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 8.5, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Maintainer resolution\\n\\nThe CodeWhale maintainers validated this report. The affected package ranges are recorded in the advisory metadata. Version 0.8.64 contains the fix in commit 57f3c89471e27ac4032d9791f6885e5d4408c381. Users should upgrade to 0.8.64 or later. The original reporter analysis is preserved below.\\n\\n### Summary\\nThe `rlm_eval` tool runs an arbitrary Python string chosen by the model in a real `python3` interpreter. Its `approval_requirement()` returns `ApprovalRequirement::Auto`, which the engine treats as \\\"never prompt,\\\" regardless of the user's configured `--approval-policy`. A single tool call — which prompt injection from any untrusted content the agent reads (a web page, a fetched URL, a repo file, an MCP tool result) can induce — runs code on the user's machine at the user's privilege with no prompt and no audit step. This is the same defect that was already patched on the sibling `run_tests` tool (CVE-2026-45311); the fix never reached `rlm_eval` or `rlm_open`, which expose a broader surface (full Python on the host, not just `cargo test`).\\n\\n### Details\\n`rlm_eval`'s `execute()` reads the LLM-controlled `code` field and runs it (`crates/tui/src/tools/rlm.rs:215-300`):\\n\\n```rust\\nfn capabilities(&self) -> Vec<ToolCapability> {\\n    vec![ToolCapability::Network, ToolCapability::ExecutesCode]\\n}\\n\\nfn approval_requirement(&self) -> ApprovalRequirement {\\n    ApprovalRequirement::Auto          // overrides the safe default below\\n}\\n\\nasync fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {\\n    let name = required_non_empty_str(&input, \\\"name\\\")?;\\n    let code = required_non_empty_str(&input, \\\"code\\\")?;   // LLM-controlled\\n    ...\\n    let round = kernel.run(code, Some(&bridge)).await...   // runs that code in python3\\n```\\n\\nThe trait default at `crates/tui/src/tools/spec.rs:632-633` would have returned `Required` for any tool whose capabilities include `ExecutesCode`. `rlm_eval` deliberately overrides that to `Auto`.\\n\\nThe engine's approval gate (`crates/tui/src/core/engine.rs:845`) is two AND-ed conditions, and a per-tool `Auto` makes the first one false:\\n\\n```rust\\nlet approval_required = spec.approval_requirement() != ApprovalRequirement::Auto\\n    && !registry.context().auto_approve;\\n```\\n\\nWhen `approval_requirement()` is `Auto`, `approval_required` is `false`, no `Event::ApprovalRequired` is emitted, and the user's `--approval-policy` (`on-request`, `unless-trusted`, `never`) is never consulted. The companion tool `rlm_open` (`rlm.rs:142-143`, same `Auto`, capabilities include `ExecutesCode` + `Network`) spawns the same Python kernel via `PythonRuntime::spawn_with_context` (`rlm.rs:181`) and can stage a `content` string, a `file_path` read, or a `url` fetch into the kernel before `rlm_eval` runs against it. Both tools are registered unconditionally by the default registry (`crates/tui/src/tools/registry.rs:802-803`); there is no flag to disable them.\\n\\n### PoC\\nSource-level reproduction. Point a provider's `base_url` at a local mock that returns canned `tool_calls`, then have the agent call `rlm_open` followed by `rlm_eval` with a `code` payload such as:\\n\\n```python\\nimport os, getpass, socket\\nopen('/tmp/pwned_by_rlm_eval','w').write(getpass.getuser()+'@'+socket.gethostname()+':'+os.getcwd())\\n```\\n\\nRun it through the non-interactive path (`codewhale exec --auto`) to confirm the tool executes, and through the plain interactive TUI under `--approval-policy on-request` (no `--auto`, no `--yolo`) to confirm no approval dialog appears. The sentinel file is written either way; the interactive run is the one that proves the policy is bypassed rather than waived.\\n\\n### Impact\\nUnsandboxed code execution on the user's workstation at the user's UID: read SSH keys, cloud credentials, `~/.codewhale/auth.json`, and other secrets; write to shell rc files or `authorized_keys` for persistence; spawn subprocesses; reach the network. No filesystem, network, or process sandbox is applied to the spawned interpreter. Reachable with user interaction (running the agent over attacker-influenced content), no further prompt.\\n\\n### Credit\\n[sai-sh](https://github.com/sai-sh)\", \"epss\": {\"percentage\": 0.00267, \"percentile\": 0.18511}, \"ghsa_id\": \"GHSA-wrj3-vj8c-784f\", \"github_reviewed_at\": \"2026-09-04T18:12:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-wrj3-vj8c-784f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wrj3-vj8c-784f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75858\"}], \"nvd_published_at\": \"2026-08-18T16:18:21Z\", \"published_at\": \"2026-09-04T18:12:15Z\", \"references\": [\"https://github.com/Hmbown/CodeWhale/security/advisories/GHSA-wrj3-vj8c-784f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-75858\", \"https://github.com/Hmbown/CodeWhale/commit/57f3c89471e27ac4032d9791f6885e5d4408c381\", \"https://www.vulncheck.com/advisories/codewhale-rlm-eval-before-remote-code-execution\", \"https://github.com/advisories/GHSA-wrj3-vj8c-784f\"], \"repository_advisory_url\": \"https://api.github.com/repos/Hmbown/Codewhale/security-advisories/GHSA-wrj3-vj8c-784f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Hmbown/CodeWhale\", \"summary\": \"CodeWhale: rlm_eval auto-approves arbitrary Python execution, bypassing the user's approval policy (RCE)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T18:12:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-wrj3-vj8c-784f\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.33, <= 0.8.41\"}, {\"first_patched_version\": \"0.8.41\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.33, < 0.8.41\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"codewhale-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"codewhale\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wrj3-vj8c-784f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "codewhale-tui: >= 0.8.41, < 0.8.64",
+      "codewhale: >= 0.8.41, < 0.8.64",
+      "deepseek-tui: >= 0.8.33, < 0.8.41",
+      "deepseek-tui: >= 0.8.33, <= 0.8.41"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-45311",
+      "CVE-2026-75858"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "codewhale",
+      "codewhale-tui",
+      "deepseek-tui"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.870195Z",
+  "provenance": {
+    "content_sha256": "65a8de557c666b31d5704ad64d75f17e421b34e48daf5dcf78456e2cb94b09e1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T18:12:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wrj3-vj8c-784f",
+  "status": "active",
+  "title": "CodeWhale: rlm_eval auto-approves arbitrary Python execution, bypassing the user's approval policy (RCE)",
+  "updated_at": "2026-09-04T18:12:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wrj3-vj8c-784f"
+}

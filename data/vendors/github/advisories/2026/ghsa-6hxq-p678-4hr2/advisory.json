@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/195698411?v=4\", \"events_url\": \"https://api.github.com/users/Josh-TantoSec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Josh-TantoSec/followers\", \"following_url\": \"https://api.github.com/users/Josh-TantoSec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Josh-TantoSec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Josh-TantoSec\", \"id\": 195698411, \"login\": \"Josh-TantoSec\", \"node_id\": \"U_kgDOC6oe6w\", \"organizations_url\": \"https://api.github.com/users/Josh-TantoSec/orgs\", \"received_events_url\": \"https://api.github.com/users/Josh-TantoSec/received_events\", \"repos_url\": \"https://api.github.com/users/Josh-TantoSec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Josh-TantoSec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Josh-TantoSec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Josh-TantoSec\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:A/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-295\", \"name\": \"Improper Certificate Validation\"}, {\"cwe_id\": \"CWE-296\", \"name\": \"Improper Following of a Certificate's Chain of Trust\"}], \"description\": \"## Summary\\n`validateCertificatePath()` does not verify that an attestation's certificate chain actually terminates at a configured trust anchor. When walking the chain it stops at the first self-signed certificate it finds (which could be user-supplied), and exits early.\\n\\nThis happens before the configured Apple/Google/etc trust anchor (which is concatenated to the end of the chain) is reached.\\n\\nA user can therefore register a credential and have the server accept it as if it were backed by a genuine Apple / Android SafetyNet / Yubikey / etc.\\n\\n## Details\\n`packages/server/src/helpers/validateCertificatePath.ts`:\\n\\nThe configured trust anchor is appended to the end of the untrusted chain (line **83**):\\n\\n```ts\\nconst x5cWithTrustAnchor = x5cCertsParsed.concat([anchor]);\\n```\\n\\nThe walk then verifies each cert was signed by the next, but breaks on the first self-signed cert (lines **104–116**):\\n\\n```ts\\nif (issuer.subject === issuer.issuer) {\\n  // Root cert detected, make sure it signed itself\\n  const issuerSignedIssuer = await issuer.verify(\\n    { publicKey: issuer.publicKey, signatureOnly: true },\\n    WebCrypto,\\n  );\\n  if (!issuerSignedIssuer) {\\n    throw new InvalidSubjectAndIssuer();\\n  }\\n  break;   // <-- exits before the appended trust anchor is ever checked if user supplied self-signed cert comes first\\n}\\n```\\n\\nThe success condition is therefore \\\"the certs form an internally-consistent chain ending in some self-signed cert\\\" Rather than \\\"the chain terminates at one of the configured trust anchors.\\\"\\n\\n## Exploit shape\\n\\n```\\nattacker sends:  x5c = [ forgedLeaf (signed by attacker root),\\n                         attackerSelfSignedRoot ]\\n\\nlibrary builds:  [ forgedLeaf, attackerSelfSignedRoot, <configured Apple/Google/etc root> ]\\n\\nwalk:  forgedLeaf -> attackerSelfSignedRoot        (verifies, attacker controls both)\\n       attackerSelfSignedRoot is self-signed        -> break\\n       attackerSelfSignedRoot -> configured root    (NEVER CHECKED)\\n```\\n\\n`return true`. The configured anchor never gets checked.\\n\\n\\nAs far as observed, all attestation enforcement uses validateCertificatePath when using MDS etc.\", \"ghsa_id\": \"GHSA-6hxq-p678-4hr2\", \"github_reviewed_at\": \"2026-09-04T17:33:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-6hxq-p678-4hr2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6hxq-p678-4hr2\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-04T17:33:20Z\", \"references\": [\"https://github.com/MasterKale/SimpleWebAuthn/security/advisories/GHSA-6hxq-p678-4hr2\", \"https://github.com/MasterKale/SimpleWebAuthn/commit/67a41fed3dfd96cab1dcf414f6d1792a72e06e35\", \"https://github.com/MasterKale/SimpleWebAuthn/commit/8a53d70f42bcbb7c744ef1b90e6db35bc4b26d06\", \"https://github.com/MasterKale/SimpleWebAuthn/commit/dd0d73c716a528e6645efafbd43a972b64df71f9\", \"https://github.com/MasterKale/SimpleWebAuthn/releases/tag/v13.3.2\", \"https://github.com/advisories/GHSA-6hxq-p678-4hr2\"], \"repository_advisory_url\": \"https://api.github.com/repos/MasterKale/SimpleWebAuthn/security-advisories/GHSA-6hxq-p678-4hr2\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/MasterKale/SimpleWebAuthn\", \"summary\": \"SimpleWebAuthn: Registration verification does not sufficiently ensure that attestation certificates chain to a trust anchor\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T17:33:24Z\", \"url\": \"https://api.github.com/advisories/GHSA-6hxq-p678-4hr2\", \"vulnerabilities\": [{\"first_patched_version\": \"13.3.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@simplewebauthn/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 13.3.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6hxq-p678-4hr2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@simplewebauthn/server: <= 13.3.1"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 2.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:A/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@simplewebauthn/server"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.903162Z",
+  "provenance": {
+    "content_sha256": "ba5c94c28a1347a13ff724b7f862cb672adbde1aa5bf14493403021448df445d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T17:33:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6hxq-p678-4hr2",
+  "status": "active",
+  "title": "SimpleWebAuthn: Registration verification does not sufficiently ensure that attestation certificates chain to a trust anchor",
+  "updated_at": "2026-09-04T17:33:24Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6hxq-p678-4hr2"
+}

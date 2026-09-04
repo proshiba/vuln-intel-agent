@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/39662153?v=4\", \"events_url\": \"https://api.github.com/users/spartan8806/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/spartan8806/followers\", \"following_url\": \"https://api.github.com/users/spartan8806/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/spartan8806/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/spartan8806\", \"id\": 39662153, \"login\": \"spartan8806\", \"node_id\": \"MDQ6VXNlcjM5NjYyMTUz\", \"organizations_url\": \"https://api.github.com/users/spartan8806/orgs\", \"received_events_url\": \"https://api.github.com/users/spartan8806/received_events\", \"repos_url\": \"https://api.github.com/users/spartan8806/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/spartan8806/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/spartan8806/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/spartan8806\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73222\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}, {\"cwe_id\": \"CWE-352\", \"name\": \"Cross-Site Request Forgery (CSRF)\"}], \"description\": \"### Summary\\n`npx claude-code-templates --studio` launches \\\"Claude Code Studio\\\", an Express HTTP server (`cli-tool/src/sandbox-server.js`, default port 3444) that binds to **all interfaces** (`0.0.0.0`), sets `Access-Control-Allow-Origin: *`, and requires **no authentication**. Two POST endpoints pass attacker-controlled request-body fields into `child_process.spawn(..., { shell: true })`. Because `shell: true` makes Node join the argv array into a single `sh -c` string, the fields are parsed by the shell and metacharacters execute. Any unauthenticated attacker who can reach the port — a malicious web page the developer visits, or anyone on the same LAN — can execute arbitrary OS commands on the developer's machine.\\n\\n### Details\\nIn `cli-tool/src/sandbox-server.js`:\\n\\n- `app.listen(PORT, ...)` is called with no host argument, so the server listens on `0.0.0.0` / `::` (reachable from the LAN, not just localhost).\\n- The CORS middleware sends `Access-Control-Allow-Origin: *` and answers the preflight `OPTIONS` for any origin, so a browser will deliver cross-origin POSTs to it.\\n- There is no authentication on any endpoint.\\n\\nThe vulnerable sinks:\\n\\n1. `POST /api/execute` — the `prompt` body field flows into `executeLocalTask()`:\\n   ```js\\n   const child = spawn('claude', [finalPrompt], { /* ... */ shell: true });\\n   The only validation on prompt is a length check (>= 10 chars). With shell: true, finalPrompt is interpreted by the shell.\\n\\n2. POST /api/install-agent — the agentName body field:\\nconst child = spawn('npx', ['claude-code-templates@latest', '--agent', agentName, '--yes'], { /* ... */ shell: true });\\n2. agentName is used unvalidated. (The same unsafe pattern is also reachable through /api/execute's agent field via checkAndInstallAgent().)\\n\\nRoot cause: spawn(cmd, argsArray, { shell: true }) does not keep argsArray as separate argv entries — Node builds cmd + ' ' + argsArray.join(' ') and runs it via sh -c, so every element is subject to shell parsing.\\n\\nPoC\\n\\n# Victim\\nnpx claude-code-templates --studio          # server on 0.0.0.0:3444\\n\\n# Attacker (another LAN host, or a malicious web page fetch(), or locally)\\ncurl -s -X POST http://127.0.0.1:3444/api/execute \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  --data '{\\\"prompt\\\":\\\"aaaaaaaaaa; touch /tmp/CCT_RCE_PROOF\\\",\\\"mode\\\":\\\"local\\\"}'\\n\\ncurl -s -X POST http://127.0.0.1:3444/api/install-agent \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  --data '{\\\"agentName\\\":\\\"x; touch /tmp/CCT_AGENT_PROOF #\\\"}'\\n\\nls -la /tmp/CCT_RCE_PROOF /tmp/CCT_AGENT_PROOF   # both created => injected commands ran\\nThe aaaaaaaaaa padding satisfies the 10-char minimum, then ; (or $(...), or backticks) starts the injected command. claude/npx do not even need to be installed — the injected segment runs regardless.\\n\\nConfirmed at runtime on v1.28.13 (Node 22, Linux): both marker files were created, the server listened on *:3444, and an OPTIONS preflight from Origin: https://evil.example returned 200 with Access-Control-Allow-Origin: *.\\n\\nImpact\\n\\nUnauthenticated remote code execution (CWE-78) on any machine running --studio. Two reachability paths:\\n- Drive-by: a developer running --studio who visits an attacker-controlled web page — the page's cross-origin fetch() (Content-Type application/json) passes the wildcard CORS preflight and delivers the POST, achieving RCE with no other interaction.\\n- LAN: because the server binds 0.0.0.0, anyone on the same network (office, co-working space, public Wi-Fi) can hit port 3444 directly.\\n\\nImpact is full compromise of the developer's user account (arbitrary command execution with the developer's privileges): source code, SSH keys, cloud credentials, and .env secrets.\\n\\nSuggested fix\\n\\n- Remove shell: true from all three spawns so arguments stay discrete argv entries (kills the injection).\\n- Validate agentName against a strict allowlist (^[A-Za-z0-9._/-]+$).\\n- Bind to loopback only (app.listen(PORT, '127.0.0.1', ...)).\\n- Replace the wildcard CORS with a same-origin allowlist and reject other origins.\", \"epss\": {\"percentage\": 0.00202, \"percentile\": 0.10454}, \"ghsa_id\": \"GHSA-79wm-x847-7cvg\", \"github_reviewed_at\": \"2026-09-03T19:50:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-79wm-x847-7cvg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-79wm-x847-7cvg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73222\"}], \"nvd_published_at\": \"2026-08-11T19:18:51Z\", \"published_at\": \"2026-09-03T19:50:47Z\", \"references\": [\"https://github.com/davila7/claude-code-templates/security/advisories/GHSA-79wm-x847-7cvg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73222\", \"https://github.com/davila7/claude-code-templates/commit/bc4618b07232633c1c0aac12a43e436268d31783\", \"https://github.com/davila7/claude-code-templates/blob/main/CHANGELOG.md\", \"https://github.com/advisories/GHSA-79wm-x847-7cvg\"], \"repository_advisory_url\": \"https://api.github.com/repos/davila7/claude-code-templates/security-advisories/GHSA-79wm-x847-7cvg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/davila7/claude-code-templates\", \"summary\": \"Claude Code Templates: Unauthenticated OS command injection (RCE) in Claude Code Studio server (--studio)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T19:50:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-79wm-x847-7cvg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.29.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"claude-code-templates\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.29.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-79wm-x847-7cvg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "claude-code-templates: <= 1.29.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73222"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "claude-code-templates"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:54.034836Z",
+  "provenance": {
+    "content_sha256": "7a745379242b21440a59b44303112c876b7e25c3a4048dcf3a343eb327ee0ba5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T19:50:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-79wm-x847-7cvg",
+  "status": "active",
+  "title": "Claude Code Templates: Unauthenticated OS command injection (RCE) in Claude Code Studio server (--studio)",
+  "updated_at": "2026-09-03T19:50:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-79wm-x847-7cvg"
+}

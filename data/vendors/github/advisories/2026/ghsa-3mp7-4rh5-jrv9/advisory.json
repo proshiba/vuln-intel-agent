@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72809\", \"cvss\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72809](https://nvd.nist.gov/vuln/detail/CVE-2026-72809).\\n\\n### Summary\\n\\nThe kernel's `CheckAuth` grants `RoleAdministrator` to any request whose `RemoteAddr` is loopback (`127.0.0.1`), for a specific set of endpoints, and these localhost bypasses sit **outside** the `accessAuthCode` gate so they apply even when an access auth code is configured. This is demonstrated live (Part A below).\\n\\nSeparately, the fixed-port reverse proxy (`fixedport.go`) forwards requests to the kernel over loopback and injects no authentication token, and no `SetTrustedProxies` is configured, so gin does not derive the client address from forwarding headers. By code inspection, a request forwarded through this proxy would reach the kernel with `RemoteAddr = 127.0.0.1`. **If** the fixed-port proxy is bound to a network interface (via `NetworkServe`) and forwards remote requests to the kernel this way, the localhost bypass would grant a remote unauthenticated caller admin on those endpoints. This second step is established by reading the code but was **not reproduced end-to-end**, and I'm asking the maintainer to confirm the proxy's runtime forwarding behavior (Part B below).\\n\\n### Details\\n\\n**Localhost-trust admin bypass (proven).** `CheckAuth` (`session.go:298-321`) contains localhost-only bypasses that key off `RemoteAddr` and grant `RoleAdministrator`. They sit outside the `accessAuthCode` gate i.e. they apply even when an access auth code is set and cover `/api/system/exit`, `getNetwork`, `getWorkspaceInfo`, `/assets/*`, and `/export/*`.\\n\\n**Fixed-port proxy behavior (code inspection).** `fixedport.go` is a plain reverse proxy that dials the kernel at `127.0.0.1` and injects no token unlike the publish proxy, which injects a `RoleReader` JWT. There is no `SetTrustedProxies` call, so gin does not rewrite `RemoteAddr` from `X-Forwarded-For`. On this reading, a request forwarded through the fixed-port proxy reaches the kernel with `RemoteAddr = 127.0.0.1`.\\n\\n**The composition (conditional).** If both hold at runtime, then: remote request → fixed-port proxy on a network interface → forwarded to kernel at `127.0.0.1` (no token) → kernel sees `RemoteAddr = 127.0.0.1` → localhost bypass grants admin for the endpoints above. I have proven the final link (localhost → admin) and read the code for the forwarding link, but have not confirmed at runtime that the fixed-port proxy is instantiated and forwards remote requests as loopback in a shipped configuration.\\n\\n**Distinct from the previously-dismissed localhost→admin observation.** That observation concerned the *publish* proxy path, where the injected `RoleReader` JWT causes `CheckAuth` to early-return before reaching the localhost bypasses. The fixed-port proxy injects no token, so a request through it would fall through to the `RemoteAddr`-keyed bypass instead. Different proxy, different code path.\\n\\n### Proof of Concept\\n\\n**Part A: the localhost bypass grants admin without auth, outside the auth-code gate (demonstrated live).**\\nOn a local instance with an access auth code configured, the same no-token `getWorkspaceInfo` request returns different results depending on the source address the kernel sees:\\n- From a non-loopback source (kernel sees a non-127.0.0.1 address): `HTTP 401`.\\n- From `127.0.0.1` (kernel sees loopback): `{\\\"code\\\":0,\\\"data\\\":{\\\"workspaceDir\\\":\\\"/siyuan/workspace\\\",…}}` admin data, no auth, despite `accessAuthCode` being set.\\n\\nThis confirms the localhost-trust bypass grants admin for these endpoints and is not gated by the access auth code.\\n\\n**Part B: remote → proxy → loopback (code inspection only; NOT reproduced).**\\nBy reading `fixedport.go`, the proxy dials `127.0.0.1`, injects no token, and no `SetTrustedProxies` is set. I was not able to reproduce this end-to-end: the `serve` CLI in the container image tested exposes only `--port` and `--accessAuthCode`, not a flag that instantiates the fixed-port proxy in the `NetworkServe`-on-a-non-default-port shape, so the remote→proxy→loopback chain was not exercised at runtime. I did not invoke the destructive `/api/system/exit` endpoint. **I'm asking the maintainer to confirm: under what conditions is the fixed-port proxy instantiated, does it bind a non-loopback interface under `NetworkServe`, and does it forward to the kernel preserving the client address or as loopback?** That determines whether Part A's bypass is remotely reachable.\\n\\n### Impact\\n\\n**Confirmed (Part A):** on any deployment where a caller can cause the kernel to see a loopback `RemoteAddr`, the endpoints `/api/system/exit`, `getNetwork`, `getWorkspaceInfo`, `/assets/*`, and `/export/*` are reachable with admin rights without the access auth code i.e. the auth code does not protect these endpoints against a loopback-sourced caller. On its own this is a local/adjacent bypass of the access-code control for those endpoints. If the fixed-port proxy forwards remote requests to the kernel as loopback (to be confirmed by the maintainer), a *remote* unauthenticated attacker obtains those admin capabilities, remote kernel shutdown (DoS), network/workspace-path disclosure, and admin-level asset/export reads that bypass the publish-access filter. This would be a remote authentication bypass. It does not grant the full admin API only the localhost-trusted endpoints.\\n\\n### Suggested fix\\n\\nDo not derive admin trust from `RemoteAddr` when a proxy forwards over loopback. Options: have the fixed-port proxy inject an explicit role/token (as the publish proxy does) so the kernel authorizes on the claim rather than the source address; or configure `SetTrustedProxies` and derive the real client address before applying any localhost bypass; or require the access auth code for these endpoints regardless of source address. The localhost bypass assumes loopback implies a local trusted caller, any loopback-dialing proxy breaks that assumption.\", \"epss\": {\"percentage\": 0.00206, \"percentile\": 0.10919}, \"ghsa_id\": \"GHSA-3mp7-4rh5-jrv9\", \"github_reviewed_at\": \"2026-09-03T22:34:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-3mp7-4rh5-jrv9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3mp7-4rh5-jrv9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72809\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T22:34:06Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-3mp7-4rh5-jrv9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72809\", \"https://github.com/siyuan-note/siyuan/commit/9c16e9851f0b5d7ed179e5c2fca15a7724666871\", \"https://www.vulncheck.com/advisories/siyuan-before-authentication-bypass-via-localhost-trust\", \"https://github.com/advisories/GHSA-3mp7-4rh5-jrv9\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-3mp7-4rh5-jrv9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Localhost-trust admin bypass on auth-code-gated endpoints, with potential remote reachability via the fixed-port proxy\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T22:34:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-3mp7-4rh5-jrv9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260723031701-9c16e9851f0b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260723031701-9c16e9851f0b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3mp7-4rh5-jrv9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260723031701-9c16e9851f0b"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72809"
+    ],
+    "cvss_score": 8.0,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.950901Z",
+  "provenance": {
+    "content_sha256": "8617b6ad3d6942af8579b83158f0356e3387fa739d1d9fb84d80a568985e0b3e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T22:34:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3mp7-4rh5-jrv9",
+  "status": "active",
+  "title": "SiYuan: Localhost-trust admin bypass on auth-code-gated endpoints, with potential remote reachability via the fixed-port proxy",
+  "updated_at": "2026-09-03T22:34:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3mp7-4rh5-jrv9"
+}
