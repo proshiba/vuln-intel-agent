@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72805\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72805](https://nvd.nist.gov/vuln/detail/CVE-2026-72805).\\n\\n### Summary\\n\\nThree block endpoints return document content snippets and metadata without any publish-access check, while their sibling `getBlockInfo` which returns comparable data does enforce one. All three are `CheckAuth`-only, so they are reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`. An anonymous reader supplying a block ID receives content and metadata belonging to publish-forbidden and password-protected documents.\\n\\n### Details\\n\\n`getBlockInfo` (`kernel/api/block.go`) gates on the publish boundary:\\n```go\\nif !checkBlockPublishAccess(c, id, ret) {\\n    return\\n}\\n```\\n\\nThe following siblings in the same file perform no equivalent check:\\n\\n| Endpoint | Returns | Publish check |\\n|---|---|---|\\n| `getBlockInfo` | root/title/path metadata | `checkBlockPublishAccess`: present |\\n| `getBlockBreadcrumb` | `BlockPath.Name` : root document title plus every ancestor block's content snippet | none |\\n| `getRefText` | the block's reference/anchor text (document content) | none |\\n| `getBlockTreeInfos` | root/title/path metadata for arbitrary block IDs | none |\\n\\n`getBlockBreadcrumb` returns the full ancestor chain including each ancestor block's content snippet, and `getRefText` returns block anchor text both are document content, not just metadata. `getBlockTreeInfos` returns root/title/path for any caller-supplied ID set via `model.GetBlockTreeInfosInBox(...)` with no gate.\\n\\n`getBlockBreadcrumb` and `getRefText` additionally accept a client-supplied notebook argument that routes to the `*InBox` variants, so the same unguarded path applies to encrypted-notebook reads while the notebook is unlocked.\\n\\nThe correct primitive already exists in the codebase and is used by `getBlockInfo`; these three handlers simply do not call it.\\n\\n### Proof of Concept\\n\\nPrecondition: publish mode enabled (default port 6808); anonymous when `Publish.Auth.Enable` is `false`, otherwise any publish reader account. A document `D` is marked publish-forbidden (or password-protected) and contains a block `BLOCK_ID` under a heading with distinctive content.\\n\\n**Control: the gated sibling correctly refuses:**\\n```\\nPOST http://127.0.0.1:6808/api/block/getBlockInfo\\n{\\\"id\\\":\\\"BLOCK_ID\\\"}\\n```\\nBlocked by `checkBlockPublishAccess`.\\n\\n**Disclosure: the ungated siblings return the data anyway:**\\n```\\nPOST http://127.0.0.1:6808/api/block/getBlockBreadcrumb\\n{\\\"id\\\":\\\"BLOCK_ID\\\"}\\n→ ancestor chain including the forbidden document's title and ancestor block content snippets\\n\\nPOST http://127.0.0.1:6808/api/block/getRefText\\n{\\\"id\\\":\\\"BLOCK_ID\\\"}\\n→ the block's reference/anchor text (content of the forbidden document)\\n\\nPOST http://127.0.0.1:6808/api/block/getBlockTreeInfos\\n{\\\"ids\\\":[\\\"BLOCK_ID\\\"]}\\n→ root ID, title, and path for the forbidden document\\n```\\n\\nVerified by code inspection at `origin/master` (`eef10568`): `getBlockInfo` contains the `checkBlockPublishAccess` call; `getBlockBreadcrumb`, `getRefText`, and `getBlockTreeInfos` contain no publish-access, publish-ignore, or readonly-role check in their bodies.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` can read, for documents explicitly excluded from publishing or protected by a publish password:\\n- the document title and full ancestor chain, including ancestor block content snippets (`getBlockBreadcrumb`);\\n- block reference/anchor text, i.e. document content (`getRefText`);\\n- root ID, title, and path metadata for arbitrary block IDs (`getBlockTreeInfos`).\\n\\nBecause `getBlockBreadcrumb` and `getRefText` accept a notebook argument routing to the `*InBox` variants, the same disclosure applies to encrypted notebooks while unlocked. Confidentiality-only; the precondition is a block ID, obtainable from other reader-reachable endpoints.\\n\\n### Suggested fix\\n\\nCall `checkBlockPublishAccess` (as `getBlockInfo` does) in `getBlockBreadcrumb`, `getRefText`, and `getBlockTreeInfos` before returning data for `getBlockTreeInfos`, apply it per ID and drop unauthorized entries. Confirm the `*InBox` variants (`GetBlockRefTextInBox`, `BuildBlockBreadcrumbInBox`) enforce the same boundary so the notebook-argument path is covered.\", \"epss\": {\"percentage\": 0.00237, \"percentile\": 0.14505}, \"ghsa_id\": \"GHSA-67x2-mq63-v9vm\", \"github_reviewed_at\": \"2026-09-03T22:52:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-67x2-mq63-v9vm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-67x2-mq63-v9vm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72805\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T22:52:12Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-67x2-mq63-v9vm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72805\", \"https://github.com/siyuan-note/siyuan/commit/931ba693375ea9877b2ef74f9bfb632fad5bab3f\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-block-endpoints\", \"https://github.com/advisories/GHSA-67x2-mq63-v9vm\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-67x2-mq63-v9vm\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Missing publish-access check on getBlockBreadcrumb, getRefText, and getBlockTreeInfos discloses content and metadata of protected/forbidden documents\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T22:52:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-67x2-mq63-v9vm\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260723163028-931ba693375e\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260723163028-931ba693375e\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-67x2-mq63-v9vm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260723163028-931ba693375e"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72805"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.934078Z",
+  "provenance": {
+    "content_sha256": "80a618d4868268f1815b817a318cd4f8464c395104a7431b98b8cc6594a2730b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T22:52:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-67x2-mq63-v9vm",
+  "status": "active",
+  "title": "SiYuan: Missing publish-access check on getBlockBreadcrumb, getRefText, and getBlockTreeInfos discloses content and metadata of protected/forbidden documents",
+  "updated_at": "2026-09-03T22:52:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-67x2-mq63-v9vm"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69086\", \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-69086](https://nvd.nist.gov/vuln/detail/CVE-2026-69086).\\n\\n### Summary\\n\\nFour attribute-view read endpoints build a filesystem path from a caller-controlled `id`/`avID` and read it without confining the result to the attribute-view storage directory (`DataDir/storage/av/`). On the load (file-exists) code path there is no boundary check, so an `avID` containing `../` segments escapes `storage/av/` and causes the kernel to read a `.json` file elsewhere in the workspace.\\n\\nThe endpoints require only `CheckAuth`, which the publish service's `RoleReader` token satisfies; when `Publish.Auth.Enable` is `false` the publish proxy uses the anonymous account, making the surface reachable with no credentials.\\n\\n### Details\\n\\nAffected endpoints (all gated by `CheckAuth` only, no `CheckAdminRole`):\\n\\n- `POST /api/av/renderAttributeView` &nbsp;→ `arg[\\\"id\\\"]`\\n- `POST /api/av/getAttributeViewKeysByID` → `arg[\\\"avID\\\"]`\\n- `POST /api/av/getAttributeViewKeys` &nbsp;→ `arg[\\\"id\\\"]`\\n- `POST /api/av/getCurrentAttrViewImages` → `arg[\\\"id\\\"]`\\n\\nIn `model.RenderAttributeView` (`model/attribute_view_render.go`), the only identifier guard `ast.IsNodeIDPattern(avID)` sits **inside** the `if !filelock.IsExist(existPath)` (create) branch:\\n\\n```go\\nexistPath = GetAttributeViewDataPath(avID)      // path built from avID, no check\\nif !filelock.IsExist(existPath) {               // NOT-EXIST / CREATE branch\\n    if !createIfNotExist {\\n        return // NotFound\\n    }\\n    if !ast.IsNodeIDPattern(avID) {             // <-- ONLY id guard, create branch only\\n        return ErrInvalidID\\n    }\\n    // ... create ...\\n}\\nattrView, err = av.ParseAttributeView(avID)     // LOAD runs unconditionally\\n```\\n\\nWhen the traversal `avID` resolves to a file that already exists, the `!filelock.IsExist(...)` condition is `false`, the entire block (including the line with `ast.IsNodeIDPattern`) is skipped, and control falls straight through to `av.ParseAttributeView(avID)`. That function rebuilds the path via `filepath.Join(DataDir, \\\"storage\\\", \\\"av\\\", avID+\\\".json\\\")` and calls `filelock.ReadFile` with no `filepath.Rel` / `IsSubPath` / `..` rejection:\\n\\n```go\\n// av.ParseAttributeView -> attributeViewDataPathByBox / GetAttributeViewDataPath\\navJSONPath = filepath.Join(DataDir, \\\"storage\\\", \\\"av\\\", avID+\\\".json\\\")  // no boundary check\\n// -> parseAttributeViewByPathInBox(avJSONPath, boxID)\\ndata, _ = filelock.ReadFile(avJSONPath)                             // SINK\\n```\\n\\n`filepath.Join` cleans the path but does **not** reject `..` segments, so it provides no containment. The three `getAttributeView*` endpoints call `ParseAttributeView` with no create branch at all, so they never even reach the `ast.IsNodeIDPattern` check same defect, same auth tier.\\n\\nThe root cause is that identifier validation is placed on a single code branch rather than confining the load to the AV base directory, so the load path reads a caller-controlled location.\\n\\n### PoC\\n\\n**Precondition:** publish mode enabled (default port `6808`); reachable by a `RoleReader` publish token, or anonymously when `Publish.Auth.Enable` is `false`.\\n\\nA request to `/api/av/renderAttributeView` with an `id` composed of `../` path segments that resolves to an existing `.json` file outside `DataDir/storage/av/` causes that file to be read and parsed instead of being rejected, because the identifier validation is only reached on the not-exist/create branch.\\n\\nI have withheld the exact encoded `id` value from this draft to avoid publishing a live traversal against internet-exposed publish instances. I'm happy to provide the precise value and a screenshot privately in this thread on request.\\n\\n### Impact\\n\\nAn authenticated publish `RoleReader` or an anonymous client when publish auth is disabled can cause the kernel to read `.json` files outside the attribute-view directory. Because the loaded file is unmarshalled into the attribute-view structure, the reliable primitives are:\\n\\n1. Disclosure of attribute-view (database) content from other scopes/notebooks the reader is not authorized to see.\\n2. A `.json`-path existence oracle for arbitrary workspace locations.\\n\\nFiles not conforming to the AV schema are read but reflect little content, and the `.json` suffix is force-appended, so this is **not** a general arbitrary-file read. No admin role, CSRF token, or write permission is required.\\n\\n### Suggested fix\\n\\nValidate `avID` with `ast.IsNodeIDPattern` before path construction on **all** branches (move it ahead of `FindAttributeViewPath` / `GetAttributeViewDataPath`), or preferably, so every caller inherits it confine at the sink: in `attributeViewDataPathByBox` / `GetAttributeViewDataPath`, compute the joined path and reject it unless `filepath.Rel(avBaseDir, cleaned)` stays within `avBaseDir` (no leading `..`). Sink-side confinement also covers the three `getAttributeView*` endpoints that never reach the create-branch guard.\", \"epss\": {\"percentage\": 0.0035, \"percentile\": 0.27676}, \"ghsa_id\": \"GHSA-7hm9-v7vf-7g4w\", \"github_reviewed_at\": \"2026-09-03T20:34:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-7hm9-v7vf-7g4w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7hm9-v7vf-7g4w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69086\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T20:34:12Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-7hm9-v7vf-7g4w\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-69086\", \"https://www.vulncheck.com/advisories/siyuan-before-path-traversal-via-unvalidated-avid\", \"https://github.com/advisories/GHSA-7hm9-v7vf-7g4w\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-7hm9-v7vf-7g4w\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Path Traversal via unvalidated avID in RenderAttributeView/AV read endpoints : reader-reachable cross-scope attribute-view disclosure\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T20:34:25Z\", \"url\": \"https://api.github.com/advisories/GHSA-7hm9-v7vf-7g4w\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260720151813-0f5a0e7c67b0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260720151813-0f5a0e7c67b0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7hm9-v7vf-7g4w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260720151813-0f5a0e7c67b0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-69086"
+    ],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.997449Z",
+  "provenance": {
+    "content_sha256": "5d28d82bdfde2949e74e8193980a536cd4812b26e77f07b6fed85638584b6da0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T20:34:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7hm9-v7vf-7g4w",
+  "status": "active",
+  "title": "SiYuan: Path Traversal via unvalidated avID in RenderAttributeView/AV read endpoints : reader-reachable cross-scope attribute-view disclosure",
+  "updated_at": "2026-09-03T20:34:25Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7hm9-v7vf-7g4w"
+}

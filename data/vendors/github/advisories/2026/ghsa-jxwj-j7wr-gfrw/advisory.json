@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/91076575?v=4\", \"events_url\": \"https://api.github.com/users/bibu123456/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bibu123456/followers\", \"following_url\": \"https://api.github.com/users/bibu123456/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bibu123456/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bibu123456\", \"id\": 91076575, \"login\": \"bibu123456\", \"node_id\": \"MDQ6VXNlcjkxMDc2NTc1\", \"organizations_url\": \"https://api.github.com/users/bibu123456/orgs\", \"received_events_url\": \"https://api.github.com/users/bibu123456/received_events\", \"repos_url\": \"https://api.github.com/users/bibu123456/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bibu123456/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bibu123456/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bibu123456\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-63670\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\nA mutation-XSS / allowedTags bypass: when `textarea` (or `xmp`) is included in `allowedTags`, an input containing a literal `</textarea/>` (a solidus right after the RCDATA end-tag name) lets non-allowed markup such as `<img src=x onerror=…>` pass through `sanitizeHtml()` **live and unescaped**, even though `img`/`onerror` are not in the allowlist. A spec-compliant browser executes the surviving handler — XSS. This is a literal-solidus variant that bypasses the two most recent fixes in this code area (CVE-2026-40186, CVE-2026-44990), both already applied in 2.17.5. The default configuration is not affected.\\n\\n### Details\\n`sanitize-html` emits the text content of HTML raw-text elements (`textarea`, `xmp`) without escaping. Two things combine:\\n- **Parser differential:** on input, htmlparser2 does NOT recognize `</textarea/>` (solidus after the RCDATA\\n  end-tag name) as a close tag; it emits `</textarea/><img …>` as a single raw-text node.\\n- **Unescaped passthrough:** the `ontext` handler (`index.js` ~575-583) appends `textarea`/`xmp` content with\\n`result += text` (no `escapeHtml`), assuming it is \\\"already properly encoded\\\" — true for entity-decoded\\n  content (what CVE-2026-40186 fixed) but false for this mis-tokenized literal close tag.\\nA spec browser treats `</textarea/>` as a valid `textarea` close, so the following `<img onerror>` is parsed as a live element. The recent fixes addressed entity-encoding (CVE-2026-40186) and the `xmp` default (CVE-2026-44990); neither covers the literal-solidus mis-tokenization, so the raw passthrough still leaks.\\n\\n### PoC\\n```js\\n// npm i sanitize-html@2.17.5 parse5 && node poc.js\\nconst sanitizeHtml = require('sanitize-html');\\nconst input = '<textarea></textarea/><img src=x onerror=\\\"alert(document.domain)\\\">';\\nconst opts  = { allowedTags: sanitizeHtml.defaults.allowedTags.concat(['textarea']) };  // img NOT allowed\\nconsole.log(sanitizeHtml(input, opts));\\n// => <textarea></textarea/><img src=x onerror=\\\"alert(document.domain)\\\"></textarea>\\n//    the <img onerror> survives live and unescaped\\n\\nconsole.log(sanitizeHtml(input));   // default config (no textarea allowed) => \\\"\\\"  (safe)\\n```\\nRe-parsing the sanitized OUTPUT with **parse5** (the WHATWG HTML parser browsers/jsdom use) yields a **live\\n`<img src=x onerror=alert(document.domain)>`** at `body` level (it escaped the textarea RCDATA, not inert text) → the `onerror` fires in a browser. Confirmed on 2.17.5 (Node v24). A canonical `poc.js` is attached.\\n<img width=\\\"650\\\" height=\\\"118\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/d63bb5b7-ba3e-4b0e-a821-86a453ea0352\\\" />\\n\\n### Impact\\nCross-site scripting (CWE-79). Requires `textarea` (or `xmp`) in `allowedTags` — a benign-looking, common addition in form builders, CMS, and rich-text editors. Adding a harmless tag that then enables XSS via *non-allowed* `img`/`onerror` breaks the sanitizer's core contract; the maintainers have fixed this class before (e.g. GHSA-9mrh). An attacker who can submit content rendered through such a configuration achieves stored/reflected XSS (cookie theft, session hijack). Severity Medium (default config is safe; user interaction to view the page). **Suggested fix:** route `textarea`/`xmp` content through `escapeHtml` instead of the raw passthrough, and/or fix the htmlparser2 `</tag/>` RCDATA end-tag tokenization to match the WHATWG spec.\", \"epss\": {\"percentage\": 0.00236, \"percentile\": 0.14282}, \"ghsa_id\": \"GHSA-jxwj-j7wr-gfrw\", \"github_reviewed_at\": \"2026-09-03T20:07:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-jxwj-j7wr-gfrw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jxwj-j7wr-gfrw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-63670\"}], \"nvd_published_at\": \"2026-08-17T20:16:45Z\", \"published_at\": \"2026-09-03T20:07:16Z\", \"references\": [\"https://github.com/apostrophecms/apostrophe/security/advisories/GHSA-jxwj-j7wr-gfrw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-63670\", \"https://github.com/apostrophecms/apostrophe/pull/5501\", \"https://github.com/apostrophecms/apostrophe/commit/eae1fb2b72ec5d1c27d0977509c6482a0408f725\", \"https://github.com/advisories/GHSA-jxwj-j7wr-gfrw\"], \"repository_advisory_url\": \"https://api.github.com/repos/apostrophecms/apostrophe/security-advisories/GHSA-jxwj-j7wr-gfrw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/apostrophecms/apostrophe\", \"summary\": \"ApostropheCMS: Mutation-XSS / allowedTags bypass via literal `</textarea/>` solidus close\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T20:07:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-jxwj-j7wr-gfrw\", \"vulnerabilities\": [{\"first_patched_version\": \"2.17.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"sanitize-html\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.17.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jxwj-j7wr-gfrw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "sanitize-html: <= 2.17.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-40186",
+      "CVE-2026-44990",
+      "CVE-2026-63670"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "sanitize-html"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-04T19:12:54.021365Z",
+  "provenance": {
+    "content_sha256": "71023b9232e61c68279e5d3e3a7a23eb8fb046cb8b35e612d99c43da3398dffd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T20:07:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jxwj-j7wr-gfrw",
+  "status": "active",
+  "title": "ApostropheCMS: Mutation-XSS / allowedTags bypass via literal `</textarea/>` solidus close",
+  "updated_at": "2026-09-03T20:07:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jxwj-j7wr-gfrw"
+}

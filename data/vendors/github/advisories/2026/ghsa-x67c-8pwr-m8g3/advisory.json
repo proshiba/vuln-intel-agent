@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72807\", \"cvss\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}, {\"cwe_id\": \"CWE-1336\", \"name\": \"Improper Neutralization of Special Elements Used in a Template Engine\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72807](https://nvd.nist.gov/vuln/detail/CVE-2026-72807).\\n\\n### Summary\\n\\nAttribute-view (AV) template columns are live-evaluated on every render and expose the `queryBlocks` template function, which runs raw SQL on the read-write database handle (`SelectBlocksRawStmt`, using `?`→argument string substitution rather than parameter binding). AV mutations are admin-gated, so this is not directly reader-injectable but it is a second-order vector: an attacker distributes a SiYuan document or AV package whose template column contains `.action{queryBlocks \\\"<arbitrary SQL>\\\"}` when a victim imports the package and renders the AV, the attacker's SQL executes on the victim's kernel (read and, via statement stacking, write).\\n\\n### Details\\n\\nDoc-level `{{…}}` templates are rendered at insert-time and become static, so they are not re-evaluated on reader view. The residual is AV template columns, which are live-evaluated at render. `queryBlocks` passes its argument to `SelectBlocksRawStmt` with `?`→arg string substitution, not a bound parameter, on the main read-write handle (`88250/go-sqlite3` fork, statement-stacking capable) so an attacker-controlled template argument becomes arbitrary SQL.\\n\\nThe SSTI surface is otherwise hardened: `BuiltInTemplateFuncs` deletes `env`, `expandenv`, and `getHostByName` so there is no environment/host/file/exec SSTI. `queryBlocks`-to-SQL is the remaining live-evaluated sink.\\n\\n### Proof of Concept\\n\\nAn AV template column set to `.action{queryBlocks \\\"<sql>\\\"}` executes `<sql>` against the read-write handle when the AV is rendered. Delivered second-order: a shared/imported document or AV package carrying such a column runs the embedded SQL on any kernel that imports and renders it.\\n\\n### Proof of Concept\\n\\nReproduced on a live instance.\\n\\n**1. Host doc + AV (admin, 6806):**\\n```\\nPOST /api/filetree/createDocWithMd {notebook, path:\\\"/ssti-poc\\\", markdown:\\\"host\\\"}  → DOC\\nPOST /api/av/renderAttributeView   {id:\\\"<AV>\\\"}   # materializes the AV\\n```\\n\\n**2. Plant the malicious template column (one performTransactions call):**\\n```json\\n{\\\"reqId\\\":1,\\\"session\\\":\\\"poc\\\",\\\"transactions\\\":[{\\\"doOperations\\\":[\\n  {\\\"action\\\":\\\"addAttrViewCol\\\",\\\"avID\\\":\\\"<AV>\\\",\\\"id\\\":\\\"<COL>\\\",\\\"name\\\":\\\"tpl\\\",\\\"type\\\":\\\"template\\\"},\\n  {\\\"action\\\":\\\"updateAttrViewColTemplate\\\",\\\"avID\\\":\\\"<AV>\\\",\\\"id\\\":\\\"<COL>\\\",\\\"type\\\":\\\"template\\\",\\n   \\\"data\\\":\\\".action{range queryBlocks \\\\\\\"SELECT * FROM blocks WHERE root_id='<PROTECTED_DOC_ID>'\\\\\\\"}.action{.Markdown} .action{end}\\\"},\\n  {\\\"action\\\":\\\"insertAttrViewBlock\\\",\\\"avID\\\":\\\"<AV>\\\",\\\"isDetached\\\":true}\\n]}]}\\n```\\n\\n**3. Trigger (render evaluates the template):**\\n```\\nPOST /api/av/renderAttributeView {id:\\\"<AV>\\\"}\\n```\\nResult: the template cell renders `## LockedSection TOP_SECRET…` the `queryBlocks` SQL executed and returned the password-protected document's content, arbitrary SQL via template reading across the publish/password boundary. `queryBlocks` uses `?`→arg string substitution (not parameterized), so UNION and stacked writes are also possible. Delivered second-order, the same column executes on any kernel that imports and renders the AV.\\n\\n### Impact\\n\\nAn attacker who gets a victim to import a crafted document/AV package and render it achieves arbitrary SQL execution on the victim's kernel cross-notebook read and via stacking, write. Precondition is content delivery plus render (import of an attacker-supplied package), which bounds severity to Medium. Not directly reachable by an anonymous reader (AV creation is admin-gated); the injection travels in stored/imported template content.\\n\\n### Suggested fix\\n\\nParameterize `queryBlocks` bind the argument rather than substituting it into the SQL string or restrict the template function set available in AV columns as was done for the doc-template functions. Treat imported template content as untrusted at render time.\", \"epss\": {\"percentage\": 0.00199, \"percentile\": 0.10005}, \"ghsa_id\": \"GHSA-x67c-8pwr-m8g3\", \"github_reviewed_at\": \"2026-09-03T22:49:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-x67c-8pwr-m8g3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x67c-8pwr-m8g3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72807\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T22:49:30Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-x67c-8pwr-m8g3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72807\", \"https://github.com/siyuan-note/siyuan/commit/0a176345e02a0d19bdc7762e50e0b92002087d20\", \"https://www.vulncheck.com/advisories/siyuan-before-sql-injection-via-queryblocks-template\", \"https://github.com/advisories/GHSA-x67c-8pwr-m8g3\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-x67c-8pwr-m8g3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Second-order SSTI to arbitrary SQL via attribute-view template column (queryBlocks): malicious imported package executes SQL on victim kernel\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T22:49:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-x67c-8pwr-m8g3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260723035036-0a176345e02a\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260723035036-0a176345e02a\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x67c-8pwr-m8g3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260723035036-0a176345e02a"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72807"
+    ],
+    "cvss_score": 8.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.942155Z",
+  "provenance": {
+    "content_sha256": "62a4b7800051cd2b77c51caf8ddb51036a4e0eac96d4c43b7350f957ab1cf138",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T22:49:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x67c-8pwr-m8g3",
+  "status": "active",
+  "title": "SiYuan: Second-order SSTI to arbitrary SQL via attribute-view template column (queryBlocks): malicious imported package executes SQL on victim kernel",
+  "updated_at": "2026-09-03T22:49:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x67c-8pwr-m8g3"
+}

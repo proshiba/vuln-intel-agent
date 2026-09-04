@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72803\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72803](https://nvd.nist.gov/vuln/detail/CVE-2026-72803).\\n\\n### Summary\\n\\n`POST /api/attr/getBlockAttrs` and `POST /api/attr/batchGetBlockAttrs` return a block's full attribute set (IAL) with no publish-access check. Both are `CheckAuth`-only, so they are reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`. An anonymous reader supplying a block ID receives the block's name, alias, memo, bookmark, tags, and every `custom-*` attribute including for blocks in publish-forbidden and password-protected documents. The batch variant accepts an ID list, making it a bulk extraction primitive.\\n\\n### Details\\n\\nNeither handler applies a filter:\\n\\n```go\\n// /api/attr/getBlockAttrs      (router line 301)\\nret.Data = sql.GetBlockAttrs(id)\\n\\n// /api/attr/batchGetBlockAttrs (router line 302)\\nret.Data = sql.BatchGetBlockAttrs(idList)\\n```\\n\\n`sql.GetBlockAttrs` is a direct database read returning the block's entire IAL: `name`, `alias`, `memo`, `bookmark`, `tags`, and any `custom-*` key/value the user has set. Several of these are user-authored free text memos in particular are freeform notes attached to a block so this is document content, not merely structural metadata.\\n\\n`batchGetBlockAttrs` takes an arbitrary list of block IDs in a single request, so an attacker holding a set of block IDs can sweep attributes across the entire workspace in one call.\\n\\n**Guarded-sibling asymmetry.** The sibling metadata endpoint `getBlockInfo` calls `checkBlockPublishAccess(c, id, ret)` before returning; `getBlockAttrs` and `batchGetBlockAttrs` call nothing.\\n\\nVerified at `origin/master`: both handler bodies contain no publish-access, publish-ignore, or readonly-role check, and both routes are registered `CheckAuth` without `CheckAdminRole`.\\n\\n### Proof of Concept\\n\\nPrecondition: publish mode enabled (default port 6808); anonymous when `Publish.Auth.Enable` is `false`, otherwise any publish reader account. A document is marked publish-forbidden (or password-protected) and contains a block with a memo and a custom attribute set.\\n\\n**Single-block disclosure:**\\n```\\nPOST http://127.0.0.1:6808/api/attr/getBlockAttrs\\n{\\\"id\\\":\\\"<BLOCK_ID_IN_PROTECTED_DOC>\\\"}\\n```\\nReturns the block's IAL: `name`, `alias`, `memo`, `bookmark`, `tags`, and all `custom-*` values.\\n\\n**Bulk disclosure:**\\n```\\nPOST http://127.0.0.1:6808/api/attr/batchGetBlockAttrs\\n{\\\"ids\\\":[\\\"<ID1>\\\",\\\"<ID2>\\\",\\\"<ID3>\\\"]}\\n```\\nReturns the attribute sets for every supplied ID in one response, with no per-ID authorization.\\n\\n**Control:** the sibling `getBlockInfo` with the same block ID is refused by `checkBlockPublishAccess`, confirming the boundary is enforced elsewhere and omitted here.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` can read block attributes belonging to publish-forbidden and password-protected documents, including user-authored memos and arbitrary `custom-*` values. The batch endpoint turns this into a bulk primitive: given a set of block IDs, an attacker retrieves attributes across the whole workspace in a single request. Confidentiality-only.\\n\\n### Suggested fix\\n\\nCall `checkBlockPublishAccess` in `getBlockAttrs` before returning, matching `getBlockInfo`. For `batchGetBlockAttrs`, apply the check per ID and drop unauthorized entries from the response rather than failing the whole batch.\", \"epss\": {\"percentage\": 0.00237, \"percentile\": 0.14507}, \"ghsa_id\": \"GHSA-qvq9-hq6p-v378\", \"github_reviewed_at\": \"2026-09-03T22:58:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-qvq9-hq6p-v378\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qvq9-hq6p-v378\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72803\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T22:58:29Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-qvq9-hq6p-v378\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72803\", \"https://github.com/siyuan-note/siyuan/commit/229fdffd7e4afdef543d4d8495657fda8a369400\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-getblockattrs\", \"https://github.com/advisories/GHSA-qvq9-hq6p-v378\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-qvq9-hq6p-v378\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Missing publish-access filter on getBlockAttrs and batchGetBlockAttrs discloses block attributes (name, alias, memo, custom fields) of protected documents\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T22:58:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-qvq9-hq6p-v378\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260724093256-229fdffd7e4a\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260724093256-229fdffd7e4a\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qvq9-hq6p-v378",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260724093256-229fdffd7e4a"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72803"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.924474Z",
+  "provenance": {
+    "content_sha256": "170f4fb9a1d3680d4dab66c664fd8c311fe185fca7cb6ba0404af897fc629402",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T22:58:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qvq9-hq6p-v378",
+  "status": "active",
+  "title": "SiYuan: Missing publish-access filter on getBlockAttrs and batchGetBlockAttrs discloses block attributes (name, alias, memo, custom fields) of protected documents",
+  "updated_at": "2026-09-03T22:58:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qvq9-hq6p-v378"
+}

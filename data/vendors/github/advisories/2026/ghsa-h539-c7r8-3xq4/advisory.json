@@ -1,0 +1,64 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/35772301?v=4\", \"events_url\": \"https://api.github.com/users/fg0x0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/fg0x0/followers\", \"following_url\": \"https://api.github.com/users/fg0x0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/fg0x0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/fg0x0\", \"id\": 35772301, \"login\": \"fg0x0\", \"node_id\": \"MDQ6VXNlcjM1NzcyMzAx\", \"organizations_url\": \"https://api.github.com/users/fg0x0/orgs\", \"received_events_url\": \"https://api.github.com/users/fg0x0/received_events\", \"repos_url\": \"https://api.github.com/users/fg0x0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/fg0x0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/fg0x0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/fg0x0\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75915\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-526\", \"name\": \"Cleartext Storage of Sensitive Information in an Environment Variable\"}], \"description\": \"### Maintainer resolution\\n\\nThe CodeWhale maintainers validated this report. The affected package ranges are recorded in the advisory metadata. Version 0.8.64 contains the fix in commit 26de44a8bd5051f8f944ea60b2c37ae1d2b7d25e. Users should upgrade to 0.8.64 or later. The original reporter analysis is preserved below.\\n\\n### Summary\\n\\njs_execution exposes parent process environment to model-provided JavaScript\\n\\nThe js_execution tool spawns Node with tokio::process::Command::new without calling the child_env scrubber that exec_shell, the Python REPL, and the MCP launcher all use. Model-provided JavaScript reads process.env and the values flow back to the parent transcript as the tool's stdout, exposing API keys, cloud credentials, and forge tokens to the next model turn.\\n\\n### Details\\n\\nIn `crates/tui/src/tools/js_execution.rs` (v0.8.37, lines 91-105):\\n\\n```rust\\nlet temp_dir = tempfile::tempdir()\\n    .map_err(|e| ToolError::execution_failed(format!(\\\"tempdir failed: {e}\\\")))?;\\nlet script_path = temp_dir.path().join(\\\"js_execution.js\\\");\\ntokio::fs::write(&script_path, code)\\n    .await\\n    .map_err(|e| ToolError::execution_failed(format!(\\\"tempfile write failed: {e}\\\")))?;\\n\\nlet mut cmd = tokio::process::Command::new(&node);\\ncmd.arg(&script_path);\\ncmd.current_dir(workspace);\\n\\nlet output = tokio::time::timeout(Duration::from_secs(120), cmd.output())\\n    .await\\n    .map_err(|_| ToolError::Timeout { seconds: 120 })\\n    .and_then(|res| res.map_err(|e| ToolError::execution_failed(e.to_string())))?;\\n```\\n\\nThe Command is built without `cmd.env_clear()` and without the project's `crate::child_env::apply_to_tokio_command` helper. Every variable in the parent process environment is inherited by the spawned `node`.\\n\\nFor comparison, exec_shell (`crates/tui/src/tools/shell.rs:790-792`) and the Python REPL (`crates/tui/src/repl/runtime.rs:238`) both apply the scrubber:\\n\\n```rust\\nchild_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));\\n```\\n\\napply_to_tokio_command calls `cmd.env_clear()` and then re-installs only the keys that pass `is_allowed_parent_env_key` (PATH, HOME, USER, LANG/LC_*, TMPDIR, proxy variables, Windows toolchain context, terminal settings). Secret-bearing variables (DEEPSEEK_API_KEY, OPENAI_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, etc.) are not on the allowlist and are dropped before the child starts. The js_execution path bypasses both the env_clear and the allowlist.\\n\\nCommit history makes the gap explicit. Commit `e6d4eae fix(security): scrub child process environments` (2026-05-08) introduced child_env.rs and rewrote exec_shell, the Python REPL, the MCP launcher, and main.rs to use it. Commit `2566f3c feat(tools): add js_execution tool` (2026-05-12) added this file four days later and never picked up the helper.\\n\\nThe tool is described to the model and surfaced in the approval pane as \\\"Run model-provided JavaScript code in local Node.js execution sandbox\\\" (`crates/tui/src/core/engine/turn_loop.rs:1174-1176`). No sandbox is applied beyond a 120-second timeout; Node has full filesystem and network access in addition to the inherited environment. The wording understates the trust boundary that the user is being asked to cross.\\n\\nIn YOLO mode (`auto_approve=true`) the JS body runs without any prompt at all, so a single adversarial prompt-injection from a README, fetched web page, or MCP server output drains the parent environment to the next model turn.\\n\\n### PoC\\n\\nA standalone Cargo test reproduces the unscrubbed-env behavior. Save as `crates/tui/tests/js_execution_env_leak.rs` and run with `cargo test -p deepseek-tui --test js_execution_env_leak -- --nocapture`:\\n\\n```rust\\nuse deepseek_tui::tools::js_execution::execute_js_execution_tool;\\nuse serde_json::json;\\nuse tempfile::tempdir;\\n\\n#[tokio::test]\\nasync fn js_execution_inherits_parent_secrets() {\\n    if deepseek_tui::dependencies::resolve_node().is_none() {\\n        eprintln!(\\\"node not on PATH; skipping\\\");\\n        return;\\n    }\\n    unsafe {\\n        std::env::set_var(\\\"AWS_SECRET_ACCESS_KEY\\\", \\\"leak-marker-AKIA-EXAMPLE\\\");\\n        std::env::set_var(\\\"DEEPSEEK_API_KEY\\\", \\\"leak-marker-sk-EXAMPLE\\\");\\n    }\\n    let tmp = tempdir().unwrap();\\n    let result = execute_js_execution_tool(\\n        &json!({\\\"code\\\": \\\"console.log(process.env.AWS_SECRET_ACCESS_KEY + '|' + process.env.DEEPSEEK_API_KEY)\\\"}),\\n        tmp.path(),\\n    ).await.expect(\\\"execute\\\");\\n    let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();\\n    let stdout = payload[\\\"stdout\\\"].as_str().unwrap_or(\\\"\\\");\\n    assert!(stdout.contains(\\\"leak-marker-AKIA-EXAMPLE\\\"), \\\"AWS leaked: {stdout}\\\");\\n    assert!(stdout.contains(\\\"leak-marker-sk-EXAMPLE\\\"), \\\"DEEPSEEK leaked: {stdout}\\\");\\n}\\n```\\n\\nEquivalent reproducer against the binary:\\n\\n```bash\\nexport AWS_SECRET_ACCESS_KEY=\\\"leak-marker-AKIA-EXAMPLE\\\"\\nexport DEEPSEEK_API_KEY=\\\"leak-marker-sk-EXAMPLE\\\"\\ndeepseek\\n# Ask the model to run:\\n#   js_execution({\\\"code\\\":\\\"console.log(JSON.stringify(process.env))\\\"})\\n# Approve once. The returned stdout contains every parent env value verbatim,\\n# including the markers above, and is now part of the model's context for the next request.\\n```\\n\\nThe fix is one line added next to the existing `cmd.current_dir(workspace)` call:\\n\\n```rust\\nlet mut cmd = tokio::process::Command::new(&node);\\ncmd.arg(&script_path);\\ncmd.current_dir(workspace);\\ncrate::child_env::apply_to_tokio_command(&mut cmd, std::iter::empty::<(&str, &str)>());\\n```\\n\\nThis calls the existing helper with no overrides, mirroring how repl/runtime.rs spawns the Python REPL. The behavior the description string already promises (sandbox) is then partially honored: secret-bearing parent variables stay in the parent.\\n\\n### Impact\\n\\nThe tool returns parent-environment secrets to the model on a single approval, or with no approval in YOLO mode. Any variable the user has exported becomes part of the next model request and travels to the configured LLM provider's logs. Common variables that the codebase's own provider clients read from process env, and therefore the values most likely to be present, include DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, AZURE_OPENAI_API_KEY, XAI_API_KEY, GROQ_API_KEY, and TOGETHER_API_KEY. Cloud and source-control credentials commonly exported in developer shells include AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, GOOGLE_APPLICATION_CREDENTIALS, GITHUB_TOKEN, GH_TOKEN, GITLAB_TOKEN, NPM_TOKEN, CARGO_REGISTRY_TOKEN, PYPI_API_TOKEN, and DATABASE_URL-style secrets. The local-sandbox wording shown at approval time understates the trust boundary, so users approving what they read as a sandboxed snippet do not anticipate that every shell-exported credential is reachable from the snippet. The remediation matches the pattern already adopted across exec_shell, the Python REPL, and the MCP launcher, so the gap is a missed call site rather than a design tradeoff.\", \"epss\": {\"percentage\": 0.00504, \"percentile\": 0.41023}, \"ghsa_id\": \"GHSA-h539-c7r8-3xq4\", \"github_reviewed_at\": \"2026-09-04T18:03:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-h539-c7r8-3xq4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h539-c7r8-3xq4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75915\"}], \"nvd_published_at\": \"2026-08-18T16:18:23Z\", \"published_at\": \"2026-09-04T18:03:08Z\", \"references\": [\"https://github.com/Hmbown/CodeWhale/security/advisories/GHSA-h539-c7r8-3xq4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-75915\", \"https://github.com/Hmbown/CodeWhale/commit/26de44a8bd5051f8f944ea60b2c37ae1d2b7d25e\", \"https://www.vulncheck.com/advisories/codewhale-before-environment-variable-leak-via-js-execution\", \"https://github.com/advisories/GHSA-h539-c7r8-3xq4\"], \"repository_advisory_url\": \"https://api.github.com/repos/Hmbown/Codewhale/security-advisories/GHSA-h539-c7r8-3xq4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Hmbown/CodeWhale\", \"summary\": \"CodeWhale: js_execution leaks parent environment to model context via missing env scrub\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T18:03:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-h539-c7r8-3xq4\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"rust\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.32, <= 0.8.41\"}, {\"first_patched_version\": \"0.8.41\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"deepseek-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.32, < 0.8.41\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"codewhale-tui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}, {\"first_patched_version\": \"0.8.64\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"codewhale\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.8.41, < 0.8.64\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h539-c7r8-3xq4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "codewhale-tui: >= 0.8.41, < 0.8.64",
+      "codewhale: >= 0.8.41, < 0.8.64",
+      "deepseek-tui: >= 0.8.32, < 0.8.41",
+      "deepseek-tui: >= 0.8.32, <= 0.8.41"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-75915"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "codewhale",
+      "codewhale-tui",
+      "deepseek-tui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.881409Z",
+  "provenance": {
+    "content_sha256": "f1e730775ed9af00954beedb1b33626054fdabedc7f870a1b2d180f0f8fe8367",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T18:03:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h539-c7r8-3xq4",
+  "status": "active",
+  "title": "CodeWhale: js_execution leaks parent environment to model context via missing env scrub",
+  "updated_at": "2026-09-04T18:03:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h539-c7r8-3xq4"
+}

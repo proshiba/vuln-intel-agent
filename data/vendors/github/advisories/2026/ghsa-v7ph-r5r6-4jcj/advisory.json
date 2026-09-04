@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72808\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72808](https://nvd.nist.gov/vuln/detail/CVE-2026-72808).\\n\\n### Summary\\n\\nThe `/api/asset/getFileAnnotation` endpoint returns the content of `.sya` PDF-annotation files with no publish-access check. It is gated by `CheckAuth` only, so it is reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`. Its sibling, the `/assets/*` asset route does enforce publish access, including the publish password. An anonymous reader who knows an asset path can therefore read the private PDF annotations (highlights, notes) attached to assets in publish-forbidden, password-protected, or unpublished documents.\\n\\n### Details\\n\\n`getFileAnnotation` resolves the annotation file via `GetAssetAbsPathInBox` (no path traversal) and returns the `.sya` content. Unlike the `/assets/*` route, which applies the publish-access filter including password enforcement before serving asset bytes, `getFileAnnotation` applies no publish-access, publish-ignore, or password check. The guarded-sibling asymmetry indicates the boundary is meant to apply to this data and was omitted here.\\n\\n`.sya` files for encrypted-box assets are fail-closed and not exposed. The gap is limited to non-encrypted assets.\\n\\n**Route / auth tier.** `getFileAnnotation` is registered `CheckAuth`-only. `CheckAuth` admits `RoleReader`; the publish proxy forwards port-6808 traffic with a Reader JWT (anonymous when publish auth is disabled).\\n\\n### Proof of Concept\\n\\nReproduced on a local instance (publish mode on 6808, Basic Auth off).\\n\\n**Setup (admin, 6806):**\\n1. `createNotebook{name:\\\"AnnotPoc\\\"}` → box\\n2. `createDocWithMd{notebook, path:\\\"/annot-victim\\\", markdown:\\\"doc with a pdf\\\"}` → doc\\n3. `POST /api/asset/upload` (multipart `id=<doc>`, `file[]=@secret.pdf`) → `assets/secret-...pdf`\\n4. `setFileAnnotation{path:\\\"<asset>.sya\\\", data:\\\"{annotSecret:ANNOT_SECRET_4471,note:private highlight}\\\"}`\\n5. `setPublishAccess{id:<doc>, visible:false, password:\\\"\\\", disable:true}` → doc forbidden\\n\\n**Exploit (anonymous reader, 6808, no token):**\\n```\\nPOST http://127.0.0.1:6808/api/asset/getFileAnnotation\\n{\\\"path\\\":\\\"assets/secret-...pdf.sya\\\"}\\n```\\nReturns:\\n```\\n{\\\"code\\\":0,\\\"data\\\":{\\\"data\\\":\\\"{\\\\\\\"annotSecret\\\\\\\":\\\\\\\"ANNOT_SECRET_4471\\\\\\\",\\\\\\\"note\\\\\\\":\\\\\\\"private highlight\\\\\\\"}\\\"}}\\n```\\nThe annotation content of a publish-forbidden document is returned to an anonymous reader with no publish-access check, while the `/assets/*` route serving the same asset class enforces publish access and password.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` can read the private PDF annotations (highlights and notes) of assets belonging to publish-forbidden, password-protected, or unpublished documents, given the asset path. This defeats the publish-access/password boundary for annotation data. Scope is limited to annotated PDFs in non-encrypted notebooks; encrypted-box annotations are not exposed. Confidentiality-only.\\n\\n### Suggested fix\\n\\nApply the same publish-access check the `/assets/*` route uses to `getFileAnnotation` resolve the asset's owning document and enforce the publish-access/publish-ignore / password check before returning `.sya` content.\", \"epss\": {\"percentage\": 0.00283, \"percentile\": 0.20262}, \"ghsa_id\": \"GHSA-v7ph-r5r6-4jcj\", \"github_reviewed_at\": \"2026-09-03T22:48:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-v7ph-r5r6-4jcj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v7ph-r5r6-4jcj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72808\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-03T22:48:22Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-v7ph-r5r6-4jcj\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72808\", \"https://github.com/siyuan-note/siyuan/commit/509b35055940856ec1c89cb4888723c4660b776a\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-getfileannotation\", \"https://github.com/advisories/GHSA-v7ph-r5r6-4jcj\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-v7ph-r5r6-4jcj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Missing publish-access filter on getFileAnnotation discloses private PDF annotations of forbidden/protected documents (publish mode)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-03T22:48:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-v7ph-r5r6-4jcj\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260723031702-509b35055940\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260723031702-509b35055940\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v7ph-r5r6-4jcj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260723031702-509b35055940"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72808"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-04T19:12:53.946162Z",
+  "provenance": {
+    "content_sha256": "17a77af75b5bc028cc8a8e8dc0034b51efc5086c499c007b23bc5d1b31c3d22f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-03T22:48:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v7ph-r5r6-4jcj",
+  "status": "active",
+  "title": "SiYuan: Missing publish-access filter on getFileAnnotation discloses private PDF annotations of forbidden/protected documents (publish mode)",
+  "updated_at": "2026-09-03T22:48:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v7ph-r5r6-4jcj"
+}
