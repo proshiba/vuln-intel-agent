@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72799\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72799](https://nvd.nist.gov/vuln/detail/CVE-2026-72799).\\n\\n### Summary\\n\\nFive filetree endpoints resolve arbitrary document IDs and paths with no publish-access check of any kind. All are `CheckAuth`-only, so they are reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`. An anonymous reader can map the complete private document tree every notebook, folder, and document title, and which notebook holds each document for documents marked hidden, password-protected, or publish-forbidden, and can resolve titles to document IDs.\\n\\n### Details\\n\\nNone of the following handlers invokes `IsReadOnlyRoleContext`, `CheckBlockIdAccessableByPublishAccess`, or `CheckPathAccessableByPublishIgnore`:\\n\\n| Endpoint | Returns | Discloses |\\n|---|---|---|\\n| `getFullHPathByID` (router 159) | `GetFullHPathByID(id)` | full title path including notebook, e.g. `/MySecretNotebook/Confidential/Q3 Layoffs Plan` |\\n| `getHPathByID` (router 157) | `GetHPathByID(id)` | document-relative title path |\\n| `getPathByID` (router 158) | `{path, notebook}` | which notebook a document lives in, plus its `.sy` storage path |\\n| `getIDsByHPath` (router 160) | `GetIDsByHPath(path, notebook)` | title-path → document-ID enumeration |\\n| `getHPathByPath` (router 155) | HPath from a storage path | title path from a storage path |\\n\\nEach accepts an arbitrary ID or HPath and resolves it identically for hidden, publish-forbidden, and password-protected documents.\\n\\nThis enables two operations for an unauthenticated caller:\\n1. **Map the private document tree**: `getFullHPathByID` and `getPathByID` yield every notebook/folder/document title and its containing notebook.\\n2. **Resolve titles to IDs**: `getIDsByHPath` converts a known or guessed title path into document IDs, which are the required input for other block-read endpoints.\\n\\nDocument titles and HPaths are precisely the block metadata that the project's block-metadata restriction (commit `ffde3b21e`) set out to protect; that change gated `getBlockInfo`, `getDocInfo`, and `getDocsInfo` but left this entire path-resolution family open.\\n\\n**Guarded-sibling asymmetry.** `getRecentDocs` (`FilterRecentDocsByPublishAccess`), `getCriteria` (`FilterCriteriaByPublishAccess`), and `getLocalStorage` (`FilterLocalStorageByPublishAccess`) all filter document references for reader sessions. The codebase clearly publish-scopes reader-visible metadata elsewhere; these five endpoints do not.\\n\\nVerified at `origin/master` (`eef105683`): all five handler bodies contain no publish-access call; the storage-family siblings contain their filters; all five routes are registered `CheckAuth` without `CheckAdminRole`.\\n\\n### Proof of Concept\\n\\nPrecondition: publish mode enabled (default port 6808); anonymous when `Publish.Auth.Enable` is `false`, otherwise any publish reader account. A document exists in a notebook marked publish-forbidden or password-protected.\\n\\n**Resolve a private document's full title path:**\\n```\\nPOST http://127.0.0.1:6808/api/filetree/getFullHPathByID\\n{\\\"id\\\":\\\"<DOC_ID>\\\"}\\n→ /MySecretNotebook/Confidential/Q3 Layoffs Plan\\n```\\n\\n**Identify its notebook and storage path:**\\n```\\nPOST http://127.0.0.1:6808/api/filetree/getPathByID\\n{\\\"id\\\":\\\"<DOC_ID>\\\"}\\n→ {\\\"path\\\":\\\"/....sy\\\",\\\"notebook\\\":\\\"<BOX_ID>\\\"}\\n```\\n\\n**Enumerate IDs from a title path:**\\n```\\nPOST http://127.0.0.1:6808/api/filetree/getIDsByHPath\\n{\\\"path\\\":\\\"/Confidential\\\",\\\"notebook\\\":\\\"<BOX_ID>\\\"}\\n→ document IDs under a folder the reader cannot otherwise access\\n```\\n\\nEach returns data for documents excluded from publishing; no password or membership is required.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` can enumerate the complete private document structure: notebook names, folder hierarchy, and document titles for content the administrator marked hidden, password-protected, or excluded from publishing. Document titles alone are frequently sensitive (project names, personnel actions, client identifiers). The ID-resolution direction additionally supplies valid document IDs, removing the \\\"attacker must know an ID\\\" precondition for other block-read endpoints. Confidentiality-only.\\n\\n### Suggested fix\\n\\nFor `IsReadOnlyRoleContext` sessions, gate each of the five handlers with `CheckBlockIdAccessableByPublishAccess` (or restrict resolution to publish-visible documents), mirroring the treatment already applied in `getRecentDocs`, `getCriteria`, and `getLocalStorage`.\", \"epss\": {\"percentage\": 0.00237, \"percentile\": 0.14506}, \"ghsa_id\": \"GHSA-5w7r-f4cg-rqq7\", \"github_reviewed_at\": \"2026-09-04T20:53:34Z\", \"html_url\": \"https://github.com/advisories/GHSA-5w7r-f4cg-rqq7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5w7r-f4cg-rqq7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72799\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-04T20:53:34Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-5w7r-f4cg-rqq7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72799\", \"https://github.com/siyuan-note/siyuan/commit/5bae0926b896eaff0bc5cc6a75d421c2d161a806\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-path-resolution\", \"https://github.com/advisories/GHSA-5w7r-f4cg-rqq7\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-5w7r-f4cg-rqq7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Missing publish-access filter on the HPath/path-resolution endpoints discloses the private document tree to anonymous readers\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T20:53:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-5w7r-f4cg-rqq7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260724112156-5bae0926b896\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260724112156-5bae0926b896\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5w7r-f4cg-rqq7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260724112156-5bae0926b896"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72799"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-05T19:11:58.312116Z",
+  "provenance": {
+    "content_sha256": "b8589cf90d1fcc6e1c9acac19c42334106b9e7509d3dc2b21142aec4f78a70cc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T20:53:34Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5w7r-f4cg-rqq7",
+  "status": "active",
+  "title": "SiYuan: Missing publish-access filter on the HPath/path-resolution endpoints discloses the private document tree to anonymous readers",
+  "updated_at": "2026-09-04T20:53:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5w7r-f4cg-rqq7"
+}

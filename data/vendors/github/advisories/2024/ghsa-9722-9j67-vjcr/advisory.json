@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4287700?v=4\", \"events_url\": \"https://api.github.com/users/5hanth/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/5hanth/followers\", \"following_url\": \"https://api.github.com/users/5hanth/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/5hanth/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/5hanth\", \"id\": 4287700, \"login\": \"5hanth\", \"node_id\": \"MDQ6VXNlcjQyODc3MDA=\", \"organizations_url\": \"https://api.github.com/users/5hanth/orgs\", \"received_events_url\": \"https://api.github.com/users/5hanth/received_events\", \"repos_url\": \"https://api.github.com/users/5hanth/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/5hanth/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/5hanth/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/5hanth\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5722272?v=4\", \"events_url\": \"https://api.github.com/users/Xkonti/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Xkonti/followers\", \"following_url\": \"https://api.github.com/users/Xkonti/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Xkonti/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Xkonti\", \"id\": 5722272, \"login\": \"Xkonti\", \"node_id\": \"MDQ6VXNlcjU3MjIyNzI=\", \"organizations_url\": \"https://api.github.com/users/Xkonti/orgs\", \"received_events_url\": \"https://api.github.com/users/Xkonti/received_events\", \"repos_url\": \"https://api.github.com/users/Xkonti/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Xkonti/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Xkonti/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Xkonti\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2024-58367\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-285\", \"name\": \"Improper Authorization\"}], \"description\": \"Due to the order in which permissions were processed, some statements, filters and computations could lead to leaking field values or record contents to users without the required permissions. This behavior could be triggered in different scenarios:\\n\\n- When performing a `SELECT` operation on a table, the values that would be returned were iterated over, field permissions would be validated and any unauthorized value would be removed from the result returned. However, performing a `SELECT VALUE` operation (e.g. `SELECT VALUE private FROM data`) would result in a non-iterable value, which would not be removed from the returned result.\\n\\n- When aliasing a field (e.g. `SELECT private AS public FROM data`) for which the user did not have `SELECT` permissions within a `SELECT` query, permissions would be checked against the field of the resulting document containing the aliased field instead of the original document containing the original field. As a consequence, the original field value would be returned as the returned field would not match the original field where permissions had been defined.\\n\\n- When calling a function in the context of a `SELECT` query and passing a field with permissions as an argument to the function (e.g. `SELECT string::lowercase(private) FROM data`), the function would receive the field value before it had been removed from the document due to `SELECT` permissions. As a result, the function would have access to the value of the field regardless of field permissions. This case includes functions called from within events and other clauses that support function calling.\\n\\n- When executing a query containing a `WHERE` clause filtering records by a field that the querying user does not have access to `SELECT` (e.g. `SELECT public FROM data WHERE private ~ \\\"secret\\\"`), the response of that query would still take the value of the field into account. Even though the value of the protected field would not be returned, this behavior could be used as a side channel by the querying user to infer information about the value of the field.\\n\\n- When performing `UPDATE` or `DELETE` operations over a table with a user that had those permissions but no `SELECT` permission, the `RETURN BEFORE` clause could be used (e.g. `DELETE data RETURN BEFORE`) to read the contents of the records prior to the authorized update or the deletion despite the querying user not being authorized to perform `SELECT` operations.\\n\\n- When performing `UPDATE` operations on a table for which the user had `SELECT` and `UPDATE` permissions, the `SET` clause could reference fields that the user had `UPDATE` but no `SELECT` permission for (e.g. `UPDATE data SET public = private`) in order to update the value of a field that the user had permission to `SELECT` to the value of another field for which the user did not.\\n\\n### Impact\\n\\nClients that were authorized by table permissions to execute `SELECT` statements for a table but were not authorized by field permissions to run `SELECT` queries for a specific field could still have been able to gain knowledge of the value of that field. Additionally, clients that were authorized to execute `UPDATE` or `DELETE` statements for a table but not authorized to execute `SELECT` statements for the same table may have been able to gain knowledge of the contents of records in that table. This could only be exploited by users who were already authorized to execute queries on the database with the affected table or field.\\n\\nDue to its relationship with table and field permissions, which apply mainly to record users rather than system users, this issue mostly affects users relying on SurrealDB as a backend-as-a-service rather than SurrealDB as a traditional database backend.\\n\\n### Patches\\n\\nThe behavior when evaluating table or field permissions and filtering records or fields as a result of those evaluations has been improved to consider permissions before any changes to the document have been made and, when relevant, permissions after changes to the document have taken place. When a user is unauthorized to view record contents and field values by permissions, the returned documents will behave as if the record or field did not exist in order to prevent leaking any information.\\n\\n- Version 2.0.4 and later are not affected by this issue.\\n\\n### Workarounds\\n\\nUsers affected by this issue and unable to update should not rely on the authorization provided by field permissions when it comes to the `SELECT` permission. Instead, read access to fields in affected versions should be restricted at the table level. When allowing the `UPDATE` or `DELETE` operations for records via table permissions, users should not rely of the authorization provided by the `SELECT` permission. Instead, users should not allow clients to `UPDATE` or `DELETE` records that they should not be able to view.\", \"epss\": {\"percentage\": 0.00209, \"percentile\": 0.11197}, \"ghsa_id\": \"GHSA-9722-9j67-vjcr\", \"github_reviewed_at\": \"2024-10-08T22:21:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-9722-9j67-vjcr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9722-9j67-vjcr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2024-58367\"}], \"nvd_published_at\": null, \"published_at\": \"2024-10-08T22:21:09Z\", \"references\": [\"https://github.com/surrealdb/surrealdb/security/advisories/GHSA-9722-9j67-vjcr\", \"https://github.com/surrealdb/surrealdb/issues/2161\", \"https://github.com/surrealdb/surrealdb/issues/3924\", \"https://github.com/surrealdb/surrealdb/pull/4785\", \"https://github.com/surrealdb/surrealdb/pull/4800\", \"https://github.com/surrealdb/surrealdb/pull/4873\", \"https://github.com/surrealdb/surrealdb/commit/439ab99e15314ec5cf87047bf58246db646e3f8c\", \"https://github.com/surrealdb/surrealdb/commit/c382fa158dc84b329328606f663efe574f102a7d\", \"https://github.com/surrealdb/surrealdb/commit/e75e7736b3a028c4b6a4a4bdf00791d76f77e339\", \"https://surrealdb.com/docs/surrealdb/security/summary#permissions\", \"https://surrealdb.com/docs/surrealql/statements/define/field#setting-permissions-on-fields\", \"https://surrealdb.com/docs/surrealql/statements/define/table#defining-permissions\", \"https://nvd.nist.gov/vuln/detail/CVE-2024-58367\", \"https://www.vulncheck.com/advisories/surrealdb-before-improper-authorization-via-select-permissions\", \"https://github.com/advisories/GHSA-9722-9j67-vjcr\"], \"repository_advisory_url\": \"https://api.github.com/repos/surrealdb/surrealdb/security-advisories/GHSA-9722-9j67-vjcr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/surrealdb/surrealdb\", \"summary\": \"SurrealDB: Improper Authorization in Select Permissions\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T19:38:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-9722-9j67-vjcr\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.4\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"surrealdb\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.4\"}, {\"first_patched_version\": \"2.0.4\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"surrealdb-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9722-9j67-vjcr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "surrealdb-core: < 2.0.4",
+      "surrealdb: < 2.0.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2024-58367"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "surrealdb",
+      "surrealdb-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-05T19:11:58.371619Z",
+  "provenance": {
+    "content_sha256": "69e9edbffc5f0b4e7ae42097ecee5eb5c9d0aff14c5639ebc51217a0e9979c57",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2024-10-08T22:21:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9722-9j67-vjcr",
+  "status": "active",
+  "title": "SurrealDB: Improper Authorization in Select Permissions",
+  "updated_at": "2026-09-04T19:38:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9722-9j67-vjcr"
+}
