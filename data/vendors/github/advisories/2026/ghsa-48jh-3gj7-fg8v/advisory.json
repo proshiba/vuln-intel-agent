@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/67718280?v=4\", \"events_url\": \"https://api.github.com/users/CyberKareem/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CyberKareem/followers\", \"following_url\": \"https://api.github.com/users/CyberKareem/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CyberKareem/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CyberKareem\", \"id\": 67718280, \"login\": \"CyberKareem\", \"node_id\": \"MDQ6VXNlcjY3NzE4Mjgw\", \"organizations_url\": \"https://api.github.com/users/CyberKareem/orgs\", \"received_events_url\": \"https://api.github.com/users/CyberKareem/received_events\", \"repos_url\": \"https://api.github.com/users/CyberKareem/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CyberKareem/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CyberKareem/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CyberKareem\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/124347725?v=4\", \"events_url\": \"https://api.github.com/users/jperezdealgaba/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jperezdealgaba/followers\", \"following_url\": \"https://api.github.com/users/jperezdealgaba/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jperezdealgaba/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jperezdealgaba\", \"id\": 124347725, \"login\": \"jperezdealgaba\", \"node_id\": \"U_kgDOB2llTQ\", \"organizations_url\": \"https://api.github.com/users/jperezdealgaba/orgs\", \"received_events_url\": \"https://api.github.com/users/jperezdealgaba/received_events\", \"repos_url\": \"https://api.github.com/users/jperezdealgaba/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jperezdealgaba/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jperezdealgaba/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jperezdealgaba\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73556\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\nThe fix for `GHSA-rwxx-mrjm-wc2m` (\\\"ReDoS via `structured_outputs.regex` compiled without timeout\\\") wrapped the regex compile in the **xgrammar** and **outlines** backends with `compile_regex_with_timeout` (and, for outlines, `validate_regex_is_buildable`). The **lm-format-enforcer** backend was left unguarded: it compiles the attacker-supplied regex with no timeout and no buildability check. A single request with a catastrophic regex hangs the structured-output compile step and stalls the engine worker (denial of service).\\n\\n### Affected code (HEAD d6d39c1)\\n\\n`vllm/v1/structured_output/backend_lm_format_enforcer.py`:\\n- line 110: `character_level_parser = lmformatenforcer.RegexParser(grammar_spec)` — builds an `interegular` FSM from the attacker regex synchronously, **no timeout**.\\n- line 155: `validate_structured_output_request_lm_format_enforcer` returns immediately on `if so_params.regex:` — **no validation**.\\n\\nSibling backends that WERE patched by GHSA-rwxx:\\n- `backend_xgrammar.py:92` → `compile_regex_with_timeout(...)`.\\n- `backend_outlines.py:65` → `compile_regex_with_timeout(...)` (plus `validate_regex_is_buildable`).\\n\\nlm-format-enforcer uses the same `interegular` DFA-construction primitive the advisory cites for the outlines backend.\\n\\n### Reproduction (runtime-verified against the sink)\\n\\nThe sink `lmformatenforcer.RegexParser(<regex>)` was exercised directly (this is exactly what the backend calls):\\n\\n```\\nbaseline  '[0-9]{3}'          -> 0.0002 s\\nattacker  '(a{1,300}){300}'   -> DID NOT COMPLETE in 20 s (one core pegged at 100% in interegular FSM construction)\\n```\\n\\nEnd-to-end: start `vllm serve <model> --structured-outputs-config '{\\\"backend\\\":\\\"lm-format-enforcer\\\"}'`, then `POST /v1/completions` with `{\\\"structured_outputs\\\":{\\\"regex\\\":\\\"(a{1,300}){300}\\\"}, ...}`. The request never returns; because grammar compile runs in the engine's structured-output path, concurrent requests stall = worker-level DoS. The identical request against the outlines backend is bounded by `compile_regex_with_timeout` and returns a clean error.\\n\\n### Impact\\n\\nUnauthenticated denial of service (vLLM ships with no authentication by default). One request pegs a CPU core and blocks the structured-output engine path.\\n\\n**Reachability precondition:** the operator must have selected `backend=lm-format-enforcer` via `--structured-outputs-config` (the default is `auto` → xgrammar). This is the same opt-in tier as the outlines backend that GHSA-rwxx already covered.\\n\\n### Suggested remediation\\n\\nRoute the lm-format-enforcer regex compile (`backend_lm_format_enforcer.py:110`) through the same `compile_regex_with_timeout` guard already applied to the xgrammar and outlines backends, and reject un-buildable / oversized patterns in `validate_structured_output_request_lm_format_enforcer`.\", \"epss\": {\"percentage\": 0.00315, \"percentile\": 0.24077}, \"ghsa_id\": \"GHSA-48jh-3gj7-fg8v\", \"github_reviewed_at\": \"2026-09-04T21:37:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-48jh-3gj7-fg8v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-48jh-3gj7-fg8v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73556\"}], \"nvd_published_at\": \"2026-08-13T15:20:17Z\", \"published_at\": \"2026-09-04T21:37:00Z\", \"references\": [\"https://github.com/vllm-project/vllm/security/advisories/GHSA-48jh-3gj7-fg8v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73556\", \"https://github.com/vllm-project/vllm/pull/47595\", \"https://github.com/vllm-project/vllm/commit/c9a788eedc412acceaa5112e0d44624b49841577\", \"https://github.com/vllm-project/vllm/releases/tag/v0.26.0\", \"https://github.com/advisories/GHSA-48jh-3gj7-fg8v\"], \"repository_advisory_url\": \"https://api.github.com/repos/vllm-project/vllm/security-advisories/GHSA-48jh-3gj7-fg8v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/vllm-project/vllm\", \"summary\": \"vLLM: ReDoS via structured_outputs.regex in the lm-format-enforcer backend (no compile timeout) — missed sibling of GHSA-rwxx-mrjm-wc2m\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T21:37:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-48jh-3gj7-fg8v\", \"vulnerabilities\": [{\"first_patched_version\": \"0.26.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"vllm\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.26.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-48jh-3gj7-fg8v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vllm: < 0.26.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-73556"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vllm"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-05T19:11:58.259791Z",
+  "provenance": {
+    "content_sha256": "e9cb0d8a3b4a0d811a72e029d74a5b57955823ac5709c6c7640c2a9c52e2d9cb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T21:37:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-48jh-3gj7-fg8v",
+  "status": "active",
+  "title": "vLLM: ReDoS via structured_outputs.regex in the lm-format-enforcer backend (no compile timeout) — missed sibling of GHSA-rwxx-mrjm-wc2m",
+  "updated_at": "2026-09-04T21:37:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-48jh-3gj7-fg8v"
+}

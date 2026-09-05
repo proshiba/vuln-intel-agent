@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72795\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72795](https://nvd.nist.gov/vuln/detail/CVE-2026-72795).\\n\\n### Summary\\n\\n`/api/block/getBlockDOMWithEmbed` and `/api/block/getBlockDOMsWithEmbed` gate only the *requested* block against publish access. The blocks pulled in by that block's embed (transclusion) query are inlined into the returned DOM with no publish-access check at all, so a reader who requests a legitimately-published block containing an embed query receives the content of every block that query matched including blocks in hidden, forbidden and password-protected documents.\\n\\nThe dedicated embed endpoint `getEmbedBlock` filters these same results for reader roles. The DOM-with-embed path does not.\\n\\n### Details\\n\\n| Item | Detail |\\n|---|---|\\n| Routes | `kernel/api/router.go:226` `POST /api/block/getBlockDOMWithEmbed` → `model.CheckAuth` → `getBlockDOMWithEmbed`; `:227` `POST /api/block/getBlockDOMsWithEmbed` → `model.CheckAuth` → `getBlockDOMsWithEmbed` |\\n| Middleware | `CheckAuth` only — no `CheckReadonly`, no `CheckAdminRole` → reachable by the publish `RoleReader` token, and anonymously when `Publish.Auth.Enable` is `false` |\\n| Guard present | Top-level requested block only. Singular: password + disable checks on the requested id. Plural: `filterBlockDOMsByPublishAccess` over the requested ids. |\\n| Guard absent | The embedded blocks resolved from the query |\\n| Exposed | Content HTML of every block matched by the embed query, regardless of that block's publish visibility or password tier |\\n\\n**The leak path.** `getBlockDOMWithEmbed` → `GetBlockDOMsWithEmbedInBox` → `resolveEmbedContentInBox` (`kernel/model/block.go:976`). That function walks the tree for `NodeBlockQueryEmbed`, extracts the embed SQL, executes `sql.SelectBlocksRawStmtInBox(stmt, ...)`, builds `embedContents` from each matched block's content HTML, and inlines the result via `SetIALAttr(\\\"embed-content\\\", ...)`.\\n\\n`resolveEmbedContentInBox` takes no `publishAccess` parameter and contains no filtering: `FilterEmbedBlocks`, `CheckBlockIdAccessableByPublishAccess`, `CheckPathAccessable`, `publishAccess` and `IsReadOnlyRoleContext` all return zero matches in that function and its call path. The top-level gate therefore passes on the requested block, and the response body carries content the reader has no access to.\\n\\nEmbed queries in published documents routinely span the entire workspace by design, dashboard documents, \\\"all my TODOs\\\" aggregations, tag or attribute rollups. The reader does not need to construct anything: requesting an already-published document that contains such an embed is sufficient. If the publish frontend renders embedded blocks through this endpoint, the disclosure occurs passively during normal viewing of any published document containing an embed block.\\n\\n**Guarded sibling.** `getEmbedBlock` (`kernel/api/router.go:212`), which is also reader-reachable and returns embed query results, applies `model.FilterEmbedBlocksByPublishAccess(c, publishAccess, blocks)` for reader roles (`kernel/model/search.go:38`). The same class of data is filtered there and unfiltered here.\\n\\n**Scope note.** A prior review of `getBlockDOMsWithEmbed` confirmed that the per-id publish gate is correctly applied to the *requested* ids. That observation is accurate and is not in dispute, this report concerns the *embedded* blocks resolved downstream in `resolveEmbedContentInBox`, which are not covered by that gate.\\n\\n### Proof of Concept\\n\\nPrecondition: publish mode enabled (default port 6808); anonymous when `Publish.Auth.Enable` is `false`, otherwise any publish reader account. A published document containing an embed query whose results include at least one block in a non-published or password-protected document.\\n\\n```\\nPOST http://127.0.0.1:6808/api/block/getBlockDOMWithEmbed\\n{\\\"id\\\":\\\"<id of a published block containing an embed query>\\\"}\\n\\n→ 200\\n   The returned DOM contains embed-content attributes carrying the\\n   content HTML of blocks in documents the reader has no publish\\n   access to.\\n```\\n\\nDifferential check against the filtered sibling, using the same reader session and the same underlying query:\\n\\n```\\nPOST http://127.0.0.1:6808/api/search/getEmbedBlock\\n{\\\"stmt\\\":\\\"<the same embed query>\\\"}\\n\\n→ 200, results filtered by FilterEmbedBlocksByPublishAccess\\n```\\n\\nThe filtered endpoint withholds the private blocks; the DOM endpoint returns their content.\\n\\nThe plural route behaves identically for each requested id:\\n\\n```\\nPOST http://127.0.0.1:6808/api/block/getBlockDOMsWithEmbed\\n{\\\"ids\\\":[\\\"<published block containing an embed query>\\\"]}\\n```\\n\\n### Impact\\n\\nAn anonymous reader in publish mode or any publish `RoleReader` can read the content of blocks in documents that are not published, are marked hidden or forbidden, or are protected by a publish password, by requesting a published block that transcludes them. Because embed queries in aggregation-style published documents commonly match across the whole workspace, the volume of exposed content is bounded only by what the author's embed queries happen to match, not by anything under the reader's control being unusual. Confidentiality-only; no integrity or availability impact.\\n\\n### Suggested fix\\n\\nThread the request's `publishAccess` context into `resolveEmbedContentInBox` and, when `IsReadOnlyRoleContext` holds, drop any matched block failing `CheckBlockIdAccessableByPublishAccess` and the password-tier check before its content is written into `embed-content` mirroring the treatment `getEmbedBlock` already gives the same data via `FilterEmbedBlocksByPublishAccess`.\", \"epss\": {\"percentage\": 0.00241, \"percentile\": 0.15004}, \"ghsa_id\": \"GHSA-h6w7-xxcf-w2mq\", \"github_reviewed_at\": \"2026-09-04T21:13:13Z\", \"html_url\": \"https://github.com/advisories/GHSA-h6w7-xxcf-w2mq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h6w7-xxcf-w2mq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72795\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-04T21:13:13Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-h6w7-xxcf-w2mq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72795\", \"https://github.com/siyuan-note/siyuan/commit/1ca1c3c9d94bea14fc9728ff2fb8392bb0f29732\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-embed-block\", \"https://github.com/advisories/GHSA-h6w7-xxcf-w2mq\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-h6w7-xxcf-w2mq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: Embedded (transclusion) block content is returned without publish-access filtering, leaking private and password-protected document content to anonymous readers\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T21:13:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-h6w7-xxcf-w2mq\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260725125659-1ca1c3c9d94b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260725125659-1ca1c3c9d94b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h6w7-xxcf-w2mq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260725125659-1ca1c3c9d94b"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72795"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-05T19:11:58.288623Z",
+  "provenance": {
+    "content_sha256": "2831675a5138894eb08f3ba11afdf5ad17178d1e7bd59a059e49ff1e50e7daa1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T21:13:13Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h6w7-xxcf-w2mq",
+  "status": "active",
+  "title": "SiYuan: Embedded (transclusion) block content is returned without publish-access filtering, leaking private and password-protected document content to anonymous readers",
+  "updated_at": "2026-09-04T21:13:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h6w7-xxcf-w2mq"
+}

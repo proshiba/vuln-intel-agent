@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75179984?v=4\", \"events_url\": \"https://api.github.com/users/Shirshakhtml/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Shirshakhtml/followers\", \"following_url\": \"https://api.github.com/users/Shirshakhtml/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Shirshakhtml/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Shirshakhtml\", \"id\": 75179984, \"login\": \"Shirshakhtml\", \"node_id\": \"MDQ6VXNlcjc1MTc5OTg0\", \"organizations_url\": \"https://api.github.com/users/Shirshakhtml/orgs\", \"received_events_url\": \"https://api.github.com/users/Shirshakhtml/received_events\", \"repos_url\": \"https://api.github.com/users/Shirshakhtml/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Shirshakhtml/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Shirshakhtml/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Shirshakhtml\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72797\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"**CVE:** This vulnerability corresponds to [CVE-2026-72797](https://nvd.nist.gov/vuln/detail/CVE-2026-72797).\\n\\n### Summary\\n\\n`POST /api/notebook/getEncryptedNotebookStatus` returns the identifier, name, and current lock state of every encrypted notebook, with no publish-access filtering. The route is registered `CheckAuth` only, no `CheckReadonly`, no `CheckAdminRole` so it is reachable by the publish `RoleReader` token and by the anonymous account when `Publish.Auth.Enable` is `false`. Encrypted notebooks are private by design; their names frequently reveal the sensitive topic that motivated encrypting them.\\n\\n### Details\\n\\nRoute registration (`kernel/api/router.go:131`):\\n```go\\nginServer.Handle(\\\"POST\\\", \\\"/api/notebook/getEncryptedNotebookStatus\\\", model.CheckAuth, getEncryptedNotebookStatus)\\n```\\n\\nThe handler (`kernel/api/notebook.go`) accepts no arguments and contains no `IsReadOnlyRoleContext` branch and no publish-access filter of any kind. It returns, for every encrypted notebook, `{id, name, unlocked}`, the notebook's `box.Name` and its live lock state together with `enabled`, `count`, `migrationPending`, `migrationBoxes`, and `hasHistoryDependency`.\\n\\n**Guarded-sibling asymmetry.** The primary notebook listing `lsNotebooks`, in the same file and also reader-reachable, *does* filter: it skips notebooks that are `Closed` and any notebook whose `publishAccess` entry is not `Visible`. The project therefore publish-scopes notebook listings but `getEncryptedNotebookStatus` enumerates all encrypted notebooks unconditionally.\\n\\n**Still unfixed at HEAD.** The encrypted-notebook hardening series (issue #18034 idle auto-lock, lock-on-background, key handling, atomic unlock) is local-threat work. Commit `f2d966659` (\\\"Expose encrypted notebook unlock status to plugins\\\") introduced this exposure, and no subsequent commit gates it for the publish/reader boundary.\\n\\n**Secondary effect.** `unlocked: true` is a live indicator of exactly when an encrypted notebook's plaintext is resident in memory, the window during which reader-reachable code paths that accept a notebook argument can read its decrypted content.\\n\\n### Proof of Concept\\n\\nPrecondition: publish mode enabled (default port 6808); anonymous when `Publish.Auth.Enable` is `false`, otherwise any publish reader account. At least one encrypted notebook exists.\\n\\n```\\nPOST http://127.0.0.1:6808/api/notebook/getEncryptedNotebookStatus\\n{}\\n```\\n\\nReturns the full set of encrypted notebooks with their IDs, names, and current `unlocked` state including notebooks that `lsNotebooks` withholds from the same reader session. No arguments and no privileged access are required.\\n\\n### Impact\\n\\nAn anonymous reader (publish mode with auth disabled) or any publish `RoleReader` learns which encrypted notebooks exist, what they are called, and whether each is currently unlocked. Notebook names are themselves sensitive: a user encrypts a notebook precisely because its subject matter is private, and the name commonly states that subject. Disclosing existence and naming to unauthenticated parties defeats that expectation, and the live lock state additionally reveals when the notebook's contents are decrypted in memory. Confidentiality-only.\\n\\n### Suggested fix\\n\\nFor `IsReadOnlyRoleContext` sessions, either reject the request or restrict the response to notebooks that are publish-visible, mirroring the filtering already applied in `lsNotebooks`. Encrypted notebooks arguably should never be enumerated to a reader at all.\", \"epss\": {\"percentage\": 0.00237, \"percentile\": 0.14506}, \"ghsa_id\": \"GHSA-f2rw-w22v-54vh\", \"github_reviewed_at\": \"2026-09-04T21:01:46Z\", \"html_url\": \"https://github.com/advisories/GHSA-f2rw-w22v-54vh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f2rw-w22v-54vh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72797\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-04T21:01:46Z\", \"references\": [\"https://github.com/siyuan-note/siyuan/security/advisories/GHSA-f2rw-w22v-54vh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72797\", \"https://github.com/siyuan-note/siyuan/commit/8fb1b5766093371f6a516c221c92026b904fe779\", \"https://www.vulncheck.com/advisories/siyuan-before-information-disclosure-via-getencryptednotebookstatus\", \"https://github.com/advisories/GHSA-f2rw-w22v-54vh\"], \"repository_advisory_url\": \"https://api.github.com/repos/siyuan-note/siyuan/security-advisories/GHSA-f2rw-w22v-54vh\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/siyuan-note/siyuan\", \"summary\": \"SiYuan: getEncryptedNotebookStatus discloses names and current lock/unlock state of all encrypted notebooks to anonymous readers\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-04T21:01:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-f2rw-w22v-54vh\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260724123622-8fb1b5766093\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/siyuan-note/siyuan/kernel\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260724123622-8fb1b5766093\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f2rw-w22v-54vh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/siyuan-note/siyuan/kernel: < 0.0.0-20260724123622-8fb1b5766093"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-72797"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/siyuan-note/siyuan/kernel"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-05T19:11:58.303002Z",
+  "provenance": {
+    "content_sha256": "e08d37dea4d917017034fd64ad60bbe16f77c6a4e6ca589706bd343afa40c5dd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-04T21:01:46Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f2rw-w22v-54vh",
+  "status": "active",
+  "title": "SiYuan: getEncryptedNotebookStatus discloses names and current lock/unlock state of all encrypted notebooks to anonymous readers",
+  "updated_at": "2026-09-04T21:01:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f2rw-w22v-54vh"
+}
