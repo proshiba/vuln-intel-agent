@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86466393?v=4\", \"events_url\": \"https://api.github.com/users/leduckhuong/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/leduckhuong/followers\", \"following_url\": \"https://api.github.com/users/leduckhuong/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/leduckhuong/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/leduckhuong\", \"id\": 86466393, \"login\": \"leduckhuong\", \"node_id\": \"MDQ6VXNlcjg2NDY2Mzkz\", \"organizations_url\": \"https://api.github.com/users/leduckhuong/orgs\", \"received_events_url\": \"https://api.github.com/users/leduckhuong/received_events\", \"repos_url\": \"https://api.github.com/users/leduckhuong/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/leduckhuong/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/leduckhuong/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/leduckhuong\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-70626\", \"cvss\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 8.6, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\n`nltk.corpus.reader.api.CorpusReader.open()` can be used to read files outside the intended corpus root via a symlink placed inside that root. Although NLTK blocks absolute paths and `..` traversal, the current boundary check is only lexical and does not account for symlink resolution. This leads to an arbitrary local file read / filesystem sandbox bypass for applications that rely on `CorpusReader` or `FileSystemPathPointer` to restrict file access.\\n\\n### Details\\nThe vulnerable flow is:\\n\\n- [`nltk/corpus/reader/api.py:222`](/mnt/Data/my_brains/test/nltk/nltk/corpus/reader/api.py#L222)\\n  - `CorpusReader.open()` blocks absolute paths and `..`, then calls `self._root.join(file).open()`\\n\\n- [`nltk/data.py:398`](/mnt/Data/my_brains/test/nltk/nltk/data.py#L398)\\n  - `FileSystemPathPointer.join()` joins the requested file ID and checks whether the resulting path still appears to remain under the configured root\\n\\nThe problem is that the check is based on the lexical path after `os.path.normpath()`, not on the resolved path after following symlinks.\\n\\nCurrent behavior:\\n\\n1. `CorpusReader.open()` rejects:\\n   - absolute paths\\n   - `..` path traversal\\n2. `FileSystemPathPointer.join()` computes:\\n   - `joined = os.path.normpath(os.path.join(self._path, fileid))`\\n   - `root = os.path.normpath(self._path)`\\n3. It allows the access if `joined` starts with `root`\\n\\nThis misses the case where a path stays inside the root lexically, but resolves outside the root via a symlink already present under the allowed directory.\\n\\nExample:\\n\\n```text\\nJOINED=/tmp/nltk-root/link/secret.txt\\nREALPATH=/tmp/outside/secret.txt\\n```\\n\\n`JOINED` still appears to be inside the root, but `REALPATH` is outside it.\\n\\nThis is distinct from simple `../` traversal:\\n\\n- the file ID is not absolute\\n- the file ID does not contain `..`\\n- the escape only happens after filesystem resolution of a symlink under the allowed root\\n\\n### PoC\\nReproduced in an isolated Docker sandbox using the local `nltk` clone.\\n\\nMinimal Python PoC:\\n\\n```python\\nimport os\\nimport tempfile\\nfrom nltk.corpus.reader.api import CorpusReader\\n\\nroot = tempfile.mkdtemp(prefix=\\\"nltk-root-\\\")\\noutside_dir = tempfile.mkdtemp(prefix=\\\"nltk-out-\\\")\\noutside_file = os.path.join(outside_dir, \\\"secret.txt\\\")\\n\\nwith open(outside_file, \\\"w\\\") as f:\\n    f.write(\\\"secret-data\\\")\\n\\nos.symlink(outside_dir, os.path.join(root, \\\"link\\\"))\\n\\ncorpus = CorpusReader(root, [\\\"link/secret.txt\\\"])\\nwith corpus.open(\\\"link/secret.txt\\\") as f:\\n    print(f.read())\\n```\\n\\nObserved result:\\n\\n```text\\nsecret-data\\n```\\n\\nDocker re-test output:\\n\\n```text\\nROOT=/tmp/nltk-root-jjxay3if\\nOUTSIDE_DIR=/tmp/nltk-out-1kef36e0\\nJOINED=/tmp/nltk-root-jjxay3if/link/secret.txt\\nREALPATH=/tmp/nltk-out-1kef36e0/secret.txt\\nREAD_OK=secret-data\\nINSIDE_ROOT=True\\nREAL_INSIDE_ROOT=False\\n```\\n\\nAdditional impact validation using a system file:\\n\\n```text\\nROOT=/tmp/nltk-root-_h5x4m19\\nJOINED=/tmp/nltk-root-_h5x4m19/hostfile\\nREALPATH=/etc/hostname\\nHOSTNAME_READ=48dafb244af3\\nINSIDE_ROOT=True\\nREAL_INSIDE_ROOT=False\\n```\\n\\nThis shows that the issue is not limited to attacker-created files outside the root; it can also read existing system files that are readable by the application user.\\n\\n### Impact\\nThis is an arbitrary local file read / symlink escape issue.\\n\\nWho is impacted:\\n\\n- applications that accept attacker-controlled corpus directories, extracted datasets, or package contents\\n- applications that rely on NLTK corpus readers as a trust boundary for file access\\n- any deployment where an attacker can place or influence files inside the allowed corpus root\\n\\nPractical impact includes disclosure of:\\n\\n- application secrets stored on disk\\n- local configuration files\\n- private datasets\\n- process-exposed files such as `/proc/self/environ`\\n- system files readable by the running user\\n\\nThe issue is best described as a filesystem sandbox bypass caused by improper link resolution before file access.\", \"epss\": {\"percentage\": 0.00205, \"percentile\": 0.10426}, \"ghsa_id\": \"GHSA-r6gq-whwq-mvg9\", \"github_reviewed_at\": \"2026-09-08T15:26:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-r6gq-whwq-mvg9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r6gq-whwq-mvg9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-70626\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T15:26:47Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-r6gq-whwq-mvg9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-70626\", \"https://github.com/nltk/nltk/pull/3522\", \"https://github.com/nltk/nltk/commit/1b0e519e2324bc1a273d56edee63e44d0ad85b48\", \"https://github.com/nltk/nltk/releases/tag/3.9.4\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3732.yaml\", \"https://www.vulncheck.com/advisories/nltk-before-symlink-escape-via-corpusreader\", \"https://github.com/advisories/GHSA-r6gq-whwq-mvg9\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-r6gq-whwq-mvg9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: Symlink escape in CorpusReader allows arbitrary local file read outside the corpus root\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T15:26:51Z\", \"url\": \"https://api.github.com/advisories/GHSA-r6gq-whwq-mvg9\", \"vulnerabilities\": [{\"first_patched_version\": \"3.9.4\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r6gq-whwq-mvg9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.9.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-70626"
+    ],
+    "cvss_score": 6.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.213593Z",
+  "provenance": {
+    "content_sha256": "c600d2445c8c19f18e2701274c5c913642693b57de0930c04ade6444a85446b1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T15:26:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r6gq-whwq-mvg9",
+  "status": "active",
+  "title": "NLTK: Symlink escape in CorpusReader allows arbitrary local file read outside the corpus root",
+  "updated_at": "2026-09-08T15:26:51Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r6gq-whwq-mvg9"
+}

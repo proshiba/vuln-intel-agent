@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/189536965?v=4\", \"events_url\": \"https://api.github.com/users/ZeroXJacks/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ZeroXJacks/followers\", \"following_url\": \"https://api.github.com/users/ZeroXJacks/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ZeroXJacks/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ZeroXJacks\", \"id\": 189536965, \"login\": \"ZeroXJacks\", \"node_id\": \"U_kgDOC0waxQ\", \"organizations_url\": \"https://api.github.com/users/ZeroXJacks/orgs\", \"received_events_url\": \"https://api.github.com/users/ZeroXJacks/received_events\", \"repos_url\": \"https://api.github.com/users/ZeroXJacks/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ZeroXJacks/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ZeroXJacks/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ZeroXJacks\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-65915\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"### Summary\\n\\nThere's a logic bug in `FileSystemPathPointer.open()` inside `nltk/data.py`\\nthat makes the sandbox check permanently inert. The guard condition is always\\n`False` — meaning any file the process can read is accessible by passing a\\n`file://` URL to `nltk.data.load()`.\\n\\n---\\n\\n### Details\\n\\nIn `nltk/data.py`, `FileSystemPathPointer.open()` was patched at some point\\nwith a comment saying \\\"SECURITY PATCH ENFORCING SANDBOX\\\", but the check\\ndoesn't work:\\n```python\\ndef open(self, encoding=None):\\n    path = os.path.normpath(self._path)\\n\\n    # Block raw absolute reads such as \\\"/\\\" \\\"C:\\\\\\\\Windows\\\" etc.\\n    if os.path.isabs(path) and path != os.path.normpath(self._path):\\n        raise ValueError(f\\\"Direct absolute file access blocked: {path}\\\")\\n\\n    stream = open(self._path, \\\"rb\\\")\\n```\\n\\n`path` is set to `os.path.normpath(self._path)` on line 1, then compared\\nagainst `os.path.normpath(self._path)` again in the condition. They are\\nalways equal. The `ValueError` never fires.\\n\\nOn top of that, `__init__` already calls `os.path.abspath()` before storing\\n`self._path`, so it's normalized before `open()` is even called. Running\\n`normpath` on it again changes nothing.\\n\\nThe `stream = open(self._path, \\\"rb\\\")` line is always reached regardless of\\nwhat path was passed in.\\n\\n---\\n\\n### PoC\\n\\nTested on Python 3.11, NLTK 3.9.1, Ubuntu 22.04.\\n```python\\nimport nltk\\nfrom nltk.data import FileSystemPathPointer\\n\\n# direct construction\\nptr = FileSystemPathPointer(\\\"/etc/passwd\\\")\\nwith ptr.open() as f:\\n    print(f.read(300))\\n\\n# via load() using file:// URL\\ndata = nltk.data.load(\\\"file:///etc/passwd\\\", format=\\\"raw\\\")\\nprint(data[:300])\\n```\\n\\nBoth print file contents. No exception is raised.\\n\\n---\\n\\n### Impact\\n\\nAny app that lets users influence the string passed to `nltk.data.load()` or\\n`nltk.data.find()` is exposed — web APIs, notebook servers, multi-tenant\\npipelines. An attacker can read any file the process user has access to:\\n`/etc/passwd`, `.env` files, private keys, `~/.aws/credentials`, etc.\\n\\n## Suggested Fix\\n\\n**File:** `nltk/data.py` — `FileSystemPathPointer.open()` (lines 378–390)\\n\\n### What's wrong\\n\\nLine 387 compares `normpath(self._path)` against itself — always equal,\\nso the `ValueError` never fires. The check is dead code.\\n`__init__` already calls `abspath()` on construction, so re-running\\n`normpath` inside `open()` changes nothing either.\\n\\n---\\n\\n### Fix\\n\\nValidate against the actual list of permitted data directories instead:\\n```python\\ndef open(self, encoding=None):\\n    import nltk.data as _d\\n    allowed = [os.path.abspath(p) for p in _d.path if p]\\n    if allowed and not any(\\n        os.path.commonpath([self._path, r]) == r for r in allowed\\n    ):\\n        raise ValueError(\\n            f\\\"Access outside nltk_data blocked: {self._path!r}\\\"\\n        )\\n    stream = open(self._path, \\\"rb\\\")\\n    if encoding is not None:\\n        stream = SeekableUnicodeStreamReader(stream, encoding)\\n    return stream\\n```\\n\\n---\\n\\n### Why `commonpath` not `startswith`\\n\\n`startswith` is bypassable by a path that shares a prefix:\\n```\\n/tmp/nltk_data_evil\\\".startswith(\\\"/tmp/nltk_data\\\") → True  ✗\\ncommonpath([\\\"/tmp/nltk_data_evil\\\", \\\"/tmp/nltk_data\\\"]) → \\\"/tmp\\\"  ✓\\n```\\n\\n---\\n\\n### Diff\\n```diff\\n-    path = os.path.normpath(self._path)\\n-    if os.path.isabs(path) and path != os.path.normpath(self._path):\\n-        raise ValueError(f\\\"Direct absolute file access blocked: {path}\\\")\\n-\\n+    import nltk.data as _d\\n+    allowed = [os.path.abspath(p) for p in _d.path if p]\\n+    if allowed and not any(\\n+        os.path.commonpath([self._path, r]) == r for r in allowed\\n+    ):\\n+        raise ValueError(f\\\"Access outside nltk_data blocked: {self._path!r}\\\")\\n     stream = open(self._path, \\\"rb\\\")\\n```\", \"epss\": {\"percentage\": 0.00359, \"percentile\": 0.28793}, \"ghsa_id\": \"GHSA-72r2-7mfr-5xr9\", \"github_reviewed_at\": \"2026-09-08T15:27:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-72r2-7mfr-5xr9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-72r2-7mfr-5xr9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-65915\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T15:27:12Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-72r2-7mfr-5xr9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-65915\", \"https://github.com/nltk/nltk/pull/3522\", \"https://github.com/nltk/nltk/commit/69db9911fdba914ceeaca7aec6e892d1b14586a9\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3731.yaml\", \"https://huntr.com/bounties/a510de7b-ffaf-4a83-9bf8-fa7e63f4bd2d\", \"https://www.vulncheck.com/advisories/nltk-before-arbitrary-file-read-via-filesystempathpointer\", \"https://github.com/advisories/GHSA-72r2-7mfr-5xr9\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-72r2-7mfr-5xr9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: FileSystemPathPointer.open() sandbox check is dead code — arbitrary file read via file:// protocol\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T15:27:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-72r2-7mfr-5xr9\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.9.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-72r2-7mfr-5xr9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.9.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-65915"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.210939Z",
+  "provenance": {
+    "content_sha256": "749df208f925bcea4e1492b0955d50cfcb30d667ac1f57d5876e8a5d333cb5da",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T15:27:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-72r2-7mfr-5xr9",
+  "status": "active",
+  "title": "NLTK: FileSystemPathPointer.open() sandbox check is dead code — arbitrary file read via file:// protocol",
+  "updated_at": "2026-09-08T15:27:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-72r2-7mfr-5xr9"
+}

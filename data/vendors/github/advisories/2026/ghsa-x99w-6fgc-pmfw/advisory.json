@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86466393?v=4\", \"events_url\": \"https://api.github.com/users/leduckhuong/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/leduckhuong/followers\", \"following_url\": \"https://api.github.com/users/leduckhuong/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/leduckhuong/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/leduckhuong\", \"id\": 86466393, \"login\": \"leduckhuong\", \"node_id\": \"MDQ6VXNlcjg2NDY2Mzkz\", \"organizations_url\": \"https://api.github.com/users/leduckhuong/orgs\", \"received_events_url\": \"https://api.github.com/users/leduckhuong/received_events\", \"repos_url\": \"https://api.github.com/users/leduckhuong/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/leduckhuong/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/leduckhuong/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/leduckhuong\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-79657\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}, {\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"### Summary\\n\\nThe current source tree still allows arbitrary code execution during supposedly safer allowlisted pickle loading. The allowlist trusts whole module namespaces instead of exact safe globals, so crafted pickles can invoke dangerous in-namespace callables through pickle REDUCE.\\n\\n### Details\\n\\n- **Vulnerability type:** Remote code execution via unsafe deserialization\\n- **Affected component:** `nltk.picklesec.allowlisted_pickle_load`, `nltk.tokenize.punkt.punkt_pickle_load`, `nltk.parse.transitionparser.TransitionParser.parse`\\n- **Affected versions:** Current source `v3.10.0-rc2`; published `3.9.4` was not the claim target for this bypass.\\n- **Patched versions:** Not yet patched\\n- **Root cause:** Module-prefix allowlists include dangerous callables such as `nltk.tokenize.repp.ReppTokenizer._execute` and `numpy.f2py.crackfortran.myeval`.\\n\\n`punkt_pickle_load()` allowlists both `nltk.tokenize.punkt` and the whole `nltk.tokenize` namespace, which exposes `ReppTokenizer._execute()` and its `subprocess.Popen(...)` sink during unpickling. `TransitionParser.parse()` uses `allowlisted_pickle_load(..., allowed_modules=(\\\"numpy\\\", \\\"scipy\\\", \\\"sklearn\\\"))`, which permits `numpy.f2py.crackfortran.myeval()` and its attacker-controlled `eval(...)` path. I confirmed both gadgets create marker files before the caller returns or later aborts on type misuse.\\n\\n### PoC\\n\\n**Preconditions**\\n- The application loads an attacker-controlled tokenizer or model artifact through these public loaders.\\n\\n**Steps**\\n1. Create a pickle whose REDUCE callable is `ReppTokenizer._execute` and point its command to a harmless marker-file write.\\n2. Pass that payload to `punkt_pickle_load(BytesIO(payload))` and observe the marker file is created during unpickling.\\n3. Create a second pickle whose REDUCE callable is `numpy.f2py.crackfortran.myeval` and load it through `TransitionParser.parse()`.\\n4. Observe the second marker file is created before `TransitionParser.parse()` later fails on the returned object type.\\n\\n**Minimal reproducible excerpt**\\n\\n```text\\n{'punkt_marker': 'PUNKT_RCE', 'transitionparser_marker': 'TP_RCE'}\\n```\\n\\n### Impact\\n\\nAny caller that trusts these current allowlisted loaders can still execute attacker-controlled commands while loading model or tokenizer artifacts. This defeats the protection mechanism that replaced unrestricted pickle loading and creates a dangerous false sense of safety.\\n\\n### Remediation\\n\\nReplace broad module-prefix allowlists with exact `(module, qualname)` pairs for the few safe classes or functions genuinely required. Do not allow entire namespaces such as `nltk.tokenize` or `numpy`, and keep post-load type validation only as a secondary defense.\\n\\n### Resources\\n\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/tokenize/punkt.py#L120-L134\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/tokenize/repp.py#L111-L115\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/parse/transitionparser.py#L26-L30\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/parse/transitionparser.py#L565-L571\\n\\n---\\n\\n## Fix + attack demonstration (verified)\\n\\n + tightened callers\\n`find_class` now, before the allowlists:\\n1. **Rejects any dotted `name`** → closes 4489 with zero legit impact.\\n2. **Denies dangerous modules** (`os`, `subprocess`, `sys`, `builtins`, `numpy.f2py`, `nltk.tokenize.repp`, …) even under a broad `allowed_modules` — a defense-in-depth **backstop** so a future too-broad allowlist can't silently reopen RCE.\\n3. **`builtins` denied wholesale**; safe primitives (`int`, `str`, …) must be named exactly via `allowed_globals`.\\n\\nCallers tightened: punkt drops the broad `nltk.tokenize` (keeps `nltk.tokenize.punkt` + exact `collections.defaultdict`/`builtins.int`); transitionparser keeps numpy/scipy/sklearn (array unpickling needs their submodules) with the new guards blocking the gadgets.\\n\\n## Full pickle-sink audit\\nEvery deserialization sink in the tree was reviewed: **no raw `pickle.load`** anywhere, and **no** joblib/numpy/torch/dill/yaml/marshal loaders. `data.load` + `wordnet_app` use `RestrictedUnpickler` (blocks all globals — safe); the remaining `pickle_load` sites (`chartparser_app`, `tbl/demo`) load user-selected or self-written files and keep their warning.\\n\\n## Attack demonstration (captured; fork clone)\\n```\\n=== EXPLOITS blocked ===\\n  4489 sklearn.os.system (dotted)      -> BLOCKED\\n  x99w numpy.f2py.crackfortran.myeval  -> BLOCKED\\n  x99w nltk.tokenize.repp._execute     -> BLOCKED\\n  backstop os.system (os allowlisted)  -> BLOCKED\\n  backstop builtins.eval (exact global)-> BLOCKED\\n=== LEGIT loads still work ===\\n  punkt round-trip via punkt_pickle_load -> OK\\n  builtins.int (safe primitive)          -> OK\\n```\\n\\n## Tests\\n`test_pickle_allowlist_security.py` — added 5 regressions (dotted traversal, both namespace gadgets, denied-module backstop, legit round-trip). Suite: 122 passed / 9 skipped (sklearn-dependent) across pickle/punkt/transition/tokenize. pre-commit (black/isort/ruff) clean.\", \"epss\": {\"percentage\": 0.01214, \"percentile\": 0.66531}, \"ghsa_id\": \"GHSA-x99w-6fgc-pmfw\", \"github_reviewed_at\": \"2026-09-08T16:42:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-x99w-6fgc-pmfw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x99w-6fgc-pmfw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-79657\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T16:42:57Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-x99w-6fgc-pmfw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-79657\", \"https://github.com/nltk/nltk/commit/c3e37113742a1ebeeb4f2ca58941f320f98805ea\", \"https://github.com/nltk/nltk/releases/tag/v3.10.3\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3735.yaml\", \"https://www.vulncheck.com/advisories/nltk-before-3.10.3-remote-code-execution-via-unsafe-pickle-deserialization\", \"https://github.com/advisories/GHSA-x99w-6fgc-pmfw\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-x99w-6fgc-pmfw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: Allowlisted pickle loaders still permit code execution in current source\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T16:42:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-x99w-6fgc-pmfw\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x99w-6fgc-pmfw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-79657"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.164023Z",
+  "provenance": {
+    "content_sha256": "3ef439a2974efe916585a3827cab6474395884c3ceb4d34221e4826fd413deca",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T16:42:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x99w-6fgc-pmfw",
+  "status": "active",
+  "title": "NLTK: Allowlisted pickle loaders still permit code execution in current source",
+  "updated_at": "2026-09-08T16:42:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x99w-6fgc-pmfw"
+}

@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-78682\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-441\", \"name\": \"Unintended Proxy or Intermediary ('Confused Deputy')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nCurrent NLTK source reopens SSRF in proxied environments. `pathsec.urlopen()` validates the requested hostname locally, but once proxy inheritance is enabled the real fetch is performed by the proxy rather than by the validated direct-connect socket path.\\n\\n### Details\\n\\n- **Vulnerability type:** Server-side request forgery\\n- **Affected component:** `nltk.pathsec.urlopen`, `nltk.data.load`, `nltk.downloader.Downloader.index`, `nltk.downloader.Downloader.download`\\n- **Affected versions:** Current source `v3.10.0-rc2`; published `3.9.4` was a negative control and did not reproduce.\\n- **Patched versions:** Not yet patched\\n- **Root cause:** Proxy-handler inheritance disables `_SafeHTTPHandler` and `_SafeHTTPSHandler`, so the validated hostname no longer matches the actual egress destination.\\n\\nThe hardened direct path pins the validated numeric destination IP before opening the socket. The proxied branch instead copies `ProxyHandler` instances from the global opener, marks the request as proxied, and skips the pinned handlers. I confirmed that a validated public URL can be fetched from a loopback-only internal service through the proxy path via `pathsec.urlopen()`, `nltk.data.load()`, `Downloader.index()`, and `Downloader.download()`.\\n\\n### PoC\\n\\n**Preconditions**\\n- The runtime has an HTTP proxy configured and the caller relies on `pathsec` to keep network fetches SSRF-safe.\\n\\n**Steps**\\n1. Start a loopback-only HTTP server that serves secret text, a valid downloader index, and a ZIP payload.\\n2. Configure a proxy that forwards a validated public URL to that internal loopback service.\\n3. Call `pathsec.urlopen()` or `nltk.data.load()` on the public URL and observe the internal response is returned.\\n4. Instantiate `Downloader(server_index_url=...)`, call `index()` and `download()`, and observe internal-only content is parsed and installed.\\n\\n**Minimal reproducible excerpt**\\n\\n```text\\n{'urlopen': 'PROXY_TEXT_SECRET', 'data_load': 'PROXY_TEXT_SECRET', 'downloaded_file': 'INTERNAL_ZIP_SECRET'}\\n```\\n\\n### Impact\\n\\nConsumers that trust `pathsec` as an SSRF barrier in proxied environments can be made to read internal-only HTTP resources, load forged downloader indexes, and install attacker-chosen package content fetched from the proxy's network view.\\n\\n### Remediation\\n\\nPreserve destination validation for the actual proxy egress target or fail closed when the request would otherwise downgrade into an unpinned proxied path. Add regression tests across `pathsec.urlopen`, `nltk.data.load`, and downloader fetches with a configured proxy.\\n\\n### References\\n\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/pathsec.py#L468-L518\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/data.py#L1247-L1283\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/downloader.py#L875-L889\\n- https://github.com/nltk/nltk/blob/v3.10.0-rc2/nltk/downloader.py#L1220-L1226\\n- https://github.com/nltk/nltk/blob/3.9.4/nltk/pathsec.py#L245-L250\\n\\n---\\n\\n## Fix + attack demonstration (verified)\\n\\n\\nNLTK cannot pin the egress through a proxy, so it stops pretending to: under `ENFORCE` a proxied fetch is **refused** rather than performed unvalidated. Operators who trust their proxy opt back in with `NLTK_ALLOW_PROXIED_URLOPEN=1` or `nltk.pathsec.ALLOW_PROXIED_FETCH=True`; under `ENFORCE=False` the refusal degrades to a warning. This closes the **whole class** (environment proxies and explicit `ProxyHandler` alike), because NLTK declines any fetch whose egress it cannot validate.\\n\\n## Attack demonstration (reproduced; captured output)\\nA loopback HTTP server stands in for the internal target; `http_proxy` points at it; NLTK is asked for a **public** IP URL.\\n\\n**Before the fix** — the internal secret is exfiltrated through the proxy:\\n```\\nvalidate_network_url(public): PASSED\\n*** BYPASS: pathsec.urlopen returned INTERNAL content via proxy: 'INTERNAL_ONLY_SECRET'\\n```\\n\\n**After the fix** — five scenarios, isolated subprocesses:\\n| Scenario | Result |\\n|---|---|\\n| proxied (env) + ENFORCE | `PermissionError` — **blocked** |\\n| proxied + opt-in | returns secret — escape hatch works |\\n| explicit `ProxyHandler` (not env) + ENFORCE | `PermissionError` — **blocked** (whole class) |\\n| no proxy (direct) | internal IP still refused — pinning intact |\\n| proxied + `ENFORCE=False` | returns secret **+ warns** |\\n\\n## Tests\\n`nltk/test/unit/test_pathsec.py`: 64 passed. Added an end-to-end regression (`test_proxied_fetch_does_not_reach_internal_target`) plus `test_env_proxy_fails_closed_under_enforce`; the prior `test_env_proxy_skips_pinning_handlers` (which encoded the vulnerable path) is re-expressed as the opt-in case. Existing direct-path DNS-rebinding and IP-policy tests unchanged and passing. pre-commit (isort/black/ruff) clean.\\n\\n## Note\\nThe upfront `validate_network_url()` and the direct-path IP pinning (from the earlier DNS-rebinding fixes, CVE-2026-54296 / GHSA-qvv7) are unchanged — this only closes the proxied downgrade they didn't cover.\", \"epss\": {\"percentage\": 0.00253, \"percentile\": 0.16638}, \"ghsa_id\": \"GHSA-6ww7-3frv-cqxh\", \"github_reviewed_at\": \"2026-09-08T16:41:40Z\", \"html_url\": \"https://github.com/advisories/GHSA-6ww7-3frv-cqxh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6ww7-3frv-cqxh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-78682\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T16:41:40Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-6ww7-3frv-cqxh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-78682\", \"https://github.com/nltk/nltk/commit/767333a005a1cd3d82d2029215f2dbe66a5844d9\", \"https://github.com/nltk/nltk/releases/tag/v3.10.3\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3733.yaml\", \"https://www.vulncheck.com/advisories/nltk-before-ssrf-protection-bypass-via-proxy\", \"https://github.com/advisories/GHSA-6ww7-3frv-cqxh\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-6ww7-3frv-cqxh\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: pathsec SSRF protection can be bypassed when a proxy is configured\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T16:41:43Z\", \"url\": \"https://api.github.com/advisories/GHSA-6ww7-3frv-cqxh\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6ww7-3frv-cqxh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54296",
+      "CVE-2026-78682"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.170747Z",
+  "provenance": {
+    "content_sha256": "7002acdada065df8f5fcfc34c868529cf753f9f87c0f3b67845f3515d7e78cee",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T16:41:40Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6ww7-3frv-cqxh",
+  "status": "active",
+  "title": "NLTK: pathsec SSRF protection can be bypassed when a proxy is configured",
+  "updated_at": "2026-09-08T16:41:43Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6ww7-3frv-cqxh"
+}
