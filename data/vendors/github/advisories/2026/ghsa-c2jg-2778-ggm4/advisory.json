@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16007882?v=4\", \"events_url\": \"https://api.github.com/users/jfagoagas/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jfagoagas/followers\", \"following_url\": \"https://api.github.com/users/jfagoagas/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jfagoagas/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jfagoagas\", \"id\": 16007882, \"login\": \"jfagoagas\", \"node_id\": \"MDQ6VXNlcjE2MDA3ODgy\", \"organizations_url\": \"https://api.github.com/users/jfagoagas/orgs\", \"received_events_url\": \"https://api.github.com/users/jfagoagas/received_events\", \"repos_url\": \"https://api.github.com/users/jfagoagas/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jfagoagas/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jfagoagas/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jfagoagas\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-73262\", \"cvss\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nProwler's HTML output formatter inserts `finding.resource_tags` into the generated report without HTML escaping. A cloud principal who can create or edit a resource tag in an account that is later scanned can store HTML or JavaScript in that tag. When another user opens the generated Prowler HTML report, the payload executes in the report page.\\n\\n## Impact\\n\\nThis is stored cross-site scripting in a security report artifact. The attacker needs permission to influence tags on a scanned cloud resource, and the victim must open the generated HTML report. In that context, JavaScript can read and modify the report DOM, alter displayed findings, and interact with any same-origin local or hosted report content available to the browser. This can undermine trust in generated security findings and can expose data contained in the report page.\\n\\n## Gate checks\\n\\nThe repository has 13,875 GitHub stars, which is above the 10,000 star floor. `SECURITY.md` is present and does not reject GitHub private reporting. The dedicated GitHub private vulnerability reporting endpoint for `prowler-cloud/prowler` returned `true`.\\n\\n## Affected versions\\n\\nThe vulnerable sink is present in current `master` at commit `329dfdf8e6cb8bc0424fb54b6595408e20969782` and in the latest GitHub release tag `5.28.0`. The package metadata identifies the Python package as `prowler`.\\n\\n## Technical details\\n\\nThe HTML formatter builds each finding row with an f-string in `prowler/lib/outputs/html/html.py`. Neighboring fields are explicitly escaped:\\n\\n- `resource_uid` is escaped at line 85 with `.replace(\\\"<\\\", \\\"&lt;\\\").replace(\\\">\\\", \\\"&gt;\\\")`.\\n- `status_extended` is escaped at line 87 with the same pattern.\\n\\nThe tag column does not apply equivalent escaping:\\n\\n```python\\n<td>{parse_html_string(unroll_dict(finding.resource_tags))}</td>\\n```\\n\\n`unroll_dict` concatenates tag keys and values into a string, and `parse_html_string` only prefixes each item with an HTML bullet. Neither function escapes `<`, `>`, quotes, or event-handler attributes before insertion into the table cell. As a result, a tag value such as this remains active markup in the generated report:\\n\\n```html\\n<img src=x onerror=\\\"window.PROWLER_TAG_XSS=1\\\">\\n```\\n\\n## Reproduction\\n\\n1. Create or identify a cloud resource that Prowler will include in an HTML report.\\n2. Add a tag value containing a harmless proof payload, for example:\\n\\n```html\\n<img src=x onerror=\\\"window.PROWLER_TAG_XSS=1\\\">\\n```\\n\\n3. Run Prowler against the account and generate HTML output.\\n4. Open the generated HTML report in a browser.\\n5. The payload executes from the tags column.\\n\\nA proof HTML fragment using the same formatter structure set `window.PROWLER_TAG_XSS=1` from `resource_tags`, while equivalent payloads in `resource_uid` and `status_extended` stayed text because those fields are escaped.\\n\\nLocal evidence:\\n\\n- `/home/unkn0wn/security_audit/vulnerability-reports/prowler-html-tag-xss-evidence-2026-05-26.json`\\n- `/home/unkn0wn/security_audit/vulnerability-reports/prowler-html-tag-xss-proof-full.html`\\n\\n## PoC\\n\\nThe minimized generated row below mirrors the vulnerable formatter output. The first and third candidate payloads are escaped controls. The middle payload is the unescaped `resource_tags` value and executes when the report is rendered.\\n\\n```html\\n<tr class=\\\"table-danger\\\">\\n  <td>&lt;img src=x onerror=\\\"window.PROWLER_UID_XSS=1\\\"&gt;</td>\\n  <td>\\n    &#x2022;Owner=<img src=x onerror=\\\"window.PROWLER_TAG_XSS=1;document.body.setAttribute('data-prowler-tag-xss','1')\\\">\\n  </td>\\n  <td>&lt;img src=x onerror=\\\"window.PROWLER_STATUS_XSS=1\\\"&gt;</td>\\n</tr>\\n```\\n\\nBrowser proof result from the local artifact:\\n\\n```json\\n{\\\"tag\\\": 1, \\\"uid\\\": 0, \\\"status\\\": 0, \\\"attr\\\": \\\"1\\\"}\\n```\\n\\n## Remediation\\n\\nEscape tag keys and values before inserting them into HTML output. Prefer a single HTML escaping helper for every finding field that can originate from provider data. If bullets or separators are needed, build the list structure after escaping each key and value, rather than escaping the final HTML string after markup has been added.\", \"epss\": {\"percentage\": 0.00215, \"percentile\": 0.12053}, \"ghsa_id\": \"GHSA-c2jg-2778-ggm4\", \"github_reviewed_at\": \"2026-09-08T18:09:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-c2jg-2778-ggm4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c2jg-2778-ggm4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-73262\"}], \"nvd_published_at\": \"2026-08-12T15:18:30Z\", \"published_at\": \"2026-09-08T18:09:25Z\", \"references\": [\"https://github.com/prowler-cloud/prowler/security/advisories/GHSA-c2jg-2778-ggm4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-73262\", \"https://github.com/prowler-cloud/prowler/pull/12221\", \"https://github.com/prowler-cloud/prowler/commit/6db407ed3c17d4c73a8f619fdb30580c8465027f\", \"https://github.com/prowler-cloud/prowler/releases/tag/5.37.0\", \"https://github.com/advisories/GHSA-c2jg-2778-ggm4\"], \"repository_advisory_url\": \"https://api.github.com/repos/prowler-cloud/prowler/security-advisories/GHSA-c2jg-2778-ggm4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/prowler-cloud/prowler\", \"summary\": \"Prowler: Stored XSS in HTML reports through unescaped cloud resource tags\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T18:09:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-c2jg-2778-ggm4\", \"vulnerabilities\": [{\"first_patched_version\": \"5.37.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"prowler\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.36.0\"}, {\"first_patched_version\": \"5.37.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"prowler-cloud\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.36.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c2jg-2778-ggm4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "prowler-cloud: <= 5.36.0",
+      "prowler: <= 5.36.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-73262"
+    ],
+    "cvss_score": 5.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "prowler",
+      "prowler-cloud"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.108000Z",
+  "provenance": {
+    "content_sha256": "dffdaf515584157d410838c616de0738c2f5546923f4b1346c5f1bda2e98b82d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T18:09:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c2jg-2778-ggm4",
+  "status": "active",
+  "title": "Prowler: Stored XSS in HTML reports through unescaped cloud resource tags",
+  "updated_at": "2026-09-08T18:09:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c2jg-2778-ggm4"
+}

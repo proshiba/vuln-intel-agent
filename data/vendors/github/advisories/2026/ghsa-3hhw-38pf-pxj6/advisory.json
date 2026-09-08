@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61110758?v=4\", \"events_url\": \"https://api.github.com/users/LiteshGhute/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LiteshGhute/followers\", \"following_url\": \"https://api.github.com/users/LiteshGhute/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LiteshGhute/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LiteshGhute\", \"id\": 61110758, \"login\": \"LiteshGhute\", \"node_id\": \"MDQ6VXNlcjYxMTEwNzU4\", \"organizations_url\": \"https://api.github.com/users/LiteshGhute/orgs\", \"received_events_url\": \"https://api.github.com/users/LiteshGhute/received_events\", \"repos_url\": \"https://api.github.com/users/LiteshGhute/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LiteshGhute/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LiteshGhute/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LiteshGhute\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62383\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 6.8, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"## Summary\\n\\n`IPIPANCorpusReader` (`nltk/corpus/reader/ipipan.py`) exposes public methods, `channels()`, `domains()`, `categories()`, and `fileids(channels=...)`, that accept a caller supplied `fileids` list and read a file via a completely unprotected builtin `open()` call, with no `nltk.pathsec` involvement at all. A symlink placed inside the corpus root, with a name containing no separators or `..`, passes NLTK's existing traversal checks and is opened directly, reading a file from anywhere on the filesystem the process can access.\\n\\n## Root cause\\n\\nAll four methods route through `_get_tag()`:\\n\\n```python\\ndef _get_tag(self, f, tag):\\n    tags = []\\n    with open(f) as infile:   # builtin open(), no pathsec involvement\\n        header = infile.read()\\n    ...\\n```\\n\\n`f` arrives via `_list_header_files()` / `_list_morph_files_by()`, both of which call:\\n\\n```python\\nf.replace(\\\"morph.xml\\\", \\\"header.xml\\\")\\n```\\n\\non the result of `self.abspath(...)` or `self.abspaths(...)`. `FileSystemPathPointer` subclasses `str`, so `.replace()` returns a plain Python string, silently discarding the `PathPointer` wrapper. That plain string is handed straight to builtin `open()`.\\n\\nThis is a more severe variant of the same CWE-59 class already fixed elsewhere in this codebase (`CorpusReader.open()`, `NKJPCorpusReader.add_root()`, and the recent `FramenetCorpusReader` fix): those route file access through `nltk.pathsec.validate_path()`, at minimum the global, non-scoped check, before opening. Here, converting the `PathPointer` to a plain string before calling `open()` skips `pathsec` completely, not just the corpus-root-scoped check, so the symlink target does not even need to land under a registered `nltk.data.path` root.\\n\\nPlain literal `../` traversal in the fileid is still blocked by `FileSystemPathPointer.join()`, so this is specifically the symlink variant, not a regression of the older, simpler traversal class.\\n\\n## Proof of concept\\n\\nConstructed the normal, documented way, `fileids` as a regex over file paths, so the reader auto-discovers whatever `.xml` files exist in its root with no special knowledge of the planted symlink.\\n\\n```python\\nimport os\\nimport tempfile\\n\\nfrom nltk.corpus.reader.ipipan import IPIPANCorpusReader\\n\\nroot = tempfile.mkdtemp()\\ncorpus_root = os.path.join(root, \\\"ipipan\\\")\\nos.makedirs(corpus_root)\\n\\nwith open(os.path.join(corpus_root, \\\"real_morph.xml\\\"), \\\"w\\\") as f:\\n    f.write(\\\"<channel>legit</channel>\\\")\\n\\nsecret_dir = os.path.join(root, \\\"outside_ipipan_root\\\")\\nos.makedirs(secret_dir)\\nsecret_path = os.path.join(secret_dir, \\\"stolen.xml\\\")\\nwith open(secret_path, \\\"w\\\") as f:\\n    f.write(\\\"<channel>TOP-SECRET-CHANNEL-DATA-FROM-OUTSIDE-CORPUS-ROOT</channel>\\\")\\n\\nos.symlink(secret_path, os.path.join(corpus_root, \\\"evil_link.xml\\\"))\\n\\nreader = IPIPANCorpusReader(corpus_root, r\\\".*\\\\.xml\\\")\\nprint(\\\"Auto-discovered fileids:\\\", sorted(reader.fileids()))\\n\\nresult = reader.channels(fileids=[\\\"evil_link.xml\\\"])\\nprint(result)\\n```\\n\\nActual output when run against current `develop`:\\n\\n```\\nAuto-discovered fileids: ['evil_link.xml', 'real_morph.xml']\\n['TOP-SECRET-CHANNEL-DATA-FROM-OUTSIDE-CORPUS-ROOT']\\n```\\n\\nThat content was read from `secret_path`, a file entirely outside `corpus_root`. No exception raised anywhere. The planted symlink even surfaces naturally in the reader's own `fileids()` listing, exactly as a real file would.\\n\\nVerified separately that literal `../` traversal in the fileid is still rejected (`ValueError: Traversal blocked`), confirming this is specifically the symlink gap, not a broader regression.\\n\\n## Why this is in scope\\n\\n- No malicious file for a victim to open, no special user interaction. Just a tampered or shared corpus directory (`SECURITY.md` names \\\"shared environments... multi-tenant pipelines\\\" as the project's own stated threat model) plus a completely normal API call.\\n- Core corpus-reader code, reached through plain `import nltk` and documented, programmatic usage (`words()`, `sents()`, `channels()`, etc.), not a demo or GUI tool.\\n- Same reader category, and same CWE-59 mechanism, already treated as CVE-worthy twice in this codebase for `FramenetCorpusReader` and `NKJPCorpusReader`.\\n- Not a bypass of a claimed fix. `ipipan.py` has never had security hardening applied, and has no dedicated test coverage at all.\\n\\n## CVSS v3.1\\n\\n- **AV:L, AC:L**: exploitation is local filesystem symlink placement, then immediate and deterministic once triggered.\\n- **PR:L**: the attacker needs some pre-existing ability to plant a symlink somewhere reachable, not zero privilege, but not elevated either.\\n- **UI:N**: fires during routine, automated corpus processing, no separate victim action.\\n- **S:U**: stays within the same process's existing privileges.\\n- **C:H, I:N, A:N**: arbitrary file read only, no write, no crash.\\n\\n## Suggested fix\\n\\nRoute `_get_tag()` through `nltk.pathsec.validate_path()` with the corpus root as `required_root`, or through `CorpusReader.open()`, instead of converting the `PathPointer` to a plain string and calling builtin `open()` directly. The same fix pattern already applied to `FramenetCorpusReader` and `NKJPCorpusReader` applies directly here.\", \"epss\": {\"percentage\": 0.00185, \"percentile\": 0.08129}, \"ghsa_id\": \"GHSA-3hhw-38pf-pxj6\", \"github_reviewed_at\": \"2026-09-08T16:40:38Z\", \"html_url\": \"https://github.com/advisories/GHSA-3hhw-38pf-pxj6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3hhw-38pf-pxj6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62383\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T16:40:38Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-3hhw-38pf-pxj6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62383\", \"https://github.com/nltk/nltk/pull/3727\", \"https://github.com/nltk/nltk/commit/ee1a42e51982c4dce6ad3ee77ff1ac43894288ab\", \"https://github.com/nltk/nltk/releases/tag/v3.10.2\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3726.yaml\", \"https://www.vulncheck.com/advisories/nltk-ipipancorpusreader-symlink-arbitrary-file-read\", \"https://github.com/advisories/GHSA-3hhw-38pf-pxj6\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-3hhw-38pf-pxj6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: Symlink-based arbitrary file read in IPIPANCorpusReader, bypasses nltk.pathsec entirely\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T16:40:39Z\", \"url\": \"https://api.github.com/advisories/GHSA-3hhw-38pf-pxj6\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.10.0, < 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3hhw-38pf-pxj6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: >= 3.10.0, < 3.10.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-62383"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-08T19:13:18.176716Z",
+  "provenance": {
+    "content_sha256": "0de03f95404fb1db5e67e40b941c6ea53ad6d9810796a766468bf5e9437e98c3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T16:40:38Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3hhw-38pf-pxj6",
+  "status": "active",
+  "title": "NLTK: Symlink-based arbitrary file read in IPIPANCorpusReader, bypasses nltk.pathsec entirely",
+  "updated_at": "2026-09-08T16:40:39Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3hhw-38pf-pxj6"
+}
