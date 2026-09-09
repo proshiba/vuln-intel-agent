@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/579103?v=4\", \"events_url\": \"https://api.github.com/users/7a6163/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/7a6163/followers\", \"following_url\": \"https://api.github.com/users/7a6163/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/7a6163/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/7a6163\", \"id\": 579103, \"login\": \"7a6163\", \"node_id\": \"MDQ6VXNlcjU3OTEwMw==\", \"organizations_url\": \"https://api.github.com/users/7a6163/orgs\", \"received_events_url\": \"https://api.github.com/users/7a6163/received_events\", \"repos_url\": \"https://api.github.com/users/7a6163/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/7a6163/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/7a6163/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/7a6163\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-50024\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-23\", \"name\": \"Relative Path Traversal\"}], \"description\": \"## Summary\\n\\nGitHacker through 1.1.7 did not validate path segments parsed from attacker-controlled `.git/HEAD` before joining them onto its output directory. A malicious server could coerce GitHacker into reading arbitrary local files. Contents do not stream back wholesale, but the recovery loop turns any 40-character hex substring into an outbound HTTP `GET` — an existence oracle for arbitrary paths plus hex-fragment exfiltration of file contents.\\n\\n## Details\\n\\n### Vulnerability\\n\\nGitHacker rebuilds a remote `.git/` by fetching files into `temp_dst`. Two functions derived filesystem paths from server-controlled content:\\n\\n- `add_head_file_tasks` reads the downloaded `.git/HEAD`, parses `ref: <ref-path>`, and joins the raw ref-path onto `temp_dst/.git/logs/` before reading the resulting file.\\n- `add_hashes_parsed` scans any file it reads for 40-character hex substrings and emits `GET .git/objects/<sha[0:2]>/<sha[2:]>` for each one — onto the attacker's server and into the local output tree.\\n\\nPre-fix, `add_head_file_tasks` did not validate the ref segments. A malicious `.git/HEAD` of\\n\\n```\\nref: ../../../../../../etc/passwd\\n```\\n\\ncaused `add_head_file_tasks` to traverse out of `temp_dst` and read `/etc/passwd`. The bytes flowed into `add_hashes_parsed`, which emitted one outbound HTTP request per 40-char-hex match — observable on the attacker's logs.\\n\\n### Impact\\n\\nPR #65 originally classified this as arbitrary local file read. Joint analysis during coordinated disclosure narrowed the primitive: file contents do not stream back wholesale because the only egress channel is the 40-char-hex regex. In practice an attacker can:\\n\\n- **Existence oracle** for any path on the GitHacker host (`/etc/shadow`, `/root/.ssh/id_rsa`, `/home/<user>/.git-credentials`, build artifacts under `/tmp/`).\\n- **Hex-fragment exfiltration** when the targeted file contains 40-char hex sequences: other git repos' refs / pack filenames, password hashes, HMAC-SHA1 outputs, some session tokens.\\n\\nNot exploitable without victim action: the attacker must persuade the victim to run GitHacker against a URL they control. Project guidance has always been to run GitHacker inside a disposable container.\\n\\n### Scoping note: no write-side primitive in 1.1.7\\n\\nA working write-side primitive (attacker drops content outside `temp_dst` via `add_folder` / `add_task`) does **not** reproduce against the shipped 1.1.7 source. Empirical testing by the reporter against `GitHacker-1.1.7.tar.gz` (25 traversal-style payloads including `....//`, `%2e%2e%2f`, layered `foo/../../`, NUL bytes, backslash variants, absolute paths) yielded 0/25 escapes. Two structural reasons:\\n\\n1. `add_folder` anchors every derived path on `self.url + '.git/'`, so the first path component after the `url_length` strip is always `.git`. `os.path.join`'s absolute-path short-circuit never fires.\\n2. Python's `str.replace(\\\"..\\\", \\\"\\\")` is greedy non-overlapping; `....//` collapses to `//`, `......//` to `///`, etc. No literal `..` survives into `add_task`.\\n\\n`5f2a8ba` is still the correct fix for the read-side primitive and additionally hardens `add_task` as defense in depth against future regressions — for example, if a later caller removes the `.git/` anchor in `add_folder` or wires a new server-controlled segment source into `add_task`.\\n\\n### Fix\\n\\nCommit [`5f2a8ba`](https://github.com/WangYihang/GitHacker/commit/5f2a8ba) introduces `_is_safe_path_segment` as a single trust boundary: every segment about to be joined onto `temp_dst` or appended to an outgoing URL is validated against an allowlist before `add_task` accepts it. Empty / `.` / `..` / separators / NUL / control characters are rejected; the brittle `replace(\\\"..\\\", \\\"\\\")` filter is removed.\\n\\nThe fix also tightens adjacent surfaces preemptively:\\n\\n- `add_folder` switches to `urlparse`-based scheme + netloc + path comparison.\\n- `construct_url_from_path_components` percent-encodes every segment.\\n\\nPR #65's two-layer defense (allowlist regex + `os.path.realpath()` confinement) was consolidated onto the allowlist applied at queue-time, removing the TOCTOU window an after-the-fact `realpath()` check leaves open and the per-call-site drift risk. PR #65 was closed in favour of the broader fix.\\n\\nRegression tests in [`tests/test_ref_validation.py`](https://github.com/WangYihang/GitHacker/blob/main/tests/test_ref_validation.py) (commit [`16fcd81`](https://github.com/WangYihang/GitHacker/commit/16fcd81)) pin the PoC and six bypass variants (extra-depth, mid-path, NUL, absolute path, leading-dot, `.lock`-suffix).\\n\\n### Credit\\n\\nReported and patched-prototyped by **Zac Wang** ([@7a6163](https://github.com/7a6163)) in [#65](https://github.com/WangYihang/GitHacker/pull/65). Zac refined the impact framing from \\\"arbitrary file read\\\" to \\\"existence oracle + hex-fragment exfiltration\\\" and verified the absence of a write-side primitive against the shipped 1.1.7 sdist with a 25-payload harness.\\n\\n## Patches\\n\\nPatched in 1.1.8 (commit [`5f2a8ba`](https://github.com/WangYihang/GitHacker/commit/5f2a8ba); tests [`16fcd81`](https://github.com/WangYihang/GitHacker/commit/16fcd81)).\\n\\n## Workarounds\\n\\nRun GitHacker inside a disposable container. Do not point GitHacker at any URL whose contents are not under your control.\\n\\n## Resources\\n\\n- https://github.com/WangYihang/GitHacker/pull/65\\n- https://github.com/WangYihang/GitHacker/commit/5f2a8ba\\n- https://github.com/WangYihang/GitHacker/blob/main/tests/test_ref_validation.py\\n- https://githacker.pages.dev/security\\n- https://github.com/justinsteven/advisories\\n- https://drivertom.blogspot.com/2021/08/git.html\", \"ghsa_id\": \"GHSA-hr3m-4qwq-3mgc\", \"github_reviewed_at\": \"2026-09-09T18:00:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-hr3m-4qwq-3mgc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hr3m-4qwq-3mgc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-50024\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-09T18:00:32Z\", \"references\": [\"https://github.com/WangYihang/GitHacker/security/advisories/GHSA-hr3m-4qwq-3mgc\", \"https://github.com/WangYihang/GitHacker/commit/5f2a8ba\", \"https://github.com/advisories/GHSA-hr3m-4qwq-3mgc\"], \"repository_advisory_url\": \"https://api.github.com/repos/WangYihang/GitHacker/security-advisories/GHSA-hr3m-4qwq-3mgc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/WangYihang/GitHacker\", \"summary\": \"GitHacker: Path traversal in ref/hash parsing enables existence oracle and hex-fragment exfiltration via malicious .git server\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-09T18:00:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-hr3m-4qwq-3mgc\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.8\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"githacker\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hr3m-4qwq-3mgc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "githacker: <= 1.1.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-50024"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "githacker"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-09T19:13:26.002364Z",
+  "provenance": {
+    "content_sha256": "d6a936fd05a1442216c7c5395f336f75407a853e7f617162ebf7bdc10220b041",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-09T18:00:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hr3m-4qwq-3mgc",
+  "status": "active",
+  "title": "GitHacker: Path traversal in ref/hash parsing enables existence oracle and hex-fragment exfiltration via malicious .git server",
+  "updated_at": "2026-09-09T18:00:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hr3m-4qwq-3mgc"
+}

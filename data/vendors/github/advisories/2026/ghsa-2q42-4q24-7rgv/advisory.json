@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/121706471?v=4\", \"events_url\": \"https://api.github.com/users/NLx64/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/NLx64/followers\", \"following_url\": \"https://api.github.com/users/NLx64/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/NLx64/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/NLx64\", \"id\": 121706471, \"login\": \"NLx64\", \"node_id\": \"U_kgDOB0EX5w\", \"organizations_url\": \"https://api.github.com/users/NLx64/orgs\", \"received_events_url\": \"https://api.github.com/users/NLx64/received_events\", \"repos_url\": \"https://api.github.com/users/NLx64/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/NLx64/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/NLx64/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/NLx64\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"### Summary\\n\\nThe `@typespec/openapi3` emitter retains the value of a `@versioned` enum member and interpolates it into the output filename as `{version}` without sanitizing path separators or traversal components. The completed path reaches the compiler's `emitFile()`, which creates the parent directory and writes the file without verifying containment under `emitterOutputDir`.\\n\\nA crafted declarative `.tsp` input can therefore create or overwrite an OpenAPI-formatted `.yaml` or `.json` file outside the configured output tree, subject to the compiler process's filesystem permissions. No executable TypeSpec extension or attacker-controlled JavaScript is required.\\n\\n### Affected version\\n\\nConfirmed on:\\n\\n- `@typespec/compiler` `1.15.0`\\n- `@typespec/openapi3` `1.15.0`\\n- `@typespec/http` `1.15.0`\\n- `@typespec/versioning` `0.85.0`\\n- release tag commit `f30cd352f93997e04c75d48c7ace6947a1d5d07a`\\n\\nThe critical `openapi.ts` and `emitter-utils.ts` blobs are unchanged on main commit `365ec52b50b82cd9e1e037de4c6fcd5de7e32e90` as checked on 2026-08-19. No patched version was identified.\\n\\n### Root cause\\n\\nThe value originates at `packages/openapi3/src/openapi.ts:592-608`:\\n\\n```ts\\nserviceRecord.versions.push({\\n  service,\\n  version: snapshot.version!.value,\\n  document: document[0],\\n  diagnostics: document[1],\\n});\\n```\\n\\nIt is interpolated without path validation at `openapi.ts:629-641`:\\n\\n```ts\\nreturn interpolatePath(options.outputFile, {\\n  \\\"openapi-version\\\": specVersion,\\n  \\\"service-name-if-multiple\\\": multipleService ? getNamespaceFullName(service.type) : undefined,\\n  \\\"service-name\\\": getNamespaceFullName(service.type),\\n  \\\"file-type\\\": fileType,\\n  version,\\n});\\n```\\n\\nThe path reaches `emitFile()` at `openapi.ts:392-401`. The sink at `packages/compiler/src/core/emitter-utils.ts:29-39` performs no output-root containment check:\\n\\n```ts\\nconst outputFolder = getDirectoryPath(options.path);\\nawait program.host.mkdirp(outputFolder);\\nreturn await program.host.writeFile(options.path, content);\\n```\\n\\n`resolvePath()` joins the template to `emitterOutputDir` before `{version}` is interpolated, so it does not see the attacker-controlled `..` components.\\n\\n### Proof of concept\\n\\nThe relevant input in `poc/main.tsp` is:\\n\\n```tsp\\n@versioned(Versions) namespace Svc;\\nenum Versions { v1: \\\"../../../../../../../../../../tmp/TYPESPEC_PWNED/pwn\\\" }\\n```\\n\\nRun from PowerShell:\\n\\n```powershell\\ncd poc\\n.\\\\run-revalidation.ps1\\n```\\n\\nThe supplied Docker runner uses a digest-pinned Node base, a committed npm integrity lock, disabled runtime networking, a benign control, a 90-second timeout, and cleanup enforcement.\\n\\nObserved in the preserved identity-locked replay (`1/1` attack and `1/1` negative control):\\n\\n```text\\nnegative_before=02dc7d056c2f773e56e2c1849947888b039f127ddd630c0bd76a5d7a9ca29cbd\\nnegative_after=02dc7d056c2f773e56e2c1849947888b039f127ddd630c0bd76a5d7a9ca29cbd\\nattack_before=7a8067bc04e42a025de90fd7aff9be4df59f005d192f2116eecfb107d7bffd78\\nattack_after=2992b399c1573c9bd2130794f8554c4026bf425861f74e78b5d89ae0324b5e38\\noutside_file_head=openapi: 3.0.0\\ninside_attack_files=\\n```\\n\\nThe benign version preserved the outside canary. The crafted version replaced it with emitted OpenAPI content, and no attack output file remained under `tsp-output`.\\n\\n### Impact and constraints\\n\\nProven impact is out-of-directory YAML/JSON creation or overwrite. The attacker can influence the traversal, final basename, and many strings in the OpenAPI-structured content. The extension is constrained to the selected emitter format, content is not arbitrary bytes, and the target must be writable.\\n\\nThis report demonstrates file corruption. Denial of service is a potential impact when a writable critical file is targeted. It does not claim file disclosure, arbitrary-byte write, deployment takeover, or code execution by a downstream consumer.\\n\\n### Suggested remediation\\n\\nAfter every filename token has been interpolated, resolve the completed destination against `emitterOutputDir` and reject any non-descendant using path-component-aware comparison. Reject or slugify absolute paths, path separators, and traversal components in spec-derived filename tokens. Add regression cases for POSIX and Windows separators, absolute values, sibling-prefix paths, and benign semantic versions.\", \"ghsa_id\": \"GHSA-2q42-4q24-7rgv\", \"github_reviewed_at\": \"2026-09-08T21:31:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-2q42-4q24-7rgv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2q42-4q24-7rgv\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T21:31:09Z\", \"references\": [\"https://github.com/microsoft/typespec/security/advisories/GHSA-2q42-4q24-7rgv\", \"https://github.com/microsoft/typespec/pull/11777\", \"https://github.com/microsoft/typespec/commit/e0f67bdf3c5a0875dfa98b475648af37caac71a6\", \"https://github.com/advisories/GHSA-2q42-4q24-7rgv\"], \"repository_advisory_url\": \"https://api.github.com/repos/microsoft/typespec/security-advisories/GHSA-2q42-4q24-7rgv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/microsoft/typespec\", \"summary\": \"OpenAPI3 version value escapes `emitterOutputDir` and overwrites YAML/JSON outside the output tree\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T21:31:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-2q42-4q24-7rgv\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@typespec/openapi3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.15.0\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"npm\", \"name\": \"@typespec/compiler\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.15.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2q42-4q24-7rgv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@typespec/compiler: <= 1.15.0",
+      "@typespec/openapi3: <= 1.15.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@typespec/compiler",
+      "@typespec/openapi3"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-09T19:13:26.059790Z",
+  "provenance": {
+    "content_sha256": "5b012e69a5cfe3c1a5857f5545af7c446e1d4bd9e5652983788d8fff5b0a4b41",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T21:31:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2q42-4q24-7rgv",
+  "status": "active",
+  "title": "OpenAPI3 version value escapes `emitterOutputDir` and overwrites YAML/JSON outside the output tree",
+  "updated_at": "2026-09-08T21:31:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2q42-4q24-7rgv"
+}
