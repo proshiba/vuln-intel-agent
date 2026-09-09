@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10161996?v=4\", \"events_url\": \"https://api.github.com/users/Hcamael/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Hcamael/followers\", \"following_url\": \"https://api.github.com/users/Hcamael/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Hcamael/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Hcamael\", \"id\": 10161996, \"login\": \"Hcamael\", \"node_id\": \"MDQ6VXNlcjEwMTYxOTk2\", \"organizations_url\": \"https://api.github.com/users/Hcamael/orgs\", \"received_events_url\": \"https://api.github.com/users/Hcamael/received_events\", \"repos_url\": \"https://api.github.com/users/Hcamael/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Hcamael/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Hcamael/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Hcamael\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nNodemailer's `disableFileAccess` / `disableUrlAccess` options are a security sandbox that lets an application forbid untrusted message content (`html`/`text`/attachment `path`/`href`) from reading local files or making outbound HTTP(S) requests. The fix for GHSA-wqvq-jvpq-h66f (commit `5f69497`) threaded these flags through the library's internal resolution paths (`MailMessage.resolveAll()` and `_convertDataImages()`), but the public plugin API `MailMessage.resolveContent(...args)` (`lib/mailer/mail-message.js:41-43`) remains a raw passthrough to `shared.resolveContent()`.\\n\\nWhen called with the documented legacy signature `mail.resolveContent(data, key, callback)`, `shared.resolveContent` normalizes the missing options argument to an empty object (`options = options || {}`, `lib/shared/index.js:530`). The message-level flags that the `MailMessage` constructor already copied into `mail.data` (`lib/mailer/mail-message.js:34-38`) are silently discarded, so `resolveContentValue` skips both access-control guards and reaches `nmfetch(url)` (SSRF, `lib/shared/index.js:588`) or `fs.createReadStream(path)` (arbitrary file read, `lib/shared/index.js:597`).\\n\\nA plugin or application code that resolves message content through the documented API (the same API the library's own `_convertDataImages` uses, threading the flags explicitly) thereby bypasses the sandbox an application deliberately enabled.\\n\\n### Details\\n\\nRoot cause. The `MailMessage` constructor stores the transporter-level sandbox flags on the message object (`lib/mailer/mail-message.js:34-38`):\\n\\n```js\\n['disableFileAccess', 'disableUrlAccess', 'normalizeHeaderKey', 'maxRecipients'].forEach(key => {\\n    if (key in options) {\\n        this.data[key] = options[key];\\n    }\\n});\\n```\\n\\nThe public resolver is a pure passthrough (`lib/mailer/mail-message.js:41-43`):\\n\\n```js\\nresolveContent(...args) {\\n    return shared.resolveContent(...args);\\n}\\n```\\n\\n`shared.resolveContent` supports the legacy 3-argument signature and collapses the missing options to `{}` (`lib/shared/index.js:524-530`):\\n\\n```js\\nmodule.exports.resolveContent = (data, key, options, callback) => {\\n    // options is optional; support the legacy resolveContent(data, key, callback) signature\\n    if (!callback && typeof options === 'function') {\\n        callback = options;\\n        options = false;\\n    }\\n    options = options || {};\\n    ...\\n    resolveContentValue(data, key, options, callback);\\n```\\n\\n`resolveContentValue` then checks `options.disableUrlAccess` / `options.disableFileAccess` (`lib/shared/index.js:581` / `:590`), both `undefined` for the legacy signature, so it falls through to `nmfetch` (`:588`) or `fs.createReadStream` (`:597`).\\n\\nContrast with the fixed paths. `resolveAll()` (`lib/mailer/mail-message.js:112-115`) and `_convertDataImages()` (`lib/mailer/index.js:437-440`) both pass the message flags explicitly. The MIME streaming path (`lib/mime-node/index.js:1059-1077`) also honors the flags. So an application that enables the sandbox and then calls `transporter.sendMail()` is protected; the bypass appears only when message content is resolved through the public legacy-signature API — which is the documented plugin usage (the `resolveContent` JSDoc at `lib/shared/index.js:510-523` states it is \\\"useful when you want to create a plugin that needs a content value\\\").\\n\\nAffected versions. Confirmed on `9.1.0` (HEAD `efd6e29c10c6e0c25c57bd2f2a71302838235a4f`, the current npm latest). The gap was introduced by the GHSA-wqvq-jvpq-h66f fix and is still present; the public API has no regression coverage (`test/mailer/mail-message-test.js` contains no `resolveContent` test).\\n\\n### PoC\\n\\nRequires: `nodemailer@9.1.0`, a readable local file, and any reachable HTTP endpoint (loopback suffices). Non-destructive; no network egress beyond a local listener.\\n\\n```js\\n'use strict';\\nconst nodemailer = require('nodemailer');\\nconst MailMessage = require('nodemailer/lib/mailer/mail-message');\\n\\nconst TARGET_FILE = '/app/src/package.json';   // any readable local file\\nconst SSRF_URL = 'http://http-sink:8080/poc-ssrf'; // any local/internal HTTP target\\n\\nconst transporter = nodemailer.createTransport({\\n    streamTransport: true,\\n    disableFileAccess: true,   // sandbox explicitly enabled\\n    disableUrlAccess: true\\n});\\n\\nconst data = {\\n    from: 'a@example.com', to: 'b@example.com', subject: 'poc', text: 'hello',\\n    html: { path: TARGET_FILE },\\n    attachments: [{ filename: 'x.bin', href: SSRF_URL }]\\n};\\nconst mail = new MailMessage(transporter, data);\\n// mail.data.disableFileAccess === true, mail.data.disableUrlAccess === true\\n\\n// Documented legacy plugin signature — options argument omitted:\\nmail.resolveContent(mail.data, 'html', (err, value) => {\\n    if (err) return console.log('BLOCKED', err.code);\\n    console.log('FILE_READ_OK len=', value.length);          // -> 1647 (package.json)\\n});\\nmail.resolveContent(mail.data.attachments, 0, (err, body) => {\\n    if (err) return console.log('BLOCKED', err.code);\\n    console.log('URL_FETCH_OK body=', body.toString());      // -> fetched response\\n});\\n```\\n\\nObserved output on the audit environment (Node 22, `nodemailer@9.1.0`):\\n\\n```text\\nmail.data.disableFileAccess = true | disableUrlAccess = true\\n[CONTROL resolveAll] err = EFILEACCESS : File access rejected for /app/src/package.json\\n[CONTROL html.path explicit-options] err = EFILEACCESS\\n[BYPASS html.path legacy] READ OK len = 1647 head = \\\"{\\\\n    \\\\\\\"name\\\\\\\": \\\\\\\"nodemailer\\\\\\\",\\\\n    \\\\\\\"version\\\\\\\": \\\\\\\"9.1.0\\\\\\\",\\\\n    \\\\\\\"des\\\"\\n[BYPASS att[0].href legacy] FETCH OK len = 13 body = \\\"HTTP-SINK OK\\\\n\\\"\\n```\\n\\nThe negative controls (`resolveAll`, and `resolveContent` with explicit `{ disableFileAccess: true }`) return `EFILEACCESS`, proving the sandbox works on the protected paths and only the legacy-signature passthrough is bypassed. The same bypass reproduces inside a real `transporter.sendMail()` flow when a `compile` plugin calls `mail.resolveContent(mail.data, 'html', cb)` / `mail.resolveContent(mail.data.attachments, 0, cb)`.\\n\\n### Impact\\n\\nAn application that enables `disableFileAccess` / `disableUrlAccess` to contain untrusted message content and that resolves content through the documented plugin API (`mail.resolveContent(data, key, callback)`) has its sandbox silently bypassed:\\n\\n- Arbitrary local file disclosure: a message `html`/attachment `path` pointing at a server file (`/etc/passwd`, `.env`, key material) is read and returned to the caller / delivered in the message.\\n- Server-side request forgery: a message `href` pointing at an internal or loopback URL is fetched from the application host.\\n\\nReachability precondition: the sandbox flags must be enabled (default off) and the application or its plugin must invoke the documented legacy-signature API on attacker-influenced data. The default `transporter.sendMail()` path remains protected, so this is a defense-in-depth gap in the library's own access-control enforcement rather than a default-flow bypass. It is the same vulnerability class as the previously accepted GHSA-wqvq-jvpq-h66f (CVE-2026-82660) and GHSA-p6gq-j5cr-w38f (CVE-2026-82659), on a distinct third code path.\", \"ghsa_id\": \"GHSA-8m3c-c648-2xjj\", \"github_reviewed_at\": \"2026-09-08T21:16:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-8m3c-c648-2xjj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8m3c-c648-2xjj\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T21:16:00Z\", \"references\": [\"https://github.com/nodemailer/nodemailer/security/advisories/GHSA-8m3c-c648-2xjj\", \"https://github.com/nodemailer/nodemailer/commit/ab7ef348b9a97b1fd70e7bfbeb56d4ea4a07946b\", \"https://github.com/nodemailer/nodemailer/commit/dc48ed395c4d6c79ee5c95eb6eff17bafe391474\", \"https://github.com/nodemailer/nodemailer/releases/tag/v9.1.1\", \"https://github.com/advisories/GHSA-8m3c-c648-2xjj\"], \"repository_advisory_url\": \"https://api.github.com/repos/nodemailer/nodemailer/security-advisories/GHSA-8m3c-c648-2xjj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nodemailer/nodemailer\", \"summary\": \"Nodemailer: resolveContent() on a MailMessage bypasses disableFileAccess/disableUrlAccess when called with the legacy signature\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T21:16:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-8m3c-c648-2xjj\", \"vulnerabilities\": [{\"first_patched_version\": \"9.1.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nodemailer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.1.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8m3c-c648-2xjj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nodemailer: <= 9.1.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-82659",
+      "CVE-2026-82660"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nodemailer"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-09T19:13:26.119295Z",
+  "provenance": {
+    "content_sha256": "7b48451a452a59bea767e067f48aa610571d01146de09f3fd5c0de930ce6880c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T21:16:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8m3c-c648-2xjj",
+  "status": "active",
+  "title": "Nodemailer: resolveContent() on a MailMessage bypasses disableFileAccess/disableUrlAccess when called with the legacy signature",
+  "updated_at": "2026-09-08T21:16:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8m3c-c648-2xjj"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/19670768?v=4\", \"events_url\": \"https://api.github.com/users/joostgrunwald/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/joostgrunwald/followers\", \"following_url\": \"https://api.github.com/users/joostgrunwald/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/joostgrunwald/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/joostgrunwald\", \"id\": 19670768, \"login\": \"joostgrunwald\", \"node_id\": \"MDQ6VXNlcjE5NjcwNzY4\", \"organizations_url\": \"https://api.github.com/users/joostgrunwald/orgs\", \"received_events_url\": \"https://api.github.com/users/joostgrunwald/received_events\", \"repos_url\": \"https://api.github.com/users/joostgrunwald/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/joostgrunwald/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/joostgrunwald/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/joostgrunwald\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"## Summary\\n\\n`@tiptap/core` contains two quadratic regular-expression denial-of-service paths in its default Markdown attribute parsers. Pandoc-style block attributes use two unanchored greedy expressions that rescan repeated `__QUOTED_0` prefixes. Inline shortcode attributes use another unanchored greedy key expression that rescans a long word-character run when no equals sign follows.\\n\\nThe public `createAtomBlockMarkdownSpec` and `createBlockMarkdownSpec` helpers call the vulnerable Pandoc-style parser; `createInlineMarkdownSpec` calls the separately vulnerable shortcode parser. Using unmodified npm 3.29.2, a complete 20,508-byte atom-block token took approximately 1.40 seconds while an equal-length control took 0.29 ms. A complete 32,776-byte inline token took approximately 2.21 seconds while its equal-length control took 0.19 ms. Current repository `main` commit `5158212970344952dd9918b6a44bfb400d7fb6c1` retains both expressions.\\n\\n## Block attribute root cause\\n\\n`packages/core/src/utilities/markdown/attributeUtils.ts` uses both `matchAll` and `replace` with `/([a-zA-Z][\\\\w-]*)\\\\s*=\\\\s*(__QUOTED_\\\\d+__)/g`. The candidate is `'__QUOTED_0'.repeat(n) + '__QUOTED_0__'`. There are no quotes, so the preceding replacement leaves it unchanged. At each `Q`, the greedy key-name expression consumes the remaining word-character run, the required equals sign fails, and the unanchored engine restarts at the next `Q`. This yields `O(n^2)` work, and the cleanup pass repeats it.\\n\\nA complete public-API proof is:\\n\\n```js\\nimport { createAtomBlockMarkdownSpec } from '@tiptap/core'\\nconst tokenizer = createAtomBlockMarkdownSpec({ nodeName: 'probe' }).markdownTokenizer\\nconst attack = '__QUOTED_0'.repeat(2048) + '__QUOTED_0__'\\nconst source = `:::probe {${attack}} :::\\\\n`\\nconst started = performance.now()\\ntokenizer.tokenize(source, [], {})\\nconsole.log(performance.now() - started)\\n```\\n\\nMeasured complete-tokenizer timings were 6.23, 23.12, 88.93, 369.10, and 1,400.17 ms at 1,308, 2,588, 5,148, 10,268, and 20,508 bytes. Equal-length controls took 0.07 to 0.29 ms. The directly exported parser took 5,645.71 ms at 40,972 bytes while its control took 0.64 ms.\\n\\n## Inline attribute root cause\\n\\n`packages/core/src/utilities/markdown/createInlineMarkdownSpec.ts` uses `/(\\\\w+)=(?:\\\"([^\\\"]*)\\\"|'([^']*)')/g`. For a long word-character run without an equals sign, `\\\\w+` consumes the remaining suffix, `=` fails, and the unanchored engine restarts at the next character. The default inline tokenizer extracts this attacker string directly from a syntactically complete `[shortcode attributes]` token.\\n\\n```js\\nimport { createInlineMarkdownSpec } from '@tiptap/core'\\nconst tokenizer = createInlineMarkdownSpec({ nodeName: 'probe', selfClosing: true }).markdownTokenizer\\nconst source = `[probe ${'0'.repeat(32768)}]`\\nconst started = performance.now()\\ntokenizer.tokenize(source, [], {})\\nconsole.log(performance.now() - started)\\n```\\n\\nAt 1,032, 2,056, 4,104, 8,200, 16,392, and 32,776 bytes, candidates took 3.24, 12.88, 54.82, 136.91, 557.83, and 2,209.47 ms. Equal-length hyphen controls took 0.02 to 0.19 ms.\\n\\n## Impact\\n\\nApplications parsing attacker-controlled Markdown with these helpers can have a browser main thread, server event loop, or worker blocked by a small input. Persisted documents can repeatedly freeze clients; repeated requests can exhaust server-side parsing capacity. Editors that only consume validated ProseMirror JSON and never invoke the Markdown parsing path are not directly affected through document content.\\n\\n## History and remediation\\n\\nCommit `35645d94ae9cd73448a564104c2e08f64e9564bc` introduced both parsers on 14 October 2025, first released in 3.7.0. Versions 3.7.0 through current 3.29.2 and current `main` remain affected. Official issue, PR, and repository-advisory searches found no duplicate.\\n\\nRequire a start-of-string or whitespace boundary before both key-value parsers, and preferably replace the multi-pass placeholder and shortcode regex designs with deterministic single-pass tokenizers. Keep quoted values out-of-band so attacker input cannot collide with predictable `__QUOTED_n__` placeholders. Add complete block and inline Markdown-tokenizer scaling regressions with equal-length controls.\\n\\nPlease credit GitHub user `joostgrunwald` as finder/reporter.\", \"ghsa_id\": \"GHSA-j95f-988m-3j2f\", \"github_reviewed_at\": \"2026-09-08T21:24:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-j95f-988m-3j2f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j95f-988m-3j2f\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T21:24:09Z\", \"references\": [\"https://github.com/ueberdosis/tiptap/security/advisories/GHSA-j95f-988m-3j2f\", \"https://github.com/ueberdosis/tiptap/commit/d0d499be3cce633cf54ca9aa9f3d8a5a1f98bd74\", \"https://github.com/ueberdosis/tiptap/releases/tag/v3.30.5\", \"https://github.com/advisories/GHSA-j95f-988m-3j2f\"], \"repository_advisory_url\": \"https://api.github.com/repos/ueberdosis/tiptap/security-advisories/GHSA-j95f-988m-3j2f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/ueberdosis/tiptap\", \"summary\": \"Tiptap: Quadratic ReDoS in block and inline Markdown attribute parsing\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T21:24:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-j95f-988m-3j2f\", \"vulnerabilities\": [{\"first_patched_version\": \"3.30.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@tiptap/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.7.0, < 3.30.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j95f-988m-3j2f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@tiptap/core: >= 3.7.0, < 3.30.5"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@tiptap/core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-09T19:13:26.098390Z",
+  "provenance": {
+    "content_sha256": "948104e65772409174fabae0c8df988774658f7b6c6d4d9de9f36fb7b0ada0a6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T21:24:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j95f-988m-3j2f",
+  "status": "active",
+  "title": "Tiptap: Quadratic ReDoS in block and inline Markdown attribute parsing",
+  "updated_at": "2026-09-08T21:24:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j95f-988m-3j2f"
+}

