@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88001\", \"cvss\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nOpen WebUI protects server-side web fetches with two controls: the operator's list of excluded hosts, and a check that refuses private and internal addresses. Neither control was applied to the destination of an HTTP redirect. On a deployment where redirect following is enabled, any authenticated user who can cause the server to fetch a URL could submit a page that redirects, and the server would fetch the redirect destination without either control being applied to it. The server therefore connects to hosts the operator excluded, and to internal addresses including loopback, private networks and cloud metadata endpoints.\\n\\n## Preconditions\\n\\n`AIOHTTP_CLIENT_ALLOW_REDIRECTS` must be set to `true`. Its default is `false`, and on the default the affected fetch paths do not follow redirects at all, so a deployment that has not changed this setting is not affected.\\n\\nThe attacker needs an authenticated account of any role, with access to any feature that causes the server to fetch a URL. Web search, ingesting a URL into a collection, the built-in page fetch tool and image URLs in chat all reach it. No internal hostnames need to be known, because the loopback and cloud metadata addresses are fixed and identical on every deployment.\\n\\nNeither `ENABLE_LOCAL_WEB_FETCH` at its default of `false` nor any set of entries in `WEB_FETCH_FILTER_LIST` prevents this.\\n\\n## Impact\\n\\nAn authenticated user can make the server issue requests to hosts the operator deliberately excluded, and to addresses on the internal network including loopback, private ranges and the cloud metadata endpoints of the major providers.\\n\\nWhat reaches the attacker depends on which HTTP client the fetch path uses, and is stated here as verified rather than assumed. On the paths built on `requests`, the fetched body is returned to the caller, so the response of an excluded host is readable: the built-in page fetch tool hands it to the model, and the URL ingestion endpoint returns it in its response. Those paths kept a working private-address check at connection time, so what they reach is excluded public hosts and internal names, not private IP addresses. On the paths built on aiohttp, which are the ones that reach private addresses written as IP literals, fetched content reaches the web search response, a retrievable collection, or model input as base64 through chat image URLs. A path on that client returning an attacker-chosen response verbatim to the requester was not demonstrated.\\n\\nThe operator has no configuration that prevents this. `169.254.169.254` ships in the default excluded list, so an operator reviewing their configuration would reasonably conclude the metadata endpoint is out of reach. The documentation for the redirect setting further recommends the excluded-host list as a compensating control when enabling redirects, and that is precisely the control the redirect path skipped.\\n\\n## Fix\\n\\nFixed in 0.11.1 by https://github.com/open-webui/open-webui/pull/27823. The excluded-host list is now evaluated once per request on both HTTP clients, where the real destination is known and a reused connection cannot skip it, so it applies to every redirect hop. The private-address check stays at connection time and is now hooked where aiohttp resolves a host, which is also reached for hosts written as IP literals.\\n\\nOne case is not resolved by the upgrade alone. Where the server reaches the internet through a forward proxy, the private-address check sees the proxy's address rather than the final destination, so it does not constrain where the proxy is asked to connect. The excluded-host list is still applied to the destination on that path. Operators who route outbound fetches through a proxy should enforce destination restrictions on the proxy itself.\\n\\n## Root cause\\n\\nAffected components:\\n\\n- the web retrieval fetch paths, on both the aiohttp and `requests` clients\\n- the built-in page fetch tool\\n- the URL ingestion endpoint\\n\\nAffected setup: builds that carry the redirect-following setting, which was introduced in 0.9.5. Earlier builds have no such setting.\\n\\nThe two controls sat at different layers, and each sat where only the originally submitted URL passes through. The excluded-host list was consulted inside URL validation, which runs once against what the user submitted, so a redirect destination never reached it on either client. The private-address check was placed inside the aiohttp resolver, and aiohttp answers a host written as an IP address itself without consulting a resolver, so for exactly those hosts the check never ran. Redirect following was added later as an option, and neither control was revisited at that point, so turning it on moved the real destination out of reach of both.\\n\\n## Proof of concept\\n\\nBoth vectors were reproduced against the shipped code of 0.11.0 and confirmed closed against 0.11.1, with `AIOHTTP_CLIENT_ALLOW_REDIRECTS=true` in both runs. A local HTTP server serves a redirect and a body, DNS is stubbed so the test hostnames resolve to loopback, and the guards themselves are unmodified.\\n\\nExcluded-host list, redirect destination `203.0.113.1` excluded, submitted URL not excluded:\\n\\n```\\n0.11.0  no check runs against the redirect destination, the server opens a connection to it\\n0.11.1  blocked at the redirect hop before any connection is attempted\\n```\\n\\nPrivate-address check, host written as an IP literal, with `ENABLE_LOCAL_WEB_FETCH` at its default of `false`:\\n\\n```\\n0.11.0  fetch returned 'LOOPBACK-CONTENT-REACHED', no check ran\\n0.11.1  blocked, non-global address 127.0.0.1\\n```\\n\\nInstrumenting 0.11.1 on a redirect that is allowed shows both controls running against the redirect destination as well as the submitted URL, and an ordinary public fetch is unaffected.\\n\\n## Credits\\n\\n- @arpitjain099, original report: the excluded-host list is not re-applied to redirect destinations.\\n- @Classic298: the private-address check is bypassed for redirect destinations written as IP literals, through aiohttp's resolver shortcut.\", \"ghsa_id\": \"GHSA-5x7x-4c3c-qf5w\", \"github_reviewed_at\": \"2026-09-09T23:54:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-5x7x-4c3c-qf5w\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5x7x-4c3c-qf5w\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88001\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-09T23:54:08Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-5x7x-4c3c-qf5w\", \"https://github.com/open-webui/open-webui/pull/27823\", \"https://github.com/open-webui/open-webui/commit/e3e4bd87df6fc629e7e22081d980d55a7632b8b7\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.1\", \"https://github.com/advisories/GHSA-5x7x-4c3c-qf5w\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-5x7x-4c3c-qf5w\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Server-side fetches reach blocked and internal hosts via unvalidated HTTP redirect targets\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-09T23:54:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-5x7x-4c3c-qf5w\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.5, <= 0.11.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5x7x-4c3c-qf5w",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.9.5, <= 0.11.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-88001"
+    ],
+    "cvss_score": 5.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-10T19:13:40.868589Z",
+  "provenance": {
+    "content_sha256": "c917caa64774627b0ac9150b51248cfa22980155716e619d2f93d6371dc6d86e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-09T23:54:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5x7x-4c3c-qf5w",
+  "status": "active",
+  "title": "Open WebUI: Server-side fetches reach blocked and internal hosts via unvalidated HTTP redirect targets",
+  "updated_at": "2026-09-09T23:54:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5x7x-4c3c-qf5w"
+}

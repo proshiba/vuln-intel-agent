@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "230a63018bb9a11ef49a9674e7a7ffaa691317f6557ce5fc45ef8720f601dbbc",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"anauaque\", \"type\": \"reporter\"}, {\"login\": \"Yann-P\", \"type\": \"coordinator\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/68611063?v=4\", \"events_url\": \"https://api.github.com/users/anauaque/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/anauaque/followers\", \"following_url\": \"https://api.github.com/users/anauaque/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/anauaque/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/anauaque\", \"id\": 68611063, \"login\": \"anauaque\", \"node_id\": \"MDQ6VXNlcjY4NjExMDYz\", \"organizations_url\": \"https://api.github.com/users/anauaque/orgs\", \"received_events_url\": \"https://api.github.com/users/anauaque/received_events\", \"repos_url\": \"https://api.github.com/users/anauaque/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/anauaque/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/anauaque/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/anauaque\", \"user_view_type\": \"public\"}}, {\"state\": \"accepted\", \"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3519082?v=4\", \"events_url\": \"https://api.github.com/users/Yann-P/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yann-P/followers\", \"following_url\": \"https://api.github.com/users/Yann-P/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yann-P/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yann-P\", \"id\": 3519082, \"login\": \"Yann-P\", \"node_id\": \"MDQ6VXNlcjM1MTkwODI=\", \"organizations_url\": \"https://api.github.com/users/Yann-P/orgs\", \"received_events_url\": \"https://api.github.com/users/Yann-P/received_events\", \"repos_url\": \"https://api.github.com/users/Yann-P/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yann-P/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yann-P/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yann-P\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-862\"], \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\r\\n\\r\\nJupyter Server's gateway WebSocket handler checks that a user is authenticated, but it does not ask the configured Authorizer whether that user may execute kernels.\\r\\n\\r\\nIn Jupyter Server 2.0.0 through 2.5.0, enabling GatewayClient.url automatically replaced the normal kernel channel handler with this gateway-specific handler. An authenticated user who is denied the `execute` action on the `kernels` resource can therefore still open a kernel channel and send messages to the upstream kernel.\\r\\n\\r\\n### Details\\r\\n\\r\\nThe normal handler performs the expected authorization check before creating the WebSocket connection:\\r\\n\\r\\nhttps://github.com/jupyter-server/jupyter_server/blob/v2.5.0/jupyter_server/services/kernels/websocket.py#L39-L47\\r\\n\\r\\nThe gateway handler only checks `current_user` and then opens the upstream channel. It never calls `authorizer.is_authorized(...)`:\\r\\n\\r\\nhttps://github.com/jupyter-server/jupyter_server/blob/v2.5.0/jupyter_server/gateway/handlers.py#L49-L75\\r\\nhttps://github.com/jupyter-server/jupyter_server/blob/v2.5.0/jupyter_server/gateway/handlers.py#L87-L98\\r\\n\\r\\nGateway mode selected that handler automatically by replacing handlers with matching routes:\\r\\n\\r\\nhttps://github.com/jupyter-server/jupyter_server/blob/v2.5.0/jupyter_server/serverapp.py#L437-L446\\r\\n\\r\\nPR #1261 stopped replacing the normal handler and routed gateway traffic through `GatewayWebSocketConnection` instead. This appears to have fixed the default gateway configuration in 2.6.0, although the deprecated handler is still present in current releases and can still be registered directly.\\r\\n\\r\\nhttps://github.com/jupyter-server/jupyter_server/pull/1261\\r\\n\\r\\n### Code-level validation\\r\\n\\r\\n1. Configure a custom Authorizer that returns false for `execute` on `kernels` for a regular authenticated user.\\r\\n2. Configure `GatewayClient.url` on Jupyter Server 2.0.0-2.5.0.\\r\\n3. The normal `KernelWebsocketHandler` would reject that user with 403 in `pre_get`.\\r\\n4. Gateway mode replaces it with `WebSocketChannelsHandler`. Its `authenticate` method only rejects anonymous users, and `get` proceeds to the upstream gateway without an authorization decision.\\r\\n\\r\\nI confirmed the issue from the handler selection and request path in the source. I did not exercise it against a live deployment.\\r\\n\\r\\n### Impact\\r\\n\\r\\nThis is a missing authorization check, not an authentication bypass. It matters in deployments that use a restrictive custom Authorizer and Jupyter Gateway/Enterprise Gateway. A read-only or otherwise limited authenticated user can cross the intended authorization boundary and obtain kernel execution, with access to data and credentials available to that kernel.\\r\\n\\r\\nSuggested CWE: CWE-862 (Missing Authorization).\\r\\nSuggested CVSS 3.1: `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H` (8.8).\\r\\n\\r\\n### Affected versions\\r\\n\\r\\n- Default gateway configuration: 2.0.0 through 2.5.0\\r\\n- 2.6.0 and later: the default path uses the authorized standard handler, but manually registering the deprecated `jupyter_server.gateway.handlers` module still exposes the old behavior.\", \"ghsa_id\": \"GHSA-354v-3q48-cv69\", \"html_url\": \"https://github.com/jupyter-server/jupyter_server/security/advisories/GHSA-354v-3q48-cv69\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-354v-3q48-cv69\"}], \"private_fork\": null, \"published_at\": \"2026-09-10T13:07:40Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3519082?v=4\", \"events_url\": \"https://api.github.com/users/Yann-P/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yann-P/followers\", \"following_url\": \"https://api.github.com/users/Yann-P/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yann-P/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yann-P\", \"id\": 3519082, \"login\": \"Yann-P\", \"node_id\": \"MDQ6VXNlcjM1MTkwODI=\", \"organizations_url\": \"https://api.github.com/users/Yann-P/orgs\", \"received_events_url\": \"https://api.github.com/users/Yann-P/received_events\", \"repos_url\": \"https://api.github.com/users/Yann-P/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yann-P/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yann-P/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yann-P\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Gateway WebSocket handler bypasses kernel execute authorization\", \"updated_at\": \"2026-09-10T13:07:40Z\", \"url\": \"https://api.github.com/repos/jupyter-server/jupyter_server/security-advisories/GHSA-354v-3q48-cv69\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"pip\", \"name\": \"jupyter-server\"}, \"patched_versions\": \"2.6.0\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, < 2.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "project-jupyter:ghsa-354v-3q48-cv69",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "jupyter-server: >= 2.0.0, < 2.6.0"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [
+      "jupyter-server: 2.6.0"
+    ],
+    "mitigations": [],
+    "products": [
+      "jupyter-server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-10T19:13:29.392929Z",
+  "provenance": {
+    "content_sha256": "381bbfc95e7929f30c468510b39c38d330cb18f5e9da55098c92dea4db0372b6",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T13:07:40Z",
+  "schema_version": 1,
+  "source_id": "jupyter_server_github",
+  "source_url": "https://github.com/jupyter-server/jupyter_server/security/advisories/GHSA-354v-3q48-cv69",
+  "status": "active",
+  "title": "Gateway WebSocket handler bypasses kernel execute authorization",
+  "updated_at": "2026-09-10T13:07:40Z",
+  "vendor": "Project Jupyter",
+  "vendor_advisory_id": "GHSA-354v-3q48-cv69"
+}

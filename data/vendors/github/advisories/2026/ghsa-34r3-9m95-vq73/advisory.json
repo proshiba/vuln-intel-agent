@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/46160459?v=4\", \"events_url\": \"https://api.github.com/users/NaorYaa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/NaorYaa/followers\", \"following_url\": \"https://api.github.com/users/NaorYaa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/NaorYaa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/NaorYaa\", \"id\": 46160459, \"login\": \"NaorYaa\", \"node_id\": \"MDQ6VXNlcjQ2MTYwNDU5\", \"organizations_url\": \"https://api.github.com/users/NaorYaa/orgs\", \"received_events_url\": \"https://api.github.com/users/NaorYaa/received_events\", \"repos_url\": \"https://api.github.com/users/NaorYaa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/NaorYaa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/NaorYaa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/NaorYaa\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-87999\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nOpen WebUI fetches user-supplied URLs on the server for RAG URL ingestion and web search, and screens the resolved addresses so internal destinations cannot be reached. That screen decided whether a destination was external by asking Python's standard library whether the address is globally routable. Several addresses reserved for internal use answer yes to that question, including 168.63.129.16, the Azure platform channel every Azure virtual machine can reach. Any authenticated user could therefore make the server issue requests to those addresses and read the responses back through the API.\\n\\n## Preconditions\\n\\n- The affected paths are the server-side URL fetches: RAG URL ingestion and web search. Both require an authenticated, verified account. No administrator role and no special workspace permission are needed.\\n- `ENABLE_LOCAL_WEB_FETCH` must be at its default of `false`. Setting it to `true` disables the address screen by design, and internal destinations are reachable on purpose.\\n- `WEB_FETCH_FILTER_LIST` is empty by default in affected versions, so no operator-supplied block entry covered these addresses unless one was added by hand.\\n- For the Azure platform channel specifically, the Open WebUI host must run on Azure (virtual machine, AKS, Container Apps or equivalent). That address is reachable from every Azure virtual machine regardless of network security group rules. On a host that is not on Azure the address routes nowhere and nothing is reachable through it.\\n\\n## Impact\\n\\nAn authenticated user could direct the server to issue GET requests at addresses reserved for internal use and receive the response body back in the API response, which also lands in the RAG context. On Azure that includes the platform channel, an endpoint the operator never intended to expose to application users. The same gap applied to the IPv4-translated range and to deprecated IPv6 site-local space, which on a host that routes them would reach internal services the same way.\\n\\nWhat was observed is the reachability and the read-back. No specific credential or secret was retrieved from the Azure platform channel during this investigation, and this advisory does not claim one. Deployments not hosted on Azure are unaffected for the platform-channel address, and deployments running with local web fetch enabled were never protected by this screen in any version.\\n\\n## Fix\\n\\nFixed in https://github.com/open-webui/open-webui/pull/27823. Address screening no longer rests on the library's notion of a globally routable address alone: a default block list of reserved and internal-purpose ranges is applied to every resolved address, at URL validation and again at connection time on both HTTP transports, so it also covers redirect hops and DNS rebinding. Operators can extend the list through `WEB_FETCH_FILTER_LIST`, which is merged with the defaults and cannot remove them.\\n\\n## Root cause\\n\\n- `backend/open_webui/retrieval/web/utils.py`: the shared address screen used by every server-side fetch.\\n- `POST /api/v1/retrieval/process/web`: RAG URL ingestion, returns the fetched body to the caller.\\n- `POST /api/v1/retrieval/process/web/search`: web search, fetches each result.\\n\\nThe code ships in every build, so no optional component or feature flag limits which installations carry it.\\n\\nThe screen answered one question, whether an address is globally routable, and treated that answer as a proxy for whether the destination is external. Those are two different questions. The library classifies by IANA special-purpose registry membership, and the Azure platform channel is allocated out of ordinary public IPv4 space, so the library correctly reports it as global while in practice it is an internal endpoint of the host's own platform. Earlier hardening (GHSA-8x5v-cpv7-8jjp) extended the screen to unwrap IPv6 addresses that carry an IPv4 address inside them. That closed the encoded-address bypasses and left the underlying test unchanged, so an address that is public by registry and internal by convention still passed.\\n\\n## Proof of concept\\n\\nAs any verified user:\\n\\n```\\nPOST /api/v1/retrieval/process/web\\n{\\\"url\\\": \\\"http://168.63.129.16/?comp=versions\\\"}\\n```\\n\\nOn an affected version the address passes validation, the request is issued, and the response body is returned in the `content` field of the API response.\\n\\nThe screening code of each released version was exercised directly:\\n\\n- 0.11.0: `168.63.129.16`, `::ffff:0:169.254.169.254` and `fec0::1` all pass validation.\\n- 0.11.1: all three are rejected, along with every alternative spelling of the same address (IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4 and both NAT64 prefixes) and the obfuscated decimal, octal and hexadecimal forms. Ordinary public addresses continue to pass.\\n\\nNo request was issued to a live Azure platform channel. The read-back property was confirmed from the ingestion endpoint, which returns the fetched body to the caller in its response.\\n\\n## Credits\\n\\n@NaorYaa reported that the Azure platform channel remained reachable after the previous hardening, and demonstrated the same gap for the IPv4-translated and IPv6 site-local ranges.\", \"ghsa_id\": \"GHSA-34r3-9m95-vq73\", \"github_reviewed_at\": \"2026-09-10T15:09:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-34r3-9m95-vq73\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-34r3-9m95-vq73\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-87999\"}], \"nvd_published_at\": \"2026-09-09T22:18:48Z\", \"published_at\": \"2026-09-10T15:09:36Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-34r3-9m95-vq73\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-87999\", \"https://github.com/open-webui/open-webui/pull/27823\", \"https://github.com/open-webui/open-webui/commit/e3e4bd87df6fc629e7e22081d980d55a7632b8b7\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.1\", \"https://github.com/advisories/GHSA-34r3-9m95-vq73\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-34r3-9m95-vq73\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Any authenticated user can reach the Azure platform channel via server-side web fetch\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T15:09:37Z\", \"url\": \"https://api.github.com/advisories/GHSA-34r3-9m95-vq73\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.11.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-34r3-9m95-vq73",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: < 0.11.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-87999"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-10T19:13:40.839982Z",
+  "provenance": {
+    "content_sha256": "cb9db77aec29028ac063876c9e496eb18c92748155aa76b21e4f24a5b16e0fbc",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T15:09:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-34r3-9m95-vq73",
+  "status": "active",
+  "title": "Open WebUI: Any authenticated user can reach the Azure platform channel via server-side web fetch",
+  "updated_at": "2026-09-10T15:09:37Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-34r3-9m95-vq73"
+}
