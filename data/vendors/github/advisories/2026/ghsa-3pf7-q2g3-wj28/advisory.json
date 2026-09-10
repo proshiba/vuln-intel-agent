@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6668626?v=4\", \"events_url\": \"https://api.github.com/users/whyiug/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/whyiug/followers\", \"following_url\": \"https://api.github.com/users/whyiug/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/whyiug/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/whyiug\", \"id\": 6668626, \"login\": \"whyiug\", \"node_id\": \"MDQ6VXNlcjY2Njg2MjY=\", \"organizations_url\": \"https://api.github.com/users/whyiug/orgs\", \"received_events_url\": \"https://api.github.com/users/whyiug/received_events\", \"repos_url\": \"https://api.github.com/users/whyiug/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/whyiug/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/whyiug/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/whyiug\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-87997\", \"cvss\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\nThe chat-completions endpoint reads a folder id out of the request body and saves the newly created chat into that folder without checking that the caller is allowed to write there. Any authenticated user who knows a folder's id can put a chat of their own into another user's folder, including a shared folder where they hold read-only access and a folder they have no access to at all. The chat then shows up in that folder for everyone who can read it, under a title and with content the attacker controls. The dedicated chat-creation and chat-move endpoints already enforced this check, the chat-completions path did not.\\n\\n## Preconditions\\n- An authenticated account of any role. No elevated permission, no admin involvement.\\n- Folders enabled, which is the default (`ENABLE_FOLDERS=true`, `USER_PERMISSIONS_FEATURES_FOLDERS=true`).\\n- The attacker needs the target folder's id. A member of a shared folder gets it from the shared-folder listing. Sharing a folder with named users is available to ordinary users by default; only wildcard public sharing is gated. A folder that was never shared has an id the attacker cannot obtain through any endpoint available to them, so those folders are not practically reachable.\\n- Releases before 0.10.0 contain the same missing check but have no read path that lists a folder's chats across owners, so the injected row was never visible to anyone.\\n\\n## Impact\\nThe integrity of folder contents. An attacker who cannot write to a folder can place chats into it, and every member with read access, the owner included, sees the entry with the attacker's display name and a title the attacker can change to arbitrary text at any time. Members can also open the injected chat and read its messages. In a workspace where a shared folder is treated as trusted, that is a usable surface for planting misleading or phishing content under another team's nose.\\n\\nNothing is disclosed to the attacker and nothing existing is altered. Writing into a folder grants no read access to it, so the attacker still cannot list or open the folder's other chats, and no data belonging to other users can be modified or deleted through this path. Availability is unaffected.\\n\\n## Fix\\nFixed in 0.11.1 by https://github.com/open-webui/open-webui/pull/28366. Chat creation, chat moves and the chat-completions creation path now share a single folder write-access check, so a folder id the caller cannot write to is rejected everywhere a chat's folder can be set. Upgrading to 0.11.1 resolves it completely, with no configuration change required.\\n\\n## Root cause\\nAffected component: the chat-completions handler in `backend/open_webui/main.py`, reached through `POST /api/chat/completions` and `POST /api/v1/chat/completions`. Affected setup: every deployment on 0.10.0 through 0.11.0 with folders enabled.\\n\\nThe completions handler gained its own chat-creation branch, which copied the client-supplied folder id into the chat it saved. The ownership and shared-write check lived as duplicated inline code inside the two chat routers rather than in one shared helper, so a third place that learned to set a folder id inherited none of it. Separately, folder listings had been changed to return a folder's chats across all owners so that shared folders work at all, which turned a write that used to be invisible to everyone into one the whole folder can see.\\n\\n## Proof of concept\\nReproduced on a running instance at 0.11.0 with three accounts: one administrator and two ordinary users, one acting as victim and one as attacker.\\n\\n1. The victim creates a folder. The attacker is given no access to it: reading the folder returns 404 and listing its chats returns 403.\\n2. The attacker sends `POST /api/v1/chats/new` with the victim's folder id. Rejected with 404, which is the pre-existing guard working.\\n3. The attacker sends `POST /api/chat/completions` with `parent_id: null`, no chat id, and the victim's folder id in the body. Accepted.\\n4. The victim lists their own folder and sees a chat owned by \\\"Attacker\\\". The victim can open it and read its messages. The attacker then renames their own chat and the new title appears verbatim in the victim's folder listing.\\n\\nRepeating step 3 with the attacker granted read-only access to a shared folder also succeeds on 0.11.0. On 0.11.1 both variants are rejected with 404 and the folder stays empty, while a member holding write access can still create chats there as intended.\\n\\nThe three accounts and the folder were created through the normal API. Nothing was written directly to the database.\\n\\n## Credits\\nwhyiug, for reporting the missing folder write-access check on the chat-completions creation path.\", \"ghsa_id\": \"GHSA-3pf7-q2g3-wj28\", \"github_reviewed_at\": \"2026-09-10T15:10:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-3pf7-q2g3-wj28\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3pf7-q2g3-wj28\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-87997\"}], \"nvd_published_at\": \"2026-09-09T22:18:48Z\", \"published_at\": \"2026-09-10T15:10:04Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-3pf7-q2g3-wj28\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-87997\", \"https://github.com/open-webui/open-webui/pull/28366\", \"https://github.com/open-webui/open-webui/commit/d9e23b90c100d19b00270aea3cde0501d2354a6c\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.1\", \"https://github.com/advisories/GHSA-3pf7-q2g3-wj28\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-3pf7-q2g3-wj28\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Any authenticated user can inject chats into another user's folder via chat completions\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T15:10:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-3pf7-q2g3-wj28\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.10.0, < 0.11.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3pf7-q2g3-wj28",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.10.0, < 0.11.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-87997"
+    ],
+    "cvss_score": 4.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-10T19:13:40.835929Z",
+  "provenance": {
+    "content_sha256": "e3a5137392d7dede9d63cbb53b2d33fc8363249f47a91b2b26b70bde2cc3a4f7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T15:10:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3pf7-q2g3-wj28",
+  "status": "active",
+  "title": "Open WebUI: Any authenticated user can inject chats into another user's folder via chat completions",
+  "updated_at": "2026-09-10T15:10:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3pf7-q2g3-wj28"
+}

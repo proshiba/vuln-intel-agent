@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88000\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-835\", \"name\": \"Loop with Unreachable Exit Condition ('Infinite Loop')\"}], \"description\": \"## Summary\\nChat histories are stored as an unvalidated JSON object. After a message is deleted, the code that picks the chat's new current message walked down the `childrenIds` links without recording where it had already been. Any account with the default `user` role could store a chat whose messages list each other as children, then delete a message from it, and the walk would run forever. That walk runs on the server's request loop, so it blocks every other user's requests until the process is killed.\\n\\n## Preconditions\\nOne account with the default `user` role. No administrator rights, no additional permissions, no configuration change and no non-default setting: creating and deleting chats is available to every user out of the box. The attack runs entirely against the attacker's own chat, so no knowledge of any other user's data is needed. Versions before 0.10.0 are unaffected because neither the message-deletion endpoint nor the affected code existed.\\n\\n## Impact\\nThe walk is synchronous and runs on the asyncio event loop, so while it spins, every request from every user is blocked, including unauthenticated `/health` and administrator endpoints. External health checks and orchestrator liveness probes fail alongside the UI. This is a pure CPU pin with no list growth, so a worker consumes one full core with flat memory and has to be killed rather than being reclaimed by an out-of-memory kill. The work is not cancelled when the client disconnects, so a single fire-and-forget request is enough and the attacker can disconnect immediately. The malformed chat stays in the database, so the condition re-arms on the next deletion attempt against that chat. No data is disclosed, altered or deleted.\\n\\n## Fix\\nFixed in 0.11.1 by https://github.com/open-webui/open-webui/commit/b933292d63d12be3fd1416fe55519ddc7aa336bc. The walk now records the ids it has already passed through, so it terminates after at most one step per stored message whatever the message contents are. Upgrading fully resolves the issue, including for chats stored while the deployment was on an affected version, which become harmless once the walk terminates.\\n\\n## Root cause\\nAffected component: the chat-history message deletion helper in `backend/open_webui/models/chats.py`, reached from `DELETE /api/v1/chats/{id}/messages/{message_id}`. Affected setup: all builds from 0.10.0 up to and including 0.11.0.\\n\\nResolving the chat's new current message after a deletion means descending to the deepest remaining child, and that descent had no notion of where it had already been, so two messages naming each other as children sent it back and forth indefinitely. The write path does not validate the structure of a chat's history, and the child-link rebuild that runs on other write paths does not apply when a chat is created, so a history whose `childrenIds` form a cycle was persisted exactly as submitted.\\n\\n## Proof of concept\\nAs a default-role user on a running instance, store one chat of roughly 300 bytes whose messages reference each other as children:\\n\\n```json\\n{\\\"chat\\\":{\\\"title\\\":\\\"poc\\\",\\\"history\\\":{\\\"currentId\\\":\\\"C\\\",\\\"messages\\\":{\\n  \\\"A\\\":{\\\"id\\\":\\\"A\\\",\\\"parentId\\\":null,\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"a\\\",\\\"childrenIds\\\":[\\\"B\\\",\\\"C\\\"],\\\"timestamp\\\":1},\\n  \\\"B\\\":{\\\"id\\\":\\\"B\\\",\\\"parentId\\\":\\\"A\\\",\\\"role\\\":\\\"assistant\\\",\\\"content\\\":\\\"b\\\",\\\"childrenIds\\\":[\\\"A\\\"],\\\"timestamp\\\":2},\\n  \\\"C\\\":{\\\"id\\\":\\\"C\\\",\\\"parentId\\\":\\\"A\\\",\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"c\\\",\\\"childrenIds\\\":[],\\\"timestamp\\\":3}}}}}\\n```\\n\\n`POST /api/v1/chats/new` stores it verbatim, with the child links unchanged. A single `DELETE /api/v1/chats/{id}/messages/C` as the same user then never returns:\\n\\n```\\n   unauthenticated GET /health -> HTTP 000 after 10.007s\\n   DELETE -> HTTP 000 after 20.007s\\n```\\n\\nSampled during the hang, the worker had consumed 42.9 seconds of CPU on one fully occupied core with flat resident memory, and unauthenticated `GET /health` timed out for as long as the process lived, including after the attacker's connection closed.\\n\\nOn 0.11.1 the same payload returns HTTP 200 in 0.011s, `/health` stays available throughout, and deleting a middle message from a well-formed four-message chain still resolves the current message correctly.\\n\\n## Credits\\n@Classic298, who found the unguarded descent through the chat's child links, demonstrated the resulting server-wide outage end to end against a live instance, and supplied the fix.\", \"ghsa_id\": \"GHSA-3cgp-3cqx-j8w2\", \"github_reviewed_at\": \"2026-09-09T23:54:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-3cgp-3cqx-j8w2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3cgp-3cqx-j8w2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88000\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-09T23:54:22Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-3cgp-3cqx-j8w2\", \"https://github.com/open-webui/open-webui/pull/28035\", \"https://github.com/open-webui/open-webui/commit/b933292d63d12be3fd1416fe55519ddc7aa336bc\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.1\", \"https://github.com/advisories/GHSA-3cgp-3cqx-j8w2\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-3cgp-3cqx-j8w2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Any authenticated user can hang the server via message deletion in a cyclic chat tree\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-09T23:54:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-3cgp-3cqx-j8w2\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.10.0, < 0.11.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3cgp-3cqx-j8w2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.10.0, < 0.11.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-88000"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-10T19:13:40.866421Z",
+  "provenance": {
+    "content_sha256": "8b5ca78206ed29a84a01cfe30190e720380231c644d21e83835a38dbc4910bec",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-09T23:54:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3cgp-3cqx-j8w2",
+  "status": "active",
+  "title": "Open WebUI: Any authenticated user can hang the server via message deletion in a cyclic chat tree",
+  "updated_at": "2026-09-09T23:54:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3cgp-3cqx-j8w2"
+}
