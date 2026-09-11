@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77691959?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut/followers\", \"following_url\": \"https://api.github.com/users/iaohkut/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut\", \"id\": 77691959, \"login\": \"iaohkut\", \"node_id\": \"MDQ6VXNlcjc3NjkxOTU5\", \"organizations_url\": \"https://api.github.com/users/iaohkut/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88046\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nMultiple backends, when given a specially crafted object to copy, can escape the backend confinement.\\n\\n| Backend | Keep/Close | Per-backend severity |\\n|---|---|---|\\n| sftp | Medium | Real filesystem escape, fires under default encoding. |\\n| smb | Low-Medium | Escapes to a different SMB share the credential can reach. |\\n| ftp | Low | Real, leading-`..` overshoot PoC is partly neutralized by encoding; escape bounded to at/below the login base. |\\n| webdav | Low | Server-side ACLs are the real boundary. |\\n| b2 | Low | Same-account sibling **bucket** crossing on a flat keyspace. |\\n| swift | Low | Same, container. |\\n| qingstor | Low | Same. |\\n| oracleobjectstorage | Low | Same. |\\n| internetarchive | Low | IA items are owner-writable only; confined to user's own items. |\\n| storj | Low | Can retarget a different bucket in the same access grant. |\\n| filelu | Low | Confined to the user's own account. |\\n| shade | Low | Confined to the user's own drive. |\\n| sia | Low | siad API password already grants full-daemon access. |\\n\\n## Root cause\\n\\nrclone core does **not** sanitize `..` in a source object's `Remote()` - verified: nothing in `fs/march`, `fs/sync`, `fs/list`, or `fs/operations` rejects `..` segments before the name reaches the destination backend's `Put`/`Update`/`Mkdir`. Confinement is therefore each backend's responsibility, and these backends join `root + remote` without a check.\\n\\nThis divides into two classes:\\n\\n- **Bucket based backends** - `bucket.Split(path.Join(f.root, rootRelativePath))`:\\n  - `backend/b2/b2.go:404`, `backend/swift/swift.go:464`, `backend/qingstor/qingstor.go:198`, `backend/oracleobjectstorage/oracleobjectstorage.go:245`, `backend/internetarchive/internetarchive.go:1016`, `backend/smb/smb.go:885`, `backend/storj/fs.go:289`.\\n  - `path.Join` collapses `..` on the standard (ASCII) form **before** encoding is applied (e.g. `FromStandardPath(path.Join(...))` at `backend/b2/b2.go:1641`), so `EncodeDot` never gets the chance to neutralize the `..`.\\n  - `lib/bucket.Join` does **not** clean paths (keeps `..` as a literal key segment); `path.Join` does. `backend/s3`, `backend/azureblob`, `backend/googlecloudstorage` already use `bucket.Join` and are therefore not affected.\\n\\n- **Path based backends** - `path.Join(root, remote)` onto a real path:\\n  - sftp: `remotePath = path.Join(f.absRoot, f.opt.Enc.FromStandardPath(remote))` (`backend/sftp/sftp.go:2497`). Default encoding is `encoder.Display` (== `Standard`), and `FromStandardPath` short-circuits to a pass-through in that mode, so `..` survives; `f.absRoot` is absolute, so `path.Join(\\\"/home/user/root\\\", \\\"../../../../etc/passwd\\\")` -> `/etc/passwd`.\\n  - webdav: `filePath` at `backend/webdav/webdav.go:426-432`.\\n  - ftp: `path.Join(f.root, remote)` at ~14 sites (e.g. `backend/ftp/ftp.go:1247`).\\n  - filelu, shade, sia: analogous joins.\\n\\n### Precondition that limits reachability\\n\\nFor any of these to fire, a **source** must hand rclone a `Remote()` containing raw `..`. That is only possible when:\\n\\n1. the source is a **flat-keyspace object store** (not a filesystem - a local/sftp/smb source cannot represent `../../x` as one directory entry), **and**\\n2. the offending key was written with **native, non-rclone tooling** - rclone's own writer applies `EncodeDot` and rewrites a `..` segment to fullwidth `．．`, so you cannot create such a key *through rclone*.\\n\\nrclone's source-side listing does pass a natively-planted raw `..` key through unchanged (verified for b2: `remote := file.Name[len(prefix):]` after `ToStandardPath`, `backend/b2/b2.go:858,867`). The reports never establish this precondition; it is the same omission across every member of the class.\\n\\n### Example attack\\n\\n```bash\\n# Step 1 - attacker, using NATIVE S3 tooling (NOT rclone) on a source the victim ingests from:\\naws s3api put-object --bucket shared-drop --key '../../victim-backups/pwned.txt' --body evil.txt\\n\\n# Step 2 - victim's ordinary ingest:\\nrclone copy s3-drop:shared-drop b2:victim-uploads/incoming\\n# path.Join(\\\"victim-uploads/incoming\\\", \\\"../../victim-backups/pwned.txt\\\") = \\\"victim-backups/pwned.txt\\\"\\n# -> lands in the victim's victim-backups bucket instead of under incoming/\\n```\\n\\nThe blast radius is the victim's **own** account (a bucket/share/path the configured credential already reaches) - integrity misdirection, not a cross-tenant or confidentiality breach. sftp/smb are the exception in *reach* (server filesystem / other share), still bounded by the login's own permissions.\\n\\n## Precedent\\n\\nThis is the same class as the already-fixed local backend advisory [https://github.com/rclone/rclone/security/advisories/GHSA-7p4m-qxvv-g567](GHSA-7p4m-qxvv-g567), which added `(*Fs).localPath` returning `errPathEscapes` for names resolving outside the root (`backend/local/local.go:819-826`). That fix was justified because the destination was the operator's own OS filesystem; the same reasoning extends (at lower severity) to sftp/smb.\", \"ghsa_id\": \"GHSA-38xv-hf3p-h7mq\", \"github_reviewed_at\": \"2026-09-10T22:45:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-38xv-hf3p-h7mq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-38xv-hf3p-h7mq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88046\"}], \"nvd_published_at\": \"2026-09-10T17:17:08Z\", \"published_at\": \"2026-09-10T22:45:36Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-38xv-hf3p-h7mq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-88046\", \"https://github.com/rclone/rclone/commit/57842c5ee4e1407eda06a414a36510cce2db4252\", \"https://github.com/rclone/rclone/releases/tag/v1.75.1\", \"https://github.com/advisories/GHSA-38xv-hf3p-h7mq\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-38xv-hf3p-h7mq\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone: source object names can escape the configured root on upload\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T22:45:37Z\", \"url\": \"https://api.github.com/advisories/GHSA-38xv-hf3p-h7mq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.75.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-38xv-hf3p-h7mq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: < 1.75.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-88046"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-11T19:13:05.145856Z",
+  "provenance": {
+    "content_sha256": "4530a371998131f7987bde8d145a529218e85aed434a05c5c0151dca1b122edb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T22:45:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-38xv-hf3p-h7mq",
+  "status": "active",
+  "title": "rclone: source object names can escape the configured root on upload",
+  "updated_at": "2026-09-10T22:45:37Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-38xv-hf3p-h7mq"
+}

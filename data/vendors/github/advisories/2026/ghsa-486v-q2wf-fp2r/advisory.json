@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77691959?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut/followers\", \"following_url\": \"https://api.github.com/users/iaohkut/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut\", \"id\": 77691959, \"login\": \"iaohkut\", \"node_id\": \"MDQ6VXNlcjc3NjkxOTU5\", \"organizations_url\": \"https://api.github.com/users/iaohkut/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88013\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-319\", \"name\": \"Cleartext Transmission of Sensitive Information\"}, {\"cwe_id\": \"CWE-522\", \"name\": \"Insufficiently Protected Credentials\"}], \"description\": \"## Vulnerability Details\\n\\n**File**: `backend/http/http.go`\\n**Lines**: 285 (client construction — no `CheckRedirect`), 505-510 (`addHeaders`, writes configured secret headers onto every request), 533-534 / 700-701 / 782-785 (`f.httpClient.Do(req)` used by List/stat/download)\\n\\n### Root Cause\\nThe `http` backend lets a user attach arbitrary secret headers to every request via `--http-headers`/`headers=` (documented for authentication: `'\\\"Cookie\\\",\\\"name=value\\\",\\\"Authorization\\\",\\\"xxx\\\"'`). The backend's HTTP client is built with `fshttp.NewClient(ctx)`, which never sets `http.Client.CheckRedirect`, so it falls back to Go's stdlib default redirect policy.\\n\\nGo's default policy only strips four header names (`Authorization`, `Www-Authenticate`, `Cookie`, `Cookie2`), and only when the redirect target's *host* differs from the original — every other configured header is copied to the redirect target unconditionally, regardless of host or scheme. Even the four protected names survive a same-host `https://` → `http://` downgrade, since Go only checks host equality, not scheme.\\n\\nAny redirect response from the configured remote — whether from server compromise, an open redirect, a CDN/mirror failover to a different domain, or a malicious server from the start — causes rclone to resend every configured secret header (and, for a scheme downgrade, `Authorization`/`Cookie` in cleartext) to the new destination.\\n\\nThis is the exact vulnerability class already fixed for the `s3` backend (`9328763`/`7543a7a`, GHSA-8mxv-9xhp-86h4 and the `webdav` backend (`59b513b`, GHSA-h4mf-4v27-hggj, wiring `rest.RefuseHTTPSDowngradeRedirectFn`). `backend/http` was not touched by either fix.\\n\\n### Vulnerable Code\\n```go\\n// backend/http/http.go:285\\nclient := fshttp.NewClient(ctx)   // no CheckRedirect set\\n...\\nf.httpClient = client             // used by readDir / NewObject / Object.Open\\n```\\n```go\\n// backend/http/http.go:505-510\\nfunc addHeaders(req *http.Request, opt *Options) {\\n\\tfor i := 0; i < len(opt.Headers); i += 2 {\\n\\t\\tkey := opt.Headers[i]\\n\\t\\tvalue := opt.Headers[i+1]\\n\\t\\treq.Header.Add(key, value)\\n\\t}\\n}\\n```\\n\\n### Attack Scenario\\n1. User configures an `http` remote: `url=https://good.example.com/files/`, `headers=X-Api-Key,SECRET-TOKEN`.\\n2. At some point `good.example.com` returns a redirect whose `Location` points at a different host (compromise, open redirect, CDN change, or malice from the start).\\n3. User runs any operation (`ls`, `cat`, `copy`, `mount`, `serve`) against the remote.\\n4. rclone follows the redirect with the default client and resends `X-Api-Key: SECRET-TOKEN` to the new, untrusted destination.\\n5. The attacker's server captures the secret from the incoming request.\\n\\n### Impact\\nExfiltration of API keys / bearer tokens / session cookies configured for one host, to any host the (trusted-at-configuration-time) remote later redirects to. All operations on the `http` backend (list, stat, download, mount, serve) are affected. No special rclone privileges or unusual user interaction are needed beyond a normal sync/list/copy once the redirect exists.\\n\\n### Dynamic Confirmation\\nBuilt rclone from source at `cfdc9d0` (current master, `v1.76.0-DEV`) and configured:\\n```ini\\n[testhttp]\\ntype = http\\nurl = http://127.0.0.1:9090/\\nheaders = X-Api-Key,SUPER-SECRET-TOKEN-abc123\\n```\\nServer A (port 9090, the \\\"configured\\\" host) 302-redirects every request to Server B (port 9091, a different host). Running `rclone cat testhttp:file.txt` caused Server B — which was never configured with any credential — to receive:\\n```\\nHeader: X-Api-Key: SUPER-SECRET-TOKEN-abc123\\nHeader: Referer: http://127.0.0.1:9090/file.txt\\n```\\nrclone printed Server B's response body as if it were the real file, confirming the full stat→redirect→download round trip leaks the header and trusts the redirect target.\\n\\n### Vulnerable Code / Fix\\nA minimal fix (implemented, tested, and verified to close the leak while preserving redirect functionality) wires the client to `rest.RefuseHTTPSDowngradeRedirectFn` (already used by `webdav`) and strips the configured `opt.Headers` on any cross-host redirect:\\n\\n```go\\nclient := fshttp.NewClient(ctx)\\nclient.CheckRedirect = redirectCheckFn(opt)\\n...\\nfunc redirectCheckFn(opt *Options) func(req *http.Request, via []*http.Request) error {\\n\\treturn func(req *http.Request, via []*http.Request) error {\\n\\t\\tif err := rest.RefuseHTTPSDowngradeRedirectFn(req, via); err != nil {\\n\\t\\t\\treturn err\\n\\t\\t}\\n\\t\\tif len(via) > 0 && req.URL.Host != via[0].URL.Host {\\n\\t\\t\\tfor i := 0; i < len(opt.Headers); i += 2 {\\n\\t\\t\\t\\treq.Header.Del(opt.Headers[i])\\n\\t\\t\\t}\\n\\t\\t}\\n\\t\\treturn nil\\n\\t}\\n}\\n```\\n\\nA regression test (`TestRedirectStripsHeadersOnHostChange`) was added to `backend/http/http_internal_test.go`, confirmed to fail without the fix and pass with it. Full `backend/http` and `lib/rest` test suites pass with the fix applied. I have a fix branch ready to push to a private fork once this report is acknowledged.\\n\\n### Verification\\nDynamically confirmed on rclone master @ `cfdc9d0` (post `v1.75.0`) in a local test harness — see \\\"Dynamic Confirmation\\\" above. Fix verified to eliminate the leak via the same harness (secret header absent from Server B after the fix; functionality — file download via redirect — unaffected).\", \"ghsa_id\": \"GHSA-486v-q2wf-fp2r\", \"github_reviewed_at\": \"2026-09-10T23:02:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-486v-q2wf-fp2r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-486v-q2wf-fp2r\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88013\"}], \"nvd_published_at\": \"2026-09-10T16:18:08Z\", \"published_at\": \"2026-09-10T23:02:53Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-486v-q2wf-fp2r\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-88013\", \"https://github.com/rclone/rclone/commit/22859b7e696cea3c563c6ba04c6b7f91f74456b4\", \"https://github.com/rclone/rclone/commit/79fbc0842f74e02cb84f0e3e7261d169983c8831\", \"https://github.com/rclone/rclone/commit/925fb4fb21eb25e75cd1b64fdd17ded857784bfc\", \"https://github.com/rclone/rclone/releases/tag/v1.75.1\", \"https://github.com/advisories/GHSA-486v-q2wf-fp2r\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-486v-q2wf-fp2r\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone: http backend forwards custom/auth headers to a different host on redirect\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T23:02:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-486v-q2wf-fp2r\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.49.0, <= 1.75.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-486v-q2wf-fp2r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: >= 1.49.0, <= 1.75.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-88013"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-09-11T19:13:05.126309Z",
+  "provenance": {
+    "content_sha256": "b36b5195f7a9678dabce8f032fe71ce9e175f0321df1be9b2cfe315baf081c2e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T23:02:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-486v-q2wf-fp2r",
+  "status": "active",
+  "title": "rclone: http backend forwards custom/auth headers to a different host on redirect",
+  "updated_at": "2026-09-10T23:02:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-486v-q2wf-fp2r"
+}
