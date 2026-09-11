@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27028174?v=4\", \"events_url\": \"https://api.github.com/users/Classic298/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Classic298/followers\", \"following_url\": \"https://api.github.com/users/Classic298/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Classic298/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Classic298\", \"id\": 27028174, \"login\": \"Classic298\", \"node_id\": \"MDQ6VXNlcjI3MDI4MTc0\", \"organizations_url\": \"https://api.github.com/users/Classic298/orgs\", \"received_events_url\": \"https://api.github.com/users/Classic298/received_events\", \"repos_url\": \"https://api.github.com/users/Classic298/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Classic298/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Classic298/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Classic298\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-87016\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-155\", \"name\": \"Improper Neutralization of Wildcards or Matching Symbols\"}, {\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"## Summary\\n\\nOn SQLite deployments, the lookup that maps an external identity to a local account does a substring match instead of an exact match. A subject value containing SQL wildcard characters therefore matches accounts the value was never issued for, and the sign-in binds to whichever account the database returns first, which can be an administrator. The same defect affects SCIM external-ID resolution. PostgreSQL deployments are not affected, because they take a separate and correct code path.\\n\\n## Preconditions\\n\\n* The database is SQLite. This is the default backend. PostgreSQL deployments are not affected at all.\\n* OAuth or OIDC sign-in is configured, or SCIM provisioning is enabled. Both are off by default.\\n* For an attacker to steer the match deliberately, they must control the value of the claim Open WebUI uses as the subject. That value is normally assigned by the identity provider and is not attacker-controlled: the shipped GitHub and Feishu configurations use provider-assigned numeric identifiers, and a standard OIDC `sub` is provider-assigned. The deliberate case therefore requires an operator to have pointed `OAUTH_SUB_CLAIM` at a claim the end user can set at the identity provider, such as a username or email claim, or an identity provider that lets a user choose their own subject value.\\n* No attacker and no misconfiguration are needed for the accidental case. A legitimate subject value that happens to contain an underscore matches other accounts as well, and which account is returned depends on database row order.\\n* For the SCIM path, the caller must already hold the SCIM bearer token, which is a privileged credential.\\n\\n## Impact\\n\\nA sign-in can be bound to an account other than the one the identity provider authenticated. Where the operator has made the subject claim user-settable, an attacker who registers at that provider can choose a value that matches an existing account and receive a session for it, including an administrator account, which is a full compromise of the instance. Where the subject claim is provider-assigned, the deliberate attack is not available, and what remains is a correctness failure in which an ordinary subject value containing an underscore can resolve to the wrong account and hand one user another user's session non-deterministically.\\n\\nThe defect is in the identity match itself, so it is not mitigated by any downstream permission check: by the time a session is issued the wrong account has already been selected. It does not allow account creation, and it does not affect password sign-in, PostgreSQL deployments, or any deployment with OAuth, OIDC and SCIM all disabled.\\n\\n## Fix\\n\\nFixed in 0.11.1 by https://github.com/open-webui/open-webui/pull/28624. The two identity lookups now compare the nested JSON value directly through SQLAlchemy's JSON subscript operator, which emits an exact match on both supported databases, instead of going through the column-level `contains()` operator that degraded to a substring comparison on SQLite. The hand-written per-dialect branching is removed, since the operator already handles both backends.\\n\\nUpgrading fully resolves it and no configuration change is required. Existing stored identities are unaffected, as the stored format does not change.\\n\\n## Root cause\\n\\n* `backend/open_webui/models/users.py` — `get_user_by_oauth_sub`, resolves an OAuth or OIDC identity to a local account.\\n* `backend/open_webui/models/users.py` — `get_user_by_scim_external_id`, the same pattern for SCIM.\\n* Reached from the OAuth callback handler and the OAuth token-exchange handler, and from the SCIM user routes.\\n* Affects builds running on SQLite, which is the default database.\\n\\nThe `oauth` and `scim` columns are declared with SQLAlchemy's generic `JSON` type. That type does not implement a containment comparator, so a `contains()` call against it falls back to the generic string operator and compiles to a `LIKE` with the operand wrapped in `%` on both sides. The intent was a JSON containment test; what was emitted was a substring test against the serialized JSON, in which `%` and `_` carry their usual `LIKE` meaning. The PostgreSQL branch was written separately against `JSONB` with an equality comparison and is correct, which is why the defect is confined to the default backend and why it survived review: the two branches look symmetrical and only one of them does what it appears to do.\\n\\n## Proof of concept\\n\\nAgainst a SQLite instance with an OIDC provider configured, two accounts exist: an administrator whose stored subject is `admin_sub_9999`, and an ordinary user whose stored subject is `bob_sub_1234`. Both rows were seeded directly rather than created through a live provider sign-in; the lookup under test was then called as the application calls it.\\n\\nResolving the subject value `%` returns the administrator account. Resolving `admin_sub_%` likewise returns the administrator account. Resolving the correct full values returns the correct accounts, and resolving an unknown value returns nothing, so the failure is visible only when the supplied value contains a wildcard character. A subsequent check with an ordinary subject value containing an underscore showed it matching more than one account, with the returned account determined by row order.\\n\\n## Credits\\n\\nReported by @Classic298.\", \"epss\": {\"percentage\": 0.00334, \"percentile\": 0.26319}, \"ghsa_id\": \"GHSA-wpmr-8h3q-fwj7\", \"github_reviewed_at\": \"2026-09-10T21:23:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-wpmr-8h3q-fwj7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wpmr-8h3q-fwj7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-87016\"}], \"nvd_published_at\": \"2026-09-09T22:18:46Z\", \"published_at\": \"2026-09-10T21:23:25Z\", \"references\": [\"https://github.com/open-webui/open-webui/security/advisories/GHSA-wpmr-8h3q-fwj7\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-87016\", \"https://github.com/open-webui/open-webui/pull/28624\", \"https://github.com/open-webui/open-webui/commit/73c1f5806aeb6345dad5de8f5aa26d1f3d0bef80\", \"https://github.com/open-webui/open-webui/releases/tag/v0.11.1\", \"https://github.com/advisories/GHSA-wpmr-8h3q-fwj7\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-webui/open-webui/security-advisories/GHSA-wpmr-8h3q-fwj7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/open-webui/open-webui\", \"summary\": \"Open WebUI: Sign-in as another user via wildcard characters in the OAuth subject claim on SQLite\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T21:23:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-wpmr-8h3q-fwj7\", \"vulnerabilities\": [{\"first_patched_version\": \"0.11.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"open-webui\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.6.41, < 0.11.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-wpmr-8h3q-fwj7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "open-webui: >= 0.6.41, < 0.11.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-87016"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "open-webui"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-11T19:13:05.194489Z",
+  "provenance": {
+    "content_sha256": "f985ede59a8a206373a875e696802a306e46ae16c8572c09d72aef52b09df2d9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T21:23:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-wpmr-8h3q-fwj7",
+  "status": "active",
+  "title": "Open WebUI: Sign-in as another user via wildcard characters in the OAuth subject claim on SQLite",
+  "updated_at": "2026-09-10T21:23:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-wpmr-8h3q-fwj7"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77691959?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut/followers\", \"following_url\": \"https://api.github.com/users/iaohkut/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut\", \"id\": 77691959, \"login\": \"iaohkut\", \"node_id\": \"MDQ6VXNlcjc3NjkxOTU5\", \"organizations_url\": \"https://api.github.com/users/iaohkut/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88014\", \"cvss\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.3, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n`backend/archive` mounts a zip file as a browsable, syncable rclone `Fs` (e.g. `rclone lsf :zip:downloaded.zip` or `rclone copy :zip:downloaded.zip dest:`). Go's `archive/zip` package does not sanitize `file.Name` - it is taken verbatim from the untrusted zip's central directory. `readZip()` in `backend/archive/zip/zip.go` applies `path.Clean` to the entry name, but this alone cannot fully neutralize a name with more `..` components than real segments preceding them (e.g. `\\\"../../etc/cron.d/evil\\\"` stays exactly as-is after cleaning). When the archive is mounted with an empty root (the common case), there was no check at all that the resulting name stayed inside the archive's own namespace, so it was stored verbatim and returned unchanged by `Object.Remote()`.\\n\\n`fs/sync`/`fs/operations` use `srcObj.Remote()` directly as the destination-relative path when copying between filesystems, so a maliciously crafted zip file can cause `rclone copy`/`sync` to attempt writes outside the intended destination directory on whatever backend it targets - this is the well-known \\\"Zip Slip\\\" vulnerability class (https://security.snyk.io/research/zip-slip-vulnerability) applied to rclone's own zip-mounting backend. It is distinct from `cmd/archive/extract`, which already validates via its own `destPath()` choke point and is not affected.\\n\\n### Details\\nVulnerable code (before fix), `backend/archive/zip/zip.go`, `(*Fs).readZip`:\\n```go\\nfor _, file := range zr.File {\\n\\tremote := strings.Trim(path.Clean(file.Name), \\\"/\\\")\\n\\tif remote == \\\".\\\" { remote = \\\"\\\" }\\n\\tremote = path.Join(f.prefix, remote)\\n\\tif f.root != \\\"\\\" {\\n\\t\\t// Ignore all files outside the root\\n\\t\\tif !strings.HasPrefix(remote, f.root) { continue }\\n\\t\\t...\\n\\t}\\n\\t...\\n\\to := &Object{f: f, remote: remote, ...}\\n\\tdt.Add(o)\\n}\\n```\\nThe escape check only ran when `f.root != \\\"\\\"`, and even then used a bare `strings.HasPrefix` with no boundary check (so `f.root=\\\"foo\\\"` incorrectly also matched a sibling entry `\\\"foobar\\\"`).\\n\\n### PoC\\nBuilt a zip in memory with Go's real `archive/zip` writer (entry name `\\\"../../etc/cron.d/evil\\\"`, not sanitized by the writer either), wrote it to disk, and mounted it via the actual production constructor `zip.New(ctx, localFs, \\\"evil.zip\\\", \\\"\\\", \\\"\\\")`:\\n```\\nzip entry Name=\\\"../../etc/cron.d/evil\\\" -> Object.Remote()=\\\"../../etc/cron.d/evil\\\"\\n```\\nFully outside the archive's own namespace - confirmed via a regression test that mounts the malicious zip through the real `local` backend and inspects the resulting Fs's internal dirtree and every Object's `Remote()`.\\n\\n### Impact\\nA user who runs `rclone copy`/`sync`/`mount` against an untrusted zip file (downloaded, e-mailed, etc.) can have files written outside the intended destination directory on the destination backend, depending on that backend's own confinement. No server compromise or custom remote configuration is required from the attacker - only a crafted zip file and a normal `rclone copy`/`sync` invocation by the victim.\\n\\n### Fix\\nSkip any zip entry whose cleaned+prefixed name still escapes the archive's own namespace, rather than exposing it. Also tightened the pre-existing root filter's weak prefix check.\", \"ghsa_id\": \"GHSA-66hp-wgxq-6f5q\", \"github_reviewed_at\": \"2026-09-10T23:03:16Z\", \"html_url\": \"https://github.com/advisories/GHSA-66hp-wgxq-6f5q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-66hp-wgxq-6f5q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88014\"}], \"nvd_published_at\": \"2026-09-10T16:18:08Z\", \"published_at\": \"2026-09-10T23:03:16Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-66hp-wgxq-6f5q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-88014\", \"https://github.com/rclone/rclone/commit/5dae3adbf571a6cd9ba501eb47397a7e871e1ae0\", \"https://github.com/rclone/rclone/commit/6507e13d5a83789f500af96d7188c302c9d74d98\", \"https://github.com/rclone/rclone/releases/tag/v1.75.1\", \"https://github.com/advisories/GHSA-66hp-wgxq-6f5q\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-66hp-wgxq-6f5q\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone archive/zip: Zip Slip via unsanitized zip entry names lets a malicious archive escape its own namespace\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T23:03:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-66hp-wgxq-6f5q\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.72.0, < 1.75.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-66hp-wgxq-6f5q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: >= 1.72.0, < 1.75.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-88014"
+    ],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-11T19:13:05.123400Z",
+  "provenance": {
+    "content_sha256": "1057ff5a156f27fb57d62a49a76f98af65ca3df3ca160d5ec9b1ea732f15e8f8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T23:03:16Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-66hp-wgxq-6f5q",
+  "status": "active",
+  "title": "rclone archive/zip: Zip Slip via unsanitized zip entry names lets a malicious archive escape its own namespace",
+  "updated_at": "2026-09-10T23:03:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-66hp-wgxq-6f5q"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77691959?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut/followers\", \"following_url\": \"https://api.github.com/users/iaohkut/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut\", \"id\": 77691959, \"login\": \"iaohkut\", \"node_id\": \"MDQ6VXNlcjc3NjkxOTU5\", \"organizations_url\": \"https://api.github.com/users/iaohkut/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/536803?v=4\", \"events_url\": \"https://api.github.com/users/ncw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ncw/followers\", \"following_url\": \"https://api.github.com/users/ncw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ncw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ncw\", \"id\": 536803, \"login\": \"ncw\", \"node_id\": \"MDQ6VXNlcjUzNjgwMw==\", \"organizations_url\": \"https://api.github.com/users/ncw/orgs\", \"received_events_url\": \"https://api.github.com/users/ncw/received_events\", \"repos_url\": \"https://api.github.com/users/ncw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ncw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ncw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ncw\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-88015\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-190\", \"name\": \"Integer Overflow or Wraparound\"}, {\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}], \"description\": \"### Summary\\nWhen `backend/local` is used with `--links`/`-l` (or the `links=true` config option), each symlink is exposed as an rclone object whose content is the target path string, suffixed `.rclonelink`. `Object.Open()` decodes an incoming `fs.RangeOption` via `Decode(o.Size())`, then for a translated-symlink object passes the decoded `offset` straight into `openTranslatedLink`, which indexes the target string directly: `linkdst[offset:]`.\\n\\n`RangeOption.Decode`'s `Start >= 0` branch (an ordinary `Range: bytes=X-` request) sets `offset = o.Start` with no upper bound, unlike its suffix-range branch (`Start < 0`, e.g. `bytes=-N`), which already clamps a too-large value to 0 - the fix for a prior, related crash (issue #6310: \\\"bytes=-90407\\\" against a 5-byte object panicked with \\\"slice bounds out of range\\\", now covered by an existing regression test). The `Start >= 0` branch never received the analogous protection.\\n\\nA `Range: bytes=<hugeStart>-` request sent to `rclone serve http`/`webdav` (or any consumer of `lib/http/serve`'s `Object()`, which parses and decodes the client's own Range header) against a directory containing a symlink therefore reaches `linkdst[offset:]` with offset far beyond the target string's length, and Go panics with \\\"slice bounds out of range\\\" instead of returning an empty read.\\n\\n### Details\\nVulnerable code (before fix):\\n```go\\nfunc (o *Object) openTranslatedLink(offset, limit int64) (lrc io.ReadCloser, err error) {\\n\\tlinkdst, err := os.Readlink(o.path)\\n\\tif err != nil { return nil, err }\\n\\treturn readers.NewLimitedReadCloser(io.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil\\n}\\n```\\n\\n### PoC\\nCalled the real production `Object.Open()` on a translated-symlink object (target length 12) with `&fs.RangeOption{Start: math.MaxInt64, End: -1}`:\\n```\\npanic: runtime error: slice bounds out of range [9223372036854775807:8]\\n  ...backend/local.(*Object).openTranslatedLink\\n  ...backend/local.(*Object).Open\\n```\\n\\n### Impact\\nA remote client can send a single crafted `Range` header against any symlink-backed object exposed by `rclone serve http`/`webdav`/etc (backed by `backend/local` with `--links` enabled) to deterministically panic the request-handling goroutine. Go's `net/http` recovers panics per-connection by default, so this fails the one request/connection rather than crashing the whole server process, and no file handle is left open (the panic occurs before any read handle is acquired) - but it is fully deterministic and remotely triggerable with no authentication or race window needed, unlike some other panic-recovery findings.\\n\\n### Fix\\nClamp `offset` to the length of the target string before slicing, matching how a real file read past EOF behaves (an empty read):\\n```go\\nif offset > int64(len(linkdst)) {\\n\\toffset = int64(len(linkdst))\\n}\\n```\\nNote: the shared `RangeOption.Decode()` also has a related, unaddressed issue - `limit = o.End - o.Start + 1` can itself overflow to a large negative number for a huge `End` - but a fix attempted there during this investigation broke `fs/operations/reopen.go`'s `NewReOpen`, which calls `Decode` with its `h.end` field still at its zero value at that point in construction. Flagged for awareness but not changed here to keep this patch minimal and low-risk.\", \"ghsa_id\": \"GHSA-p6m2-r3w9-mpxw\", \"github_reviewed_at\": \"2026-09-10T22:49:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-p6m2-r3w9-mpxw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-p6m2-r3w9-mpxw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-88015\"}], \"nvd_published_at\": \"2026-09-10T16:18:08Z\", \"published_at\": \"2026-09-10T22:49:27Z\", \"references\": [\"https://github.com/rclone/rclone/security/advisories/GHSA-p6m2-r3w9-mpxw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-88015\", \"https://github.com/rclone/rclone/commit/28bf49d66f94acc3f4f7f318504a706686281af9\", \"https://github.com/rclone/rclone/releases/tag/v1.75.1\", \"https://github.com/advisories/GHSA-p6m2-r3w9-mpxw\"], \"repository_advisory_url\": \"https://api.github.com/repos/rclone/rclone/security-advisories/GHSA-p6m2-r3w9-mpxw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/rclone/rclone\", \"summary\": \"rclone local: crafted Range request against a translated symlink panics (DoS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-10T22:49:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-p6m2-r3w9-mpxw\", \"vulnerabilities\": [{\"first_patched_version\": \"1.75.1\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rclone/rclone\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.75.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-p6m2-r3w9-mpxw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rclone/rclone: <= 1.75.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-88015"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rclone/rclone"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-11T19:13:05.132015Z",
+  "provenance": {
+    "content_sha256": "f69904a9713da775c133f37bd34d42ab27e4a48b0c3f3728f0181a2b9113a007",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-10T22:49:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-p6m2-r3w9-mpxw",
+  "status": "active",
+  "title": "rclone local: crafted Range request against a translated symlink panics (DoS)",
+  "updated_at": "2026-09-10T22:49:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-p6m2-r3w9-mpxw"
+}
