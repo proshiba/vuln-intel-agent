@@ -1,0 +1,64 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59973\", \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe published fix for GHSA-v6ph-xcq9-qxxj / CVE-2026-39885 added a direct hostname denylist for OpenAPI external `$ref` dereferencing, but the latest patched dependency `mcp-from-openapi` 2.3.0 still makes backend-origin requests to loopback when the target is reached through hostname resolution, redirects, or IPv4-mapped IPv6 syntax.\\n\\nFrontMCP latest release v1.2.1 and current main still call `OpenAPIToolGenerator.fromURL()` and `OpenAPIToolGenerator.fromJSON()` from `mcp-from-openapi` 2.3.0 when loading OpenAPI adapters. An attacker who can cause a hosted or multi-user FrontMCP deployment to load an untrusted OpenAPI spec can trigger requests from the server to localhost or private services during tool generation.\\n\\nThis is a latest-version bypass of the previous fix. A direct `http://127.0.0.1` `$ref` control is now denied and produces zero canary hits, while semantically equivalent loopback targets still reach the canary.\\n\\n## Latest versions checked\\n\\n- `frontmcp` npm latest: 1.2.1\\n- `@frontmcp/adapters` npm latest: 1.2.1\\n- `mcp-from-openapi` npm latest: 2.3.0\\n- FrontMCP release tag: v1.2.1, commit db323976c66297d684a3e63bbfe1db6b310f2944\\n- FrontMCP current main checked: c15b79abe8c6a3cb71d4b7a3bafb8190730dc756\\n\\nThe release tag and current main both keep `mcp-from-openapi` 2.3.0 in `package.json` and `libs/adapters/package.json`, and both keep the OpenAPI adapter forwarding untrusted `url`, `spec`, and `loadOptions.refResolution` into `OpenAPIToolGenerator`.\\n\\n## Technical details\\n\\nFrontMCP's OpenAPI adapter reaches the affected dependency paths:\\n\\n- `libs/adapters/src/openapi/openapi.adapter.ts` imports `OpenAPIToolGenerator` from `mcp-from-openapi`.\\n- `loadOpenAPISpec()` calls `OpenAPIToolGenerator.fromURL(this.options.url, ...)` and forwards `loadOptions.refResolution`.\\n- The same method calls `OpenAPIToolGenerator.fromJSON(this.options.spec, ...)` and forwards `loadOptions.refResolution`.\\n\\nIn `mcp-from-openapi` 2.3.0, the patched guard is applied before the HTTP resolver fetches an external `$ref`. It checks the parsed URL hostname string against deny patterns for direct local and private addresses. The resolver does not resolve hostnames before allow or deny decisions, does not pin the validated IP to the fetch, and does not revalidate redirect targets before following them. It also misses IPv4-mapped IPv6 loopback forms.\\n\\nAs a result, these URLs are accepted by the guard but cause a loopback request from the backend:\\n\\n- `http://127.0.0.1.nip.io:<port>/schema.json`, because the hostname string is not a direct IP even though it resolves to 127.0.0.1.\\n- `http://127.0.0.1.nip.io:<port>/redirect`, because the first host passes and the actual request follows a redirect to `http://127.0.0.1:<port>/schema.json`.\\n- `http://[::ffff:127.0.0.1]:<port>/schema.json` and `http://[::ffff:7f00:1]:<port>/schema.json`, because IPv4-mapped IPv6 loopback is not normalized and denied.\\n\\n`OpenAPIToolGenerator.fromURL()` is also still unguarded for the initial OpenAPI spec URL. The PoC includes that as supporting evidence, but the primary report is the external `$ref` fix bypass.\\n\\n## Reproduction\\n\\nThe attached local PoC starts a loopback canary and loads generated OpenAPI specs using `mcp-from-openapi` 2.3.0. The request body schema contains a single external `$ref` for each test case. The canary records every backend-origin request.\\n\\nRun:\\n\\n```bash\\ncd /home/unkn0wn/security_audit/frontmcp-ssrf-poc\\nnode repro-frontmcp-latest-ssrf-bypasses.mjs\\n```\\n\\nImportant output from a fresh run on 2026-05-25:\\n\\n```json\\n{\\\"name\\\":\\\"direct-127-denied-control\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://127.0.0.1:45117/schema.json\\\",\\\"ok\\\":false,\\\"hitCount\\\":0,\\\"hits\\\":[]}\\n{\\\"name\\\":\\\"dns-name-to-127-bypass\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://127.0.0.1.nip.io:45117/schema.json\\\",\\\"ok\\\":true,\\\"hitCount\\\":1,\\\"hits\\\":[{\\\"url\\\":\\\"/schema.json\\\",\\\"host\\\":\\\"127.0.0.1.nip.io:45117\\\",\\\"authorization\\\":null}]}\\n{\\\"name\\\":\\\"dns-name-to-127-bypass-with-allowedHosts\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://127.0.0.1.nip.io:45117/schema.json\\\",\\\"ok\\\":true,\\\"hitCount\\\":1,\\\"hits\\\":[{\\\"url\\\":\\\"/schema.json\\\",\\\"host\\\":\\\"127.0.0.1.nip.io:45117\\\",\\\"authorization\\\":null}]}\\n{\\\"name\\\":\\\"redirect-to-127-after-allowed-host\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://127.0.0.1.nip.io:45117/redirect\\\",\\\"ok\\\":true,\\\"hitCount\\\":2,\\\"hits\\\":[{\\\"url\\\":\\\"/redirect\\\",\\\"host\\\":\\\"127.0.0.1.nip.io:45117\\\",\\\"authorization\\\":null},{\\\"url\\\":\\\"/schema.json\\\",\\\"host\\\":\\\"127.0.0.1:45117\\\",\\\"authorization\\\":null}]}\\n{\\\"name\\\":\\\"ipv4-mapped-ipv6-dotted-bypass\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://[::ffff:127.0.0.1]:45117/schema.json\\\",\\\"ok\\\":true,\\\"hitCount\\\":1,\\\"hits\\\":[{\\\"url\\\":\\\"/schema.json\\\",\\\"host\\\":\\\"[::ffff:7f00:1]:45117\\\",\\\"authorization\\\":null}]}\\n{\\\"name\\\":\\\"ipv4-mapped-ipv6-hex-bypass\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://[::ffff:7f00:1]:45117/schema.json\\\",\\\"ok\\\":true,\\\"hitCount\\\":1,\\\"hits\\\":[{\\\"url\\\":\\\"/schema.json\\\",\\\"host\\\":\\\"[::ffff:7f00:1]:45117\\\",\\\"authorization\\\":null}]}\\n{\\\"name\\\":\\\"external-refs-disabled-control\\\",\\\"kind\\\":\\\"external_ref\\\",\\\"refUrl\\\":\\\"http://127.0.0.1.nip.io:45117/schema.json\\\",\\\"ok\\\":true,\\\"hitCount\\\":0,\\\"hits\\\":[]}\\n```\\n\\nControls:\\n\\n1. Direct loopback `$ref` is denied and the canary records zero requests.\\n2. Numeric IPv4 variants tested as parser controls were denied with zero requests.\\n3. Default `file://` resolution was denied in this runtime.\\n4. Setting `refResolution.allowedProtocols: []` prevents the external request, but this is not the default.\\n\\n## Impact\\n\\nThe previous advisory documented SSRF during untrusted OpenAPI `$ref` dereferencing. The latest patched version still lets an attacker trigger backend-origin requests to loopback or private network services through equivalent URL forms. In hosted or multi-user FrontMCP deployments where users can import or configure OpenAPI specs, this can expose internal admin APIs, metadata-like services, and other network endpoints that external users cannot reach directly.\\n\\nThe impact depends on whether a deployment treats OpenAPI adapter configuration as trusted administrator-only input. If untrusted authenticated users can import specs, this is a high-impact SSRF fix bypass. If only a local administrator can configure OpenAPI specs, the practical severity is lower.\\n\\n## Remediation\\n\\n1. Do not rely on parsed hostname denylist checks for external `$ref` URLs.\\n2. Resolve hostnames before the request and reject loopback, private, link-local, multicast, unspecified, and metadata ranges.\\n3. Normalize IPv4-mapped IPv6 before range checks.\\n4. Revalidate every redirect target before following it, or disable redirects during external `$ref` dereferencing.\\n5. Pin the validated IP to the actual request with a custom dispatcher, lookup hook, or equivalent connect-time control.\\n6. Apply the same protected client to `fromURL()` initial spec loads.\\n7. Consider disabling external refs by default for untrusted OpenAPI specs and requiring explicit allowlists.\\n8. Add regression tests for direct loopback, DNS-to-loopback, redirect-to-loopback, IPv4-mapped IPv6, numeric IP forms, file refs, and disabled external refs.\", \"ghsa_id\": \"GHSA-65h7-9wrw-629c\", \"github_reviewed_at\": \"2026-09-11T22:02:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-65h7-9wrw-629c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-65h7-9wrw-629c\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59973\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-11T22:02:04Z\", \"references\": [\"https://github.com/agentfront/frontmcp/security/advisories/GHSA-65h7-9wrw-629c\", \"https://github.com/advisories/GHSA-65h7-9wrw-629c\"], \"repository_advisory_url\": \"https://api.github.com/repos/agentfront/frontmcp/security-advisories/GHSA-65h7-9wrw-629c\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/agentfront/frontmcp\", \"summary\": \"FrontMCP and mcp-from-openapi have bypass of OpenAPI external $ref SSRF fix\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-11T22:02:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-65h7-9wrw-629c\", \"vulnerabilities\": [{\"first_patched_version\": \"2.5.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"mcp-from-openapi\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.3.0, < 2.5.0\"}, {\"first_patched_version\": \"1.5.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@frontmcp/adapters\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.2.1, < 1.5.0\"}, {\"first_patched_version\": \"1.5.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"frontmcp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.2.1, < 1.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-65h7-9wrw-629c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@frontmcp/adapters: >= 1.2.1, < 1.5.0",
+      "frontmcp: >= 1.2.1, < 1.5.0",
+      "mcp-from-openapi: >= 2.3.0, < 2.5.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-39885",
+      "CVE-2026-59973"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@frontmcp/adapters",
+      "frontmcp",
+      "mcp-from-openapi"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-12T19:11:33.353561Z",
+  "provenance": {
+    "content_sha256": "3915e35e637485a1056faca11b83f0b97debef22f81d77f42eed3a3c911adda8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-11T22:02:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-65h7-9wrw-629c",
+  "status": "active",
+  "title": "FrontMCP and mcp-from-openapi have bypass of OpenAPI external $ref SSRF fix",
+  "updated_at": "2026-09-11T22:02:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-65h7-9wrw-629c"
+}
