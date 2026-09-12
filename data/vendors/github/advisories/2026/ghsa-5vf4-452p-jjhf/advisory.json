@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/74185756?v=4\", \"events_url\": \"https://api.github.com/users/Fr6ey/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Fr6ey/followers\", \"following_url\": \"https://api.github.com/users/Fr6ey/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Fr6ey/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Fr6ey\", \"id\": 74185756, \"login\": \"Fr6ey\", \"node_id\": \"MDQ6VXNlcjc0MTg1NzU2\", \"organizations_url\": \"https://api.github.com/users/Fr6ey/orgs\", \"received_events_url\": \"https://api.github.com/users/Fr6ey/received_events\", \"repos_url\": \"https://api.github.com/users/Fr6ey/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Fr6ey/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Fr6ey/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Fr6ey\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56831\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"## Summary\\n\\nThe Shopper Framework discount management functionality accepts negative discount values without server-side validation.\\n\\nIt was confirmed that negative fixed-amount discounts can be created through the administrative interface, persisted to the database, and subsequently processed by the cart/order calculation pipeline.\\n\\nThe application appears to assume that discount values are always positive but does not enforce this assumption during creation, storage, or calculation.\\n\\nAs a result, malformed discount records can influence financial calculations and produce unintended order totals.\\n\\n---\\n\\n## Affected Product\\n\\n**Package:** shopper/framework\\n\\n**Version Tested:** 2.8.1\\n\\n---\\n\\n## Vulnerability Type\\n\\n* Business Logic Vulnerability\\n* Improper Input Validation (CWE-20)\\n\\n---\\n\\n## Description\\n\\nWhile reviewing the discount functionality, it was discovered that the application accepts negative discount values through the administrative interface.\\n\\nExample values tested:\\n\\n```text\\n-50.00\\n-99,999,999.00\\n```\\n\\nThe application accepted these values without validation and stored them in the database.\\n\\nExample records observed in the `sh_discounts` table:\\n\\n```text\\n1 | QCZ5Y3HESM | fixed_amount | -5000\\n4 | TOZKAHCB4S | fixed_amount | -9999999900\\n```\\n\\nThis demonstrates that negative discount values are successfully persisted.\\n\\n---\\n\\n## Steps to Reproduce\\n\\n### 1. Create a Discount\\n\\nLogin as an administrator.\\n\\nNavigate to:\\n\\n```text\\n/cpanel/discounts\\n```\\n\\nCreate a new discount with the following values:\\n\\n```text\\nType: fixed_amount\\nValue: -99999999\\n```\\n\\nSave the discount.\\n\\n### 2. Observe Successful Creation\\n\\nThe discount is accepted by the application and displayed in the administration interface.\\n\\nExample:\\n\\n```text\\nCode: TOZKAHCB4S\\nAmount: -$99,999,999.00\\n```\\n\\n### 3. Verify Database Persistence\\n\\nInspect the database:\\n\\n```sql\\nselect * from sh_discounts;\\n```\\n\\nObserved entry:\\n\\n```text\\nTOZKAHCB4S | fixed_amount | -9999999900\\n```\\n\\n---\\n\\n## Technical Analysis\\n\\n### Discount Calculation\\n\\nFile:\\n\\n```text\\nvendor/shopper/cart/src/Discounts/DiscountCalculator.php\\n```\\n\\nObserved code:\\n\\n```php\\n$fixedAmount = $discount->value;\\n```\\n\\nThe value is later processed without validation:\\n\\n```php\\n$fixedAmount = min($fixedAmount, $applicableSubtotal);\\n```\\n\\nWhen a negative value is supplied:\\n\\n```php\\nmin(-9999999900, 10000)\\n```\\n\\nreturns:\\n\\n```php\\n-9999999900\\n```\\n\\nallowing the negative value to continue through the calculation pipeline.\\n\\nThe resulting adjustment values are inserted into the database:\\n\\n```php\\nCartLineAdjustment::query()->insert($adjustments);\\n```\\n\\nNo validation was identified to ensure that discount amounts are positive before calculations occur.\\n\\n---\\n\\n### Final Total Calculation\\n\\nFile:\\n\\n```text\\nvendor/shopper/cart/src/Pipelines/Calculate.php\\n```\\n\\nObserved logic:\\n\\n```php\\n$context->total = max(\\n    0,\\n    $context->taxInclusive\\n        ? $context->subtotal - $context->discountTotal\\n        : $context->subtotal - $context->discountTotal + $context->taxTotal\\n);\\n```\\n\\nBecause negative discount values are allowed to reach this stage, financial calculations are performed using malformed discount data.\\n\\nExample:\\n\\n```text\\nSubtotal      = 10000\\nDiscountTotal = -5000\\n```\\n\\nResulting calculation:\\n\\n```text\\n10000 - (-5000)\\n```\\n\\nResult:\\n\\n```text\\n15000\\n```\\n\\nThis demonstrates that negative discount values directly affect order total calculations.\\n\\n---\\n\\n## Impact\\n\\nThe following was confirmed:\\n\\n* Negative discount values are accepted.\\n* Negative discount values are persisted.\\n* Negative discount values are processed by the discount calculation engine.\\n* Negative discount values affect order total calculations.\\n\\nPotential consequences include:\\n\\n* Incorrect pricing calculations.\\n* Financial data integrity issues.\\n* Unexpected order totals.\\n* Violated assumptions within downstream pricing logic.\\n* Future vulnerabilities if additional components assume discount values are always positive.\\n\\nBecause Shopper is a headless e-commerce administration framework and does not ship with a customer-facing storefront, it was not verified a customer-facing exploitation path.\\n\\nHowever, malformed discount records currently propagate through pricing calculations without validation.\\n\\n---\\n\\n## Recommendation\\n\\nImplement server-side validation enforcing positive discount values before persistence and before entering the calculation pipeline.\\n\\nSuggested validation:\\n\\n### Fixed Amount Discounts\\n\\n```text\\nvalue > 0\\n```\\n\\n### Percentage Discounts\\n\\n```text\\n0 < value <= 100\\n```\\n\\nAdditionally, existing discount records should be validated before calculation to prevent malformed data from influencing pricing logic.\\n\\n---\\n\\n## Environment\\n\\n```text\\nShopper Framework 2.8.1\\nLaravel 12.61.1\\nPHP 8.4.16\\nSQLite\\n```\", \"ghsa_id\": \"GHSA-5vf4-452p-jjhf\", \"github_reviewed_at\": \"2026-09-11T21:28:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-5vf4-452p-jjhf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5vf4-452p-jjhf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56831\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-11T21:28:00Z\", \"references\": [\"https://github.com/shopperlabs/shopper/security/advisories/GHSA-5vf4-452p-jjhf\", \"https://github.com/advisories/GHSA-5vf4-452p-jjhf\"], \"repository_advisory_url\": \"https://api.github.com/repos/shopperlabs/shopper/security-advisories/GHSA-5vf4-452p-jjhf\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/shopperlabs/shopper\", \"summary\": \"Shopper: Negative discount values accepted and propagated through order calculation pipeline\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-11T21:28:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-5vf4-452p-jjhf\", \"vulnerabilities\": [{\"first_patched_version\": \"2.9.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"shopper/framework\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.9.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5vf4-452p-jjhf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "shopper/framework: < 2.9.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-56831"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "shopper/framework"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-12T19:11:33.375302Z",
+  "provenance": {
+    "content_sha256": "71f9e7d8edfa98e0efbb99b45e5e92a537c3928a16fe3dc46d32b2cbc332b0c3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-11T21:28:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5vf4-452p-jjhf",
+  "status": "active",
+  "title": "Shopper: Negative discount values accepted and propagated through order calculation pipeline",
+  "updated_at": "2026-09-11T21:28:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5vf4-452p-jjhf"
+}
