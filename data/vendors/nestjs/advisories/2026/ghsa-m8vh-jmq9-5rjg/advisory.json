@@ -1,0 +1,55 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"zerovulnlabs\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/322870032?v=4\", \"events_url\": \"https://api.github.com/users/zerovulnlabs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zerovulnlabs/followers\", \"following_url\": \"https://api.github.com/users/zerovulnlabs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zerovulnlabs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zerovulnlabs\", \"id\": 322870032, \"login\": \"zerovulnlabs\", \"node_id\": \"U_kgDOEz6bEA\", \"organizations_url\": \"https://api.github.com/users/zerovulnlabs/orgs\", \"received_events_url\": \"https://api.github.com/users/zerovulnlabs/received_events\", \"repos_url\": \"https://api.github.com/users/zerovulnlabs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zerovulnlabs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zerovulnlabs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zerovulnlabs\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": null, \"vector_string\": null}}, \"cwe_ids\": [\"CWE-248\", \"CWE-674\"], \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}, {\"cwe_id\": \"CWE-674\", \"name\": \"Uncontrolled Recursion\"}], \"description\": \"| Field | Value |\\r\\n| --- | --- |\\r\\n| Ecosystem | npm |\\r\\n| Package | `@nestjs/microservices` |\\r\\n| Affected versions | `>= 12.0.0, < 12.0.2` and `< 11.2.4` |\\r\\n| Patched versions | `12.0.2` and `11.2.4` (upgrade to `12.0.3` / `11.2.5`) |\\r\\n| Severity | High |\\r\\n| CVSS v3.1 | `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H` (7.5) |\\r\\n| CWE | CWE-674 (Uncontrolled Recursion), CWE-248 (Uncaught Exception) |\\r\\n\\r\\n### Summary\\r\\n\\r\\nA single message whose `pattern` is a deeply nested object terminates a NestJS microservice that uses the TCP or\\r\\nRabbitMQ transport. The server serialized the client-supplied pattern with `JSON.stringify` to derive the handler\\r\\nlookup key; on deeply nested input this throws `RangeError: Maximum call stack size exceeded`. The exception escaped\\r\\nthe asynchronous message handler as an unhandled promise rejection, which terminates the Node.js process under the\\r\\ndefault `--unhandled-rejections=throw`.\\r\\n\\r\\n### Impact\\r\\n\\r\\nDenial of service, one message per crash, repeatable. The attacker needs to be able to reach the transport: connect\\r\\nto the TCP transport's port, or publish to the queue or exchange the service consumes from. The TCP transport\\r\\nperforms no authentication by default, so on a reachable port this requires nothing else.\\r\\n\\r\\nOnly the **TCP** and **RabbitMQ** transports are affected. The other transports take the pattern as a string from the\\r\\nbroker topic or channel and never serialize a client-supplied object to build it.\\r\\n\\r\\n### Details\\r\\n\\r\\nIn `ServerTCP#handleMessage` and `ServerRMQ#handleMessage` the pattern was stringified without a guard:\\r\\n\\r\\n```ts\\r\\nconst pattern = isString(packet.pattern)\\r\\n  ? packet.pattern\\r\\n  : JSON.stringify(packet.pattern);\\r\\n```\\r\\n\\r\\n`JSON.parse` accepts nesting depths that `JSON.stringify` cannot re-serialize, because `JSON.stringify` recurses\\r\\nnatively, so an attacker can craft a payload that parses successfully on arrival and then throws when the pattern is\\r\\nconverted back to a string. Neither transport attached a rejection handler to the promise returned by\\r\\n`handleMessage`, so the `RangeError` propagated out as an unhandled rejection.\\r\\n\\r\\n### Proof of concept\\r\\n\\r\\nAgainst a NestJS microservice on the TCP transport (default port 3001). The nested JSON is built as text rather than\\r\\nwith `JSON.stringify`, which is what makes the payload serializable by the attacker but not by the victim:\\r\\n\\r\\n```js\\r\\nconst { connect } = require('node:net');\\r\\n\\r\\nconst DEPTH = 100_000;\\r\\nconst pattern = '{\\\"nested\\\":'.repeat(DEPTH) + '{}' + '}'.repeat(DEPTH);\\r\\nconst payload = `{\\\"pattern\\\":${pattern},\\\"data\\\":null,\\\"id\\\":\\\"1\\\"}`;\\r\\n\\r\\nconst socket = connect(3001, '127.0.0.1', () => {\\r\\n  // Nest's TCP framing is <byteLength>#<json>\\r\\n  socket.write(`${Buffer.byteLength(payload)}#${payload}`);\\r\\n});\\r\\n```\\r\\n\\r\\nThe service exits with `RangeError: Maximum call stack size exceeded`. The equivalent payload published to the\\r\\nconsumed queue crashes a RabbitMQ-transport service.\\r\\n\\r\\n### Patches\\r\\n\\r\\nFixed in **12.0.2** and **11.2.4**.\\r\\n\\r\\n- Incoming patterns are converted through a guarded `Server#getPatternAsString`, which falls back to a sentinel value\\r\\n  that matches no handler. Such a message now receives the ordinary \\\"no message handler\\\" response (TCP) or is\\r\\n  negatively acknowledged (RabbitMQ) instead of crashing the process.\\r\\n- Rejections escaping `handleMessage` in both transports are routed to `handleError` rather than left unhandled.\\r\\n\\r\\n### Workarounds\\r\\n\\r\\nIf you cannot upgrade, restrict network access to the transport so that only trusted peers can reach it. Running the\\r\\nprocess with `--unhandled-rejections=warn` prevents the crash but leaves the message unprocessed and is not a\\r\\nsubstitute for the fix.\\r\\n\\r\\n### Credit\\r\\n\\r\\nReported by ZeroVuln Labs.\", \"ghsa_id\": \"GHSA-m8vh-jmq9-5rjg\", \"html_url\": \"https://github.com/nestjs/nest/security/advisories/GHSA-m8vh-jmq9-5rjg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m8vh-jmq9-5rjg\"}], \"private_fork\": null, \"published_at\": \"2026-09-15T08:38:29Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/23244943?v=4\", \"events_url\": \"https://api.github.com/users/kamilmysliwiec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kamilmysliwiec/followers\", \"following_url\": \"https://api.github.com/users/kamilmysliwiec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kamilmysliwiec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kamilmysliwiec\", \"id\": 23244943, \"login\": \"kamilmysliwiec\", \"node_id\": \"MDQ6VXNlcjIzMjQ0OTQz\", \"organizations_url\": \"https://api.github.com/users/kamilmysliwiec/orgs\", \"received_events_url\": \"https://api.github.com/users/kamilmysliwiec/received_events\", \"repos_url\": \"https://api.github.com/users/kamilmysliwiec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kamilmysliwiec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kamilmysliwiec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kamilmysliwiec\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"Remote process termination via a deeply nested microservice message pattern\", \"updated_at\": \"2026-09-15T08:38:29Z\", \"url\": \"https://api.github.com/repos/nestjs/nest/security-advisories/GHSA-m8vh-jmq9-5rjg\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"\", \"name\": \"@nestjs/microservices\"}, \"patched_versions\": \"12.0.2 and 11.2.4\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 12.0.0, < 12.0.2 and < 11.2.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "nestjs:ghsa-m8vh-jmq9-5rjg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@nestjs/microservices: >= 12.0.0, < 12.0.2 and < 11.2.4"
+    ],
+    "cves": [],
+    "fixed_versions": [
+      "@nestjs/microservices: 12.0.2 and 11.2.4"
+    ],
+    "mitigations": [],
+    "products": [
+      "@nestjs/microservices"
+    ],
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-15T19:13:38.090324Z",
+  "provenance": {
+    "content_sha256": "aa5fd2bceca83f9b07c9fe22e6610732da148c3c7992ce05aa6ad6b1696f8e42",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-15T08:38:29Z",
+  "schema_version": 1,
+  "source_id": "nestjs_github",
+  "source_url": "https://github.com/nestjs/nest/security/advisories/GHSA-m8vh-jmq9-5rjg",
+  "status": "active",
+  "title": "Remote process termination via a deeply nested microservice message pattern",
+  "updated_at": "2026-09-15T08:38:29Z",
+  "vendor": "NestJS",
+  "vendor_advisory_id": "GHSA-m8vh-jmq9-5rjg"
+}
