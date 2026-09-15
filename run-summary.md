@@ -1,32 +1,31 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-09-14T19:09:27.197905+00:00
-- Completed: 2026-09-14T19:20:53.544091+00:00
+- Started: 2026-09-15T19:09:09.091751+00:00
+- Completed: 2026-09-15T19:21:22.437122+00:00
 
 ## Changes
 
-- new: 169
-- quarantined: 8
-- unchanged: 2090
-- updated: 111
+- new: 155
+- quarantined: 7
+- unchanged: 2128
+- updated: 197
 
 ## Priorities
 
-- INFO: 2170
-- P1: 7
-- P3: 201
+- INFO: 2253
+- P1: 36
+- P3: 198
 
 ## Source outcomes
 
-- failed: 8
-- not_modified: 77
+- failed: 7
+- not_modified: 76
 - partial: 0
-- success: 81
+- success: 83
 
 ## Unsuccessful sources
 
-- atlassian (failed, html): records=0, parse_failures=0 — html: atlassian: 1 advisory detail fetch(es) failed: atlassian: host is not allowed: auth.atlassian.com
 - envoy_github (failed, json_api): records=0, parse_failures=0 — json_api: envoy_github: JSON exceeds configured limit of 100 items
 - gitea_github (failed, json_api): records=0, parse_failures=0 — json_api: gitea_github: JSON exceeds configured limit of 100 items
 - github_enterprise (failed, html): records=0, parse_failures=0 — html: github_enterprise: configured HTML selector matched zero advisory records
