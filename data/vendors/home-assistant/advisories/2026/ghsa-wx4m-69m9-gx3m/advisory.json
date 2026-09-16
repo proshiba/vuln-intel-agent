@@ -1,0 +1,65 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "error": "OPENAI_API_KEY or LLM_MODEL is not configured",
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "input_hash": "1d52ee9430bc74f3d3897f2ff9e4e70bcb6da67cdaad8461ba3e290911cceef5",
+    "prompt_version": "2026-07-16",
+    "recommended_actions": [],
+    "status": "skipped",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"author\": null, \"closed_at\": null, \"collaborating_teams\": null, \"collaborating_users\": null, \"created_at\": null, \"credits\": [{\"login\": \"pwnpanda\", \"type\": \"reporter\"}], \"credits_detailed\": [{\"state\": \"accepted\", \"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5609743?v=4\", \"events_url\": \"https://api.github.com/users/pwnpanda/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/pwnpanda/followers\", \"following_url\": \"https://api.github.com/users/pwnpanda/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/pwnpanda/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/pwnpanda\", \"id\": 5609743, \"login\": \"pwnpanda\", \"node_id\": \"MDQ6VXNlcjU2MDk3NDM=\", \"organizations_url\": \"https://api.github.com/users/pwnpanda/orgs\", \"received_events_url\": \"https://api.github.com/users/pwnpanda/received_events\", \"repos_url\": \"https://api.github.com/users/pwnpanda/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/pwnpanda/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/pwnpanda/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/pwnpanda\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-91130\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": null, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.8, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:A/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H\"}}, \"cwe_ids\": [\"CWE-80\"], \"cwes\": [{\"cwe_id\": \"CWE-80\", \"name\": \"Improper Neutralization of Script-Related HTML Tags in a Web Page (Basic XSS)\"}], \"description\": \"### Summary\\r\\nAn authenticated party can add a malicious name to any statistics-capable entity, allowing for\\r\\nCross-Site Scripting attacks against anyone who views a Statistics Graph card containing that\\r\\nentity, when they hover over any data point on the chart.\\r\\n\\r\\n**Payload**\\r\\n<img width=\\\"1529\\\" height=\\\"441\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/6926ce53-75fb-455a-bd4e-0c5281e8bed8\\\" />\\r\\n\\r\\n**Payload triggering**\\r\\n<img width=\\\"835\\\" height=\\\"469\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/0bb9d17a-c123-4d44-8471-35097f65ddd2\\\" />\\r\\n\\r\\nAn alternative, and more impactful scenario, is that the entity gets a malicious name from the\\r\\nprovider of the integration (e.g. Tibber, Shelly, or any HACS integration), and is exploited\\r\\nthat way through the default name — without requiring any direct access to the Home Assistant\\r\\ninstance. This is the same supply-chain vector as CVE-2025-62172.\\r\\n\\r\\n\\r\\n### Details\\r\\n\\r\\nThe Statistics Graph card renders entity names in ECharts tooltips as raw HTML. The offending\\r\\nline is in `src/components/chart/statistics-chart.ts`:\\r\\n\\r\\nhttps://github.com/home-assistant/frontend/blob/c13a80ce5e7ae39f0262444e2b6295a074a96732/src/components/chart/statistics-chart.ts#L236\\r\\n\\r\\nWhere **_`param.seriesName`_** is interpolated verbatim into the returned HTML string:\\r\\n\\r\\n```\\r\\nreturn `${time}${param.marker} ${param.seriesName}: ${value}`;\\r\\n```\\r\\n\\r\\nNo call to `filterXSS()` is made — unlike the Energy dashboard chart, which was patched as part\\r\\nof CVE-2025-62172:\\r\\n\\r\\n```\\r\\n// FIXED in energy-chart-options.ts:268\\r\\nreturn `${param.marker} ${filterXSS(param.seriesName!)}: ...`;\\r\\n```\\r\\n\\r\\nThe `statistics-chart` component was not updated when the Energy chart was patched, leaving the\\r\\nsame class of vulnerability in place.\\r\\n\\r\\nThe existing entity and payload used for CVE-2025-62172 is also a valid exploit for this vulnerability:\\r\\n<img width=\\\"962\\\" height=\\\"500\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/35c84dcd-64d4-47b6-8df2-6c8b63cac880\\\" />\\r\\n\\r\\n\\r\\nThe name value flows through the following chain:\\r\\n\\r\\n1. `name` is set from `getStatisticLabel(this.hass, statistic_id, meta)`:\\r\\n   https://github.com/home-assistant/frontend/blob/c13a80ce5e7ae39f0262444e2b6295a074a96732/src/components/chart/statistics-chart.ts#L411\\r\\n\\r\\n2. `getStatisticLabel` is defined here and calls `computeStateName(entity)`:\\r\\n   https://github.com/home-assistant/frontend/blob/c13a80ce5e7ae39f0262444e2b6295a074a96732/src/data/recorder.ts#L329-L339\\r\\n\\r\\n3. `computeStateName` is defined here — no HTML encoding is applied:\\r\\n   https://github.com/home-assistant/frontend/blob/c13a80ce5e7ae39f0262444e2b6295a074a96732/src/common/entity/compute_state_name.ts\\r\\n\\r\\nThe only transformation applied to the name is replacing underscores with spaces\\r\\n(`computeObjectId(entityId).replace(/_/g, \\\" \\\")`), which does not prevent HTML injection.\\r\\n\\r\\n\\r\\n**NB:** Do note that only the fields `Mean, State, Sum and Change` are vulnerable. The top 3 (Min, Max, Mean) or the bottom 3 (State, Sum, Change) are selected by default though, making it vulnerable by default:\\r\\n<img width=\\\"105\\\" height=\\\"216\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/7a784c90-cca5-46da-bcb9-6942ad81da0c\\\" />\\r\\n\\r\\nAnother requirement is that the Chart Type is of type Line, not Bar, which is also the default:\\r\\n<img width=\\\"133\\\" height=\\\"91\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/4f131495-9000-4a80-808b-bf4be9f7a2f6\\\" />\\r\\n\\r\\n\\r\\n\\r\\n---\\r\\n\\r\\n### PoC\\r\\n\\r\\n1. In **Settings → Devices & Services → Helpers**, click **+ Create Helper**. (For testing)\\r\\n\\r\\n2. Choose **Template** → **Template sensor**. Fill in the form:\\r\\n   - **Name:** `test <img src=x onerror=alert(document.domain) />`\\r\\n   - **State template:** `{{0.00000001*as_timestamp(states('sensor.date_time_iso'))}}`\\r\\n   - **Unit of measurement:** `kWh`\\r\\n   - **State class:** `Measurement`\\r\\n   - Click **Submit**.\\r\\n\\r\\n<img width=\\\"392\\\" height=\\\"741\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/6a9b2c65-93fb-4d20-89b8-5a1f47a2bcb0\\\" />\\r\\n\\r\\n\\r\\n3. Open a dashboard and add a **Statistics Graph** card targeting the new sensor:\\r\\n\\r\\n\\r\\n<img width=\\\"694\\\" height=\\\"720\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/83996d12-d5ba-467a-9ca1-cbc46246ddff\\\" />\\r\\n\\r\\n**NB:** Set time-window to 5 minutes for ease of testing so you see data quickly\\r\\n\\r\\n\\r\\n4. Hover over any data point on the chart.\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n5. The `onerror` handler fires — `alert(document.domain)` executes in the browser or HTML-injection appears depending on the payload\\r\\n\\r\\n\\r\\n** Exact helper as described here**\\r\\n<img width=\\\"802\\\" height=\\\"441\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/09284c10-bc39-410a-aff0-307e0bfd0502\\\" />\\r\\n\\r\\n**Own sensor**\\r\\n<img width=\\\"962\\\" height=\\\"500\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/35c84dcd-64d4-47b6-8df2-6c8b63cac880\\\" />\\r\\n\\r\\n**Own sensor 2**\\r\\n<img width=\\\"835\\\" height=\\\"469\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/0bb9d17a-c123-4d44-8471-35097f65ddd2\\\" />\\r\\n---\\r\\n\\r\\n### Impact\\r\\n\\r\\nThe vulnerability can be exploited remotely via the supply-chain vector: any integration that\\r\\nautomatically names entities (e.g. energy providers like Tibber) could deliver the payload\\r\\nwithout requiring the attacker to have any account on the target Home Assistant instance. This\\r\\nmirrors the exact attack path described in CVE-2025-62172. The most likely exploit is also through energy providers due to them providing multiple entities compatible with statistic graphs.\\r\\n\\r\\nCompared to CVE-2025-62172, this has the requirement that you add a Statistics Graph to your dashboard (or somehow view the entity in a Statistics Graph through other means, if such a method exists). Otherwise the attack flow is identical.\\r\\nSuggested CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:A/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H\\r\\n\\r\\nThe root cause — missing `filterXSS()` on `param.seriesName` — is identical to the already-fixed\\r\\nEnergy dashboard. The Statistics Graph card, which uses a shared `statistics-chart` component,\\r\\nwas not included in the previous fix scope.\\r\\n\\r\\nCredit: Robin Lunde - [https://robinlunde.com](https://robinlunde.com)\", \"ghsa_id\": \"GHSA-wx4m-69m9-gx3m\", \"html_url\": \"https://github.com/home-assistant/core/security/advisories/GHSA-wx4m-69m9-gx3m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-wx4m-69m9-gx3m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-91130\"}], \"private_fork\": null, \"published_at\": \"2026-09-16T09:44:46Z\", \"publisher\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/295814934?v=4\", \"events_url\": \"https://api.github.com/users/JC0liver/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JC0liver/followers\", \"following_url\": \"https://api.github.com/users/JC0liver/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JC0liver/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JC0liver\", \"id\": 295814934, \"login\": \"JC0liver\", \"node_id\": \"U_kgDOEaHHFg\", \"organizations_url\": \"https://api.github.com/users/JC0liver/orgs\", \"received_events_url\": \"https://api.github.com/users/JC0liver/received_events\", \"repos_url\": \"https://api.github.com/users/JC0liver/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JC0liver/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JC0liver/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JC0liver\", \"user_view_type\": \"public\"}, \"severity\": \"high\", \"state\": \"published\", \"submission\": null, \"summary\": \"XSS in Statistics Graph Card\", \"updated_at\": \"2026-09-16T09:44:46Z\", \"url\": \"https://api.github.com/repos/home-assistant/core/security-advisories/GHSA-wx4m-69m9-gx3m\", \"vulnerabilities\": [{\"package\": {\"ecosystem\": \"pip\", \"name\": \"Home Assistant\"}, \"patched_versions\": \">2026.06\", \"vulnerable_functions\": [], \"vulnerable_version_range\": \"2025.1.4<\"}], \"withdrawn_at\": null}",
+  "canonical_id": "home-assistant:ghsa-wx4m-69m9-gx3m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "Home Assistant: 2025.1.4<"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2025-62172",
+      "CVE-2026-91130"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:A/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+    "fixed_versions": [
+      "Home Assistant: >2026.06"
+    ],
+    "mitigations": [],
+    "products": [
+      "Home Assistant"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-16T19:13:50.095926Z",
+  "provenance": {
+    "content_sha256": "73b7d8db479ac635078a2fc82cd567d750382959bf564a2bb4c5cc1a4f869ba2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-16T09:44:46Z",
+  "schema_version": 1,
+  "source_id": "home_assistant_github",
+  "source_url": "https://github.com/home-assistant/core/security/advisories/GHSA-wx4m-69m9-gx3m",
+  "status": "active",
+  "title": "XSS in Statistics Graph Card",
+  "updated_at": "2026-09-16T09:44:46Z",
+  "vendor": "Home Assistant",
+  "vendor_advisory_id": "GHSA-wx4m-69m9-gx3m"
+}

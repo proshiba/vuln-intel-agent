@@ -1,0 +1,65 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/93225934?v=4\", \"events_url\": \"https://api.github.com/users/ERobertGII/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ERobertGII/followers\", \"following_url\": \"https://api.github.com/users/ERobertGII/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ERobertGII/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ERobertGII\", \"id\": 93225934, \"login\": \"ERobertGII\", \"node_id\": \"U_kgDOBY6Dzg\", \"organizations_url\": \"https://api.github.com/users/ERobertGII/orgs\", \"received_events_url\": \"https://api.github.com/users/ERobertGII/received_events\", \"repos_url\": \"https://api.github.com/users/ERobertGII/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ERobertGII/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ERobertGII/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ERobertGII\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/142698?v=4\", \"events_url\": \"https://api.github.com/users/rossabaker/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/rossabaker/followers\", \"following_url\": \"https://api.github.com/users/rossabaker/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/rossabaker/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/rossabaker\", \"id\": 142698, \"login\": \"rossabaker\", \"node_id\": \"MDQ6VXNlcjE0MjY5OA==\", \"organizations_url\": \"https://api.github.com/users/rossabaker/orgs\", \"received_events_url\": \"https://api.github.com/users/rossabaker/received_events\", \"repos_url\": \"https://api.github.com/users/rossabaker/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/rossabaker/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/rossabaker/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/rossabaker\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-69205\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-444\", \"name\": \"Inconsistent Interpretation of HTTP Requests ('HTTP Request/Response Smuggling')\"}], \"description\": \"## Summary\\n\\nEmber's HTTP/1.1 header parser matches the `Transfer-Encoding` header value\\nwith a case-sensitive substring test (`hValue.contains(\\\"chunked\\\")`). RFC\\n9112 §7 requires transfer-coding names to be compared case-insensitively. A\\nrequest carrying `Transfer-Encoding: Chunked` (capital C) is therefore not\\nrecognised as chunked, and Ember falls back to framing by `Content-Length`\\n(or zero if absent) while a compliant intermediary frames the same bytes by\\nchunked encoding. The two parsers then disagree on where the request body\\nends, enabling HTTP request smuggling (TE.CL / TE.0).\\n\\nThe same line of code admits two further variants:\\n\\n- The substring test misfires on `Transfer-Encoding: notchunked` (an inverse\\n  desync — Ember treats it as chunked while a compliant intermediary\\n  rejects the unknown coding).\\n- Header field bytes are decoded with the platform-default charset. Under\\n  UTF-8 the wire bytes `E2 84 AA` decode to U+212A KELVIN SIGN, which\\n  `String.equalsIgnoreCase` Unicode-case-folds to `k`, so\\n  `Transfer-Encoding: chun<U+212A>ed` matches `chunked` once the comparison\\n  is made case-insensitive without also pinning the decode to ISO-8859-1.\\n\\n## Impact\\n\\n### Server\\n\\nRequest smuggling when ember-server is an origin behind an intermediary that\\nhonours `Transfer-Encoding` case-insensitively per RFC, forwards the header\\nvalue verbatim, and reuses keep-alive connections to the backend:\\n\\n- Front-end security bypass: the smuggled request reaches paths the\\n  intermediary's ACL/auth layer would have blocked, with attacker-chosen\\n  method and headers.\\n- Cross-user request hijack: a partial smuggled prefix left in Ember's\\n  connection buffer is concatenated with the next victim's request on the\\n  same pooled backend connection, exposing its headers (e.g. `Cookie`,\\n  `Authorization`) to the attacker.\\n- Cache poisoning: the smuggled response is associated with the next request\\n  key in a caching proxy.\\n\\n### Client\\n\\nember-client shares the same `HeaderP.parse` on the response path, enabling\\nresponse smuggling when http4s is used as a gateway. This is less severe: it\\nrequires a malicious or compromised upstream rather than an anonymous remote\\nclient.\\n\\n## Preconditions\\n\\n- Unauthenticated remote attacker (server)\\n- ember-server as origin behind a keep-alive intermediary\\n- Intermediary treats `Transfer-Encoding` case-insensitively (per RFC) and\\n  forwards the header value without lowercasing it\\n- Malicious or compromised upstream (client)\\n\\n## Workarounds\\n\\n- Intermediary fully buffers and re-encodes request bodies (e.g. nginx with\\n  default `proxy_request_buffering on`)\\n- Intermediary normalises the `Transfer-Encoding` value (lowercases the\\n  token) before forwarding\\n- Disable backend keep-alive between the intermediary and Ember\", \"ghsa_id\": \"GHSA-9998-894r-fwvr\", \"github_reviewed_at\": \"2026-09-15T19:54:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-9998-894r-fwvr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9998-894r-fwvr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-69205\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-15T19:54:25Z\", \"references\": [\"https://github.com/http4s/http4s/security/advisories/GHSA-9998-894r-fwvr\", \"https://github.com/http4s/http4s/commit/5e88b2e7b4e6ea2f0c61040a4bc9de0d73e51217\", \"https://github.com/http4s/http4s/releases/tag/v0.23.35\", \"https://github.com/http4s/http4s/releases/tag/v1.0.0-M47\", \"https://github.com/advisories/GHSA-9998-894r-fwvr\"], \"repository_advisory_url\": \"https://api.github.com/repos/http4s/http4s/security-advisories/GHSA-9998-894r-fwvr\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/http4s/http4s\", \"summary\": \"Http4s Ember Transfer-Encoding value parsing (TE.CL / TE.0 request smuggling)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-15T19:54:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-9998-894r-fwvr\", \"vulnerabilities\": [{\"first_patched_version\": \"0.23.35\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.http4s:http4s-ember-core_3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.23.34\"}, {\"first_patched_version\": \"0.23.35\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.http4s:http4s-ember-core_2.13\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.23.34\"}, {\"first_patched_version\": \"0.23.35\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.http4s:http4s-ember-core_2.12\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.23.34\"}, {\"first_patched_version\": \"1.0.0-M47\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.http4s:http4s-ember-core_2.13\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0-M1, <= 1.0.0-M46\"}, {\"first_patched_version\": \"1.0.0-M47\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.http4s:http4s-ember-core_3\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0-M1, <= 1.0.0-M46\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9998-894r-fwvr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.http4s:http4s-ember-core_2.12: <= 0.23.34",
+      "org.http4s:http4s-ember-core_2.13: <= 0.23.34",
+      "org.http4s:http4s-ember-core_2.13: >= 1.0.0-M1, <= 1.0.0-M46",
+      "org.http4s:http4s-ember-core_3: <= 0.23.34",
+      "org.http4s:http4s-ember-core_3: >= 1.0.0-M1, <= 1.0.0-M46"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-69205"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.http4s:http4s-ember-core_2.12",
+      "org.http4s:http4s-ember-core_2.13",
+      "org.http4s:http4s-ember-core_3"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-16T19:13:43.377290Z",
+  "provenance": {
+    "content_sha256": "b076a69066c54a57d888c50c3a10c896e323bd5d1096ac5743101557ee67e92b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-15T19:54:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9998-894r-fwvr",
+  "status": "active",
+  "title": "Http4s Ember Transfer-Encoding value parsing (TE.CL / TE.0 request smuggling)",
+  "updated_at": "2026-09-15T19:54:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9998-894r-fwvr"
+}

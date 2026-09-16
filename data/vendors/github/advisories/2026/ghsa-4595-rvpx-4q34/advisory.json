@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/61448100?v=4\", \"events_url\": \"https://api.github.com/users/blankshiro/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/blankshiro/followers\", \"following_url\": \"https://api.github.com/users/blankshiro/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/blankshiro/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/blankshiro\", \"id\": 61448100, \"login\": \"blankshiro\", \"node_id\": \"MDQ6VXNlcjYxNDQ4MTAw\", \"organizations_url\": \"https://api.github.com/users/blankshiro/orgs\", \"received_events_url\": \"https://api.github.com/users/blankshiro/received_events\", \"repos_url\": \"https://api.github.com/users/blankshiro/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/blankshiro/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/blankshiro/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/blankshiro\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61554\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"### Summary\\nThe `http_poll` C2 transport accepts attacker-controlled HTTP polling sessions before CBOR `MsgAuth` authentication is completed. A remote unauthenticated attacker can create arbitrary polling sessions and send request bodies that are forwarded into the C2 dispatch path. This can consume server resources and trigger pre-auth C2 processing.\\n\\n### Details\\nThe plain HTTP C2 server starts the HTTP polling listener and forwards requests into `HandleHTTPServerSession`:\\n```go\\n// core/internal/cc/server/c2_http_server.go\\nmux.HandleFunc(c2Path, func(w http.ResponseWriter, req *http.Request) {\\n    stream, err := transport.HandleHTTPServerSession(w, req, &live.RuntimeConfig.MalleableC2)\\n    ...\\n    if stream != nil {\\n        go cborStreamAccept(transport.NewStreamTransport(stream, req.RemoteAddr))\\n    }\\n})\\n```\\nThe HTTP polling handler accepts an attacker-supplied `sessionID` and `init=1` cookie, then creates and stores a server-side stream before authentication:\\n\\n```go\\n// core/internal/transport/c2channel_http.go\\nif isInit {\\n    stream = newHTTPServerStream(sessionID)\\n    w.WriteHeader(http.StatusOK)\\n    return stream, nil\\n}\\n```\\nPOST bodies for that unauthenticated session are read and queued before CBOR authentication rejects them:\\n```go\\n// core/internal/transport/c2channel_http.go\\ncase http.MethodPost:\\n    data, err := io.ReadAll(req.Body)\\n    if err == nil && len(data) > 0 {\\n        select {\\n        case stream.readCh <- data:\\n            w.WriteHeader(http.StatusOK)\\n        ...\\n        }\\n    }\\n```\\nAuthentication only happens later in the C2 dispatch layer:\\n```go\\n// core/internal/cc/server/dispatcher.go\\nsecureConn := transport.NewSecureConn(t)\\n...\\nn, err := secureConn.Read(authFrame)\\n```\\n\\n### PoC\\n1. Start the C2 server in a lab environment with the HTTP polling transport exposed, for example with `--http-port 12345`.\\n2. Send an unauthenticated HTTP POST to the default polling path `/api/v1/telemetry` with a random `sessionID` cookie and the `init=1` cookie value.\\n3. Send a second unauthenticated HTTP POST to `/api/v1/telemetry` using the same `sessionID`, with a request body containing repeated `A` bytes.\\n4. Observe that both unauthenticated requests return HTTP `200`.\\n5. Observe the C2 server log showing attacker-controlled bytes reaching the encrypted C2 frame parser, for example: `read: invalid encrypted chunk length: 1094795585`.\\n6. `1094795585` is `0x41414141`, which corresponds to `AAAA`, confirming unauthenticated request body data reached `cborProtocolDispatch` before CBOR `MsgAuth` authentication.\\n7. Repeat the request sequence concurrently to increase server resource usage and log volume.\\n\\n### Impact\\n- Remote unauthenticated attackers can create arbitrary HTTP polling sessions.\\n- Attacker-controlled request bodies reach pre-auth C2 dispatch handling.\\n- Repeated requests can consume server memory, goroutines, request handling capacity, and log volume.\\n- C2 service availability and operator reliability may be degraded under sustained traffic.\\n\\n### Remediation\\n- Require authentication before creating long-lived HTTP polling sessions.\\n- Do not forward request bodies into the C2 stream before validation.\\n- Add strict request body limits.\", \"ghsa_id\": \"GHSA-4595-rvpx-4q34\", \"github_reviewed_at\": \"2026-09-15T20:47:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-4595-rvpx-4q34\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4595-rvpx-4q34\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61554\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-15T20:47:17Z\", \"references\": [\"https://github.com/jm33-m0/emp3r0r/security/advisories/GHSA-4595-rvpx-4q34\", \"https://github.com/jm33-m0/emp3r0r/releases/tag/v4.2.5\", \"https://github.com/advisories/GHSA-4595-rvpx-4q34\"], \"repository_advisory_url\": \"https://api.github.com/repos/jm33-m0/emp3r0r/security-advisories/GHSA-4595-rvpx-4q34\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jm33-m0/emp3r0r\", \"summary\": \"emp3r0r has an unauthenticated HTTP Polling DoS\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-15T20:47:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-4595-rvpx-4q34\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260531142011-aed3d81641ab\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/jm33-m0/emp3r0r/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260531142011-aed3d81641ab\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4595-rvpx-4q34",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/jm33-m0/emp3r0r/core: < 0.0.0-20260531142011-aed3d81641ab"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61554"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/jm33-m0/emp3r0r/core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-16T19:13:43.350828Z",
+  "provenance": {
+    "content_sha256": "d16b7d14ef3128b9c1480328de835135b339e1521559c27741a1d661d97ecd8c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-15T20:47:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4595-rvpx-4q34",
+  "status": "active",
+  "title": "emp3r0r has an unauthenticated HTTP Polling DoS",
+  "updated_at": "2026-09-15T20:47:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4595-rvpx-4q34"
+}
