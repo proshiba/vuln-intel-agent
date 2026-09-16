@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/271374756?v=4\", \"events_url\": \"https://api.github.com/users/DavidCarliez/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DavidCarliez/followers\", \"following_url\": \"https://api.github.com/users/DavidCarliez/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DavidCarliez/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DavidCarliez\", \"id\": 271374756, \"login\": \"DavidCarliez\", \"node_id\": \"U_kgDOECzZpA\", \"organizations_url\": \"https://api.github.com/users/DavidCarliez/orgs\", \"received_events_url\": \"https://api.github.com/users/DavidCarliez/received_events\", \"repos_url\": \"https://api.github.com/users/DavidCarliez/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DavidCarliez/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DavidCarliez/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DavidCarliez\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N/E:P\"}}, \"cwes\": [{\"cwe_id\": \"CWE-601\", \"name\": \"URL Redirection to Untrusted Site ('Open Redirect')\"}], \"description\": \"## Summary\\n\\nNezha v2.2.3 regresses the GHSA-9rc6-8cjv-rcvx host header injection fix for deployments where the new `dashboard_host` setting is empty. In that configuration, `/api/v1/oauth2/{provider}` again reflects the request `Host` header into the OAuth2 `redirect_uri` sent to the identity provider, even if `install_host` is configured.\\n\\n## Impact\\n\\nAn attacker who can get a victim to start OAuth2 login through a request that reaches Nezha with a forged `Host` header can make Nezha send an attacker-controlled callback URL as the OAuth2 `redirect_uri`. If the configured OAuth2 provider accepts that redirect URI, the victim's authorization code is sent to the attacker origin. The attacker can then complete the OAuth2 binding or login flow described in GHSA-9rc6.\\n\\nThis is configuration-dependent, but it affects a realistic upgrade/default state because `dashboard_host` is a new optional field. The original v2.2.0 fix fell back to `install_host`; current v2.2.3 only falls back when `dashboard_host` is non-empty.\\n\\n## Reproduction\\n\\nOn current v2.2.3 / master commit `3d74cd9431a48fa89c6489689eac82a872799ea0`, configure OAuth2 and set an existing dashboard host only through `install_host`, leaving `dashboard_host` empty. Then send the OAuth2 redirect request with a forged Host header:\\n\\n```http\\nGET /api/v1/oauth2/github?type=1 HTTP/1.1\\nHost: evil.attacker.test\\nX-Forwarded-Proto: https\\n```\\n\\nThe generated OAuth2 authorization URL contains:\\n\\n```text\\nredirect_uri=https%3A%2F%2Fevil.attacker.test%2Fapi%2Fv1%2Foauth2%2Fcallback\\n```\\n\\nA minimal route-level unit test demonstrating the issue is:\\n\\n```go\\nfunc TestOAuth2Redirect_RegressionWhenDashboardHostEmptyReflectsForgedHost(t *testing.T) {\\n    defer setupOAuth2Test(t)()\\n    singleton.Conf.InstallHost = \\\"legit-dashboard.example.com\\\"\\n    singleton.Conf.DashboardHost = \\\"\\\"\\n    singleton.Conf.Oauth2[\\\"github\\\"] = &model.Oauth2Config{\\n        ClientID: \\\"client-id\\\",\\n        ClientSecret: \\\"client-secret\\\",\\n        Endpoint: model.Oauth2Endpoint{AuthURL: \\\"https://idp.example.test/authorize\\\", TokenURL: \\\"https://idp.example.test/token\\\"},\\n        Scopes: []string{\\\"openid\\\"},\\n    }\\n\\n    c, _ := newOAuth2Ctx(t)\\n    c.Params = gin.Params{{Key: \\\"provider\\\", Value: \\\"github\\\"}}\\n    c.Request.Host = \\\"evil.attacker.test\\\"\\n    c.Request.URL.RawQuery = \\\"type=1\\\"\\n    c.Request.Header.Set(\\\"X-Forwarded-Proto\\\", \\\"https\\\")\\n\\n    resp, err := oauth2redirect(c)\\n    require.NoError(t, err)\\n\\n    parsed, err := url.Parse(resp.Redirect)\\n    require.NoError(t, err)\\n    require.Equal(t, \\\"https://evil.attacker.test/api/v1/oauth2/callback\\\", parsed.Query().Get(\\\"redirect_uri\\\"))\\n}\\n```\\n\\nThe corresponding control with `DashboardHost = \\\"panel.example.com\\\"` pins the same forged request to `https://panel.example.com/api/v1/oauth2/callback`, so the issue is specifically the empty `dashboard_host` fallback.\\n\\n## Root cause\\n\\nCurrent `cmd/dashboard/controller/oauth2.go` chooses the request Host unless `DashboardHost` is non-empty:\\n\\n```go\\nhost := c.Request.Host\\nif !singleton.IsReservedDashboardHost(host) && singleton.Conf != nil && singleton.Conf.DashboardHost != \\\"\\\" {\\n    host = singleton.Conf.DashboardHost\\n}\\nreturn scheme + host + \\\"/api/v1/oauth2/callback\\\"\\n```\\n\\nThe v2.2.0 fix used `InstallHost` as the fallback for untrusted request hosts. After `DashboardHost` was introduced, empty `dashboard_host` now disables host pinning and reintroduces the original Host header injection behavior for those deployments.\\n\\n## Remediation\\n\\nBuild the OAuth2 callback URL from a deterministic configured origin. For example:\\n\\n1. Use `DashboardHost` when it is set.\\n2. Otherwise fall back to `InstallHost` if it is set, preserving the v2.2.0 invariant for existing deployments.\\n3. If neither value is set, reject OAuth2 redirect initiation with a configuration error instead of reflecting request Host.\\n\\nPlease also add a regression test that `InstallHost` plus empty `DashboardHost` does not reflect a forged Host into `redirect_uri`.\", \"ghsa_id\": \"GHSA-rf68-8gjr-36q7\", \"github_reviewed_at\": \"2026-09-15T19:50:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-rf68-8gjr-36q7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rf68-8gjr-36q7\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-15T19:50:08Z\", \"references\": [\"https://github.com/nezhahq/nezha/security/advisories/GHSA-rf68-8gjr-36q7\", \"https://github.com/nezhahq/nezha/commit/38824dbc11a63964c5b9296ae4c68e62b34fa04b\", \"https://github.com/advisories/GHSA-rf68-8gjr-36q7\"], \"repository_advisory_url\": \"https://api.github.com/repos/nezhahq/nezha/security-advisories/GHSA-rf68-8gjr-36q7\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/nezhahq/nezha\", \"summary\": \"Nezha: OAuth2 redirect_uri Host header injection regression when dashboard_host is empty\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-15T19:50:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-rf68-8gjr-36q7\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/nezhahq/nezha\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"= 2.2.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rf68-8gjr-36q7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/nezhahq/nezha: = 2.2.3"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 2.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N/E:P",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/nezhahq/nezha"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-09-16T19:13:43.395697Z",
+  "provenance": {
+    "content_sha256": "b78aebb4de383339dedea896bc7b223d32bfe067e2e58f1a9563bf6e477b3e40",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-15T19:50:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rf68-8gjr-36q7",
+  "status": "active",
+  "title": "Nezha: OAuth2 redirect_uri Host header injection regression when dashboard_host is empty",
+  "updated_at": "2026-09-15T19:50:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rf68-8gjr-36q7"
+}

