@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/286391906?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/followers\", \"following_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut-from-NightWolf-Team\", \"id\": 286391906, \"login\": \"iaohkut-from-NightWolf-Team\", \"node_id\": \"U_kgDOERH-Yg\", \"organizations_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-71485\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}], \"description\": \"## Vulnerability Details\\n\\n**File**: `internal/client/handler.go` (`OnClientConnecting`), `internal/proxy/http.go` (`requestHeaders`), `internal/proxy/grpc.go` (`requestMetadata`), `internal/unigrpc/grpc.go` (`Consume`)\\n**Line**: handler.go:389,548-552 (`e.Headers` -> `SetEmulatedHeadersToContext`), http.go:131-165 (`requestHeaders`), grpc.go:82-114 (`requestMetadata`), unigrpc/grpc.go:46 (`Headers: req.Headers`)\\n\\n### Root Cause\\nThe `http_headers` / `grpc_metadata` proxy config options are documented as \\\"List of incoming HTTP header names to forward to the proxy backend\\\" / \\\"List of incoming gRPC metadata keys to forward to the proxy backend\\\" -- implying the value originates from the underlying transport connection (e.g. set by a trusted reverse proxy/API gateway in front of Centrifugo). Operators commonly use this to forward identity/trust headers to their own backend for access-control decisions.\\n\\nHowever, the wire protocol used by every Centrifugo transport (`protocol.ConnectRequest`, field `headers`) includes a `headers` map populated entirely from the connecting client's own message (its JSON `connect` command, or for gRPC, its `ConnectRequest` protobuf field) -- not from real transport-level HTTP headers. Centrifugo copies this client-supplied map verbatim into `ConnectEvent.Headers`, then into an \\\"emulated headers\\\" context value used by every proxy type (connect, refresh, subscribe, publish, rpc, sub_refresh, map_publish, map_remove, shared_poll_refresh) for the entire connection lifetime. Any header name in the operator's allowlist is forwarded to the backend with the client's own chosen value, unless a header of the exact same name also happens to be present on the genuine underlying HTTP request. For the unidirectional gRPC transport specifically there is no HTTP request at all, so there is no possible override -- the client-controlled value always wins.\\n\\n### Attack Scenario\\n1. Operator configures a connect proxy with `http_headers: [\\\"x-trusted-user\\\"]` (or any header name their backend uses for caller identity/trust).\\n2. Attacker connects directly to Centrifugo and sends a connect command containing `\\\"headers\\\": {\\\"x-trusted-user\\\": \\\"<any value>\\\"}`.\\n3. Centrifugo forwards `X-Trusted-User: <attacker value>` to the backend exactly as if a trusted intermediary had set it.\\n4. The backend, trusting this header per its own design, grants whatever access/identity it associates with that value.\\n\\n### Impact\\nFull spoofing of any header value the backend trusts for authentication/authorization, for every proxy call type, for the lifetime of the connection -- up to full account/identity impersonation depending on backend logic. No credentials, JWT, or API key required.\\n\\n### Vulnerable Code\\n```go\\n// internal/proxy/http.go\\nfunc requestHeaders(ctx context.Context, allowedHeaders, allowedMetaKeys []string, staticHeaders map[string]string) http.Header {\\n    headers := http.Header{}\\n    for k, v := range staticHeaders { headers.Set(k, v) }\\n    emulatedHeaders, _ := clientcontext.GetEmulatedHeadersFromContext(ctx) // 100% client-controlled\\n    for k, v := range emulatedHeaders {\\n        if slices.Contains(allowedHeaders, strings.ToLower(k)) {\\n            headers.Set(k, v) // forwarded to backend as a real outgoing HTTP header\\n        }\\n    }\\n    httpHeaders, hasHTTPHeaders := middleware.GetHeadersFromContext(ctx) // real headers, if present\\n    for k, vv := range httpHeaders {\\n        if slices.Contains(allowedHeaders, strings.ToLower(k)) {\\n            headers[k] = vv // only overrides if SAME header name was ALSO on the real request\\n        }\\n    }\\n    ...\\n}\\n```\\n```go\\n// internal/unigrpc/grpc.go -- never goes through HTTP middleware, no competing real-header check at all\\nconnectRequest := &protocol.ConnectRequest{\\n    Token: req.Token, Data: req.Data, Name: req.Name, Version: req.Version,\\n    Headers: req.Headers, // the gRPC client's own protobuf field\\n}\\n```\\n\\n### Recommended Fix\\nDocument explicitly that `http_headers`/`grpc_metadata` values can also be supplied by the connecting client itself via \\\"headers emulation\\\" and are not guaranteed to come from a trusted reverse proxy. Provide a separate allowlist (e.g. `trusted_http_headers`) populated only from genuine transport-level HTTP headers, never from client-supplied `ConnectRequest.headers`, for operators who need an unforgeable header. For uniGRPC, consider disabling `http_headers` forwarding entirely since there is no transport-level header concept to fall back on.\\n\\n### Verification\\nDynamically confirmed against the official `centrifugo/centrifugo:v6.8.3` Docker image on BOTH the bidirectional WebSocket transport and the unidirectional gRPC transport, using a minimal backend that logs every header it receives:\\n- WS: connecting with `{\\\"connect\\\": {\\\"headers\\\": {\\\"x-trusted-user\\\": \\\"admin-impersonation-via-headers-emulation\\\"}}}` resulted in the backend receiving `X-Trusted-User: admin-impersonation-via-headers-emulation`, despite no such header existing on the real WebSocket upgrade HTTP request.\\n- uniGRPC: calling the `Consume` RPC with `ConnectRequest(headers={\\\"x-trusted-user\\\": \\\"admin-impersonation-via-unigrpc\\\"})` (zero real gRPC metadata set) resulted in the backend receiving `X-Trusted-User: admin-impersonation-via-unigrpc`.\\n- Control tests (no `headers` field / no metadata) confirmed the header is absent from the backend's request in the baseline case.\", \"epss\": {\"percentage\": 0.00423, \"percentile\": 0.3564}, \"ghsa_id\": \"GHSA-9468-v6mj-fppw\", \"github_reviewed_at\": \"2026-09-02T23:41:37Z\", \"html_url\": \"https://github.com/advisories/GHSA-9468-v6mj-fppw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9468-v6mj-fppw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-71485\"}], \"nvd_published_at\": \"2026-08-20T21:17:08Z\", \"published_at\": \"2026-09-02T23:41:37Z\", \"references\": [\"https://github.com/centrifugal/centrifugo/security/advisories/GHSA-9468-v6mj-fppw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-71485\", \"https://github.com/centrifugal/centrifugo/pull/1182\", \"https://github.com/centrifugal/centrifugo/commit/84d38cea1dd2efa24375a148817a974c8727f4b0\", \"https://github.com/centrifugal/centrifugo/releases/tag/v6.9.0\", \"https://github.com/advisories/GHSA-9468-v6mj-fppw\"], \"repository_advisory_url\": \"https://api.github.com/repos/centrifugal/centrifugo/security-advisories/GHSA-9468-v6mj-fppw\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/centrifugal/centrifugo\", \"summary\": \"Centrifugo: Client-forgeable headers emulation lets any client spoof headers forwarded to proxy backends\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T16:35:35Z\", \"url\": \"https://api.github.com/advisories/GHSA-9468-v6mj-fppw\", \"vulnerabilities\": [{\"first_patched_version\": \"6.9.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/centrifugal/centrifugo\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 6.8.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9468-v6mj-fppw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/centrifugal/centrifugo: <= 6.8.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-71485"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/centrifugal/centrifugo"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-17T19:13:26.055529Z",
+  "provenance": {
+    "content_sha256": "2d63a0d42674e545ba99dddd2a26b0e1a6e1be7c2c34e21b98f2c0c8c12db8e8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-02T23:41:37Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9468-v6mj-fppw",
+  "status": "active",
+  "title": "Centrifugo: Client-forgeable headers emulation lets any client spoof headers forwarded to proxy backends",
+  "updated_at": "2026-09-17T16:35:35Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9468-v6mj-fppw"
+}

