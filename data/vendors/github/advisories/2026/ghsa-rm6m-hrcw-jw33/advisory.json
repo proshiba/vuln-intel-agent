@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/27207380?v=4\", \"events_url\": \"https://api.github.com/users/suchitd/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/suchitd/followers\", \"following_url\": \"https://api.github.com/users/suchitd/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/suchitd/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/suchitd\", \"id\": 27207380, \"login\": \"suchitd\", \"node_id\": \"MDQ6VXNlcjI3MjA3Mzgw\", \"organizations_url\": \"https://api.github.com/users/suchitd/orgs\", \"received_events_url\": \"https://api.github.com/users/suchitd/received_events\", \"repos_url\": \"https://api.github.com/users/suchitd/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/suchitd/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/suchitd/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/suchitd\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77406\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:L\"}}, \"cwes\": [{\"cwe_id\": \"CWE-195\", \"name\": \"Signed to Unsigned Conversion Error\"}], \"description\": \"## Summary\\nA logic and resource exhaustion vulnerability exists in the AMQP client's Quality of Service (`Qos`) configuration method. The `Qos` function accepts signed integers (`int`) for the `prefetchCount` and `prefetchSize` parameters but casts them directly to unsigned integers (`uint16` and `uint32`, respectively) when formatting the wire-level frame.\\n\\nIf a developer passes a negative integer (such as `-1`) to these parameters—frequently intended as a sentinel value meaning \\\"no change\\\" or \\\"no limit\\\"—the application performs an implicit signed-to-unsigned conversion. This wraps the values to their absolute maximum limit ($65535$ and $4294967295$). Consequently, a consumer expecting restricted message delivery rates is suddenly flooded with an unlimited volume of messages, potentially exhausting memory resources and crashing the application.\\n\\n---\\n\\n## Vulnerability Details\\n\\n### Mechanism\\nThe bug manifests during the structural assignment inside the channel's `Qos` method:\\n\\n```go\\n// channel.go:795-796\\nPrefetchCount: uint16(prefetchCount),  // -1 wraps to 65535\\nPrefetchSize:  uint32(prefetchSize),   // -1 wraps to 4294967295\\n```\\n\\nIn Go, converting a negative signed integer to an unsigned integer shifts the value via two's complement arithmetic. Because no boundary validation or signedness check occurs prior to the cast:\\n* Passing `-1` for `prefetchCount` yields a wire value of `65535`.\\n* Passing `-1` for `prefetchSize` yields a wire value of `4294967295`.\\n\\n### Impact\\nThe AMQP broker interprets a `prefetch-count` of `65535` as an instruction to dispatch messages to the consumer with virtually no concurrency limits. \\n\\nIf the application is processing heavy payloads or relies on strict rate-limiting to maintain stability, this unexpected flood will cause rapid heap memory growth, unmanageable processing queues, and an eventual Out-Of-Memory (OOM) termination.\\n\\n---\\n\\n## Attack Vector\\nAn attacker who can manipulate configuration files, environmental variables, or API inputs that dictate client Qos settings can trigger an application-layer Denial of Service:\\n\\n1. **Malicious Input:** An attacker sets a service's prefetch configuration parameter to `-1`.\\n2. **Implicit Overflow:** The application initializes the channel, executes `Qos(-1, ...)`, and transmits an unintended maximum-capacity request to the RabbitMQ/AMQP broker.\\n3. **Consumer Exhaustion:** The broker flushes the entire contents of the queue directly into the client consumer's network buffer, bypassing expected application concurrency barriers and inducing a crash.\", \"ghsa_id\": \"GHSA-rm6m-hrcw-jw33\", \"github_reviewed_at\": \"2026-09-17T17:04:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-rm6m-hrcw-jw33\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rm6m-hrcw-jw33\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77406\"}], \"nvd_published_at\": \"2026-09-16T15:17:49Z\", \"published_at\": \"2026-09-17T17:04:05Z\", \"references\": [\"https://github.com/rabbitmq/amqp091-go/security/advisories/GHSA-rm6m-hrcw-jw33\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-77406\", \"https://github.com/rabbitmq/amqp091-go/pull/351\", \"https://github.com/rabbitmq/amqp091-go/commit/3b879e1d1d25b544e26b3bc3d7db3213203c0f3b\", \"https://github.com/rabbitmq/amqp091-go/releases/tag/v1.13.0\", \"https://github.com/advisories/GHSA-rm6m-hrcw-jw33\"], \"repository_advisory_url\": \"https://api.github.com/repos/rabbitmq/amqp091-go/security-advisories/GHSA-rm6m-hrcw-jw33\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/rabbitmq/amqp091-go\", \"summary\": \"RabbitMQ amqp091-go: Consumer Message Flooding via Signed-to-Unsigned Integer Casting in Qos Configuration\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T17:04:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-rm6m-hrcw-jw33\", \"vulnerabilities\": [{\"first_patched_version\": \"1.13.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/rabbitmq/amqp091-go\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.13.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rm6m-hrcw-jw33",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/rabbitmq/amqp091-go: < 1.13.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-77406"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/rabbitmq/amqp091-go"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-17T19:13:26.036543Z",
+  "provenance": {
+    "content_sha256": "f275835ebc460b076782430c1b4084517195b3d8fef510c0400a38a3dcf24be4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T17:04:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rm6m-hrcw-jw33",
+  "status": "active",
+  "title": "RabbitMQ amqp091-go: Consumer Message Flooding via Signed-to-Unsigned Integer Casting in Qos Configuration",
+  "updated_at": "2026-09-17T17:04:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rm6m-hrcw-jw33"
+}
