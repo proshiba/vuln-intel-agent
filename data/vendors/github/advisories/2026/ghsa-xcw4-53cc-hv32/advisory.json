@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/79399355?v=4\", \"events_url\": \"https://api.github.com/users/dplush/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dplush/followers\", \"following_url\": \"https://api.github.com/users/dplush/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dplush/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dplush\", \"id\": 79399355, \"login\": \"dplush\", \"node_id\": \"MDQ6VXNlcjc5Mzk5MzU1\", \"organizations_url\": \"https://api.github.com/users/dplush/orgs\", \"received_events_url\": \"https://api.github.com/users/dplush/received_events\", \"repos_url\": \"https://api.github.com/users/dplush/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dplush/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dplush/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dplush\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-59163\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}], \"description\": \"### Summary\\n\\nThe Mnemosyne sync server's authentication check decoded JWT bearer tokens but never verified their HMAC-SHA256 signatures. Any well-formed token was accepted, allowing an unauthenticated attacker to impersonate any user and read or modify their sync data.\\n\\n**Severity: Critical**\\n\\nCVSS 3.1: AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N = 9.1\\n\\nAssumes the sync server endpoint is network-reachable. If your deployment is localhost-only, the score drops substantially and severity becomes High or Medium depending on local exposure. Confirm your threat model.\\n\\n### Affected versions\\n\\nAll mnemosyne versions exposing the sync server endpoint, up to and including v3.10.0.\\n\\n### Patched versions\\n\\nv3.10.1 (commit a0b6b871 on branch security/jwt-signature-verification)\\n\\n___\\n\\n### Description\\n\\nThe sync server uses JWT bearer tokens to authenticate clients. Prior to v3.10.1, the auth check in mnemosyne/core/sync_server.py parsed the JWT's header and payload using base64 decoding, then passed the token to a jwt library call with options that effectively disabled signature verification. The server accepted any well-formed token regardless of the signature, including tokens with alg: none and tokens signed with the wrong key.\\n\\nThe fix in v3.10.1 replaces the broken decode with a from-scratch HS256 verifier using only the Python standard library:\\n\\n- Constant-time signature comparison via hmac.compare_digest\\n- Strict alg: HS256 check, rejecting none and other algorithms\\n- UTC-aware exp validation with leeway\\n- Loud errors with specific failure reasons\\n- Type validation of decoded payload before use\\n\\n### Impact\\n\\nAn attacker with network access to the sync server can:\\n\\n- Forge a JWT for any user_id without knowing the secret\\n- Authenticate as that user to /sync/status, /sync/push, and /sync/pull\\n- Read the victim's sync state\\n- Push malicious sync state to corrupt the victim's local database\\n- Pivot within a shared deployment (multi-user sync server)\\n\\nConfidentiality and integrity of sync data are fully compromised for the duration of exposure. There is no impact on the server's availability.\\n\\n### Reproduction\\n\\n```python\\nimport base64\\nimport json\\nimport requests\\n\\n# Forge a JWT for any user. No secret required.\\ndef forge_jwt(user_id):\\n    header = base64.urlsafe_b64encode(\\n        json.dumps({\\\"alg\\\": \\\"HS256\\\", \\\"typ\\\": \\\"JWT\\\"}).encode()\\n    ).rstrip(b\\\"=\\\")\\n    payload = base64.urlsafe_b64encode(\\n        json.dumps({\\\"user_id\\\": user_id, \\\"exp\\\": 9999999999}).encode()\\n    ).rstrip(b\\\"=\\\")\\n    sig = b\\\"\\\"\\n    return f\\\"{header.decode()}.{payload.decode()}.\\\"\\n\\nr = requests.get(\\n    \\\"https://target.example.com/sync/status\\\",\\n    headers={\\\"Authorization\\\": f\\\"Bearer {forge_jwt('victim-user-id')}\\\"},\\n)\\nprint(r.status_code, r.json())\\n```\\n\\nA 200 OK response with valid sync status payload confirms the bypass. The attack requires no credentials, no secret, and no prior access.\\n\\n### Mitigation\\n\\nUpgrade to v3.10.1.\\n\\nFor users who cannot upgrade immediately:\\n\\n- Restrict network access to the sync server endpoint to trusted clients only. Firewall, reverse proxy with mTLS, or localhost bind with SSH tunnel are all viable.\\n- The vulnerability is not exploitable against an unreachable endpoint.\\n\\n### Workarounds\\n\\nNone. The patch is required to restore authentication integrity.\\n\\n### Credits\\n\\n- Reporter: Denis Hache (dplush). Reported via private channel on 2026-06-13 with full reproduction and a coordinated disclosure window.\\n- Fix: Denis Hache\\n\\n### Timeline\\n- 2026-06-13: Initial report received from Denis via private channel.\", \"ghsa_id\": \"GHSA-xcw4-53cc-hv32\", \"github_reviewed_at\": \"2026-09-18T17:54:26Z\", \"html_url\": \"https://github.com/advisories/GHSA-xcw4-53cc-hv32\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xcw4-53cc-hv32\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-59163\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-18T17:54:26Z\", \"references\": [\"https://github.com/AxDSan/mnemosyne/security/advisories/GHSA-xcw4-53cc-hv32\", \"https://github.com/mnemosyne-oss/mnemosyne/pull/373\", \"https://github.com/mnemosyne-oss/mnemosyne/commit/a0b6b8711a1a485304971710dc3571e29ff9dbeb\", \"https://github.com/mnemosyne-oss/mnemosyne/releases/tag/v3.10.1\", \"https://github.com/advisories/GHSA-xcw4-53cc-hv32\"], \"repository_advisory_url\": \"https://api.github.com/repos/mnemosyne-oss/mnemosyne/security-advisories/GHSA-xcw4-53cc-hv32\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/AxDSan/mnemosyne\", \"summary\": \"Mnemosyne has JWT signature verification bypass sync server that allows authentication bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-18T17:54:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-xcw4-53cc-hv32\", \"vulnerabilities\": [{\"first_patched_version\": \"3.10.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mnemosyne-memory\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.10.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xcw4-53cc-hv32",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mnemosyne-memory: <= 3.10.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-59163"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mnemosyne-memory"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.489556Z",
+  "provenance": {
+    "content_sha256": "a6b4d42ca158fc355d4d7c5585c04503913f3b2cd91cbd5183beded6ba2cae2d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-18T17:54:26Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xcw4-53cc-hv32",
+  "status": "active",
+  "title": "Mnemosyne has JWT signature verification bypass sync server that allows authentication bypass",
+  "updated_at": "2026-09-18T17:54:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xcw4-53cc-hv32"
+}

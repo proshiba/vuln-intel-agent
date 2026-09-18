@@ -1,0 +1,54 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}, {\"cwe_id\": \"CWE-116\", \"name\": \"Improper Encoding or Escaping of Output\"}], \"description\": \"Five independent defects in djust's template auto-escaping cause attacker-controlled input to be rendered as live markup where Django escapes it. All four are present in shipped 1.1.0 and are fixed in 1.1.1.\\n\\nThey share one shape: **a filter or grant that escapes nothing itself and relies on the render-time auto-escape, which something downstream then removes.** They are grouped into a single advisory because the mitigation is identical — upgrade to 1.1.1 — and because no single one of them is meaningfully actionable in isolation.\\n\\n## 1. `linenumbers` never escaped its input (#2291)\\n\\n```\\n{{ p|linenumbers|safe }}   with p = '<img src=x onerror=alert(1)>'\\n  djust   '1. <img src=x onerror=alert(1)>'      <- executes\\n  django  '1. &lt;img src=x onerror=alert(1)&gt;'\\n```\\n\\nThe filter deferred all escaping to render time; a trailing `|safe` suppressed exactly that. The exposure is wider than the `|safe` form: **any downstream filter that reads the output as markup is affected**, including `{{ p|linenumbers|truncatechars_html:\\\"5\\\" }}`, which contains no `|safe` at all.\\n\\n## 2. `escape` was a no-op (#2281)\\n\\n```\\n{{ p|escape|safe }}\\n  djust   '<img src=x onerror=alert(1)>'          <- executes\\n  django  '&amp;lt;img src=x onerror=alert(1)&amp;gt;'\\n```\\n\\nDjango's `escape` is eager (`conditional_escape`, returning `SafeString`). djust's returned its input unchanged and let the render site escape it — indistinguishable for `{{ p|escape }}` alone, wrong for every chain. The security cell is `{{ p|escape|safe }}`: an idiom that reads as \\\"escape it, then it is safe to emit\\\" — which is what Django's semantics make true — was a bare `|safe` on attacker input. A sweep of every length-2 and length-3 chain containing `escape` found **104** live-markup cells.\\n\\n## 3. `unordered_list` / `safeseq` handed a string back under a safe grant (#2274)\\n\\nBoth carry an unconditional \\\"emit without escaping\\\" grant, earned because they escape every item they emit. Given a **string** rather than a sequence they emitted nothing and returned the input verbatim under that same grant, making `{{ hostile|safeseq }}` an exact synonym for `|safe` with no `mark_safe` anywhere in the template.\\n\\n## 4. A safety grant outlived the value it was granted for (#2300)\\n\\n**No filter chain and no `|safe` anywhere; a bare `{{ p }}` is the whole reproducer.**\\n\\nSafe context keys accumulated on the view and were never revoked, so a key marked safe once stayed safe for the lifetime of the view — which spans **every event on a WebSocket connection**:\\n\\n```python\\nrender 1:  p = mark_safe('<b>trusted</b>')     ->  '<b>trusted</b>'   correct\\nrender 2:  p = '<img src=x onerror=alert(1)>'  ->  executes\\n```\\n\\nA view that renders trusted markup into a variable and later renders user input into the same variable emits it live.\\n\\n## 5. A custom tag handler's return was emitted raw — including djust's own `{% render_slot %}` (#2379)\\n\\n**Reachable with no `|safe`, no `mark_safe`, and no application code: using component slots is enough.**\\n\\nDjango's `SimpleNode.render` runs `conditional_escape` over a `simple_tag`'s return\\nunless it carries `__html__`. djust inserted the return verbatim, so a handler as\\nordinary as `return f\\\"Hello {name}\\\"` emitted attacker markup live.\\n\\nOf the 221 handlers djust registers, one echoes a context value unescaped —\\n`render_slot`, the framework's own function-component/slot tag:\\n\\n```\\n{% render_slot p %}     p = '<img src=x onerror=alert(1)>'\\n\\n  djust   '<img src=x onerror=alert(1)>'          <- executes\\n  django  '&lt;img src=x onerror=alert(1)&gt;'\\n```\\n\\nTogether with defect 3 this is one of the two classes reachable without the\\napplication writing anything unusual.\\n\\n## 6. `linebreaks` / `linebreaksbr` — and `|safe` was the only spelling that worked (#2284)\\n\\n`linebreaks` emits `<p>`/`<br>` but neither escaped its content nor reported its\\noutput safe. The plain spelling therefore escaped the filter's **own** tags and\\nprinted a literal `<p>` on the page, so `|safe` was the only form that rendered\\nat all — and that form emitted the content live:\\n\\n```\\n{{ bio|linebreaks }}         renders literal '<p>' text        (visibly broken)\\n{{ bio|linebreaks|safe }}    '<img src=x onerror=alert(1)>'    <- executes\\n```\\n\\nBecause the broken spelling is the one a developer discards, the vulnerable\\nspelling is the one that ships. Any application rendering user-entered text with\\nparagraph breaks is written that way.\\n\\n## Impact\\n\\nStored or reflected XSS in any djust application that renders untrusted input through the affected filters, or that reuses a context variable which was previously marked safe. Exploitation requires no special configuration. Defects 3, 4 and 5 require no unusual template construct at all — defect 5 needs only that the application use component slots, and defect 6's vulnerable spelling is the only one that renders correctly.\\n\\n## Patches\\n\\nFixed in **1.1.1**, and in **1.2.0** (`main`).\\n\\n1.1.1 re-implements each fix against 1.1.0's own code rather than back-porting `main`'s, which depends on a value-level safety model 1.1.0 does not have. Three consequences are documented in the 1.1.1 CHANGELOG and are all in the **over-escaping** direction: `{{ p|escape|F }}` double-escapes for a plain following filter `F`; `{% render_slot slot.content %}` over-escapes; and a `mark_safe`d value passed through `|escape` is escaped rather than passed through.\\n\\n**Not fixed in 1.1.1**, and tracked separately: application-written tag handlers that return attacker data as a plain `str` (only djust's own `render_slot` is covered by defect 5), and a `{% with %}`/`{% for %}` bind inheriting a safety grant it never earned. Both are fixed in 1.2.0.\\n\\n## Workarounds\\n\\nNone complete. Before upgrading, avoid `|safe` after any filter in a chain, avoid `safeseq`/`unordered_list` on values that may be strings, and avoid reusing a context variable for both `mark_safe` content and untrusted input.\\n\\n## Credit\\n\\nFound during an internal Django-parity audit by a registry-wide differential that compares djust's escaping capabilities against Django's across every filter chain, rather than by inspection.\", \"ghsa_id\": \"GHSA-9395-2g46-rj3f\", \"github_reviewed_at\": \"2026-09-17T20:31:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-9395-2g46-rj3f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9395-2g46-rj3f\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-17T20:31:43Z\", \"references\": [\"https://github.com/djust-org/djust/security/advisories/GHSA-9395-2g46-rj3f\", \"https://github.com/djust-org/djust/releases/tag/v1.1.1\", \"https://github.com/advisories/GHSA-9395-2g46-rj3f\"], \"repository_advisory_url\": \"https://api.github.com/repos/djust-org/djust/security-advisories/GHSA-9395-2g46-rj3f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/djust-org/djust\", \"summary\": \"djust: Six template-layer defects emit attacker-controlled markup unescaped (XSS)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T20:31:45Z\", \"url\": \"https://api.github.com/advisories/GHSA-9395-2g46-rj3f\", \"vulnerabilities\": [{\"first_patched_version\": \"1.1.1\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"djust\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.1.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9395-2g46-rj3f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "djust: <= 1.1.0"
+    ],
+    "cves": [],
+    "cvss_score": 0.0,
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "djust"
+    ],
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.690020Z",
+  "provenance": {
+    "content_sha256": "1ce0ff210ce743e09bd507bd4a36b552b225e01ce46565fd0af210779ac173e5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T20:31:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9395-2g46-rj3f",
+  "status": "active",
+  "title": "djust: Six template-layer defects emit attacker-controlled markup unescaped (XSS)",
+  "updated_at": "2026-09-17T20:31:45Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9395-2g46-rj3f"
+}

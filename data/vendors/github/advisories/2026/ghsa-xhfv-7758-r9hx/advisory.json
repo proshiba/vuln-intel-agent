@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75837\", \"cvss\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-269\", \"name\": \"Improper Privilege Management\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\nThe core Flex group blueprint `system/blueprints/user/group.yaml` (access field, lines 48-55) omits the `security@: admin.super` field guard that its sibling account blueprint carries (`account.yaml:131/138/150`, added by the CVE-2026-42613 fix). A delegated non-super operator holding `admin.users.update` can therefore save a group whose `access` map contains `admin.super: true`, which `UserGroupObject::authorize` then grants to every member of that group, a full privilege escalation to super-admin (scheduler/cron RCE, Twig eval). This is a distinct file, sink, and fix from all four related advisories.\\n\\n## Root Cause\\nThe CVE-2026-42613 fix protected the account `access`/`groups` fields with a blueprint-level `security@: admin.super` gate, which `Blueprint::dynamicSecurity()` (`system/src/Grav/Common/Data/Blueprint.php:644-662`) uses to mark a field `validate.ignore=true` for non-super users so `BlueprintSchema::filterArray()` (`BlueprintSchema.php:263-311`) drops it. The functionally-identical group `access` field, a permission map granted to every member of the group, is declared in `system/blueprints/user/group.yaml:48-55` with `check_authorize: false` and NO `security@` guard. `check_authorize` has ZERO PHP enforcement (`grep -rn check_authorize` across the repo returns 0 PHP consumers; only two YAML blueprints reference it), so `security@` is the sole real control. Because the group access field lacks `security@`, `dynamicSecurity` never flags it, `filterArray` retains it, and `Validation::filterArray` (`type: array, value_type: bool`) passes the nested `admin.super:true` leaf through. The core save path (`FlexObject::update()` then `Framework/Flex/FlexObject.php:683` `$blueprint->filter($data,true,true)` then `save()`) persists it to `user://config/groups.yaml`.\\n\\n## Impact\\nA delegated `admin.users` operator (strictly below `admin.super`) escalates to super-admin, gaining the admin panel, the scheduler (cron to RCE) and Twig evaluation. Full read/write/DoS (C:H/I:H/A:H). Even absent self-escalation, arbitrary rewrite of ANY group's ACL is itself a full escalation primitive.\\n\\n## Proof of Concept\\nAs a non-super `admin.users` operator who is a member of group `ops`:\\n```\\nPOST /admin/accounts/groups/ops   (or groups.json task:save)\\ndata[access][admin][super]=1\\n```\\n`user/config/groups.yaml` gains `ops: { access: { admin: { super: true } } }`, so the operator is super-admin on the next request.\\n\\n## Attack Chain\\n1. Entry: authenticated delegated admin (`admin.users.update`, no `admin.super`) POSTs the group-edit form for a group they belong to (or a new group), body `access[admin][super]=true`. Guard: `FlexAuthorizeTrait::isAuthorizedAction` to `admin.users.update`. Bypass proof: `user-groups.yaml` exposes groups at `admin.users:crudl`; operator legitimately holds update.\\n2. Check (field guard): `Blueprint::dynamicSecurity` marks `validate.ignore` only for `security@` fields. Guard: none on group access (no `security@`). Bypass proof: `group.yaml:48-55` has no `security@`; `git log -S 'security@' -- system/blueprints/user/group.yaml` is empty.\\n3. Filter: `BlueprintSchema::filterArray` retains the non-ignored field; `Validation::filterArray` (`value_type: bool`) passes `admin.super:true` through. Bypass proof: field not flagged ignore/disabled; nested bool leaf preserved.\\n4. Sink (persist): `FlexObject::update` then `filter` then `save` writes to `user://config/groups.yaml`. Guard: none. Bypass proof: value already survived steps 2/3; storage performs no ACL filtering.\\n5. Impact: any member request triggers `UserGroupObject::authorize('admin.super')` (`.../UserGroups/UserGroupObject.php:75`) returning true, so the member is super-admin, enabling scheduler/Twig RCE.\\n\\n## Bypass Evidence\\n- `system/blueprints/user/group.yaml:48-55`: access block with `check_authorize: false`, no `security@` (confirmed live on tag 2.0.12).\\n- `git log -S 'security@' -- system/blueprints/user/group.yaml` is empty (guard never existed; a permanent gap, not a regression).\\n- `git log 2.0.12..HEAD -- system/blueprints/user/group.yaml` is empty (no post-release fix).\\n- `grep -rn check_authorize` (whole repo) returns 0 PHP hits (guard unenforced in PHP).\\n- `grep -rn \\\"typePermissions|filterPermissions\\\" system/src/Grav/Common/Data` returns 0 (permissions map falls through to array-bool filtering that keeps nested keys).\\n- Guard asymmetry: `account.yaml:131/138/150` carry `security@: admin.super`; `group.yaml` carries none. GHSA-h33v-82r9-v8pm's own text confirms the blueprint `security@` gate is the sole Flex-backend strip for these keys.\\n\\n## Affected Versions\\n`<= 2.0.12` (latest release; the guard never existed on `group.yaml`, so all 2.x are affected). The missing guard and the strip logic are both in core `getgrav/grav`; the group-edit UI is provided by the flex-objects/admin plugin, but the fix belongs in core.\\n\\n## Suggested Fix\\nAdd `security@: admin.super` to the `access` field in `system/blueprints/user/group.yaml` (mirroring `account.yaml`), and/or enforce a super-only strip on group ACL saves in core so all callers are covered.\\n\\n---\\nReported by **zx (Jace)** — GitHub: @manus-use\", \"epss\": {\"percentage\": 0.00339, \"percentile\": 0.26554}, \"ghsa_id\": \"GHSA-xhfv-7758-r9hx\", \"github_reviewed_at\": \"2026-09-17T20:45:15Z\", \"html_url\": \"https://github.com/advisories/GHSA-xhfv-7758-r9hx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xhfv-7758-r9hx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75837\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-17T20:45:15Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-xhfv-7758-r9hx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-75837\", \"https://www.vulncheck.com/advisories/grav-before-privilege-escalation-via-group-access-field\", \"https://github.com/advisories/GHSA-xhfv-7758-r9hx\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-xhfv-7758-r9hx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav: Missing admin.super guard on core group blueprint access field allows admin.users operator to escalate to super-admin\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T20:56:22Z\", \"url\": \"https://api.github.com/advisories/GHSA-xhfv-7758-r9hx\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.14\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.0.14\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xhfv-7758-r9hx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: < 2.0.14"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-42613",
+      "CVE-2026-75837"
+    ],
+    "cvss_score": 9.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.647175Z",
+  "provenance": {
+    "content_sha256": "376d0a53ebd602403a85fbeeca673fcb86b06e9519cab84a9d95f173a7094399",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T20:45:15Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xhfv-7758-r9hx",
+  "status": "active",
+  "title": "Grav: Missing admin.super guard on core group blueprint access field allows admin.users operator to escalate to super-admin",
+  "updated_at": "2026-09-17T20:56:22Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xhfv-7758-r9hx"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": null, \"cvss\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\nThe `api.php?action=smwtask` API module performs no authorization check. The equivalent maintenance interface in the web UI (`Special:SMWAdmin`) requires the `smw-admin` right, but the API module that backs several of the same operations enforces nothing. An unauthenticated visitor can therefore retrieve internal Semantic MediaWiki database statistics and reach state-changing maintenance operations that are intended to be administrator-only.\\n\\n### Details\\n\\n`SMW\\\\MediaWiki\\\\Api\\\\Task::execute()` (`src/MediaWiki/Api/Task.php`) reads the request parameters, resolves a task through `TaskFactory`, and runs it. It contains no permission check — no `smw-admin`, no `checkUserRightsAny()`, no per-task right.\\n\\nThe only gates on the module are:\\n\\n- `needsToken( 'csrf' )` — this is **not** authorization. MediaWiki issues anonymous users a fixed, public CSRF token (`+\\\\`), so any unauthenticated caller satisfies the token check. It defends logged-in users against CSRF; it does nothing against a direct anonymous request.\\n- `mustBePosted()` / `isWriteMode()` — do not gate on group membership.\\n\\nBy contrast, `Special:SMWAdmin` restricts access via `parent::__construct( 'SMWAdmin', 'smw-admin' )` and raises `PermissionsError` when the `smw-admin` right is absent. The API path bypasses that restriction entirely.\\n\\nTasks reachable anonymously through the module include:\\n\\n- `table-statistics`, `duplicate-lookup` — return internal store statistics and enumerate the internal object-ID space (intended to be behind `Special:SMWAdmin` → Supplementary functions).\\n- `insert-job` — enqueues any Semantic MediaWiki job type (including `smw.fulltextSearchTableRebuild`, `smw.propertyStatisticsRebuild`, `smw.entityIdDisposer`) for an arbitrary title.\\n- `update`, `check-query`, `run-joblist` — run update jobs and `#ask` queries synchronously within the request; `run-joblist` pops and executes queued jobs inline.\\n\\nBecause the read tasks disclose the internal object-ID space and `insert-job` can enqueue `smw.entityIdDisposer` with a specific `id` parameter, the exposure extends beyond information disclosure and resource consumption to targeted modification of stored semantic data.\\n\\n### Proof of concept\\n\\nOn a default installation, as an unauthenticated visitor:\\n\\n```\\n# 1. Obtain the anonymous CSRF token (the fixed public value \\\"+\\\\\\\")\\ncurl -s 'https://HOST/api.php?action=query&meta=tokens&type=csrf&format=json'\\n#   -> {\\\"query\\\":{\\\"tokens\\\":{\\\"csrftoken\\\":\\\"+\\\\\\\\\\\"}}}\\n\\n# 2. Read internal database statistics — HTTP 200 with the data\\ncurl -s -H 'Content-Type: application/x-www-form-urlencoded' \\\\\\n  --data-raw 'action=smwtask&task=table-statistics&params={}&token=%2B%5C&format=json' \\\\\\n  'https://HOST/api.php'\\n#   -> {\\\"task\\\":{\\\"list\\\":{\\\"smw_object_ids\\\":{\\\"total_row_count\\\":49,\\\"last_id\\\":516,...\\n\\n# 3. Enqueue a maintenance job (state-changing)\\ncurl -s --data-urlencode 'action=smwtask' --data-urlencode 'task=insert-job' \\\\\\n  --data-urlencode 'params={\\\"subject\\\":\\\"Main_Page#0##\\\",\\\"job\\\":\\\"smw.fulltextSearchTableRebuild\\\",\\\"parameters\\\":{\\\"mode\\\":\\\"full\\\"}}' \\\\\\n  --data-urlencode 'token=+\\\\' --data-urlencode 'format=json' 'https://HOST/api.php'\\n#   -> {\\\"task\\\":{\\\"done\\\":\\\"\\\"}}   (job now present in the queue)\\n\\n# 4. Execute queued jobs synchronously in the anonymous request\\ncurl -s --data-urlencode 'action=smwtask' --data-urlencode 'task=run-joblist' \\\\\\n  --data-urlencode 'params={\\\"subject\\\":\\\"Main_Page#0##\\\",\\\"jobs\\\":{\\\"smw.fulltextSearchTableRebuild\\\":1}}' \\\\\\n  --data-urlencode 'token=+\\\\' --data-urlencode 'format=json' 'https://HOST/api.php'\\n#   -> {\\\"task\\\":{\\\"done\\\":\\\"\\\",\\\"log\\\":{\\\"smw.fulltextSearchTableRebuild\\\":[\\\"Main_Page\\\"]}}}\\n```\\n\\nReproduced on `master` against a default install, with the requester confirmed anonymous (`action=query&meta=userinfo` returned `{\\\"id\\\":0,\\\"anon\\\":\\\"\\\"}`).\\n\\n### Impact\\n\\nAn unauthenticated attacker can:\\n\\n- Retrieve internal Semantic MediaWiki database statistics — row counts, the last/highest internal object ID, per-namespace breakdowns, and blob term statistics — and enumerate the internal object-ID space.\\n- Enqueue arbitrary Semantic MediaWiki maintenance jobs and force synchronous execution of update jobs, `#ask` queries, and queued jobs, degrading wiki performance.\\n- Reach entity-disposal operations against enumerated object IDs, affecting the integrity of stored semantic data.\\n\\nPractical severity depends on deployment: the disclosed statistics are more sensitive on a populated wiki, and the performance and integrity impact scales with store size and job cost.\\n\\n### Affected versions\\n\\nAll releases that ship the `smwtask` API module (introduced in 3.x) up to and including the current release.\\n\\n### Mitigation\\n\\nUpgrading to 7.3.0+ or apply a local patch in `localSettings.php` to disable the endpoint if you can't update:\\n```php\\n$wgExtensionFunctions[] = static function () {\\n      unset( $GLOBALS['wgAPIModules']['smwtask'] );\\n};\\n```\", \"ghsa_id\": \"GHSA-jr78-w6w5-m8f8\", \"github_reviewed_at\": \"2026-09-18T16:59:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-jr78-w6w5-m8f8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jr78-w6w5-m8f8\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-18T16:59:31Z\", \"references\": [\"https://github.com/SemanticMediaWiki/SemanticMediaWiki/security/advisories/GHSA-jr78-w6w5-m8f8\", \"https://github.com/SemanticMediaWiki/SemanticMediaWiki/releases/tag/7.3.0\", \"https://github.com/advisories/GHSA-jr78-w6w5-m8f8\"], \"repository_advisory_url\": \"https://api.github.com/repos/SemanticMediaWiki/SemanticMediaWiki/security-advisories/GHSA-jr78-w6w5-m8f8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/SemanticMediaWiki/SemanticMediaWiki\", \"summary\": \"Semantic MediaWiki'a missing authorization in the smwtask API module allows unauthenticated access to admin-only maintenance tasks\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-18T16:59:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-jr78-w6w5-m8f8\", \"vulnerabilities\": [{\"first_patched_version\": \"7.3.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"mediawiki/semantic-media-wiki\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, <= 7.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jr78-w6w5-m8f8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mediawiki/semantic-media-wiki: >= 3.0.0, <= 7.2.1"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mediawiki/semantic-media-wiki"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.602459Z",
+  "provenance": {
+    "content_sha256": "a760aa8efd3d1404663fdd1afaaa3e0007771c75b9e8f4dbbe46e88613e83dbd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-18T16:59:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jr78-w6w5-m8f8",
+  "status": "active",
+  "title": "Semantic MediaWiki'a missing authorization in the smwtask API module allows unauthenticated access to admin-only maintenance tasks",
+  "updated_at": "2026-09-18T16:59:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jr78-w6w5-m8f8"
+}

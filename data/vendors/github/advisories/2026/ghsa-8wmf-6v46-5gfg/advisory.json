@@ -1,0 +1,67 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5067549?v=4\", \"events_url\": \"https://api.github.com/users/pellared/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/pellared/followers\", \"following_url\": \"https://api.github.com/users/pellared/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/pellared/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/pellared\", \"id\": 5067549, \"login\": \"pellared\", \"node_id\": \"MDQ6VXNlcjUwNjc1NDk=\", \"organizations_url\": \"https://api.github.com/users/pellared/orgs\", \"received_events_url\": \"https://api.github.com/users/pellared/received_events\", \"repos_url\": \"https://api.github.com/users/pellared/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/pellared/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/pellared/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/pellared\", \"user_view_type\": \"public\"}}, {\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5543599?v=4\", \"events_url\": \"https://api.github.com/users/MrAlias/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MrAlias/followers\", \"following_url\": \"https://api.github.com/users/MrAlias/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MrAlias/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MrAlias\", \"id\": 5543599, \"login\": \"MrAlias\", \"node_id\": \"MDQ6VXNlcjU1NDM1OTk=\", \"organizations_url\": \"https://api.github.com/users/MrAlias/orgs\", \"received_events_url\": \"https://api.github.com/users/MrAlias/received_events\", \"repos_url\": \"https://api.github.com/users/MrAlias/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MrAlias/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MrAlias/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MrAlias\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-81870\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 2.0, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:L/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-532\", \"name\": \"Insertion of Sensitive Information into Log File\"}], \"description\": \"### Summary\\n\\nOpenTelemetry Go versions 1.5.0 through 1.44.0 can include trace exporter endpoint configuration in an internal diagnostic log emitted when an SDK `TracerProvider` is created. The default OpenTelemetry logger does not emit this event. Exposure requires an application to install a logger that enables OpenTelemetry's internal Info-level diagnostics and for someone other than the intended audience to have access to those logs.\\n\\nThe logged configuration can disclose the address of the trace collector and whether the OTLP/HTTP connection is configured as insecure. The Zipkin exporter logs its complete collector URL, so credentials in URL userinfo or tokens in the query string are also disclosed if an application embeds them there. OTLP authentication headers, TLS key material, and exported span data are not included in this log.\\n\\nExporter `MarshalLog` implementations that caused this configuration to be included in internal logs were introduced by [`a1fff3c`](https://github.com/open-telemetry/opentelemetry-go/commit/a1fff3c2588c783d1f3f6fd2315aa2660fc6d330).\\n\\n### Details\\n\\nWhen `sdk/trace.NewTracerProvider` constructs a provider, it records a `TracerProvider created` internal Info event containing the provider configuration. In affected versions, the configuration's `MarshalLog` methods recursively include:\\n\\n1. the provider's span processors;\\n2. each processor's span exporter; and\\n3. for the OTLP trace exporter, its client configuration.\\n\\nThis causes the following values to be present in the event:\\n\\n- OTLP trace gRPC: the configured endpoint;\\n- OTLP trace HTTP: the configured endpoint and the `Insecure` flag; and\\n- Zipkin: the complete collector URL.\\n\\nOpenTelemetry Go does not emit this event with its default logger, which only emits errors. An application must explicitly configure a sufficiently verbose logger with `otel.SetLogger`. The required `logr` verbosity is version-dependent:\\n\\n- versions 1.5.0 through 1.14.x use `V(1)` for this Info event; and\\n- versions 1.15.0 through 1.44.0 use `V(4)`.\\n\\nOTLP header configuration is not part of the marshaled object, so credentials supplied with `WithHeaders` or the corresponding environment variables are not exposed. The documented OTLP `WithEndpoint` input is a collector address rather than a credential-bearing URL. The higher-risk case is therefore the Zipkin collector URL, which is retained and logged in full, or an application passing sensitive data in an OTLP endpoint outside the documented format.\\n\\n### Proof of concept\\n\\nThe following program demonstrates the behavior with OpenTelemetry Go 1.44.0. It deliberately places credentials and a token in the Zipkin collector URL and enables internal Info logging:\\n\\n```go\\npackage main\\n\\nimport (\\n\\t\\\"bytes\\\"\\n\\t\\\"context\\\"\\n\\t\\\"fmt\\\"\\n\\n\\t\\\"github.com/go-logr/logr/funcr\\\"\\n\\t\\\"go.opentelemetry.io/otel\\\"\\n\\t\\\"go.opentelemetry.io/otel/exporters/zipkin\\\"\\n\\tsdktrace \\\"go.opentelemetry.io/otel/sdk/trace\\\"\\n)\\n\\nfunc main() {\\n\\tvar logs bytes.Buffer\\n\\totel.SetLogger(funcr.New(func(_, args string) {\\n\\t\\t_, _ = logs.WriteString(args)\\n\\t}, funcr.Options{Verbosity: 4}))\\n\\n\\texporter, err := zipkin.New(\\n\\t\\t\\\"http://user:pass@zipkin.internal:9411/api/v2/spans?token=secret\\\",\\n\\t)\\n\\tif err != nil {\\n\\t\\tpanic(err)\\n\\t}\\n\\n\\ttp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))\\n\\t_ = tp.Shutdown(context.Background())\\n\\n\\tfmt.Println(logs.String())\\n}\\n```\\n\\nThe `TracerProvider created` event contains:\\n\\n```text\\nhttp://user:pass@zipkin.internal:9411/api/v2/spans?token=secret\\n```\\n\\nFor versions before 1.15.0, set `funcr.Options{Verbosity: 1}` instead.\\n\\n### Impact\\n\\nThis is a conditional disclosure through application logs. Affected applications must enable verbose OpenTelemetry internal diagnostics and configure a trace exporter containing information they do not intend to expose to readers of those logs. In that configuration, a person or system with log access can learn the trace collector address and internal network topology. If credentials or tokens are embedded directly in a Zipkin collector URL, those values can also be recovered from the logs.\\n\\nThere is no exposure with the default OpenTelemetry logger, and the vulnerable log is generated from local application configuration rather than remotely supplied span data. OTLP authentication headers, certificate or private-key contents, and telemetry payloads are not logged by this path.\\n\\n### Remediation\\n\\nUpgrade the affected OpenTelemetry Go modules to version 1.45.0 or later. The fix in [`3a1412d`](https://github.com/open-telemetry/opentelemetry-go/commit/3a1412d2b3bc4e4231fbeac2ed42117ae541bb38) stops recursively marshaling exporter and client configuration and records their types instead.\\n\\nIf an immediate upgrade is not possible:\\n\\n- keep OpenTelemetry internal logging below the Info verbosity described above;\\n- do not embed credentials or tokens in exporter endpoint URLs; use authentication headers or another supported credential mechanism; and\\n- restrict access to existing logs and rotate any credentials that may already have been recorded.\", \"epss\": {\"percentage\": 0.00187, \"percentile\": 0.08574}, \"ghsa_id\": \"GHSA-8wmf-6v46-5gfg\", \"github_reviewed_at\": \"2026-09-17T20:31:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-8wmf-6v46-5gfg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8wmf-6v46-5gfg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-81870\"}], \"nvd_published_at\": \"2026-09-16T20:17:32Z\", \"published_at\": \"2026-09-17T20:31:06Z\", \"references\": [\"https://github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-8wmf-6v46-5gfg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-81870\", \"https://github.com/open-telemetry/opentelemetry-go/pull/8438\", \"https://github.com/open-telemetry/opentelemetry-go/commit/3a1412d2b3bc4e4231fbeac2ed42117ae541bb38\", \"https://github.com/open-telemetry/opentelemetry-go/releases/tag/exporters/zipkin/v1.45.0\", \"https://github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/v1.45.0\", \"https://github.com/advisories/GHSA-8wmf-6v46-5gfg\"], \"repository_advisory_url\": \"https://api.github.com/repos/open-telemetry/opentelemetry-go/security-advisories/GHSA-8wmf-6v46-5gfg\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/open-telemetry/opentelemetry-go\", \"summary\": \"OpenTelemetry-Go: Exporter config logging may leak endpoint URLs in info logs\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T20:31:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-8wmf-6v46-5gfg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/sdk\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, <= 1.44.0\"}, {\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/exporters/otlp/otlptrace\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, <= 1.44.0\"}, {\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, <= 1.44.0\"}, {\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, <= 1.44.0\"}, {\"first_patched_version\": \"1.45.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"go.opentelemetry.io/otel/exporters/zipkin\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, <= 1.44.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8wmf-6v46-5gfg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc: >= 1.5.0, <= 1.44.0",
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp: >= 1.5.0, <= 1.44.0",
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace: >= 1.5.0, <= 1.44.0",
+      "go.opentelemetry.io/otel/exporters/zipkin: >= 1.5.0, <= 1.44.0",
+      "go.opentelemetry.io/otel/sdk: >= 1.5.0, <= 1.44.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-81870"
+    ],
+    "cvss_score": 2.0,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:L/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace",
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc",
+      "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp",
+      "go.opentelemetry.io/otel/exporters/zipkin",
+      "go.opentelemetry.io/otel/sdk"
+    ],
+    "remote": false,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.695030Z",
+  "provenance": {
+    "content_sha256": "81684faaff181747d87d5c49229f14c661172ec935d8b226895a3430d6591f4f",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T20:31:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8wmf-6v46-5gfg",
+  "status": "active",
+  "title": "OpenTelemetry-Go: Exporter config logging may leak endpoint URLs in info logs",
+  "updated_at": "2026-09-17T20:31:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8wmf-6v46-5gfg"
+}
