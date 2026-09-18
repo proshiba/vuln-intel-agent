@@ -1,0 +1,62 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/36455663?v=4\", \"events_url\": \"https://api.github.com/users/kah-ja/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/kah-ja/followers\", \"following_url\": \"https://api.github.com/users/kah-ja/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/kah-ja/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/kah-ja\", \"id\": 36455663, \"login\": \"kah-ja\", \"node_id\": \"MDQ6VXNlcjM2NDU1NjYz\", \"organizations_url\": \"https://api.github.com/users/kah-ja/orgs\", \"received_events_url\": \"https://api.github.com/users/kah-ja/received_events\", \"repos_url\": \"https://api.github.com/users/kah-ja/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/kah-ja/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/kah-ja/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/kah-ja\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77615\", \"cvss\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\n\\nThe Opencast Paella player renders caption cue text into `innerHTML` without escaping. The captions canvas clears `_captionsContainer.innerHTML` and then appends each active cue with `_captionsContainer.innerHTML += cue`, so HTML inside a WebVTT or DFXP cue becomes live DOM and executes in the Opencast origin.\\n\\nThe caption track is read from any media package element with a `captions/*` flavor and is served, with the player manifest, to anonymous viewers through `/search/episode.json`. The caption plugins that consume it are enabled in the default player configuration, the \\\"Subtitles\\\" upload that produces a `captions/source` track is active by default, and no caption processing step escapes the cue text.\\n\\nA user who can upload a subtitle to an event and publish it stores the payload in the published caption file. Any viewer who opens the event and turns captions on runs the script.\\n\\nResult: a non-admin content author stores JavaScript in a subtitle cue that executes in the browser session of every viewer who enables captions on that event, including anonymous viewers and authenticated staff.\\n\\n## Affected\\n\\nopencast/opencast, `engage-paella-player` module. Supported release lines 19.x and 20.x are affected (and 18.x). Live-confirmed on 18.8 (Paella 7, paella-core 1.50.2) and 20.0 (Paella 8, paella-core 1.50.4); 19.5 ships the code-identical caption path (paella-core 1.50.4, same `EpisodeConversor` and default plugin config as 20.0). The captions canvas uses the same `innerHTML += cue` sink across these versions.\\nDefault configuration: the WebVTT and DFXP caption plugins are `enabled: true` in `etc/ui-config/mh_default_org/paella7/config.json`, the \\\"Subtitles\\\" upload option (`captions/source`, `.vtt`) is active in `etc/listproviders/event.upload.asset.options.properties`, and the `fast` workflow publishes `captions/*` to the engage player.\\nCondition: an event with a caption track published to the engage player. No non-default flag required.\\n\\n## Root cause\\n\\nThe captions canvas appends each cue to `_captionsContainer.innerHTML` in the bundled paella-core (served at `/paellaN/ui/paella-player.js` / the 20.x core chunk), so markup in a cue becomes live DOM. The caption entry is built from any media package element whose flavor matches `captions/*` at `modules/engage-paella-player-7/src/js/EpisodeConversor.js:392`, and `/search/episode.json` serves the manifest and the caption file to anonymous clients. The WebVTT and DFXP plugins that consume it are enabled by default at `etc/ui-config/mh_default_org/paella7/config.json:571` and `:574`. The cue text is not HTML-escaped before assignment to `innerHTML`, and `partial-process-uploaded-captions` only cuts and tags the file, it never sanitizes it. Opencast sets neither a Content-Security-Policy nor an X-Content-Type-Options header, so the injected script runs without restriction.\\n\\n## Reproduction\\n\\nDefault config, default caption plugins enabled, a non-admin user with `ROLE_API_EVENTS_CREATE`, `ROLE_API_EVENTS_TRACK_EDIT`, and `ROLE_UI_TASKS_CREATE` (no `ROLE_ADMIN`).\\n\\n1. As the non-admin user, create an event, then upload a WebVTT subtitle as `captions/source` whose cue text is an XSS payload, and publish the event.\\n\\n```\\nWEBVTT\\n\\n00:00:00.000 --> 00:00:30.000\\n<img src=x onerror=document.title=window.__xss=document.domain>\\n```\\n\\n2. The anonymous search manifest then exposes the caption and serves the cue raw.\\n\\n```\\nGET /search/episode.json?id=<event>\\n\\\"type\\\":\\\"captions/source\\\", \\\"url\\\":\\\".../static/.../x.vtt\\\"\\nGET .../static/.../x.vtt  ->  cue text returned verbatim\\n```\\n\\n3. Open the event in the player as an anonymous viewer, open the captions menu, and select the track; the cue is written to `innerHTML` and the `onerror` handler runs.\\n\\nLive-verified: on Opencast 18.8 (build 8705223) in Chrome, a non-admin author published the subtitle and an anonymous viewer enabled captions, rendering the cue as a live `<img>` node and setting `window.__xss` and `document.title` to `document.domain`. On Opencast 20.0 (build d919405, Paella 8), the served core bundle contains the identical `innerHTML += cue` sink and the player loads the cue raw; the sink executes JavaScript in the engage origin when fed the player's own published caption file.\\n\\n## Impact\\n\\n- JavaScript execution in the Opencast origin in the session of any viewer who enables captions on the event.\\n- Anonymous viewers and authenticated staff are equally affected; an instructor or admin viewer exposes that session context to the script.\\n- Session and CSRF-token theft, actions performed as the victim against the Opencast REST API.\\n- Stored by a non-admin content author, triggered by viewing with captions on, no attacker authentication at view time.\\n\\n## Credit\\n\\nJan Kahmen, [turingpoint](https://www.turingpoint.de) (jan@turingpoint.de)\", \"ghsa_id\": \"GHSA-m6c8-jcw2-5r25\", \"github_reviewed_at\": \"2026-09-18T13:11:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-m6c8-jcw2-5r25\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m6c8-jcw2-5r25\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77615\"}], \"nvd_published_at\": \"2026-09-17T21:17:38Z\", \"published_at\": \"2026-09-18T13:11:59Z\", \"references\": [\"https://github.com/opencast/opencast/security/advisories/GHSA-m6c8-jcw2-5r25\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-77615\", \"https://github.com/opencast/opencast/pull/7736\", \"https://github.com/opencast/opencast/commit/701682c635f668228c3e8fb7b4564b3294788e40\", \"https://github.com/polimediaupv/paella-core/commit/94a36490808ac5a1f60a0745d71ec9253f6d206b\", \"https://github.com/polimediaupv/paella-core/commit/9b2f14ec4cf55efaf4c045c77a5ed8f5ec559ab4\", \"https://github.com/polimediaupv/paella-player/commit/6fe4af7306044198c8e91e2e7f4128428b83cf03\", \"https://github.com/opencast/opencast/releases/tag/19.7\", \"https://github.com/opencast/opencast/releases/tag/20.2\", \"https://github.com/polimediaupv/paella-player/blob/a1b6c42467938a00a4b4d0b8c68435cd4f9d2a16/repos/paella-core/CHANGELOG.md?plain=1#L21\", \"https://github.com/advisories/GHSA-m6c8-jcw2-5r25\"], \"repository_advisory_url\": \"https://api.github.com/repos/opencast/opencast/security-advisories/GHSA-m6c8-jcw2-5r25\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/opencast/opencast\", \"summary\": \"Opencast: Stored XSS in Paella player via WebVTT/DFXP caption cue text\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-18T13:12:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-m6c8-jcw2-5r25\", \"vulnerabilities\": [{\"first_patched_version\": \"19.7\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.opencastproject:opencast-engage-paella-player-7\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 19.7\"}, {\"first_patched_version\": \"20.2\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.opencastproject:opencast-engage-paella-player-7\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 20.0, < 20.2\"}, {\"first_patched_version\": \"1.50.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"paella-core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.50.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m6c8-jcw2-5r25",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.opencastproject:opencast-engage-paella-player-7: < 19.7",
+      "org.opencastproject:opencast-engage-paella-player-7: >= 20.0, < 20.2",
+      "paella-core: < 1.50.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77615"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.opencastproject:opencast-engage-paella-player-7",
+      "paella-core"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.626616Z",
+  "provenance": {
+    "content_sha256": "bd5be959b840fbc55138bed5a891a72b6cf0f22dfc081561cba8c182aaa979a8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-18T13:11:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m6c8-jcw2-5r25",
+  "status": "active",
+  "title": "Opencast: Stored XSS in Paella player via WebVTT/DFXP caption cue text",
+  "updated_at": "2026-09-18T13:12:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m6c8-jcw2-5r25"
+}

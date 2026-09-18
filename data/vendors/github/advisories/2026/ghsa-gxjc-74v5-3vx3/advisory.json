@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/153093559?v=4\", \"events_url\": \"https://api.github.com/users/PhucQuan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/PhucQuan/followers\", \"following_url\": \"https://api.github.com/users/PhucQuan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/PhucQuan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/PhucQuan\", \"id\": 153093559, \"login\": \"PhucQuan\", \"node_id\": \"U_kgDOCSAFtw\", \"organizations_url\": \"https://api.github.com/users/PhucQuan/orgs\", \"received_events_url\": \"https://api.github.com/users/PhucQuan/received_events\", \"repos_url\": \"https://api.github.com/users/PhucQuan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/PhucQuan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/PhucQuan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/PhucQuan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61794\", \"cvss\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"### Summary\\nA validation bug in `internal/webhook/tenant/validation/forbidden_annotations_regex.go` allows an invalid `ForbiddenAnnotations.Regex` value to bypass Tenant admission on update. The webhook compiles `ForbiddenLabels.Regex` for both labels and annotations, so a malformed annotations regex can be persisted. Once stored, namespace admission later evaluates the bad regex through `pkg/api/forbidden_list.go`, where `regexp.MustCompile` can panic and cause admission failure.\\n\\n### Details\\nIn `internal/webhook/tenant/validation/forbidden_annotations_regex.go`, `OnUpdate` validates the new Tenant object, but the loop compiles `tnt.Spec.NamespaceOptions.ForbiddenLabels.Regex` for both `labels` and `annotations`. That means an invalid `ForbiddenAnnotations.Regex` is never validated if `ForbiddenLabels.Regex` is valid.\\n\\nRelevant paths:\\n- `internal/webhook/tenant/validation/forbidden_annotations_regex.go`\\n- `internal/webhook/namespace/validation/user_metadata.go`\\n- `pkg/api/forbidden_list.go`\\n\\nNamespace admission later calls `api.ValidateForbidden(...)`, and `ForbiddenListSpec.RegexMatch()` uses `regexp.MustCompile(in.Regex)`. If the malformed regex is present in the Tenant spec, any namespace request that reaches this check can panic or fail hard, causing denial of service for namespace operations in the affected tenant.\\n\\n\\n### PoC\\n1. Update a Tenant so that:\\n   - `spec.namespaceOptions.forbiddenLabels.regex` is valid\\n   - `spec.namespaceOptions.forbiddenAnnotations.regex` is malformed, for example: `[invalid-regex(`\\n2. The Tenant update is accepted because the webhook compiles the labels regex for both fields.\\n3. Create or update a Namespace that triggers forbidden metadata validation.\\n4. The namespace admission path reaches `regexp.MustCompile(...)` and panics.\\n\\n```\\npackage main\\n\\nimport (\\n\\t\\\"fmt\\\"\\n\\t\\\"regexp\\\"\\n)\\n\\ntype ForbiddenListSpec struct {\\n\\tRegex string\\n}\\n\\ntype NamespaceOptions struct {\\n\\tForbiddenLabels      ForbiddenListSpec\\n\\tForbiddenAnnotations ForbiddenListSpec\\n}\\n\\ntype Tenant struct {\\n\\tNamespaceOptions *NamespaceOptions\\n}\\n\\nfunc validateTenantUpdate(tnt *Tenant) error {\\n\\tif tnt.NamespaceOptions == nil {\\n\\t\\treturn nil\\n\\t}\\n\\n\\tannotationsToCheck := map[string]string{\\n\\t\\t\\\"labels\\\":      tnt.NamespaceOptions.ForbiddenLabels.Regex,\\n\\t\\t\\\"annotations\\\": tnt.NamespaceOptions.ForbiddenAnnotations.Regex,\\n\\t}\\n\\n\\tfor scope, annotation := range annotationsToCheck {\\n\\t\\tif _, err := regexp.Compile(tnt.NamespaceOptions.ForbiddenLabels.Regex); err != nil {\\n\\t\\t\\treturn fmt.Errorf(\\\"deny update: unable to compile %s regex for forbidden %s\\\", annotation, scope)\\n\\t\\t}\\n\\t}\\n\\n\\treturn nil\\n}\\n\\nfunc validateForbidden(metadata map[string]string, forbidden ForbiddenListSpec) error {\\n\\tfor key := range metadata {\\n\\t\\tif forbidden.Regex != \\\"\\\" {\\n\\t\\t\\tif regexp.MustCompile(forbidden.Regex).MatchString(key) {\\n\\t\\t\\t\\treturn fmt.Errorf(\\\"forbidden key matched: %s\\\", key)\\n\\t\\t\\t}\\n\\t\\t}\\n\\t}\\n\\n\\treturn nil\\n}\\n\\nfunc main() {\\n\\toldTenant := &Tenant{\\n\\t\\tNamespaceOptions: &NamespaceOptions{\\n\\t\\t\\tForbiddenLabels:      ForbiddenListSpec{Regex: `^[a-z0-9-]+$`},\\n\\t\\t\\tForbiddenAnnotations: ForbiddenListSpec{Regex: `^[a-z0-9-]+$`},\\n\\t\\t},\\n\\t}\\n\\n\\tnewTenant := &Tenant{\\n\\t\\tNamespaceOptions: &NamespaceOptions{\\n\\t\\t\\tForbiddenLabels:      ForbiddenListSpec{Regex: `^[a-z0-9-]+$`},\\n\\t\\t\\tForbiddenAnnotations: ForbiddenListSpec{Regex: `[invalid-regex(`},\\n\\t\\t},\\n\\t}\\n\\n\\tfmt.Println(\\\"=== Update step ===\\\")\\n\\tif err := validateTenantUpdate(newTenant); err != nil {\\n\\t\\tfmt.Printf(\\\"unexpected deny: %v\\\\n\\\", err)\\n\\t} else {\\n\\t\\tfmt.Println(\\\"allowed: malformed ForbiddenAnnotations.Regex bypassed validation\\\")\\n\\t}\\n\\n\\tfmt.Println()\\n\\tfmt.Println(\\\"=== Namespace step ===\\\")\\n\\t_ = oldTenant\\n\\n\\tdefer func() {\\n\\t\\tif r := recover(); r != nil {\\n\\t\\t\\tfmt.Printf(\\\"panic reproduced from ValidateForbidden: %v\\\\n\\\", r)\\n\\t\\t}\\n\\t}()\\n\\n\\t_ = validateForbidden(map[string]string{\\\"example\\\": \\\"value\\\"}, ForbiddenListSpec{Regex: `[invalid-regex(`})\\n\\tfmt.Println(\\\"no panic, unexpected\\\")\\n}\\n```\\nExpected output:\\n\\n```text\\n=== Update step ===\\nallowed: malformed ForbiddenAnnotations.Regex bypassed validation\\n\\n=== Namespace step ===\\npanic reproduced from ValidateForbidden: regexp: Compile(`[invalid-regex(`): error parsing regexp: missing closing ]: `[invalid-regex(`\\n```\\n\\n\\n\\n### Impact\\nAn attacker who can update the Tenant configuration can persist a malformed `ForbiddenAnnotations.Regex` and cause namespace admission failures for the affected tenant. This can result in a tenant-scoped denial of service.\", \"ghsa_id\": \"GHSA-gxjc-74v5-3vx3\", \"github_reviewed_at\": \"2026-09-18T17:14:26Z\", \"html_url\": \"https://github.com/advisories/GHSA-gxjc-74v5-3vx3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gxjc-74v5-3vx3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61794\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-18T17:14:26Z\", \"references\": [\"https://github.com/projectcapsule/capsule/security/advisories/GHSA-gxjc-74v5-3vx3\", \"https://github.com/projectcapsule/capsule/pull/1983\", \"https://github.com/projectcapsule/capsule/commit/8d89d6865df6f41c7faa22fc9e807a57b01bfd0e\", \"https://github.com/projectcapsule/capsule/releases/tag/v0.13.7\", \"https://github.com/advisories/GHSA-gxjc-74v5-3vx3\"], \"repository_advisory_url\": \"https://api.github.com/repos/projectcapsule/capsule/security-advisories/GHSA-gxjc-74v5-3vx3\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/projectcapsule/capsule\", \"summary\": \"Capsule: Malformed ForbiddenAnnotations.Regex can bypass Tenant validation and trigger namespace admission panic\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-18T17:14:28Z\", \"url\": \"https://api.github.com/advisories/GHSA-gxjc-74v5-3vx3\", \"vulnerabilities\": [{\"first_patched_version\": \"0.13.7\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/projectcapsule/capsule\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.13.0, < 0.13.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gxjc-74v5-3vx3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/projectcapsule/capsule: >= 0.13.0, < 0.13.7"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-61794"
+    ],
+    "cvss_score": 4.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/projectcapsule/capsule"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.592963Z",
+  "provenance": {
+    "content_sha256": "2ea7bc891c7fecc0aa805fb832c51163ee126198e62bfb23e3547539ab5904f4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-18T17:14:26Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gxjc-74v5-3vx3",
+  "status": "active",
+  "title": "Capsule: Malformed ForbiddenAnnotations.Regex can bypass Tenant validation and trigger namespace admission panic",
+  "updated_at": "2026-09-18T17:14:28Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gxjc-74v5-3vx3"
+}

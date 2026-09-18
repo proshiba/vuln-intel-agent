@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/92229893?v=4\", \"events_url\": \"https://api.github.com/users/ka3n1x/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ka3n1x/followers\", \"following_url\": \"https://api.github.com/users/ka3n1x/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ka3n1x/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ka3n1x\", \"id\": 92229893, \"login\": \"ka3n1x\", \"node_id\": \"U_kgDOBX9RBQ\", \"organizations_url\": \"https://api.github.com/users/ka3n1x/orgs\", \"received_events_url\": \"https://api.github.com/users/ka3n1x/received_events\", \"repos_url\": \"https://api.github.com/users/ka3n1x/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ka3n1x/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ka3n1x/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ka3n1x\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-72695\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\"}, \"cvss_v4\": {\"score\": 7.1, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"# Path Traversal in MediaUploadTrait::deleteFile() Allows Arbitrary File Deletion\\n\\n## Summary\\n\\nA path traversal vulnerability in `MediaUploadTrait::deleteFile()` allows an authenticated user with media management permissions to delete arbitrary files on the server. The method validates only the basename portion of the filename using `Utils::checkFilename()`, while the directory path (which may contain `../` sequences) is preserved and passed unvalidated to `unlink()`. This enables directory escape from the intended media storage path.\\n\\n## Severity\\n\\n**High (8.1)** - CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H\\n\\n## CWE\\n\\nCWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\\n\\n## Details\\n\\nIn `system/src/Grav/Common/Media/Traits/MediaUploadTrait.php`, the `deleteFile()` method (lines 332-365) performs filename validation only on the basename, not the full path:\\n\\n```php\\npublic function deleteFile(string $filename, ?array $settings = null): void\\n{\\n    $settings = $this->getUploadSettings($settings);\\n    $filesystem = Filesystem::getInstance(false);\\n\\n    // Line 339-340: Only the BASENAME is validated\\n    $basename = $filesystem->basename($filename);  // e.g. \\\"evil.jpg\\\" from \\\"../../evil.jpg\\\"\\n    if (!Utils::checkFilename($basename)) {         // passes - no traversal in basename\\n        throw new RuntimeException(/* ... */);\\n    }\\n\\n    $path = $settings['destination'] ?? $this->getPath();\\n    // ...\\n\\n    // Line 353: Full pathname (with traversal) is preserved\\n    $pathname = $filesystem->pathname($filename);   // \\\"../../\\\"\\n\\n    // Line 356-357: Traversal path reconstructed\\n    [$base, $ext,,] = $this->getFileParts($basename);\\n    $name = \\\"{$pathname}{$base}.{$ext}\\\";            // \\\"../../evil.jpg\\\"\\n\\n    // Line 360: Passed to doRemove()\\n    $this->doRemove($name, $path);\\n}\\n```\\n\\n`doRemove()` (line 521-582) then calls:\\n\\n```php\\n// Line 538\\nunlink(\\\"{$folder}/{$filename}\\\");\\n// e.g. unlink(\\\"/var/www/grav/user/pages/mypage/../../config/system.yaml\\\")\\n```\\n\\n`Utils::checkFilename()` (lines 1022-1044) properly checks for `/`, `\\\\`, and `..`, but it is applied to `$filesystem->basename($filename)` (the last path component only), so traversal sequences in the directory portion are never validated.\\n\\n### Data flow from user input\\n\\nThe vulnerability is reachable through the Flex media handling pipeline:\\n\\n1. `FlexMediaTrait::setUpdatedMedia()` (line 386) iterates form flash data where `$filename` is the array key - user-controlled\\n2. For file deletions (`$file` is null, line 396), NO upload validation is performed (the `checkUploadedFile()` call at line 401 only executes when `$file` is truthy)\\n3. The raw filename is stored in `$this->_uploads` at line 414\\n4. `saveUpdatedMedia()` (line 499) calls `$media->deleteFile($filename, $settings)` with the unsanitized filename\\n\\n### Sibling: renameFile()\\n\\nThe same pattern exists in `renameFile()` (lines 374-405) which has even weaker validation - it performs NO `checkFilename()` call at all. While `renameFile()` currently has no callers in the core codebase, it is part of the public `MediaUploadInterface` and should be fixed as defense-in-depth.\\n\\n## Proof of Concept\\n\\n**Environment**: Grav CMS 2.0.16 with admin plugin\\n\\nThe attack requires an authenticated admin user with page/media editing permissions (not super-admin).\\n\\n1. Create a target file:\\n```bash\\necho \\\"DELETE_ME\\\" > /var/www/grav/user/data/target.txt\\n```\\n\\n2. Submit a Flex object form (e.g. page edit) with a crafted media deletion where the filename key contains path traversal:\\n\\n```\\nPOST /admin/pages/mypage/task:save\\nContent-Type: multipart/form-data\\n\\n# The form flash data includes a media deletion entry with key:\\n# \\\"../../data/target.txt\\\" -> null (deletion marker)\\n```\\n\\n3. When `saveUpdatedMedia()` processes the deletion queue:\\n   - `$filename` = `../../data/target.txt`\\n   - `deleteFile(\\\"../../data/target.txt\\\")` is called\\n   - `$basename` = `target.txt` (passes `checkFilename()`)\\n   - `$pathname` = `../../data/`\\n   - `$name` = `../../data/target.txt`\\n   - `doRemove()` calls `unlink(\\\"/var/www/grav/user/pages/mypage/../../data/target.txt\\\")`\\n   - Which resolves to `unlink(\\\"/var/www/grav/user/data/target.txt\\\")`\\n\\n4. The file is deleted outside the intended media directory.\\n\\n### Impact\\n\\nAn authenticated user with media management permissions can:\\n- Delete configuration files (`user/config/system.yaml`, `user/config/security.yaml`)\\n- Delete other pages' content files\\n- Delete authentication-related files (user account YAML files)\\n- Cause denial of service by removing critical application files\\n- Potentially escalate privileges by removing security configuration\\n\\n## Suggested Fix\\n\\nApply `Utils::checkFilename()` to the full `$filename` parameter before decomposing it, or reject any filename containing directory separators or `..` sequences:\\n\\n```php\\npublic function deleteFile(string $filename, ?array $settings = null): void\\n{\\n    $settings = $this->getUploadSettings($settings);\\n    $filesystem = Filesystem::getInstance(false);\\n\\n    // Validate the FULL filename, not just the basename\\n    if (!Utils::checkFilename($filename)) {\\n        throw new RuntimeException(/* ... */);\\n    }\\n\\n    // ... rest unchanged\\n}\\n```\\n\\nThe same fix should be applied to `renameFile()` for both `$from` and `$to` parameters.\\n\\n## References\\n\\n- Vulnerable file: `system/src/Grav/Common/Media/Traits/MediaUploadTrait.php` lines 332-365, 521-582\\n- Caller: `system/src/Grav/Framework/Flex/Traits/FlexMediaTrait.php` lines 386-414, 490-499\\n- Sibling: `system/src/Grav/Common/Media/Traits/MediaUploadTrait.php` lines 374-405 (renameFile)\\n- Related GHSA: GHSA-g6j3-8jv9-ch5f (path traversal in PagesController::batchCopy - different file, same bug class)\\n\\n## Disclosure\\n\\nThis vulnerability was discovered using AI-assisted security research tools.\", \"epss\": {\"percentage\": 0.00567, \"percentile\": 0.4553}, \"ghsa_id\": \"GHSA-jq29-c7v8-rg55\", \"github_reviewed_at\": \"2026-09-17T20:34:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-jq29-c7v8-rg55\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jq29-c7v8-rg55\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-72695\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-17T20:34:05Z\", \"references\": [\"https://github.com/getgrav/grav/security/advisories/GHSA-jq29-c7v8-rg55\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-72695\", \"https://www.vulncheck.com/advisories/grav-before-path-traversal-via-mediauploadtrait-deletefile\", \"https://github.com/advisories/GHSA-jq29-c7v8-rg55\"], \"repository_advisory_url\": \"https://api.github.com/repos/getgrav/grav/security-advisories/GHSA-jq29-c7v8-rg55\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/getgrav/grav\", \"summary\": \"Grav: Path Traversal in MediaUploadTrait::deleteFile() Allows Arbitrary File Deletion\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-17T20:34:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-jq29-c7v8-rg55\", \"vulnerabilities\": [{\"first_patched_version\": \"2.0.16\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"getgrav/grav\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.0.15\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jq29-c7v8-rg55",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "getgrav/grav: <= 2.0.15"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-72695"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "getgrav/grav"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-18T19:13:32.658060Z",
+  "provenance": {
+    "content_sha256": "ea85319650243669a68ddc2ba9d4131d3410b196a54b74ebefd18a42353c9c85",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-17T20:34:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jq29-c7v8-rg55",
+  "status": "active",
+  "title": "Grav: Path Traversal in MediaUploadTrait::deleteFile() Allows Arbitrary File Deletion",
+  "updated_at": "2026-09-17T20:34:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jq29-c7v8-rg55"
+}
