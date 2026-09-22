@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/268783706?v=4\", \"events_url\": \"https://api.github.com/users/SakusenSec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SakusenSec/followers\", \"following_url\": \"https://api.github.com/users/SakusenSec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SakusenSec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SakusenSec\", \"id\": 268783706, \"login\": \"SakusenSec\", \"node_id\": \"U_kgDOEAVQWg\", \"organizations_url\": \"https://api.github.com/users/SakusenSec/orgs\", \"received_events_url\": \"https://api.github.com/users/SakusenSec/received_events\", \"repos_url\": \"https://api.github.com/users/SakusenSec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SakusenSec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SakusenSec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SakusenSec\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5459596?v=4\", \"events_url\": \"https://api.github.com/users/johaven/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/johaven/followers\", \"following_url\": \"https://api.github.com/users/johaven/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/johaven/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/johaven\", \"id\": 5459596, \"login\": \"johaven\", \"node_id\": \"MDQ6VXNlcjU0NTk1OTY=\", \"organizations_url\": \"https://api.github.com/users/johaven/orgs\", \"received_events_url\": \"https://api.github.com/users/johaven/received_events\", \"repos_url\": \"https://api.github.com/users/johaven/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/johaven/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/johaven/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/johaven\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-58269\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-288\", \"name\": \"Authentication Bypass Using an Alternate Path or Channel\"}], \"description\": \"**Affected component:** Sync-in Server v2.3.0, `POST /api/auth/token` (`auth.controller.ts:50-55`).\\n\\n**Required attacker capability:** Valid username and password for a 2FA-enabled account.\\n\\n## Summary\\n\\n`POST /api/auth/token` authenticates with username and password only, then calls `getTokens()`, which returns unrestricted Bearer access and refresh JWTs without checking whether the account has TOTP 2FA enabled. An attacker who already knows valid credentials for a 2FA-enabled account can bypass 2FA in a single request.\\n\\nThe parallel login endpoint (`POST /api/auth/login`) correctly enforces 2FA by calling `setCookies(user, res, true)`, which gates on `user.twoFaEnabled` when server-side TOTP is enabled.\\n\\n## Details\\n\\nThe token endpoint at `auth.controller.ts:50-55` uses `AuthLocalGuard` (password-only) and calls `getTokens()` directly:\\n```typescript\\n// auth.controller.ts:50-55\\n@Post(AUTH_ROUTE.TOKEN)\\n@AuthTokenSkip()\\n@UseGuards(AuthLocalGuard)\\ntoken(@GetUser() user: UserModel): Promise<TokenResponseDto> {\\n  return this.authManager.getTokens(user)\\n}\\n```\\n`getTokens()` at `auth.service.ts:25-39` signs and returns access and refresh JWTs. It never reads `user.twoFaEnabled`:\\n```typescript\\n// auth.service.ts:25-39\\nasync getTokens(user: UserModel, refresh = false): Promise<TokenResponseDto> {\\n  const currentTime = currentTimeStamp()\\n  // ...expiration logic...\\n  return {\\n    [TOKEN_TYPE.ACCESS]: await this.jwtSign(user, TOKEN_TYPE.ACCESS, accessExpiration),\\n    [TOKEN_TYPE.REFRESH]: await this.jwtSign(user, TOKEN_TYPE.REFRESH, refreshExpiration),\\n    // ...\\n  }\\n}\\n```\\nCompare with the login endpoint at `auth.controller.ts:30-35`, which calls `setCookies(user, res, true)`. Inside `setCookies()` at `auth.service.ts:45`, the 2FA gate fires:\\n```typescript\\n// auth.service.ts:45\\nconst verify2Fa = init2FaVerify && configuration.auth.mfa.totp.enabled && user.twoFaEnabled\\n```\\nWhen `verify2Fa` is true, `setCookies()` issues only a restricted `ACCESS_2FA` token and requires the user to complete `POST /api/auth/2fa/login/verify` before receiving full session cookies. The token endpoint has no equivalent gate.\\n\\n## PoC\\n\\n### Prerequisites\\n\\n- A Sync-in instance with TOTP 2FA enabled server-wide.\\n- A user account with 2FA enrolled (the target).\\n- The target's valid login and password, but not the TOTP secret or current TOTP code.\\n\\n### Steps\\n\\n1. **Enable 2FA on the target account.** Log in as the target user, navigate to Settings, and enable TOTP two-factor authentication.\\n\\n2. **Confirm normal login requires 2FA.** Log out. Log back in with the target's credentials. The UI presents a TOTP code prompt before granting access, and the API response contains only `token.access_2fa_expiration` (a restricted partial token):\\n```\\nPOST /api/auth/login\\n{\\\"login\\\":\\\"test\\\",\\\"password\\\":\\\"...\\\"}\\n\\nResponse: {\\\"user\\\":{\\\"twoFaEnabled\\\":true},\\\"server\\\":{\\\"twoFaEnabled\\\":true},\\\"token\\\":{\\\"access_2fa_expiration\\\":1781234379}}\\n```\\n3. **Bypass 2FA via the token endpoint.** Send the same credentials to `/api/auth/token`:\\n```\\nPOST /api/auth/token\\n{\\\"login\\\":\\\"test\\\",\\\"password\\\":\\\"...\\\"}\\n\\nResponse:\\n{\\n  \\\"access\\\": \\\"eyJhbGciOiJIUzI1NiIs...\\\",\\n  \\\"refresh\\\": \\\"eyJhbGciOiJIUzI1NiIs...\\\",\\n  \\\"access_expiration\\\": 1781235890,\\n  \\\"refresh_expiration\\\": 1781248490\\n}\\n```\\nUnrestricted Bearer access and refresh JWTs are returned. No TOTP code was required.\\n\\n4. **Confirm API access.** Use the token on a protected endpoint:\\n```\\nGET /api/users/me\\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIs...\\n\\nResponse: {\\\"user\\\":{\\\"id\\\":16,\\\"login\\\":\\\"test\\\",\\\"email\\\":\\\"test@lab.local\\\",\\\"twoFaEnabled\\\":true,...}}\\n```\\nThe server returns the user profile. Protected API endpoints that accept Bearer authentication are accessible as the target user. No TOTP code was required at any step.\\n\\n### Measured observations\\n\\n- The login endpoint (`/api/auth/login`) correctly returns a restricted 2FA-pending response.\\n- The token endpoint (`/api/auth/token`) returns unrestricted Bearer JWTs with the same credentials and no TOTP.\\n- The returned Bearer token grants access to protected API endpoints as a fully authenticated user, though cookie-specific flows may differ.\\n\\n## Impact\\n\\nAn attacker who already knows valid credentials for a 2FA-enabled account can obtain unrestricted Bearer access and refresh JWTs in a single HTTP request, without knowing the TOTP secret or possessing the authenticator device. 2FA security is bypassed for Bearer-token API authentication.\\n\\n## Remediation\\n\\nGate the token endpoint behind the same 2FA policy used by the login route. After `AuthLocalGuard` validates the username and password, require a valid TOTP code when server-side TOTP is enabled and `user.twoFaEnabled` is true, before calling `getTokens()`.\", \"ghsa_id\": \"GHSA-92cr-jxw4-5wjg\", \"github_reviewed_at\": \"2026-09-22T14:46:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-92cr-jxw4-5wjg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-92cr-jxw4-5wjg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-58269\"}], \"nvd_published_at\": \"2026-09-21T20:17:26Z\", \"published_at\": \"2026-09-22T14:46:30Z\", \"references\": [\"https://github.com/Sync-in/server/security/advisories/GHSA-92cr-jxw4-5wjg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-58269\", \"https://github.com/Sync-in/server/pull/228\", \"https://github.com/Sync-in/server/commit/3ec74e2ea1f538fe1a3ac9487bdf24a19e548361\", \"https://github.com/Sync-in/server/releases/tag/v2.4.0\", \"https://github.com/advisories/GHSA-92cr-jxw4-5wjg\"], \"repository_advisory_url\": \"https://api.github.com/repos/Sync-in/server/security-advisories/GHSA-92cr-jxw4-5wjg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Sync-in/server\", \"summary\": \"Sync-in Server has a complete 2FA Bypass via `POST /api/auth/token`\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T14:46:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-92cr-jxw4-5wjg\", \"vulnerabilities\": [{\"first_patched_version\": \"2.4.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@sync-in/server\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-92cr-jxw4-5wjg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@sync-in/server: <= 2.3.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-58269"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@sync-in/server"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-22T19:15:07.044371Z",
+  "provenance": {
+    "content_sha256": "15cedea21a4fe91d74b6dc6c41007f154699857040b70ca3dcc568c41b64e04e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T14:46:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-92cr-jxw4-5wjg",
+  "status": "active",
+  "title": "Sync-in Server has a complete 2FA Bypass via `POST /api/auth/token`",
+  "updated_at": "2026-09-22T14:46:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-92cr-jxw4-5wjg"
+}
