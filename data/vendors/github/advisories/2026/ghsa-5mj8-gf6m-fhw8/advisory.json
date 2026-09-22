@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/178017272?v=4\", \"events_url\": \"https://api.github.com/users/b401t/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/b401t/followers\", \"following_url\": \"https://api.github.com/users/b401t/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/b401t/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/b401t\", \"id\": 178017272, \"login\": \"b401t\", \"node_id\": \"U_kgDOCpxT-A\", \"organizations_url\": \"https://api.github.com/users/b401t/orgs\", \"received_events_url\": \"https://api.github.com/users/b401t/received_events\", \"repos_url\": \"https://api.github.com/users/b401t/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/b401t/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/b401t/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/b401t\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56681\", \"cvss\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-807\", \"name\": \"Reliance on Untrusted Inputs in a Security Decision\"}], \"description\": \"## Summary\\n\\n9router determines whether an incoming request originates from localhost by trusting the X-9r-Real-Ip HTTP request header. This header is intended to be produced and sanitized exclusively by the bundled custom-server.js layer from the TCP socket address. In deployment modes where requests reach Next.js directly (the header is never stripped/regenerated), a remote, unauthenticated attacker can simply send X-9r-Real-Ip: 127.0.0.1 and be treated as a local client. This bypasses the API-key requirement on the public LLM API (/api/v1/*), granting unauthenticated access to the instance owner's configured provider resources.\\n\\n## Affected Component\\n\\n- src/dashboardGuard.js  \\n- isLocalRequest() — trusts the client-supplied X-9r-Real-Ip header to decide loopback origin  \\n- canAccessPublicLlmApi() — grants access to /api/v1/* when isLocalRequest() returns true, skipping API-key validation  \\n- Verified affected route: GET /api/v1/models  \\n- Product version tested: 9router-app 0.5.4 (Next.js 16.2.9)\\n## Root Cause\\n\\nThe authorization layer makes a security decision based on a client-controllable HTTP header. isLocalRequest() reads X-9r-Real-Ip and, if its value is a loopback address (127.0.0.1), classifies the request as local. The design assumes this header can only be set by the trusted custom-server.js wrapper (which derives it from the unspoofable socket address and strips any inbound copy). When the application is served without that wrapper, Next.js passes the attacker-supplied header through unchanged, so the trust assumption is violated:\\n\\n```text\\nUntrusted Client Input\\n        ↓\\nX-9r-Real-Ip: 127.0.0.1\\n        ↓\\nisLocalRequest()  → true\\n        ↓\\ncanAccessPublicLlmApi()  → allowed (API key not required)\\n        ↓\\n200 OK\\n```\\n\\n## Attack Scenario\\n\\n1. The instance is deployed in a mode that does not use custom-server.js, and the LLM API is reachable by the attacker (the default bind is 0.0.0.0).\\n2. The attacker sends a normal request to /api/v1/models and receives 401 Unauthorized (API key required for remote access).\\n3. The attacker re-sends the identical request with the single added header X-9r-Real-Ip: 127.0.0.1.\\n4. The request is classified as local, the API-key check is skipped, and the attacker receives 200 OK with the owner's model catalog and ongoing access to the LLM API.\\n\\n## Proof of Concept\\n\\n### Baseline Request\\n<img width=\\\"1211\\\" height=\\\"402\\\" alt=\\\"Screenshot 2026-06-19 174727\\\" src=\\\"https://github.com/user-attachments/assets/170b635f-1bd6-4dfd-ad85-30a03a9f6f72\\\" />\\n\\n### Exploit Request\\n\\n<img width=\\\"1207\\\" height=\\\"816\\\" alt=\\\"Screenshot 2026-06-19 174844\\\" src=\\\"https://github.com/user-attachments/assets/b7b4efde-c071-4aa2-ab13-9bde7c88a7b8\\\" />\\n\\n\\nThe only difference between the two requests is the addition of X-9r-Real-Ip: 127.0.0.1.\\n## Impact\\n\\nAn unauthenticated remote attacker who can reach the service can bypass API-key enforcement on the public LLM API and act as a trusted local client. Consequences include:\\n\\n- Unauthorized use of the owner's configured LLM provider connections\\n- Consumption of paid API credits / financial loss to the instance owner\\n- Abuse of upstream provider accounts via the proxy\\n- Enumeration of configured providers and available models\\n\\n## Remediation\\n\\n- Do not trust X-9r-Real-Ip (or any X-9r-* header) when received directly from clients.\\n- Derive the client address for authorization from a trusted transport-level source, e.g. req.socket.remoteAddress, rather than a request header.\\n- If custom-server.js is required for the security model, fail closed when its trusted marker is absent, and explicitly strip/reject any inbound client-supplied X-9r-* headers at the edge.\\n- Document supported, secure startup modes so the application is not run in a configuration where the header is attacker-controllable.\", \"ghsa_id\": \"GHSA-5mj8-gf6m-fhw8\", \"github_reviewed_at\": \"2026-09-22T16:34:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-5mj8-gf6m-fhw8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5mj8-gf6m-fhw8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56681\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-22T16:34:06Z\", \"references\": [\"https://github.com/decolua/9router/security/advisories/GHSA-5mj8-gf6m-fhw8\", \"https://github.com/decolua/9router/commit/efd20be8d81ef2e256a7037f3aa78e6b567b5fd3\", \"https://github.com/decolua/9router/releases/tag/v0.5.6\", \"https://github.com/advisories/GHSA-5mj8-gf6m-fhw8\"], \"repository_advisory_url\": \"https://api.github.com/repos/decolua/9router/security-advisories/GHSA-5mj8-gf6m-fhw8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/decolua/9router\", \"summary\": \"9Router has an Authentication Bypass in Public LLM API via Spoofable X-9r-Real-Ip Header\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T16:34:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-5mj8-gf6m-fhw8\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.8\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"9router\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5mj8-gf6m-fhw8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "9router: <= 0.5.4"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-56681"
+    ],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "9router"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-22T19:15:07.033197Z",
+  "provenance": {
+    "content_sha256": "a84c1fa612b5d4adb3e7b14960034788add927cafaf03635286b516f65186cb2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T16:34:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5mj8-gf6m-fhw8",
+  "status": "active",
+  "title": "9Router has an Authentication Bypass in Public LLM API via Spoofable X-9r-Real-Ip Header",
+  "updated_at": "2026-09-22T16:34:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5mj8-gf6m-fhw8"
+}
