@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6706818?v=4\", \"events_url\": \"https://api.github.com/users/sectroyer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sectroyer/followers\", \"following_url\": \"https://api.github.com/users/sectroyer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sectroyer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sectroyer\", \"id\": 6706818, \"login\": \"sectroyer\", \"node_id\": \"MDQ6VXNlcjY3MDY4MTg=\", \"organizations_url\": \"https://api.github.com/users/sectroyer/orgs\", \"received_events_url\": \"https://api.github.com/users/sectroyer/received_events\", \"repos_url\": \"https://api.github.com/users/sectroyer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sectroyer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sectroyer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sectroyer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77422\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\nThe JLine3 built-in `grep` command wraps the user-supplied regular expression with\\n`.*` before compiling it with Java's backtracking regex engine. This amplifies\\ncatastrophic backtracking and allows a short pattern such as `(a+)+b` to hang the\\ncommand thread on non-matching input. In environments that expose the JLine shell to\\nremote users, this is a denial-of-service issue.\\n\\n### Details\\n\\nIn `builtins/src/main/java/org/jline/builtins/PosixCommands.java`, the grep\\nimplementation rewrites the user pattern before compilation:\\n\\n```java\\nString regex = args.remove(0);\\nString regexp = regex;\\nif (opt.isSet(\\\"word-regexp\\\")) {\\n    regexp = \\\"\\\\\\\\b\\\" + regexp + \\\"\\\\\\\\b\\\";\\n}\\nif (opt.isSet(\\\"line-regexp\\\")) {\\n    regexp = \\\"^\\\" + regexp + \\\"$\\\";\\n} else {\\n    regexp = \\\".*\\\" + regexp + \\\".*\\\";\\n}\\n```\\n\\nThe transformed pattern is compiled with `Pattern.compile(...)` and then used to test\\neach input line. For a payload such as `(a+)+b`, the automatic `.*` prefix and suffix\\nincrease the backtracking search space substantially.\\n\\nAffected source location:\\n- `builtins/src/main/java/org/jline/builtins/PosixCommands.java`\\n- `grep(...)`\\n\\n### PoC\\n\\n1. Create a file containing a long run of `a` characters:\\n\\n```sh\\nprintf 'aaaaaaaaaaaaaaaaaaaaaaa\\\\n' > /tmp/testfile.txt\\n```\\n\\n2. Run JLine3's built-in `grep` against that file:\\n\\n```sh\\ngrep '(a+)+b' /tmp/testfile.txt\\n```\\n\\nExpected result:\\n- The command stops responding.\\n- The executing thread consumes high CPU.\\n\\nReproduction environment:\\n- JLine3 on x86_64 Linux\\n- OpenJDK 25.0.2\\n\\n### Impact\\n\\nThis is a denial-of-service vulnerability caused by catastrophic regex backtracking.\\nAny application embedding `org.jline:jline-builtins` and exposing the built-in `grep`\\ncommand is impacted. In remote shell deployments, an attacker can occupy a worker\\nthread indefinitely and repeat the attack across multiple sessions to reduce service\\navailability for other users.\\n\\n### Suggested Fix\\n\\nThe preferred fix for the current git head is:\\n- stop rewriting non-line-regexp searches as `.*...*`\\n- use `Matcher.find()` for substring semantics\\n- compile user patterns with a linear-time engine such as RE2/J\\n\\nSuggested patch:\\n\\n```diff\\ndiff --git a/builtins/pom.xml b/builtins/pom.xml\\n--- a/builtins/pom.xml\\n+++ b/builtins/pom.xml\\n@@\\n         <dependency>\\n+            <groupId>com.google.re2j</groupId>\\n+            <artifactId>re2j</artifactId>\\n+            <version>1.8</version>\\n+        </dependency>\\n+        <dependency>\\n             <groupId>org.jline</groupId>\\n             <artifactId>jline-reader</artifactId>\\n         </dependency>\\n\\ndiff --git a/builtins/src/main/java/org/jline/builtins/PosixCommands.java b/builtins/src/main/java/org/jline/builtins/PosixCommands.java\\n--- a/builtins/src/main/java/org/jline/builtins/PosixCommands.java\\n+++ b/builtins/src/main/java/org/jline/builtins/PosixCommands.java\\n@@\\n-import java.util.regex.Pattern;\\n+import com.google.re2j.Pattern;\\n@@\\n         if (opt.isSet(\\\"line-regexp\\\")) {\\n             regexp = \\\"^\\\" + regexp + \\\"$\\\";\\n-        } else {\\n-            regexp = \\\".*\\\" + regexp + \\\".*\\\";\\n         }\\n@@\\n-        boolean m = p.matcher(line).matches();\\n+        boolean m = opt.isSet(\\\"line-regexp\\\")\\n+                ? p.matcher(line).matches()\\n+                : p.matcher(line).find();\\n```\\n\\n### Credits\\n\\nThis issue was identified by Michał Majchrowicz and Marcin Wyczechowski, members of the AFINE Team.\", \"ghsa_id\": \"GHSA-r2xf-8xr9-62gw\", \"github_reviewed_at\": \"2026-09-23T18:12:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-r2xf-8xr9-62gw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r2xf-8xr9-62gw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77422\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-23T18:12:35Z\", \"references\": [\"https://github.com/jline/jline3/security/advisories/GHSA-r2xf-8xr9-62gw\", \"https://github.com/jline/jline3/pull/2012\", \"https://github.com/jline/jline3/pull/2018\", \"https://github.com/jline/jline3/commit/1d5fc3099e77938b971e197211cad2d4fbb17541\", \"https://github.com/jline/jline3/commit/341ee69ccc57b7733c1b40d6993219b64b3206ae\", \"https://github.com/jline/jline3/releases/tag/4.3.1\", \"https://github.com/jline/jline3/releases/tag/jline-3.30.15\", \"https://github.com/advisories/GHSA-r2xf-8xr9-62gw\"], \"repository_advisory_url\": \"https://api.github.com/repos/jline/jline3/security-advisories/GHSA-r2xf-8xr9-62gw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jline/jline3\", \"summary\": \"JLine: ReDoS in Built-in grep Command Amplified by Automatic `.*` Wrapping\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-23T18:12:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-r2xf-8xr9-62gw\", \"vulnerabilities\": [{\"first_patched_version\": \"4.3.1\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.jline:jline-builtins\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.3.1\"}, {\"first_patched_version\": \"3.30.15\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.jline:jline-builtins\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 3.30.15\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r2xf-8xr9-62gw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.jline:jline-builtins: >= 3.0.0, < 3.30.15",
+      "org.jline:jline-builtins: >= 4.0.0, < 4.3.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-77422"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.jline:jline-builtins"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.543279Z",
+  "provenance": {
+    "content_sha256": "98041ca715f4c53e1f451a6bef06e113552d9871a6b209adec53cf36bf8ce592",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-23T18:12:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r2xf-8xr9-62gw",
+  "status": "active",
+  "title": "JLine: ReDoS in Built-in grep Command Amplified by Automatic `.*` Wrapping",
+  "updated_at": "2026-09-23T18:12:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r2xf-8xr9-62gw"
+}

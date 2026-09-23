@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/102229946?v=4\", \"events_url\": \"https://api.github.com/users/0xmagic0/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/0xmagic0/followers\", \"following_url\": \"https://api.github.com/users/0xmagic0/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/0xmagic0/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/0xmagic0\", \"id\": 102229946, \"login\": \"0xmagic0\", \"node_id\": \"U_kgDOBhfnug\", \"organizations_url\": \"https://api.github.com/users/0xmagic0/orgs\", \"received_events_url\": \"https://api.github.com/users/0xmagic0/received_events\", \"repos_url\": \"https://api.github.com/users/0xmagic0/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/0xmagic0/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/0xmagic0/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/0xmagic0\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77243\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\n\\n`ENABLED_TOOLS` and `TOOLSETS` filters are enforced at `tools/list` time only. `tools/call` dispatches from the full unfiltered tool registry (73 tools). Any user with access to the server endpoint that knows a tool name can invoke it directly. Tool names are not secret since mcp-atlassian is open source. Any direct JSON-RPC call bypasses the restriction entirely.\\n\\n`READ_ONLY_MODE` is **not** affected: it has dual enforcement at list time (`_list_tools_mcp`) and call time `@check_write_access decorator`. The developers applied the correct pattern to `READ_ONLY_MODE` but not to `ENABLED_TOOLS` or `toolsets` - confirming this is an implementation oversight.\\n\\n### Impact\\n\\nAny user with access to the MCP server's HTTP endpoint can invoke any of the 73 registered tools regardless of `ENABLED_TOOLS` or `TOOLSETS` configuration - including write and delete operations on Jira issues, Confluence pages, etc. Operators deploying mcp-atlassian via Streamable HTTP rely on `ENABLED_TOOLS` to enforce least-privilege access; the bypass invalidates that model entirely.\\n\\nThe security impact concentrates in multi-user / HTTP-transport deployments, where the tool filter is a trust boundary between clients. In a single-user stdio deployment there is no second principal to defend against.\\n\\n### Details\\nIn `src/mcp_atlassian/servers/main.py`, AtlassianMCP overrides `_list_tools_mcp` and applies the `TOOLSETS` and `ENABLED_TOOLS` filters before returning the tool list to clients. The `_call_tool_mcp` handler is not overridden. FastMCP's default `_call_tool_mcp` resolves the tool from the local tool manager / mounted servers, the full unfiltered inventory, so the filters never apply at call time.\\n\\n\\n### Proof of Concept\\n\\nAll calls are issued against the HTTP transport, with `ENABLED_TOOLS=jira_search` configured - only `jira_search` should be reachable.\\n\\nStep 1 - negative control: tools/list correctly filters by ENABLED_TOOLS:\\n```\\nreq → tools/list\\n← { \\\"tools\\\": [ { \\\"name\\\": \\\"jira_search\\\" } ] }   # only 1 tool; jira_get_issue / jira_create_issue absent\\n```\\n\\nStep 2 - confidentiality bypass: tools/call dispatches jira_get_issue despite its exclusion from the list:\\n```\\nreq → tools/call jira_get_issue { \\\"issue_key\\\": \\\"SEC-1\\\" }\\n← { ... issue fields (summary, status, ...) ... }   # executed; not blocked\\n```\\n\\nStep 3 - integrity bypass: tools/call dispatches the write tool jira_create_issue:\\n```\\nreq → tools/call jira_create_issue\\n         { \\\"project_key\\\": \\\"SEC\\\", \\\"summary\\\": \\\"[PoC] ENABLED_TOOLS bypass\\\", \\\"issue_type\\\": \\\"Task\\\" }\\n← { ... \\\"key\\\": \\\"SEC-<n>\\\" ... }   # issue created despite ENABLED_TOOLS=jira_search\\n```\\n\\nStep 1 proves the filter exists and is enforced at list time, so Steps 2–3 are a genuine authorization bypass, not an open/unconfigured endpoint. The same result holds with TOOLSETS=jira_read configured: write tools are absent from tools/list yet execute via tools/call.\\n\\n**Local reproduction**\\n\\nExtract `enabled_tools_bypass_tool_authorization.zip`:\\n```\\n# Fill Atlassian credentials in docker-compose.yml (ENABLED_TOOLS=jira_search is preset);\\n# ensure issue SEC-1 exists, or update the project/issue key in poc.sh\\ndocker compose up -d        # mcp-atlassian, streamable-http, 0.0.0.0, ENABLED_TOOLS=jira_search\\n./poc.sh                    # exits 0 on success\\ndocker compose down -v\\n```\\n\\n>Requires Docker, curl, jq, and an Atlassian Cloud site with a Jira project (free tier works). The script runs the three steps above: it confirms tools/list returns only jira_search, then dispatches the excluded jira_get_issue (read) and jira_create_issue (write) via tools/call. The test issue it creates is deleted automatically on exit.\\n\\n### Credit\\nDiscovered by [Francisco Rosales](https://www.linkedin.com/in/francisco-rosales-celis/) of [Manifold Security](https://manifold.security/)\", \"ghsa_id\": \"GHSA-3r68-hf9h-887v\", \"github_reviewed_at\": \"2026-09-22T20:34:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-3r68-hf9h-887v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-3r68-hf9h-887v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77243\"}], \"nvd_published_at\": \"2026-09-22T18:17:17Z\", \"published_at\": \"2026-09-22T20:34:55Z\", \"references\": [\"https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-3r68-hf9h-887v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-77243\", \"https://github.com/sooperset/mcp-atlassian/pull/1448\", \"https://github.com/sooperset/mcp-atlassian/commit/b041733473f95119dd539542a43c280737a8e460\", \"https://github.com/sooperset/mcp-atlassian/releases/tag/v0.22.0\", \"https://github.com/advisories/GHSA-3r68-hf9h-887v\"], \"repository_advisory_url\": \"https://api.github.com/repos/sooperset/mcp-atlassian/security-advisories/GHSA-3r68-hf9h-887v\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sooperset/mcp-atlassian\", \"summary\": \"MCP Atlassian: ENABLED_TOOLS / Toolset authorization bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:34:56Z\", \"url\": \"https://api.github.com/advisories/GHSA-3r68-hf9h-887v\", \"vulnerabilities\": [{\"first_patched_version\": \"0.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-atlassian\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-3r68-hf9h-887v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-atlassian: < 0.22.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77243"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-atlassian"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.764997Z",
+  "provenance": {
+    "content_sha256": "b52fe6b6bca985c9d2f89e7dfaee3ccecf2c3fe4ba2a97745f2ead6ef3d84421",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:34:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-3r68-hf9h-887v",
+  "status": "active",
+  "title": "MCP Atlassian: ENABLED_TOOLS / Toolset authorization bypass",
+  "updated_at": "2026-09-22T20:34:56Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-3r68-hf9h-887v"
+}

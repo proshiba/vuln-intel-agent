@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/6706818?v=4\", \"events_url\": \"https://api.github.com/users/sectroyer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sectroyer/followers\", \"following_url\": \"https://api.github.com/users/sectroyer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sectroyer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sectroyer\", \"id\": 6706818, \"login\": \"sectroyer\", \"node_id\": \"MDQ6VXNlcjY3MDY4MTg=\", \"organizations_url\": \"https://api.github.com/users/sectroyer/orgs\", \"received_events_url\": \"https://api.github.com/users/sectroyer/received_events\", \"repos_url\": \"https://api.github.com/users/sectroyer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sectroyer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sectroyer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sectroyer\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77420\", \"cvss\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.5, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\nThe JLine3 `HISTORY_IGNORE` variable is converted into a Java regular expression with\\nonly partial escaping. As a result, regex metacharacters other than `*` and `:` are\\npassed through to the regex engine. A crafted value such as `(a+)+b` can cause\\ncatastrophic backtracking each time a command line is added to history, hanging the\\nreader thread at high CPU.\\n\\n### Details\\n\\nIn `reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java`,\\n`matchPatterns()` converts `HISTORY_IGNORE` into a regex:\\n\\n```java\\nfor (int i = 0; i < patterns.length(); i++) {\\n    char ch = patterns.charAt(i);\\n    if (ch == '\\\\\\\\') {\\n        ch = patterns.charAt(++i);\\n        sb.append(ch);\\n    } else if (ch == ':') {\\n        sb.append('|');\\n    } else if (ch == '*') {\\n        sb.append('.').append('*');\\n    } else {\\n        sb.append(ch);\\n    }\\n}\\nreturn line.matches(sb.toString());\\n```\\n\\nThis logic translates wildcard syntax but does not escape regex metacharacters such as\\n`(`, `)`, `+`, `?`, `{`, `}`, `[`, and `]`. Those characters therefore reach the Java\\nregex engine unchanged.\\n\\nAffected source location:\\n- `reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java`\\n- `matchPatterns(String patterns, String line)`\\n\\n### PoC\\n\\n1. Configure `HISTORY_IGNORE` to a malicious pattern, for example:\\n\\n```sh\\nset history-ignore \\\"(a+)+b\\\"\\n```\\n\\n2. At the JLine prompt, enter a long non-matching line:\\n\\n```text\\naaaaaaaaaaaaaaaaaaaaaaaaaaax\\n```\\n\\n3. Press Enter.\\n\\nExpected result:\\n- The prompt does not return.\\n- The reader thread consumes high CPU.\\n\\nReproduction environment:\\n- JLine3 on x86_64 Linux\\n- OpenJDK 25.0.2\\n\\n### Impact\\n\\nThis is a denial-of-service vulnerability caused by catastrophic regex backtracking.\\nApplications embedding `org.jline:jline-reader` are impacted if they allow\\n`HISTORY_IGNORE` to be configured through user configuration or application settings.\\nThe issue is lower severity than the interactive editor findings because the attacker\\nmust control configuration, but it can still reliably hang a reader session.\\n\\n### Suggested Fix\\n\\nThe safest fix for the current git head is to stop treating arbitrary `HISTORY_IGNORE`\\ncontent as a regex. Instead, escape all characters by default and translate only the\\nintended JLine wildcard syntax (`*`) and separator syntax (`:`).\\n\\nSuggested patch:\\n\\n```diff\\ndiff --git a/reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java b/reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java\\n--- a/reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java\\n+++ b/reader/src/main/java/org/jline/reader/impl/history/DefaultHistory.java\\n@@\\n         StringBuilder sb = new StringBuilder();\\n         for (int i = 0; i < patterns.length(); i++) {\\n             char ch = patterns.charAt(i);\\n             if (ch == '\\\\\\\\') {\\n                 ch = patterns.charAt(++i);\\n-                sb.append(ch);\\n+                sb.append(Pattern.quote(Character.toString(ch)));\\n             } else if (ch == ':') {\\n                 sb.append('|');\\n             } else if (ch == '*') {\\n                 sb.append('.').append('*');\\n             } else {\\n-                sb.append(ch);\\n+                sb.append(Pattern.quote(Character.toString(ch)));\\n             }\\n         }\\n         return line.matches(sb.toString());\\n```\\n\\n### Credits\\n\\nThis issue was identified by Michał Majchrowicz and Marcin Wyczechowski, members of the AFINE Team.\", \"ghsa_id\": \"GHSA-5q95-hrpc-m3w3\", \"github_reviewed_at\": \"2026-09-23T18:12:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-5q95-hrpc-m3w3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-5q95-hrpc-m3w3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77420\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-23T18:12:05Z\", \"references\": [\"https://github.com/jline/jline3/security/advisories/GHSA-5q95-hrpc-m3w3\", \"https://github.com/jline/jline3/pull/2012\", \"https://github.com/jline/jline3/pull/2018\", \"https://github.com/jline/jline3/commit/1d5fc3099e77938b971e197211cad2d4fbb17541\", \"https://github.com/jline/jline3/commit/341ee69ccc57b7733c1b40d6993219b64b3206ae\", \"https://github.com/jline/jline3/releases/tag/4.3.1\", \"https://github.com/jline/jline3/releases/tag/jline-3.30.15\", \"https://github.com/advisories/GHSA-5q95-hrpc-m3w3\"], \"repository_advisory_url\": \"https://api.github.com/repos/jline/jline3/security-advisories/GHSA-5q95-hrpc-m3w3\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jline/jline3\", \"summary\": \"JLine: ReDoS via `HISTORY_IGNORE` Configuration Variable\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-23T18:12:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-5q95-hrpc-m3w3\", \"vulnerabilities\": [{\"first_patched_version\": \"4.3.1\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.jline:jline-reader\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.3.1\"}, {\"first_patched_version\": \"3.30.15\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.jline:jline-reader\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 3.30.15\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-5q95-hrpc-m3w3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "org.jline:jline-reader: >= 3.0.0, < 3.30.15",
+      "org.jline:jline-reader: >= 4.0.0, < 4.3.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77420"
+    ],
+    "cvss_score": 5.5,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "org.jline:jline-reader"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.558160Z",
+  "provenance": {
+    "content_sha256": "b8e1e9acf816fda1dbeb82c207fb365f6f1c04a8075b790ba108b29e1b2cf204",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-23T18:12:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-5q95-hrpc-m3w3",
+  "status": "active",
+  "title": "JLine: ReDoS via `HISTORY_IGNORE` Configuration Variable",
+  "updated_at": "2026-09-23T18:12:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-5q95-hrpc-m3w3"
+}

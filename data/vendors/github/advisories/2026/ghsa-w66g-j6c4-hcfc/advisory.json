@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/272485939?v=4\", \"events_url\": \"https://api.github.com/users/CorsenAI/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/CorsenAI/followers\", \"following_url\": \"https://api.github.com/users/CorsenAI/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/CorsenAI/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/CorsenAI\", \"id\": 272485939, \"login\": \"CorsenAI\", \"node_id\": \"U_kgDOED3OMw\", \"organizations_url\": \"https://api.github.com/users/CorsenAI/orgs\", \"received_events_url\": \"https://api.github.com/users/CorsenAI/received_events\", \"repos_url\": \"https://api.github.com/users/CorsenAI/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/CorsenAI/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/CorsenAI/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/CorsenAI\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77251\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-184\", \"name\": \"Incomplete List of Disallowed Inputs\"}, {\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}, {\"cwe_id\": \"CWE-1276\", \"name\": \"Hardware Child Block Incorrectly Connected to Parent System\"}], \"description\": \"### Summary\\n\\n`mcp-atlassian` is a popular community MCP server wrapper exposing Jira / Confluence to MCP clients. Operators commonly restrict the surface to a small allowlist of projects/spaces via the `JIRA_PROJECTS_FILTER` and `CONFLUENCE_SPACES_FILTER` environment variables, which the README documents as the principal mechanism for limiting attacker-controlled MCP clients (= prompt-injected LLM agents) to the operator's intended subset of the workspace.\\n\\nWe identified **three distinct sub-bugs** that let attacker-controlled queries read content from **forbidden** projects/spaces (= projects NOT in the operator's filter) despite the filter being correctly set. The most severe is **empirically reproduced on production Atlassian Cloud** with real operator credentials and sentinel content in two real projects.\\n\\n| Sub-bug | Layer | Class | Live? |\\n|---|---|---|---|\\n| **A1** | Jira `jira_search` `jql` | substring-bypass | 🔴 **LIVE PROVEN 2026-05-18 on real Atlassian Cloud** |\\n| **A2** | Confluence `confluence_search` `cql` | case-sensitive substring-bypass | code-level verified |\\n| **B** | Jira agile `get_board_issues` / `get_agile_boards` | zero-filter (missing check) | code-level verified |\\n\\n### Details\\n\\n**Sub-bug A1** — `src/mcp_atlassian/jira/search.py` lines 92-94 at HEAD `d8bc78698a63cb6b321c7ca796d6329d448f7f6d`:\\n\\n```python\\nif projects_filter and \\\"project = \\\" not in jql.lower():\\n    jql = f\\\"{jql} AND project in ({','.join(projects_filter)})\\\"\\n```\\n\\nThe substring check is satisfied by *any* JQL of the form `project = <forbidden-project>` — including a project NOT in `projects_filter`. The wrapper does NOT verify that the project named in the user JQL is a member of the allowlist. The user-supplied JQL is sent verbatim to Jira's search API which returns content from the forbidden project (Jira's authorization is satisfied because the operator's PAT typically has broader access than the operator's intended allowlist — which is *why* the operator set a filter in the first place).\\n\\n**Sub-bug A2** — `src/mcp_atlassian/confluence/search.py` line 60: same pattern as A1, PLUS the substring check `\\\"space = \\\" not in cql` is **case-sensitive** (no `.lower()`). User CQL `SPACE = \\\"<forbidden-space>\\\"` (uppercase) bypasses the substring match.\\n\\n**Sub-bug B** — `get_board_issues` and `get_agile_boards` paths have **no `projects_filter` enforcement at all** — no substring check, no AST walk, the allowlist is silently ignored. An MCP client invoking `get_agile_boards` enumerates boards across the entire workspace (including forbidden projects), and `get_board_issues(boardId=<forbidden-board>)` returns all issues with no filter check.\\n\\n### PoC\\n\\nEnd-to-end Phase C against real Atlassian Cloud + real `mcp-atlassian` Python binary v0.21.1 (latest on PyPI) with operator-provided test workspace and two real Jira projects (one allowed, one forbidden via `JIRA_PROJECTS_FILTER`):\\n\\n| Step | JQL submitted | Result | Verdict |\\n|---|---|---|---|\\n| 1 initialize | – | MCP 2024-11-05 OK | ✓ |\\n| 2 tools/list | – | 33+ tools incl. `jira_search` | ✓ |\\n| 3 CONTROL | `project = <allowed>` | returns allowed issue | ✓ |\\n| 4 NEG CTRL | `summary ~ \\\"any-string\\\"` | wrapper appends `AND project in (<allowed>)` → 0 forbidden results | ✓ |\\n| 5 **BYPASS A1** | `project = <forbidden>` | **returns forbidden issue with sentinel content** | 🔴 **BYPASS** |\\n\\nFull RPC log and a reproducible test script are available in a disclosure bundle I have prepared. I can share the zip via a private channel (email / your preferred private fork / encrypted upload) — please reply with your preference. The bundle includes:\\n\\n- 00-FINDING-REPORT.md (primary report)\\n- ATTACK-MATRIX.md\\n- Verbatim source files at HEAD with sha256 chain of custody (`source-jira-search.py`, `source-confluence-search.py`)\\n- Phase C live test script + JSON-RPC witness log\\n- Bundle zip sha256: `034cbf0bcb66c325be9373ff2dc186b8b0e1747c5165d6fba3bca83054949dd3`\\n\\nRepro recipe (no bundle needed) :\\n\\n```bash\\npip install mcp-atlassian\\nexport JIRA_URL=https://<your-test-workspace>.atlassian.net\\nexport JIRA_USERNAME=<your-test-email>\\nexport JIRA_API_TOKEN=<your-pat>\\nexport JIRA_PROJECTS_FILTER=<your-allowed-project-key>\\n# Then drive the MCP via stdio JSON-RPC with tools/call jira_search jql=\\\"project = <forbidden-project-key>\\\"\\n# Expect: forbidden project content returned despite the filter.\\n```\\n\\n### Impact\\n\\nSeverity is higher in deployments where the operator's PAT covers a broader set of projects than `JIRA_PROJECTS_FILTER` (= the common configuration, which is the reason operators set the filter).\\n\\nAffected: every operator who relies on `JIRA_PROJECTS_FILTER` / `CONFLUENCE_SPACES_FILTER` to confine an attacker-controlled MCP client (= prompt-injected LLM agent) to a subset of their workspace.\\n\\n### Suggested fix\\n\\n1. Replace substring checks with **AST-based JQL/CQL parsers** that walk the WHERE clause looking for `project`/`space` constraints. Reject queries whose `project`/`space` constraint references a key not in the allowlist.\\n2. Add `projects_filter` check inside `get_board_issues` (resolve board → project, reject if not in filter) and `get_agile_boards` (filter returned list).\\n3. Make the Confluence substring check case-insensitive (`cql.lower()`) for defense-in-depth, even after the AST fix lands.\\n4. Default-deny for ambiguous queries: if the AST parser can't fully classify a clause, refuse instead of pass-through.\\n5. Add unit tests that assert attacker JQL `project = <not-in-filter>` returns zero results when the filter is set.\\n\\n### Disclosure\\n\\nISO/IEC 29147. Default 90-day embargo from the date you acknowledge receipt. Happy to coordinate the CVE via the GitHub CNA pipeline. Credit under: **Mordehai Attia, Founder, Corsen AI** (https://corsen.ai , GitHub @CorsenAI).\\n\\nThank you for maintaining mcp-atlassian — the project is widely used and your security policy was clear, which made this disclosure straightforward to file. Looking forward to coordinating the fix.\", \"ghsa_id\": \"GHSA-w66g-j6c4-hcfc\", \"github_reviewed_at\": \"2026-09-22T20:34:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-w66g-j6c4-hcfc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-w66g-j6c4-hcfc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77251\"}], \"nvd_published_at\": \"2026-09-22T18:17:17Z\", \"published_at\": \"2026-09-22T20:34:47Z\", \"references\": [\"https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-w66g-j6c4-hcfc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-77251\", \"https://github.com/sooperset/mcp-atlassian/pull/1448\", \"https://github.com/sooperset/mcp-atlassian/commit/b041733473f95119dd539542a43c280737a8e460\", \"https://github.com/sooperset/mcp-atlassian/releases/tag/v0.22.0\", \"https://github.com/advisories/GHSA-w66g-j6c4-hcfc\"], \"repository_advisory_url\": \"https://api.github.com/repos/sooperset/mcp-atlassian/security-advisories/GHSA-w66g-j6c4-hcfc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sooperset/mcp-atlassian\", \"summary\": \"MCP Atlassian: JIRA_PROJECTS_FILTER / CONFLUENCE_SPACES_FILTER allow forbidden-project content exfiltration (one LIVE-proven on Atlassian Cloud)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:34:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-w66g-j6c4-hcfc\", \"vulnerabilities\": [{\"first_patched_version\": \"0.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-atlassian\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-w66g-j6c4-hcfc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-atlassian: < 0.22.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77251"
+    ],
+    "cvss_score": 8.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:H/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-atlassian"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.774096Z",
+  "provenance": {
+    "content_sha256": "d7d5f66a79f340a3dd7f45600dfdea01dcfaa7dc312ad17a56317fcb7e68ec33",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:34:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-w66g-j6c4-hcfc",
+  "status": "active",
+  "title": "MCP Atlassian: JIRA_PROJECTS_FILTER / CONFLUENCE_SPACES_FILTER allow forbidden-project content exfiltration (one LIVE-proven on Atlassian Cloud)",
+  "updated_at": "2026-09-22T20:34:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-w66g-j6c4-hcfc"
+}

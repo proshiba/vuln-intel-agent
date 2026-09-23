@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3240571?v=4\", \"events_url\": \"https://api.github.com/users/thientd/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/thientd/followers\", \"following_url\": \"https://api.github.com/users/thientd/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/thientd/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/thientd\", \"id\": 3240571, \"login\": \"thientd\", \"node_id\": \"MDQ6VXNlcjMyNDA1NzE=\", \"organizations_url\": \"https://api.github.com/users/thientd/orgs\", \"received_events_url\": \"https://api.github.com/users/thientd/received_events\", \"repos_url\": \"https://api.github.com/users/thientd/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/thientd/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/thientd/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/thientd\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62987\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}, {\"cwe_id\": \"CWE-348\", \"name\": \"Use of Less Trusted Source\"}], \"description\": \"**Affected:** github.com/fabiolb/fabio >= 1.6.6 through 1.7.1 and master HEAD (c75f8a6).\\n\\n### Summary\\nThe v1.6.6 fix for CVE-2025-48865 sweeps the client `Connection` header against a hardcoded allowlist `protectHeaders` (proxy/http_headers.go:28-36) containing only the 7 X-Forwarded family headers. Fabio also injects three *operator-configured* server-side trust headers that are NOT in that allowlist, so the original hop-by-hop stripping attack still works against them.\\n\\n### Details\\nThe three unprotected trust headers and where fabio sets them:\\n- ClientIPHeader (`proxy.header.clientip`) - http_headers.go:73 `r.Header.Set(cfg.ClientIPHeader, remoteIP)`\\n- TLSHeader (`proxy.header.tls`) - http_headers.go:153 `r.Header.Set(cfg.TLSHeader, cfg.TLSHeaderValue)` (TLS connections)\\n- RequestID (`proxy.header.requestid`) - http_proxy.go:90 `r.Header.Set(p.Config.RequestID, id())`\\n\\nOrder of operations in HTTPProxy.ServeHTTP: (1) line 90 sets RequestID; (2) line 175 calls addHeaders, which sweeps the Connection header (keeping the three configured names because they are absent from protectHeaders) and then sets ClientIPHeader/TLSHeader; (3) line 223 runs the Go `httputil.ReverseProxy`, whose `removeHopByHopHeaders` (Go stdlib net/http/httputil/reverseproxy.go) iterates the inbound `Connection` header and `h.Del`s every listed header. The three trust headers fabio just set are therefore deleted before the request reaches the backend.\\n\\n### PoC\\nConfigure `proxy.header.clientip=X-Client-IP`, `proxy.header.requestid=X-Request-ID`. Raw request:\\n```\\nGET / HTTP/1.1\\nHost: foo.com\\nConnection: close, X-Client-IP, X-Request-ID\\n```\\nBackend sees `X-Client-IP: <empty>` and `X-Request-ID: <empty>`. Baseline (`Connection: close`) => backend sees the real client IP and a request id. The same works for `proxy.header.tls` over TLS (`Connection: close, X-Secure` strips the TLS assertion). Reproduced by the two PASS-ing tests in proxy/poc_cve48865_incomplete_test.go on master HEAD (Go 1.26.4). Control: `X-Forwarded-For` (in protectHeaders) survives, confirming the gap is specific to the configured headers.\\n\\n### Impact\\nWhere a backend trusts these fabio-set headers, an external unauthenticated client can strip/downgrade the trust signal: bypass/poison IP-based ACL or audit that reads the clientip header, downgrade a TLS-terminated request to appear non-TLS to a backend keying off the TLS header, or drop request-id correlation. Scope: deployments that enable the relevant `proxy.header.*` option (all empty by default). Fix: add the configured ClientIPHeader/TLSHeader/RequestID names to the protectHeaders set (or strip their token from the inbound Connection header) inside addHeaders.\\n\\nParent: CVE-2025-48865 / GHSA-q7p4-7xjv-j3wf (fixed in v1.6.6). This is an incomplete-fix sibling - the same hop-by-hop stripping primitive applies to the operator-configured trust headers the allowlist does not cover.\", \"epss\": {\"percentage\": 0.00162, \"percentile\": 0.05803}, \"ghsa_id\": \"GHSA-fq95-v8xc-jm3v\", \"github_reviewed_at\": \"2026-09-22T20:34:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-fq95-v8xc-jm3v\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fq95-v8xc-jm3v\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62987\"}], \"nvd_published_at\": \"2026-09-21T17:17:38Z\", \"published_at\": \"2026-09-22T20:34:22Z\", \"references\": [\"https://github.com/fabiolb/fabio/security/advisories/GHSA-fq95-v8xc-jm3v\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62987\", \"https://github.com/fabiolb/fabio/commit/240526a8004077edad4fb96d25b382bfc3901357\", \"https://github.com/fabiolb/fabio/releases/tag/v1.7.2\", \"https://github.com/advisories/GHSA-fq95-v8xc-jm3v\"], \"repository_advisory_url\": \"https://api.github.com/repos/fabiolb/fabio/security-advisories/GHSA-fq95-v8xc-jm3v\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/fabiolb/fabio\", \"summary\": \"Fabio - Incomplete fix for CVE-2025-48865: operator-configured trust headers (clientip/tls/requestid) still strippable via the Connection header\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:34:24Z\", \"url\": \"https://api.github.com/advisories/GHSA-fq95-v8xc-jm3v\", \"vulnerabilities\": [{\"first_patched_version\": \"1.7.2\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/fabiolb/fabio\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.6.6, <= 1.7.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fq95-v8xc-jm3v",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/fabiolb/fabio: >= 1.6.6, <= 1.7.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-48865",
+      "CVE-2026-62987"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/fabiolb/fabio"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.808951Z",
+  "provenance": {
+    "content_sha256": "c83f9448e4b840187270342197a81823c19ac1340831bfb7dcdbd40b3494d7e8",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:34:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fq95-v8xc-jm3v",
+  "status": "active",
+  "title": "Fabio - Incomplete fix for CVE-2025-48865: operator-configured trust headers (clientip/tls/requestid) still strippable via the Connection header",
+  "updated_at": "2026-09-22T20:34:24Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fq95-v8xc-jm3v"
+}

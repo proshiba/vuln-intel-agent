@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/235860593?v=4\", \"events_url\": \"https://api.github.com/users/Yunkaiwjs/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yunkaiwjs/followers\", \"following_url\": \"https://api.github.com/users/Yunkaiwjs/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yunkaiwjs/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yunkaiwjs\", \"id\": 235860593, \"login\": \"Yunkaiwjs\", \"node_id\": \"U_kgDODg7ycQ\", \"organizations_url\": \"https://api.github.com/users/Yunkaiwjs/orgs\", \"received_events_url\": \"https://api.github.com/users/Yunkaiwjs/received_events\", \"repos_url\": \"https://api.github.com/users/Yunkaiwjs/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yunkaiwjs/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yunkaiwjs/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yunkaiwjs\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77249\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"Summary\\n\\nThe fix for the SSRF vulnerability tracked as GHSA-7r34-79r5-rcc9 / CVE-2026-27826 is incomplete. That fix added two defenses: validate_url_for_ssrf() on the per-request X-Atlassian-Jira-Url / X-Atlassian-Confluence-Url headers (blocking a directly-internal base URL), and a redirect-validation hook (_make_ssrf_safe_hook) attached to the fetcher's HTTP session so that an attacker-controlled public host cannot redirect outbound requests to an internal address.\\n\\nHowever, one outbound request path does not go through the hooked session. JiraUserMixin._lookup_user_by_permissions issues its request with the module-level requests.get instead of self.jira._session.get, so the redirect-validation hook never runs for it. An unauthenticated attacker (in the HTTP / multi-tenant transport mode that binds 0.0.0.0 with no credentials) can therefore set a public base URL that passes validate_url_for_ssrf(), then have their own server return an HTTP redirect to an internal address. The bare requests.get follows that redirect with no validation, resulting in a blind server-side request to an arbitrary internal host and port.\\n\\nAffected component\\n\\nsrc/mcp_atlassian/jira/users.py, method _lookup_user_by_permissions (the requests.get(...) call):\\n\\n    url = f\\\"{self.config.url}/rest/api/2/user/permission/search\\\"\\n    params = {\\\"query\\\": username, \\\"permissions\\\": \\\"BROWSE\\\"}\\n    ...\\n    response = requests.get(           # module-level requests, NOT self.jira._session\\n        url,\\n        params=params,\\n        auth=auth,\\n        headers=headers,\\n        verify=self.config.ssl_verify,\\n    )\\n\\nFor comparison, the equivalent non-standard-endpoint call in src/mcp_atlassian/jira/development.py correctly uses the hooked session (self.jira._session.get(...)), and the SSRF redirect hook is attached only to that session in src/mcp_atlassian/servers/dependencies.py (get_session=lambda f: f.jira._session). The bare requests.get in users.py is the one outbound path the hook does not cover.\\n\\nDetails — why the existing defenses do not apply here\\n\\n1. self.config.url is attacker-controlled in the header-PAT branch of _get_fetcher (dependencies.py): header_config = spec.config_class(url=url_header_val, auth_type=\\\"pat\\\", personal_token=token_header_val, ...).\\n2. The middleware validates that header URL with validate_url_for_ssrf() before storing it, so it must resolve to a public address. The attacker simply points it at a public server they control — this passes validation.\\n3. Credential validation (_create_and_validate → spec.validate_fn) runs against that same attacker-controlled server, so it returns success and no real Atlassian credentials are required.\\n4. The redirect-validation hook is attached to f.jira._session. _lookup_user_by_permissions does not use that session — it uses bare requests.get, which follows redirects (allow_redirects=True by default) with no SSRF check.\\n\\nProof of Concept\\n\\nPreconditions: the server is running in HTTP transport (streamable-http or sse) multi-tenant mode, as described in the GHSA-7r34-79r5-rcc9 advisory (binds 0.0.0.0, per-request header auth, no server-side credentials).\\n\\n1. Attacker stands up a public HTTP server http://attacker.example that:\\n   - responds to GET /rest/api/2/user/search (and the atlassian client's user-find call) with 200 [] — an empty user list, forcing the direct-lookup fallthrough;\\n   - responds to GET /rest/api/2/user/permission/search with 302 Location: http://169.254.169.254/latest/meta-data/ (or any internal host:port).\\n2. Attacker sends a tool call to the MCP HTTP endpoint with headers:\\n   - X-Atlassian-Jira-Url: http://attacker.example\\n   - X-Atlassian-Jira-Personal-Token: anything\\n     and invokes a tool that resolves an assignee — e.g. jira_create_issue / jira_update_issue with assignee set to a value that the direct lookup cannot match.\\n3. Flow: _get_account_id → _lookup_user_directly returns None (attacker returned []) → _lookup_user_by_permissions → requests.get(\\\"http://attacker.example/rest/api/2/user/permission/search?...\\\") → attacker server returns 302 → bare requests follows the redirect to http://169.254.169.254/....\\n\\nThe server makes an outbound GET to the internal target, confirming SSRF.\\n\\nImpact\\n\\nBlind, unauthenticated server-side request forgery from the mcp-atlassian host. An attacker who can reach the HTTP transport endpoint can cause the server to issue GET requests to arbitrary internal hosts and ports (internal service reachability and port discovery, triggering of internal GET-actuated endpoints, reachability of cloud metadata endpoints). The response body is not reflected to the attacker except in the narrow case where an internal service returns a JSON object shaped like {\\\"users\\\": [...]}, so this is primarily a blind SSRF: weaker than the original CVE-2026-27826 (no general internal data exfiltration), but the redirect-based internal-reachability that GHSA-7r34-79r5-rcc9 intended to close remains exploitable through this code path in the latest release (v0.21.1).\\n\\nSuggested Remediation\\n\\nRoute the request through the hooked session instead of the module-level requests, mirroring development.py:\\n\\n    response = self.jira._session.get(\\n        url,\\n        params=params,\\n        verify=self.config.ssl_verify,\\n    )\\n\\n(The session already carries the appropriate authentication, so the manual auth / Authorization handling can be dropped.) More generally, auditing for any remaining bare requests.* / httpx.* calls that use self.config.url and routing them through the SSRF-hooked session would prevent recurrence.\\n\\nCoordinated Disclosure\\n\\nThis appears to be an incomplete fix for GHSA-7r34-79r5-rcc9 (CVE-2026-27826). If you agree, I would kindly ask you to consider requesting a CVE ID for this residual instance through this repository's Security Advisory \\\"Request CVE ID\\\" workflow once confirmed, so that downstream users and distributions can track the additional fix. The severity here is lower than the parent advisory — it is a blind, redirect-only SSRF gated on the HTTP multi-tenant deployment mode — so a Medium rating seems appropriate, and I defer to your judgment on the final score. Thank you very much for your time and for your work on this project.\", \"ghsa_id\": \"GHSA-v9m3-wfh8-5646\", \"github_reviewed_at\": \"2026-09-22T20:36:31Z\", \"html_url\": \"https://github.com/advisories/GHSA-v9m3-wfh8-5646\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v9m3-wfh8-5646\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77249\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-22T20:36:31Z\", \"references\": [\"https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-v9m3-wfh8-5646\", \"https://github.com/sooperset/mcp-atlassian/pull/1448\", \"https://github.com/sooperset/mcp-atlassian/commit/b041733473f95119dd539542a43c280737a8e460\", \"https://github.com/sooperset/mcp-atlassian/releases/tag/v0.22.0\", \"https://github.com/advisories/GHSA-v9m3-wfh8-5646\"], \"repository_advisory_url\": \"https://api.github.com/repos/sooperset/mcp-atlassian/security-advisories/GHSA-v9m3-wfh8-5646\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sooperset/mcp-atlassian\", \"summary\": \"MCP Atlassian:  Incomplete fix for GHSA-7r34-79r5-rcc9: redirect-based SSRF via unhooked requests session in Jira user-permission lookup\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:36:32Z\", \"url\": \"https://api.github.com/advisories/GHSA-v9m3-wfh8-5646\", \"vulnerabilities\": [{\"first_patched_version\": \"0.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-atlassian\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v9m3-wfh8-5646",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-atlassian: < 0.22.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-27826",
+      "CVE-2026-77249"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-atlassian"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.712746Z",
+  "provenance": {
+    "content_sha256": "f595ec15d2156479666556c07ec4ac2d22343ab901908795ddef352b0c369369",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:36:31Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v9m3-wfh8-5646",
+  "status": "active",
+  "title": "MCP Atlassian:  Incomplete fix for GHSA-7r34-79r5-rcc9: redirect-based SSRF via unhooked requests session in Jira user-permission lookup",
+  "updated_at": "2026-09-22T20:36:32Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v9m3-wfh8-5646"
+}

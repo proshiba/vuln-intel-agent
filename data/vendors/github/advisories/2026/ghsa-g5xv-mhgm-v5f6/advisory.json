@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/87920408?v=4\", \"events_url\": \"https://api.github.com/users/sondt99/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sondt99/followers\", \"following_url\": \"https://api.github.com/users/sondt99/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sondt99/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sondt99\", \"id\": 87920408, \"login\": \"sondt99\", \"node_id\": \"MDQ6VXNlcjg3OTIwNDA4\", \"organizations_url\": \"https://api.github.com/users/sondt99/orgs\", \"received_events_url\": \"https://api.github.com/users/sondt99/received_events\", \"repos_url\": \"https://api.github.com/users/sondt99/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sondt99/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sondt99/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sondt99\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77250\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-312\", \"name\": \"Cleartext Storage of Sensitive Information\"}], \"description\": \"### Summary\\n\\nWhen OAuth tokens are saved, MCP Atlassian always writes a plaintext fallback copy under `~/.mcp-atlassian/oauth-<client_id>.json`. The fallback file is created with the process default umask rather than restrictive permissions. In this environment the file was created as mode `0664`, exposing access and refresh tokens to same-group local users and any process that can read the home directory.\\n\\n### Details\\n\\n`OAuthConfig._save_tokens()` stores OAuth token data in keyring, but it also unconditionally maintains a plaintext file fallback for backwards compatibility in `src/mcp_atlassian/utils/oauth.py:350-386`. If keyring saving fails it also falls back to the same file path in `src/mcp_atlassian/utils/oauth.py:387-391`.\\n\\nThe fallback writer creates `~/.mcp-atlassian` and then writes `oauth-<client_id>.json` with a normal `open(token_path, \\\"w\\\")` call in `src/mcp_atlassian/utils/oauth.py:392-420`. No `mode=0o600`, `os.open(..., 0o600)`, `chmod`, or owner-only directory permission is applied. The file contains both `access_token` and `refresh_token` (`src/mcp_atlassian/utils/oauth.py:360-367`) and is later loaded from the same plaintext path in `src/mcp_atlassian/utils/oauth.py:450-470`.\\n\\nThe security policy warns that OAuth client credentials and secrets should not be exposed (`SECURITY.md:39-44`), but the current implementation creates a persistent plaintext token copy even when keyring succeeds.\\n\\n### PoC\\n\\nThe following safe local proof uses a temporary `HOME` and mocked keyring writes. It creates and deletes only temporary files.\\n\\n```bash\\nuv run python - <<'PY'\\nimport json, os, shutil, stat, tempfile\\nfrom pathlib import Path\\nfrom unittest.mock import patch\\nfrom mcp_atlassian.utils.oauth import OAuthConfig\\n\\nhome = tempfile.mkdtemp(prefix='mcp-atlassian-oauth-poc-')\\nold_home = os.environ.get('HOME')\\nos.environ['HOME'] = home\\ntry:\\n    cfg = OAuthConfig(client_id='poc-client', client_secret='client-secret', redirect_uri='http://localhost/callback', scope='offline_access', cloud_id='cloud-id')\\n    cfg.access_token = 'poc-access-token'\\n    cfg.refresh_token = 'poc-refresh-token'\\n    cfg.expires_at = 2000000000\\n    with patch('keyring.set_password', return_value=None):\\n        cfg._save_tokens()\\n    token_file = Path(home) / '.mcp-atlassian' / 'oauth-poc-client.json'\\n    mode = stat.S_IMODE(token_file.stat().st_mode)\\n    data = json.loads(token_file.read_text())\\n    print(json.dumps({\\n        'token_file_exists': token_file.exists(),\\n        'token_file_mode_octal': oct(mode),\\n        'contains_access_token': data.get('access_token') == 'poc-access-token',\\n        'contains_refresh_token': data.get('refresh_token') == 'poc-refresh-token',\\n        'token_file_path': str(token_file),\\n    }, indent=2, sort_keys=True))\\nfinally:\\n    if old_home is not None:\\n        os.environ['HOME'] = old_home\\n    else:\\n        os.environ.pop('HOME', None)\\n    shutil.rmtree(home)\\nPY\\n```\\n\\nObserved output from this environment:\\n\\n```json\\n{\\n  \\\"contains_access_token\\\": true,\\n  \\\"contains_refresh_token\\\": true,\\n  \\\"token_file_exists\\\": true,\\n  \\\"token_file_mode_octal\\\": \\\"0o664\\\",\\n  \\\"token_file_path\\\": \\\"/tmp/mcp-atlassian-oauth-poc-9m9wvktp/.mcp-atlassian/oauth-poc-client.json\\\"\\n}\\n```\\n\\nThe proof confirms that a plaintext file containing both access and refresh tokens is created and is not owner-only.\\n\\n### Impact\\n\\nA local user, container sidecar, compromised dependency, backup job, or other process with filesystem read access to the account's home directory can recover OAuth access and refresh tokens. Refresh tokens can allow continued Atlassian API access until revoked or expired, depending on the OAuth app and token policy. In shared hosts, Kubernetes volumes, developer workstations, and CI runners, this can lead to persistent Atlassian account compromise.\", \"ghsa_id\": \"GHSA-g5xv-mhgm-v5f6\", \"github_reviewed_at\": \"2026-09-22T20:36:34Z\", \"html_url\": \"https://github.com/advisories/GHSA-g5xv-mhgm-v5f6\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g5xv-mhgm-v5f6\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77250\"}], \"nvd_published_at\": \"2026-09-22T18:17:17Z\", \"published_at\": \"2026-09-22T20:36:34Z\", \"references\": [\"https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-g5xv-mhgm-v5f6\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-77250\", \"https://github.com/sooperset/mcp-atlassian/pull/1448\", \"https://github.com/sooperset/mcp-atlassian/commit/b041733473f95119dd539542a43c280737a8e460\", \"https://github.com/sooperset/mcp-atlassian/releases/tag/v0.22.0\", \"https://github.com/advisories/GHSA-g5xv-mhgm-v5f6\"], \"repository_advisory_url\": \"https://api.github.com/repos/sooperset/mcp-atlassian/security-advisories/GHSA-g5xv-mhgm-v5f6\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sooperset/mcp-atlassian\", \"summary\": \"MCP Atlassian: OAuth fallback token storage writes plaintext access and refresh tokens with group-readable permissions\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:36:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-g5xv-mhgm-v5f6\", \"vulnerabilities\": [{\"first_patched_version\": \"0.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-atlassian\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g5xv-mhgm-v5f6",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-atlassian: < 0.22.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77250"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-atlassian"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.709589Z",
+  "provenance": {
+    "content_sha256": "51d805ae811723933ffc528f85cd54e0f9a12cadf4d580648be686c9842cb8e3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:36:34Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g5xv-mhgm-v5f6",
+  "status": "active",
+  "title": "MCP Atlassian: OAuth fallback token storage writes plaintext access and refresh tokens with group-readable permissions",
+  "updated_at": "2026-09-22T20:36:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g5xv-mhgm-v5f6"
+}

