@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/107809485?v=4\", \"events_url\": \"https://api.github.com/users/ngxuankhoi/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ngxuankhoi/followers\", \"following_url\": \"https://api.github.com/users/ngxuankhoi/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ngxuankhoi/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ngxuankhoi\", \"id\": 107809485, \"login\": \"ngxuankhoi\", \"node_id\": \"U_kgDOBm0KzQ\", \"organizations_url\": \"https://api.github.com/users/ngxuankhoi/orgs\", \"received_events_url\": \"https://api.github.com/users/ngxuankhoi/received_events\", \"repos_url\": \"https://api.github.com/users/ngxuankhoi/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ngxuankhoi/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ngxuankhoi/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ngxuankhoi\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56679\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-915\", \"name\": \"Improperly Controlled Modification of Dynamically-Determined Object Attributes\"}], \"description\": \"### Summary\\nThe `PATCH /api/settings` endpoint writes the entire request body to persistent settings without a field whitelist. An authenticated user can set security-critical fields that are not meant to be modifiable here — notably `requireLogin`. Setting `requireLogin: false` disables authentication for the whole application, exposing all protected routes (e.g. `/api/keys`, `/api/providers`) to unauthenticated access.\\n\\n### Details\\nRoot cause is unfiltered mass assignment (CWE-915):\\n\\n- `src/app/api/settings/route.js` (PATCH handler) parses the body and passes it to `updateSettings(body)`, with special handling only for `newPassword` and `oidcClientSecret`. All other fields pass through.\\n- `src/lib/db/repos/settingsRepo.js` — `updateSettings` does `next = { ...current, ...updates }`, so any key in the body overwrites stored settings, including `requireLogin`, `tunnelDashboardAccess`, `authMode`.\\n- `src/dashboardGuard.js` — `isAuthenticated` returns `true` whenever `settings.requireLogin === false`, bypassing auth on all protected routes.\\n\\nThis is distinct from CVE-2026-5842 (CWE-285, pre-auth bypass on `/api`, patched in 0.3.75). This finding requires a valid authenticated session and abuses input handling, not missing authentication.\\n\\n### PoC\\nInstance on `localhost:20128`, default password `123456`.\\n\\n1. Authenticate, capture session:\\n   `POST /api/auth/login` body `{\\\"password\\\":\\\"123456\\\"}` → `200 {\\\"success\\\":true}`\\n2. Mass-assign with the authenticated session:\\n   `PATCH /api/settings` body `{\\\"requireLogin\\\":false}` → `200`, response confirms `\\\"requireLogin\\\":false`\\n3. Verify bypass with NO session/credentials:\\n   `GET /api/keys` → `200`, returns full API key list unauthenticated\\n4. Cleanup (authenticated): `PATCH /api/settings` body `{\\\"requireLogin\\\":true}` → `GET /api/keys` returns `401` again\\n\\n### Impact\\nPost-authentication mass assignment. Any authenticated user (including one using the default password) can disable authentication globally, then read all stored API keys and provider connection data without credentials, and toggle tunnel/dashboard exposure. Escalates to remote full compromise when chained with the default password `123456` on an instance exposed via tunnel (`tunnelDashboardAccess` defaults to `true`).\\n\\n### Suggested fix\\nWhitelist user-configurable fields in the PATCH handler; move security-critical fields (`requireLogin`, `tunnelDashboardAccess`, `authMode`) to a dedicated endpoint requiring re-authentication (current-password re-entry), mirroring the existing DB export/import re-auth flow.\", \"epss\": {\"percentage\": 0.00519, \"percentile\": 0.42583}, \"ghsa_id\": \"GHSA-vmjq-hvgq-2wv4\", \"github_reviewed_at\": \"2026-09-23T18:12:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-vmjq-hvgq-2wv4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-vmjq-hvgq-2wv4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56679\"}], \"nvd_published_at\": \"2026-07-15T21:16:55Z\", \"published_at\": \"2026-09-23T18:12:33Z\", \"references\": [\"https://github.com/decolua/9router/security/advisories/GHSA-vmjq-hvgq-2wv4\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-56679\", \"https://github.com/advisories/GHSA-vmjq-hvgq-2wv4\"], \"repository_advisory_url\": \"https://api.github.com/repos/decolua/9router/security-advisories/GHSA-vmjq-hvgq-2wv4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/decolua/9router\", \"summary\": \"9router: Mass assignment in PATCH /api/settings allows authenticated authorization downgrade\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-23T18:12:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-vmjq-hvgq-2wv4\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"9router\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-vmjq-hvgq-2wv4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "9router: <= 0.5.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-56679",
+      "CVE-2026-5842"
+    ],
+    "cvss_score": 8.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "9router"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-23T19:14:13.545613Z",
+  "provenance": {
+    "content_sha256": "f7999b7371b066daa620087b32f35a774031cc2a357e82acd80f57095f282066",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-23T18:12:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-vmjq-hvgq-2wv4",
+  "status": "active",
+  "title": "9router: Mass assignment in PATCH /api/settings allows authenticated authorization downgrade",
+  "updated_at": "2026-09-23T18:12:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-vmjq-hvgq-2wv4"
+}
