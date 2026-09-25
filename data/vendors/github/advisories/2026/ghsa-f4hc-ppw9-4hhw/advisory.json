@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/45316273?v=4\", \"events_url\": \"https://api.github.com/users/alfieV/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/alfieV/followers\", \"following_url\": \"https://api.github.com/users/alfieV/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/alfieV/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/alfieV\", \"id\": 45316273, \"login\": \"alfieV\", \"node_id\": \"MDQ6VXNlcjQ1MzE2Mjcz\", \"organizations_url\": \"https://api.github.com/users/alfieV/orgs\", \"received_events_url\": \"https://api.github.com/users/alfieV/received_events\", \"repos_url\": \"https://api.github.com/users/alfieV/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/alfieV/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/alfieV/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/alfieV\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/5722339?v=4\", \"events_url\": \"https://api.github.com/users/zachdaniel/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/zachdaniel/followers\", \"following_url\": \"https://api.github.com/users/zachdaniel/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/zachdaniel/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/zachdaniel\", \"id\": 5722339, \"login\": \"zachdaniel\", \"node_id\": \"MDQ6VXNlcjU3MjIzMzk=\", \"organizations_url\": \"https://api.github.com/users/zachdaniel/orgs\", \"received_events_url\": \"https://api.github.com/users/zachdaniel/received_events\", \"repos_url\": \"https://api.github.com/users/zachdaniel/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/zachdaniel/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/zachdaniel/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/zachdaniel\", \"user_view_type\": \"public\"}}, {\"type\": \"coordinator\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/333918?v=4\", \"events_url\": \"https://api.github.com/users/maennchen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maennchen/followers\", \"following_url\": \"https://api.github.com/users/maennchen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maennchen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maennchen\", \"id\": 333918, \"login\": \"maennchen\", \"node_id\": \"MDQ6VXNlcjMzMzkxOA==\", \"organizations_url\": \"https://api.github.com/users/maennchen/orgs\", \"received_events_url\": \"https://api.github.com/users/maennchen/received_events\", \"repos_url\": \"https://api.github.com/users/maennchen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maennchen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maennchen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maennchen\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-55736\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.9, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-915\", \"name\": \"Improperly Controlled Modification of Dynamically-Determined Object Attributes\"}], \"description\": \"### Summary\\n\\nAsh fails to consistently strip private action arguments (those declared with `public?: false`) when a changeset is built from an untrusted parameter map. Private arguments are meant to be set only by trusted server-side code, but a caller who controls the parameters supplied to an action can inject a value for one. Any actor able to submit parameters to an action that defines a private argument can trigger it.\\n\\n### Details\\n\\nPrivate arguments (`public?: false`) are meant to be populated internally (e.g. via `Ash.Changeset.set_private_argument/3`) and never accepted from external input. When an action is invoked with a parameter map, Ash should discard keys that name a private argument. The filtering in `lib/ash/changeset/changeset.ex` is incomplete, and the gap differs across the two parameter paths.\\n\\n**1. Regular path (`for_create`, `for_update`, `for_destroy`).** `cast_params/4` validates keys via `get_action_argument/2`. Its atom-keyed clause filters on `public?`, but the binary-keyed (string) clause does not, so a string key matching a private argument name is accepted and written into `changeset.arguments`. User-supplied parameter maps are string-keyed, making this the reachable case.\\n\\n**2. Atomic / bulk path (`Ash.Changeset.fully_atomic_changeset/4`).** `atomic_params/4` gates assignment on `has_argument?/2`, whose atom and binary clauses both omit the `public?` check, so private arguments are accepted regardless of key type.\\n\\n### PoC\\n\\n1. Define an action with a private argument, e.g. `argument :acting_user_id, :string, public?: false`, and a change that writes it into an attribute.\\n2. Build the changeset from a string-keyed map including it, e.g. `Ash.Changeset.for_create(Resource, :place, %{\\\"item\\\" => \\\"book\\\", \\\"acting_user_id\\\" => \\\"victim-user-id\\\"})`.\\n3. Observe `acting_user_id` is present in `changeset.arguments` and persisted, whereas the same map with atom keys is correctly stripped.\\n4. For the atomic path, call `Ash.Changeset.fully_atomic_changeset(Resource, :promote, %{\\\"acting_user_id\\\" => \\\"victim-user-id\\\"})` (atom or string keys) and observe the private argument is retained either way.\\n\\n### Impact\\n\\nAn attacker who can submit parameters to an action that defines a private argument can set that argument to a value of their choosing, overriding data the application intended to control server-side. Where a private argument drives authorization, identity, or record ownership (e.g. `acting_user_id`), this can lead to an integrity violation or privilege escalation.\", \"epss\": {\"percentage\": 0.00367, \"percentile\": 0.27757}, \"ghsa_id\": \"GHSA-f4hc-ppw9-4hhw\", \"github_reviewed_at\": \"2026-09-24T19:53:36Z\", \"html_url\": \"https://github.com/advisories/GHSA-f4hc-ppw9-4hhw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f4hc-ppw9-4hhw\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-55736\"}], \"nvd_published_at\": \"2026-06-23T19:17:12Z\", \"published_at\": \"2026-09-24T19:53:36Z\", \"references\": [\"https://github.com/ash-project/ash/security/advisories/GHSA-f4hc-ppw9-4hhw\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-55736\", \"https://github.com/ash-project/ash/commit/d9b3100219b3ea86d73202bf7368c03a7688efea\", \"https://cna.erlef.org/cves/CVE-2026-55736.html\", \"https://github.com/ash-project/ash/releases/tag/v3.29.3\", \"https://osv.dev/vulnerability/EEF-CVE-2026-55736\", \"https://github.com/advisories/GHSA-f4hc-ppw9-4hhw\"], \"repository_advisory_url\": \"https://api.github.com/repos/ash-project/ash/security-advisories/GHSA-f4hc-ppw9-4hhw\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/ash-project/ash\", \"summary\": \"Ash: Private action arguments can be set by user input via string-keyed params and atomic changesets\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-24T19:53:38Z\", \"url\": \"https://api.github.com/advisories/GHSA-f4hc-ppw9-4hhw\", \"vulnerabilities\": [{\"first_patched_version\": \"3.29.3\", \"package\": {\"ecosystem\": \"erlang\", \"name\": \"ash\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.0.0, < 3.29.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f4hc-ppw9-4hhw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ash: >= 3.0.0, < 3.29.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-55736"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ash"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-25T19:13:21.107598Z",
+  "provenance": {
+    "content_sha256": "5ffda9f3d53deaff63ca4671396a7ce3ad99a24077d3cbb207878a6d220ba378",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-24T19:53:36Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f4hc-ppw9-4hhw",
+  "status": "active",
+  "title": "Ash: Private action arguments can be set by user input via string-keyed params and atomic changesets",
+  "updated_at": "2026-09-24T19:53:38Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f4hc-ppw9-4hhw"
+}

