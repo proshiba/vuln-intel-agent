@@ -1,0 +1,58 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/23277273?v=4\", \"events_url\": \"https://api.github.com/users/NotAFlightRisk/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/NotAFlightRisk/followers\", \"following_url\": \"https://api.github.com/users/NotAFlightRisk/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/NotAFlightRisk/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/NotAFlightRisk\", \"id\": 23277273, \"login\": \"NotAFlightRisk\", \"node_id\": \"MDQ6VXNlcjIzMjc3Mjcz\", \"organizations_url\": \"https://api.github.com/users/NotAFlightRisk/orgs\", \"received_events_url\": \"https://api.github.com/users/NotAFlightRisk/received_events\", \"repos_url\": \"https://api.github.com/users/NotAFlightRisk/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/NotAFlightRisk/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/NotAFlightRisk/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/NotAFlightRisk\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1862727?v=4\", \"events_url\": \"https://api.github.com/users/lissy93/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lissy93/followers\", \"following_url\": \"https://api.github.com/users/lissy93/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lissy93/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lissy93\", \"id\": 1862727, \"login\": \"lissy93\", \"node_id\": \"MDQ6VXNlcjE4NjI3Mjc=\", \"organizations_url\": \"https://api.github.com/users/lissy93/orgs\", \"received_events_url\": \"https://api.github.com/users/lissy93/received_events\", \"repos_url\": \"https://api.github.com/users/lissy93/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lissy93/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lissy93/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lissy93\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"## Summary\\n\\nTwo independent quadratic paths in the `linkify: true` handling. Both are in markdown-it's own code rather than in linkify-it, which stays linear on both payloads.\\n\\n`src/rules_core/linkify.ts` calls `arrayReplaceAt` once per linkified text token, and that rebuilds the whole `children` array each time. A paragraph of N soft-broken lines is one inline token with about 2N children, so you get N rebuilds over a 2N array. Schema-less emails are what reach it. A `http://` link gets consumed by the inline rule first and never arrives as a text token, so those stay linear.\\n\\n`src/rules_inline/linkify.ts` runs `state.pending.match(SCHEME_RE)` at every `://` in the source. `state.pending` only gets truncated once a link is actually produced, so an unregistered scheme leaves it growing and every `://` rescans the lot.\\n\\n## Proof of concept\\n\\nClean install of 15.0.0 from npm, `new MarkdownIt({ linkify: true }).render(payload)`, Node 24.\\n\\n| N | 5,000 | 10,000 | 20,000 | 40,000 |\\n|---|---|---|---|---|\\n| `'a@b.co\\\\n'.repeat(N)`, 34KB to 273KB | 1.1s | 4.7s | 19.6s | 89s |\\n| `'a://'.repeat(N)`, 20KB to 156KB | 0.25s | 0.76s | 3.1s | 15.0s |\\n\\nDoubling the input roughly quadruples the time in both. With `linkify: false` the same inputs run in 25 to 131ms and stay flat.\\n\\nControls for the first one, all at N=20000: putting every email in a single text token (`'a@b.co '`) takes 0.59s, one email per paragraph (`'a@b.co\\\\n\\\\n'`) takes 0.64s, and soft-broken lines with nothing linkifiable take 42ms. So it needs many children AND many of them linkifying. For the second, replaying just the `SCHEME_RE` calls against the same growing prefixes with no markdown-it involved accounts for 11.7s of the 15s.\\n\\nOrdinary prose does it too. `'ping a@b.co ok\\\\n'.repeat(20000)` is 293KB and takes 31s.\\n\\n## Caveat\\n\\n`linkify` is off by default, so this only reaches apps that turn it on.\\n\\n## Impact\\n\\nAvailability only. A few hundred KB of fairly ordinary markdown pins one core for tens of seconds, and because it's quadratic it degrades quickly with size. Nothing is read, written or executed.\", \"ghsa_id\": \"GHSA-253c-mchw-3w2r\", \"github_reviewed_at\": \"2026-09-29T17:57:56Z\", \"html_url\": \"https://github.com/advisories/GHSA-253c-mchw-3w2r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-253c-mchw-3w2r\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-29T17:57:56Z\", \"references\": [\"https://github.com/markdown-it/markdown-it/security/advisories/GHSA-253c-mchw-3w2r\", \"https://github.com/markdown-it/markdown-it/commit/09fa07118dda4c953f058848f53dae88395618ca\", \"https://github.com/markdown-it/markdown-it/commit/aaadcfa6d817b3c5f89afb49d97c7b797a6dd4fd\", \"https://github.com/markdown-it/markdown-it/commit/ad70f6b7cff64bee10e42a774147112480ca0d49\", \"https://github.com/advisories/GHSA-253c-mchw-3w2r\"], \"repository_advisory_url\": \"https://api.github.com/repos/markdown-it/markdown-it/security-advisories/GHSA-253c-mchw-3w2r\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/markdown-it/markdown-it\", \"summary\": \"markdown-it linkify: true has two quadratic paths, so a few hundred KB of markdown blocks the event loop for tens of seconds\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-29T17:57:57Z\", \"url\": \"https://api.github.com/advisories/GHSA-253c-mchw-3w2r\", \"vulnerabilities\": [{\"first_patched_version\": \"15.0.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"markdown-it\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"= 15.0.0\"}, {\"first_patched_version\": \"14.3.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"markdown-it\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 14.3.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-253c-mchw-3w2r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "markdown-it: < 14.3.1",
+      "markdown-it: = 15.0.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "markdown-it"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-29T19:13:55.104063Z",
+  "provenance": {
+    "content_sha256": "dc8d3afedcb3f3405dd0a4d3872b76d1d50ff7b9f62cc621c92df38225917fb0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-29T17:57:56Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-253c-mchw-3w2r",
+  "status": "active",
+  "title": "markdown-it linkify: true has two quadratic paths, so a few hundred KB of markdown blocks the event loop for tens of seconds",
+  "updated_at": "2026-09-29T17:57:57Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-253c-mchw-3w2r"
+}

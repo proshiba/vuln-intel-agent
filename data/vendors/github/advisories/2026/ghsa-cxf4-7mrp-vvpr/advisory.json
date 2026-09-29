@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77691959?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut/followers\", \"following_url\": \"https://api.github.com/users/iaohkut/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut\", \"id\": 77691959, \"login\": \"iaohkut\", \"node_id\": \"MDQ6VXNlcjc3NjkxOTU5\", \"organizations_url\": \"https://api.github.com/users/iaohkut/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-102601\", \"cvss\": {\"score\": 3.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-150\", \"name\": \"Improper Neutralization of Escape, Meta, or Control Sequences\"}], \"description\": \"## Related public issue (context, not a duplicate)\\n\\nClosed issue #1429 (\\\"Handle non-UTF-8 paths\\\", 2024-03-24) raised exactly this general concern and\\neven suggested detection via `preg_match('//u', $path) !== 1` -- note the reporter's suggested check\\nexplicitly compares `!== 1`, which *would* correctly treat PCRE's `false` return as \\\"reject.\\\" The\\nmaintainer's reply pointed to the `PathNormalizer` interface as the place to implement this. The\\ncontrol-character check that ended up shipping in `WhitespacePathNormalizer`\\n(`if (preg_match('#\\\\p{C}+#u', $unixPath))`) addresses the general concern but does **not** use the\\n`!== 1`-style comparison the original issue suggested -- it uses a bare truthy check, which is exactly\\nthe gap this report demonstrates. So this is not a duplicate of #1429; it's a concrete bypass\\nsurviving in the fix that issue's concern led to.\\n\\n## Vulnerability Details\\n\\n**File**: `src/WhitespacePathNormalizer.php`, lines 22-28 (`normalizePath()`) -- the **default**\\n`PathNormalizer` used by `Filesystem` for every adapter (Local, FTP, SFTP, S3, AsyncAwsS3, Azure, GCS,\\nZipArchive, GridFS, InMemory) unless the application supplies a custom one.\\n\\n### Root Cause\\n\\n```php\\npublic function normalizePath(string $path): string\\n{\\n    $unixPath = str_replace('\\\\\\\\', '/', $path);\\n\\n    if (preg_match('#\\\\p{C}+#u', $unixPath)) {\\n        throw CorruptedPathDetected::forPath($path);\\n    }\\n    ...\\n```\\n\\n`preg_match()` returns `false` (a PHP engine error) rather than `0` when the subject string is not\\nvalid UTF-8 and the pattern uses the `/u` modifier -- PCRE can't even attempt the match. `false` and\\n`0` are both falsy in PHP, and `if (preg_match(...))` does not distinguish them. So a path containing\\n**any single invalid UTF-8 byte anywhere in the string** makes `preg_match()` fail with a \\\"Malformed\\nUTF-8 characters\\\" engine error, the `if` evaluates false, and `CorruptedPathDetected` is silently **not**\\nthrown -- even when the same string also contains literal control characters this exact check exists\\nto catch.\\n\\nthe identical payload IS correctly rejected once it's valid UTF-8:\\n```php\\n$n->normalizePath(\\\"foo\\\\x1bbar\\\");         // valid UTF-8, contains ESC -> throws CorruptedPathDetected (correct)\\n$n->normalizePath(\\\"foo\\\\x80\\\\x1bbar\\\");    // 0x80 = invalid lone UTF-8 continuation byte -> NOT thrown (bypass)\\n```\\n\\nThe path-traversal protection is **unaffected** -- it's exact byte-string comparison on\\n`/`-delimited segments, independent of UTF-8 validity:\\n```php\\n$n->normalizePath(\\\"\\\\x80/../../etc/passwd\\\");   // still throws PathTraversalDetected\\n```\\n\\n### Recommended Fix\\n```php\\npublic function normalizePath(string $path): string\\n{\\n    $unixPath = str_replace('\\\\\\\\', '/', $path);\\n    $matched = preg_match('#\\\\p{C}+#u', $unixPath);\\n\\n    if ($matched !== 0) {\\n        // $matched === false means malformed UTF-8 -- must also be treated as corrupted,\\n        // not silently allowed through.\\n        throw CorruptedPathDetected::forPath($path);\\n    }\\n    ...\\n```\\n\\n### Verification\\nDynamically confirmed on `league/flysystem` HEAD `6837e1d` / tag `3.35.2`, PHP 8.4.22 CLI, end-to-end\\nthrough `LocalFilesystemAdapter`:\\n```\\n[1] write() succeeded -- normalizer did NOT reject the path.\\n[2] Actual bytes on disk: ...801b5b386d6e6f726d616c2d6c6f6f6b696e672d66696c652e7478741b5b306d...\\n[3] Filesystem::listContents() path contains raw ESC (0x1b): YES\\n[4] Raw terminal output (via `cat -v`): M-^@^[[8mnormal-looking-file.txt^[[0m^[[2K^[[1Aurgent-invoice.pdf\", \"ghsa_id\": \"GHSA-cxf4-7mrp-vvpr\", \"github_reviewed_at\": \"2026-09-29T18:10:14Z\", \"html_url\": \"https://github.com/advisories/GHSA-cxf4-7mrp-vvpr\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cxf4-7mrp-vvpr\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-102601\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-29T18:10:14Z\", \"references\": [\"https://github.com/thephpleague/flysystem/security/advisories/GHSA-cxf4-7mrp-vvpr\", \"https://github.com/thephpleague/flysystem/commit/ef4a9a557d769b5d472c403125716706a0d9cc77\", \"https://github.com/thephpleague/flysystem/releases/tag/3.35.3\", \"https://github.com/advisories/GHSA-cxf4-7mrp-vvpr\"], \"repository_advisory_url\": \"https://api.github.com/repos/thephpleague/flysystem/security-advisories/GHSA-cxf4-7mrp-vvpr\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/thephpleague/flysystem\", \"summary\": \"Flysystem: WhitespacePathNormalizer's control-character (CorruptedPathDetected) check is bypassed by malformed UTF-8 in the path, affecting every adapter\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-29T18:10:14Z\", \"url\": \"https://api.github.com/advisories/GHSA-cxf4-7mrp-vvpr\", \"vulnerabilities\": [{\"first_patched_version\": \"3.35.3\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"league/flysystem\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.35.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cxf4-7mrp-vvpr",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "league/flysystem: <= 3.35.2"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-102601"
+    ],
+    "cvss_score": 3.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "league/flysystem"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-09-29T19:13:55.088521Z",
+  "provenance": {
+    "content_sha256": "224384f7c161d66d5dcfe16b3fc1aeeeab11d575489179139a9565d374ae157d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-29T18:10:14Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cxf4-7mrp-vvpr",
+  "status": "active",
+  "title": "Flysystem: WhitespacePathNormalizer's control-character (CorruptedPathDetected) check is bypassed by malformed UTF-8 in the path, affecting every adapter",
+  "updated_at": "2026-09-29T18:10:14Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cxf4-7mrp-vvpr"
+}
