@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/32502734?v=4\", \"events_url\": \"https://api.github.com/users/cruzryan/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/cruzryan/followers\", \"following_url\": \"https://api.github.com/users/cruzryan/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/cruzryan/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/cruzryan\", \"id\": 32502734, \"login\": \"cruzryan\", \"node_id\": \"MDQ6VXNlcjMyNTAyNzM0\", \"organizations_url\": \"https://api.github.com/users/cruzryan/orgs\", \"received_events_url\": \"https://api.github.com/users/cruzryan/received_events\", \"repos_url\": \"https://api.github.com/users/cruzryan/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/cruzryan/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/cruzryan/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/cruzryan\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-101910\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.9, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:H/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"### Summary\\n\\nNo classifier on `Address6` recognizes the NAT64 local-use range `64:ff9b:1::/48` (RFC 8215). `isPrivate()`, `isLoopback()`, `isLinkLocal()` and their siblings all return `false` for every address in it, so an internal IPv4 destination written through a local-use NAT64 prefix (`64:ff9b:1:7f00:0:100::` for `127.0.0.1`, `64:ff9b:1:a9fe:a9:fe00::` for `169.254.169.254`) reads as an ordinary global address. `getType()` names the range `'NAT64 (local-use)'`, so the library knows what the address is and classifies it as nothing.\\n\\nAn application that builds a network trust-boundary decision on these checks (for example a filter intended to block Server-Side Request Forgery, or SSRF) will classify an internal target as external and allow the request. SSRF is an attack in which a user-supplied address coaxes the server into making a request to an internal destination the user could not otherwise reach, such as a loopback service or a cloud metadata endpoint.\\n\\n### Details\\n\\nThe fix for GHSA-22jq-vg5j-6vgg (10.2.1) classifies IPv4-mapped (`::ffff:0:0/96`) and NAT64 well-known (`64:ff9b::/96`) addresses by their embedded IPv4 address: `embeddedIPv4()` in `src/ipv6.ts` decodes the trailing 32 bits and every special-use classifier delegates to the resulting `Address4`. Those are the only two ranges `embeddedIPv4()` handles.\\n\\nThe local-use range differs in kind from the well-known prefix, which is why extending the decoder does not fix it. RFC 8215 reserves `64:ff9b:1::/48` so an operator can carve their own NAT64 prefix out of it, of any length RFC 6052 allows (`/48`, `/56`, `/64`, or `/96`). Where the IPv4 address sits depends on that choice: `127.0.0.1` is `64:ff9b:1:7f00:0:100::` under a `/48` prefix and `64:ff9b:1::7f00:1` under a `/96` prefix, and each of those decodes to a different address under the other prefix length. There is no single embedded IPv4 address for the library to classify by.\\n\\nWhat is well-defined is the range as a whole. The IANA IPv6 Special-Purpose Address Registry lists `64:ff9b:1::/48` as not globally reachable, and Python's `ipaddress` module reports `is_private` as `True` and `is_global` as `False` for every address in it. `isPrivate()` covered ULA (`fc00::/7`) plus the decoded mapped and well-known cases, and nothing in the local-use range.\\n\\n### Affected versions\\n\\n`>= 10.2.0, <= 10.5.0`. The `is*` classification API was extended to `Address6` in 10.2.0; releases before it do not expose the method and are not affected through this vector.\\n\\n### Impact\\n\\nEvery address in `64:ff9b:1::/48` parses successfully, `isValid()` is `true`, and no classifier catches it. Which internal target is reached depends on the NAT64 prefix deployed on the server's network; the well-known prefix column is the patched control from GHSA-22jq-vg5j-6vgg.\\n\\n| Internal target | Well-known form | Classified | Local-use form (`/48` prefix) | Classified |\\n|---|---|---|---|---|\\n| `127.0.0.1` | `64:ff9b::7f00:1` | loopback | `64:ff9b:1:7f00:0:100::` | nothing |\\n| `10.0.0.1` | `64:ff9b::a00:1` | private | `64:ff9b:1:a00:0:100::` | nothing |\\n| `169.254.169.254` | `64:ff9b::a9fe:a9fe` | link-local | `64:ff9b:1:a9fe:a9:fe00::` | nothing |\\n| `192.168.1.1` | `64:ff9b::c0a8:101` | private | `64:ff9b:1:c0a8:1:100::` | nothing |\\n\\n### Reachability\\n\\nReaching an internal host through one of these addresses requires that the server's network run a NAT64 translator on a prefix inside `64:ff9b:1::/48` and that the attacker guess or know the prefix length. That is the same precondition the well-known prefix carries (a translator on `64:ff9b::/96`), with the additional constraint that the prefix is operator-chosen rather than fixed. The severity reflects that precondition.\\n\\n### Proof of concept\\n\\n`npm i ip-address@10.5.0`, then:\\n\\n```js\\nconst { Address6 } = require('ip-address');\\n\\n// A guard of the shape the library documents.\\nfunction isBlocked(host) {\\n  const a = new Address6(host);\\n  return a.isLoopback() || a.isLinkLocal() || a.isPrivate() || a.isMulticast() || a.isUnspecified();\\n}\\n\\nfor (const h of ['64:ff9b::7f00:1', '64:ff9b:1:7f00:0:100::', '64:ff9b:1::7f00:1']) {\\n  console.log(isBlocked(h) ? 'BLOCK' : 'ALLOW', h, '-> getType()', new Address6(h).getType());\\n}\\n```\\n\\nOn affected versions:\\n\\n```\\nBLOCK 64:ff9b::7f00:1 -> getType() NAT64 (well-known)\\nALLOW 64:ff9b:1:7f00:0:100:: -> getType() NAT64 (local-use)\\nALLOW 64:ff9b:1::7f00:1 -> getType() NAT64 (local-use)\\n```\\n\\n### Remediation\\n\\nUpgrade to the patched release. In the fix, `isPrivate()` returns `true` for every address in `64:ff9b:1::/48`, alongside ULA and the decoded mapped and well-known cases. The range is reported private as a whole rather than by a decoded IPv4 address, for the reason given above; `toAddress4Nat64(prefix)` remains the way to decode an address under a known deployment prefix. `isLoopback()` and `isLinkLocal()` are unchanged for this range, since without the prefix length the library cannot know which IPv4 address is embedded.\\n\\nIf you cannot upgrade immediately, test the range directly:\\n\\n```js\\nconst NAT64_LOCAL_USE = new Address6('64:ff9b:1::/48');\\nconst localUse = new Address6(host).isHostInSubnet(NAT64_LOCAL_USE);\\n```\\n\\n### A note on SSRF defense\\n\\nThese methods are address classifiers, not a complete SSRF defense. Regardless of this fix, a robust SSRF guard must resolve the hostname and validate the *resolved* IP against the socket it connects to, and account for DNS rebinding and redirects. Treat these checks as one layer, not the only one.\", \"ghsa_id\": \"GHSA-2vr4-cq9g-pvrc\", \"github_reviewed_at\": \"2026-09-28T20:43:03Z\", \"html_url\": \"https://github.com/advisories/GHSA-2vr4-cq9g-pvrc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2vr4-cq9g-pvrc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-101910\"}], \"nvd_published_at\": \"2026-09-28T18:17:20Z\", \"published_at\": \"2026-09-28T20:43:03Z\", \"references\": [\"https://github.com/beaugunderson/ip-address/security/advisories/GHSA-2vr4-cq9g-pvrc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-101910\", \"https://github.com/beaugunderson/ip-address/commit/ab3dc88bcf5374344168a2ba075ca7ac4ff257f8\", \"https://github.com/beaugunderson/ip-address/releases/tag/v10.5.1\", \"https://github.com/advisories/GHSA-2vr4-cq9g-pvrc\"], \"repository_advisory_url\": \"https://api.github.com/repos/beaugunderson/ip-address/security-advisories/GHSA-2vr4-cq9g-pvrc\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/beaugunderson/ip-address\", \"summary\": \"ip-address: no classifier recognizes the NAT64 local-use range 64:ff9b:1::/48, allowing SSRF and trust-boundary bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-28T20:43:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-2vr4-cq9g-pvrc\", \"vulnerabilities\": [{\"first_patched_version\": \"10.5.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"ip-address\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 10.2.0, <= 10.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2vr4-cq9g-pvrc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "ip-address: >= 10.2.0, <= 10.5.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-101910"
+    ],
+    "cvss_score": 6.9,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:N/VA:N/SC:H/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "ip-address"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-09-29T19:13:55.137167Z",
+  "provenance": {
+    "content_sha256": "a2c35fff2bbba228baec6a7420ae46df541bb49cec8b10b09cdbb722af5cce36",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-28T20:43:03Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2vr4-cq9g-pvrc",
+  "status": "active",
+  "title": "ip-address: no classifier recognizes the NAT64 local-use range 64:ff9b:1::/48, allowing SSRF and trust-boundary bypass",
+  "updated_at": "2026-09-28T20:43:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2vr4-cq9g-pvrc"
+}
