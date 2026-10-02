@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-102825\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-307\", \"name\": \"Improper Restriction of Excessive Authentication Attempts\"}], \"description\": \"### Details\\n\\n#### Affected versions and vulnerable location\\n\\n- Confirmed present on default branch `main` at HEAD `0089c89c94753bebbec12b956c07a1cd38740379`.\\n- Crate version at HEAD: `0.62.4`.\\n- Vulnerable locations on current default branch:\\n  - `russh/src/server/mod.rs:91` (`pub max_auth_attempts: usize`)\\n  - `russh/src/server/mod.rs:121` (default `max_auth_attempts: 10`)\\n  - `russh/src/server/encrypted.rs:89` (`USERAUTH_REQUEST` dispatch into auth handler path)\\n  - `russh/src/server/encrypted.rs:98` (`self.common.auth_attempts += 1`)\\n  - `russh/src/server/encrypted.rs:53` (only runtime read of `auth_attempts`, used for initial reject timing, not attempt limiting)\\n- Default-branch history check did not show a newer merged commit adding enforcement against `config.max_auth_attempts`.\\n\\n#### Reachability trace verified\\n\\n1. Entry point: exported server API `server::run_stream` in `russh/src/server/mod.rs:1049`.\\n2. Session run loop in `russh/src/server/session.rs` processes incoming packets and calls `reply(...)` (`server/session.rs:725`).\\n3. `reply` forwards encrypted packets to `session.server_read_encrypted(...)` (`server/mod.rs:1221`).\\n4. `server_read_encrypted` routes `USERAUTH_REQUEST` to `enc.server_read_auth_request(...)` (`server/encrypted.rs:89`).\\n5. On each request, `self.common.auth_attempts += 1` executes (`server/encrypted.rs:98`).\\n6. No comparison against `self.common.config.max_auth_attempts` is present in this runtime flow.\\n\\n### PoC\\n\\n#### Reproduction steps and observed output\\n\\nI did not run a full server process in this environment because Rust tooling is unavailable. I verified the issue from source and command output on the audited tree.\\n\\n1. Show where `max_auth_attempts` appears:\\n\\n```bash\\nrtk rg -n \\\"max_auth_attempts\\\" .scratch/russh/russh/src/server/mod.rs .scratch/russh/russh/src/server/encrypted.rs .scratch/russh/russh/src/server/session.rs\\n```\\n\\nObserved:\\n\\n```text\\n.scratch/russh/russh/src/server/mod.rs:91:    pub max_auth_attempts: usize,\\n.scratch/russh/russh/src/server/mod.rs:121:            max_auth_attempts: 10,\\n.scratch/russh/russh/src/server/mod.rs:148:            .field(\\\"max_auth_attempts\\\", &self.max_auth_attempts)\\n```\\n\\n2. Show runtime auth-attempt handling:\\n\\n```bash\\nrtk rg -n \\\"auth_attempts == 0|auth_attempts \\\\\\\\+= 1\\\" .scratch/russh/russh/src/server/encrypted.rs\\n```\\n\\nObserved:\\n\\n```text\\n53:        let initial_none_rejection_wait_until = if self.common.auth_attempts == 0 {\\n98:                self.common.auth_attempts += 1;\\n```\\n\\n3. Show production entrypoint-to-auth path references:\\n\\n```bash\\nrtk rg -n \\\"pub async fn run_stream|match reply\\\\\\\\(|server_read_encrypted\\\\\\\\(|server_read_auth_request\\\\\\\\(\\\" .scratch/russh/russh/src/server/mod.rs .scratch/russh/russh/src/server/session.rs .scratch/russh/russh/src/server/encrypted.rs\\n```\\n\\nObserved:\\n\\n```text\\n.scratch/russh/russh/src/server/encrypted.rs:89:                enc.server_read_auth_request(\\n.scratch/russh/russh/src/server/session.rs:725:                            match reply(&mut self, &mut handler, &mut pkt).await {\\n.scratch/russh/russh/src/server/mod.rs:1049:pub async fn run_stream<H, R>(\\n.scratch/russh/russh/src/server/mod.rs:1221:    session.server_read_encrypted(handler, pkt).await\\n```\\n\\n4. Toolchain check:\\n\\n```bash\\ncargo --version\\n```\\n\\nObserved:\\n\\n```text\\n/bin/bash: line 1: cargo: command not found\\n```\\n\\n### Impact\\n\\n#### Attacker model\\n\\n- Attacker: unauthenticated remote client with TCP reachability to a russh-backed SSH service.\\n- Preconditions: deployer expects `server::Config.max_auth_attempts` to cap attempts.\\n- Impact: repeated `USERAUTH_REQUEST` attempts continue for a single connection beyond configured limit, increasing online guessing opportunity and backend auth workload.\\n\\n### Suggested fix\\n\\nEnforce `max_auth_attempts` in the `USERAUTH_REQUEST` branch before invoking auth-method handlers, and fail closed once threshold is reached.\\n\\nConcrete patch direction in `russh/src/server/encrypted.rs`:\\n\\n```rust\\nif self.common.config.max_auth_attempts > 0\\n    && self.common.auth_attempts >= self.common.config.max_auth_attempts\\n{\\n    self.common.disconnect(\\n        Disconnect::NoMoreAuthMethodsAvailable,\\n        \\\"Too many authentication attempts\\\",\\n        \\\"\\\",\\n    )?;\\n    return Ok(());\\n}\\n```\\n\\n### How it was found and a note on tooling\\n\\nThe researcher synthesized three lens outputs, then revalidated each claim against current `main`: source presence and commit history, advisory overlap checks in both GitHub advisories and OSV, entrypoint-to-sink reachability, attacker-model realism, and execution-claim integrity. The researcher used `gh`, `git`, `rg`, and direct source inspection under `.scratch/russh`. Because Rust tooling is unavailable in this worker, this report is intentionally marked `source-only`.\\n\\nAI assistance was used while investigating this and while drafting this report. The finding was verified by reading the cited code at HEAD. The vulnerability was not executed it, and that limit is stated plainly above rather than left implied.\\n\\nCredits: arpitjain099.\", \"epss\": {\"percentage\": 0.00282, \"percentile\": 0.1864}, \"ghsa_id\": \"GHSA-g6xm-f9xp-qq35\", \"github_reviewed_at\": \"2026-09-30T23:26:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-g6xm-f9xp-qq35\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g6xm-f9xp-qq35\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-102825\"}], \"nvd_published_at\": \"2026-09-29T19:17:24Z\", \"published_at\": \"2026-09-30T23:26:17Z\", \"references\": [\"https://github.com/Eugeny/russh/security/advisories/GHSA-g6xm-f9xp-qq35\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-102825\", \"https://github.com/Eugeny/russh/commit/f8fd0b11a393364dc7f01a182482d86adafdd653\", \"https://github.com/Eugeny/russh/releases/tag/v0.62.6\", \"https://github.com/advisories/GHSA-g6xm-f9xp-qq35\"], \"repository_advisory_url\": \"https://api.github.com/repos/Eugeny/russh/security-advisories/GHSA-g6xm-f9xp-qq35\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/Eugeny/russh\", \"summary\": \"Russh: Configured server auth-attempt cap is not enforced in the USERAUTH_REQUEST runtime path\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T23:26:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-g6xm-f9xp-qq35\", \"vulnerabilities\": [{\"first_patched_version\": \"0.62.6\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"russh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.62.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g6xm-f9xp-qq35",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "russh: <= 0.62.5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-102825"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "russh"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.176367Z",
+  "provenance": {
+    "content_sha256": "c892cbe7e5408bbdab598a2988cecd974caf2c402f9f449195800f8b1f3c2461",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T23:26:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g6xm-f9xp-qq35",
+  "status": "active",
+  "title": "Russh: Configured server auth-attempt cap is not enforced in the USERAUTH_REQUEST runtime path",
+  "updated_at": "2026-09-30T23:26:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g6xm-f9xp-qq35"
+}

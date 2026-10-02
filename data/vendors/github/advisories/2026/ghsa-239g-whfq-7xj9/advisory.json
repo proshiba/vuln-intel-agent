@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/46834502?v=4\", \"events_url\": \"https://api.github.com/users/dharanivarma/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dharanivarma/followers\", \"following_url\": \"https://api.github.com/users/dharanivarma/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dharanivarma/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dharanivarma\", \"id\": 46834502, \"login\": \"dharanivarma\", \"node_id\": \"MDQ6VXNlcjQ2ODM0NTAy\", \"organizations_url\": \"https://api.github.com/users/dharanivarma/orgs\", \"received_events_url\": \"https://api.github.com/users/dharanivarma/received_events\", \"repos_url\": \"https://api.github.com/users/dharanivarma/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dharanivarma/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dharanivarma/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dharanivarma\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-87817\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-427\", \"name\": \"Uncontrolled Search Path Element\"}], \"description\": \"### Summary\\n\\n`Repo.__init__` decides which directory is the git directory by testing candidate paths in an order that\\nconsiders the real `.git` **last**. Two earlier tests can be satisfied by ordinary tracked files. Git\\nreserves only the literal name `.git`, so `HEAD`, `objects/`, `refs/`, `config`, `gitdir`, `commondir`\\nand `hooks/` at a repository root are all legal tracked content.\\n\\nConsequently, after a victim opens or clones an attacker's repository, GitPython resolves `git_dir` to\\nthe **working-tree root** while real git correctly resolves `<root>/.git`. Everything GitPython then\\ntreats as \\\"inside the git directory\\\" is attacker-authored content — including `hooks/`, which it\\nexecutes.\\n\\n### CVE-2026-87817\\n\\n### Affected code (3.1.59)\\n\\nThe discovery loop in `git/repo/base.py` tests, in order:\\n\\n1. `git/repo/base.py:299` — `isfile(curpath/gitdir)` **and** `isfile(curpath/commondir)` **and** `isfile(curpath/HEAD)`\\n2. `git/repo/base.py:320` — `is_git_dir(curpath)`\\n3. `git/repo/base.py:341` — `dotgit = osp.join(curpath, \\\".git\\\")` ← the real git dir, considered last\\n\\n`is_git_dir` (`git/repo/fun.py:60`) requires only that `objects/` and `refs/` are directories and that\\n`HEAD` is a file; **`HEAD`'s contents are never parsed.** The hook path is resolved from\\n`index.repo.git_dir` (`git/index/fun.py:73`), i.e. the mis-resolved directory.\\n\\n### Proof of concept\\n\\nRequires only `pip install GitPython==3.1.59`. Full script attached as `poc1_rce.py`; it runs entirely\\nin a temp directory and the payload only writes a marker file.\\n\\nAttacker repository — four ordinary tracked files at the root:\\n\\n| path | mode | content |\\n|---|---|---|\\n| `gitdir` | 100644 | `.git\\\\n` |\\n| `commondir` | 100644 | `.git\\\\n` |\\n| `HEAD` | 100644 | `ref: refs/heads/master\\\\n` |\\n| `hooks/pre-commit` | **100755** | `#!/bin/sh` + payload |\\n\\nVictim — two ordinary calls:\\n\\n```python\\nrepo = git.Repo.clone_from(url, dst)     # or git.Repo(dst)\\nrepo.index.commit(\\\"automated commit\\\")    # code execution happens here\\n```\\n\\nObserved on the PyPI release 3.1.59 (Linux and Windows):\\n\\n```\\nreal git says the git dir is : /tmp/.../victim/.git\\nGitPython says it is         : /tmp/.../victim      <- shadowed\\nattacker's hook executed     : True\\ngit fsck                     : (clean)\\n```\\n\\nThe `pre-commit` hook runs at `git/index/base.py:1201`, before `write_tree()`, so it fires even though\\nthe commit later fails.\\n\\n### Impact\\n\\nA service that opens or clones an untrusted repository with GitPython — a CI runner building a fork\\npull request, a code-scanning/SBOM service, a mirror, a dependency bot, an AI code-review/agent tool —\\ncan be made to:\\n\\n1. **Execute arbitrary commands** via the tracked `<root>/hooks/pre-commit` when the victim calls\\n   `index.commit()`.\\n2. **Read files outside the repository**: the tracked `<root>/config` becomes the repository config and\\n   is parsed with `merge_includes=True` (`git/repo/base.py:765`), so `[include] path = ~/.aws/credentials`\\n   discloses the file. (`Repo._config_reader` still defaults `merge_includes=True`, so the hardening\\n   added in 3.1.59 for `.gitmodules`/GHSA-7833 does not cover this path.)\\n3. **Write a config file to an attacker-chosen directory** via an absolute tracked `commondir`.\\n\\nDelivery is silent: `git clone` exits 0, `git fsck` (including `--strict`, and with\\n`transfer.fsckObjects`/`fetch.fsckObjects=true`) reports nothing, and the clone passes every read-only\\nprobe (`head.commit`, `branches`, `is_dirty()`, `untracked_files`, `iter_commits`) because a tracked\\n`commondir` of `.git` pins `common_dir` to the real `.git`.\\n\\n### Threat model / preconditions\\n\\n- Attacker controls the content of a repository the victim opens or clones with GitPython (public repo,\\n  fork PR, mirrored dependency).\\n- For code execution, the victim performs a commit via GitPython's native `index.commit()`. For the\\n  file-read impact, opening the repo and reading config is enough.\\n- `GIT_WORK_TREE` is **not** a mitigation — `git_dir` is assigned and the discovery loop breaks before\\n  the environment is consulted.\\n- Real git is unaffected; only GitPython mis-resolves the directory.\\n\\n### Remediation\\n\\n1. Test `curpath/.git` **before** the `gitdir`/`commondir`/`HEAD` triple and before `is_git_dir(curpath)`.\\n2. Resolve `hook_path` / `_commit_hook_path` / `_get_validated_reflog_path` through `repo.common_dir`.\\n3. Containment-check `commondir`/`gitdir` contents before joining (reuse\\n   `SymbolicReference._get_validated_path`).\\n4. Validate `HEAD` in `is_git_dir` (require `ref: refs/...` or a 40-hex sha).\\n5. Pass `merge_includes=False` in `Repo._config_reader` (`git/repo/base.py:765`).\\n\\n### Note for the maintainers\\n\\nCommit `406b98e1` (2026-05-31, \\\"respect core.hooksPath for commit hooks\\\") resolved the hook path via\\n`git rev-parse --git-path`, which is immune because git rediscovers the true `.git`. Commit `9bc287a2`\\n(2026-07-20) reverted it to avoid an unconditional `rev-parse` dependency — reintroducing the exec step.\\nMeasured at each commit with the healthy-looking layout: `406b98e1` → hook did not fire; `9bc287a2` …\\n`3.1.59` → hook fired.\\n\\n### Scope note\\n\\nOnly the **repository-root** case is reported: where a real `.git` exists, git prefers it, and GitPython\\ndoes not. A fake git dir in a subdirectory fools real git too, so that variant is out of scope as a\\ngeneral ecosystem hazard rather than a GitPython defect.\\n\\n###POC Files :\\n[poc1_rce.py](https://github.com/user-attachments/files/31388464/poc1_rce.py)\\n[poc2_file_read.py](https://github.com/user-attachments/files/31388465/poc2_file_read.py)\", \"epss\": {\"percentage\": 0.00405, \"percentile\": 0.31912}, \"ghsa_id\": \"GHSA-239g-whfq-7xj9\", \"github_reviewed_at\": \"2026-09-30T23:27:59Z\", \"html_url\": \"https://github.com/advisories/GHSA-239g-whfq-7xj9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-239g-whfq-7xj9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-87817\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-30T23:27:59Z\", \"references\": [\"https://github.com/gitpython-developers/GitPython/security/advisories/GHSA-239g-whfq-7xj9\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-87817\", \"https://github.com/gitpython-developers/GitPython/pull/2218\", \"https://github.com/gitpython-developers/GitPython/commit/c7cf4d13b1ed0a2e70f2a1f3c6b4fc6c2652cf0b\", \"https://github.com/gitpython-developers/GitPython/releases/tag/3.1.60\", \"https://github.com/pypa/advisory-database/tree/main/vulns/gitpython/PYSEC-2026-3982.yaml\", \"https://www.vulncheck.com/advisories/gitpython-before-3.1.60-remote-code-execution-via-git-directory-impersonation\", \"https://github.com/advisories/GHSA-239g-whfq-7xj9\"], \"repository_advisory_url\": \"https://api.github.com/repos/gitpython-developers/GitPython/security-advisories/GHSA-239g-whfq-7xj9\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/gitpython-developers/GitPython\", \"summary\": \"GitPython: Repository content can impersonate the git directory, leading to arbitrary code execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T23:28:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-239g-whfq-7xj9\", \"vulnerabilities\": [{\"first_patched_version\": \"3.1.60\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"gitpython\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.1.59\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-239g-whfq-7xj9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "gitpython: <= 3.1.59"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-87817"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "gitpython"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.165243Z",
+  "provenance": {
+    "content_sha256": "a82e336910679ea477f6b820c34ee4bd5b21b4981daf1d8607b9cd3397b7c98c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T23:27:59Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-239g-whfq-7xj9",
+  "status": "active",
+  "title": "GitPython: Repository content can impersonate the git directory, leading to arbitrary code execution",
+  "updated_at": "2026-09-30T23:28:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-239g-whfq-7xj9"
+}

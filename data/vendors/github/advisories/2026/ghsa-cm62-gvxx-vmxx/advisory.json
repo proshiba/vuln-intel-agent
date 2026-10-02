@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/49032?v=4\", \"events_url\": \"https://api.github.com/users/jelmer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jelmer/followers\", \"following_url\": \"https://api.github.com/users/jelmer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jelmer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jelmer\", \"id\": 49032, \"login\": \"jelmer\", \"node_id\": \"MDQ6VXNlcjQ5MDMy\", \"organizations_url\": \"https://api.github.com/users/jelmer/orgs\", \"received_events_url\": \"https://api.github.com/users/jelmer/received_events\", \"repos_url\": \"https://api.github.com/users/jelmer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jelmer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jelmer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jelmer\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"## Summary\\n\\nDulwich's `stash.py:pop()` function is vulnerable to symlink directory traversal, allowing an attacker to write arbitrary files outside the repository worktree when a victim pops a stash in a malicious repository.\\n\\n## Root Cause\\n\\nThe `pop()` function at `dulwich/stash.py:236` uses `os.path.exists(parent_dir)` to check if a parent directory exists before writing stashed files. `os.path.exists()` follows symlinks, so when an intermediate directory in the path is a symlink pointing outside the worktree (e.g., `link → ../../.git/hooks`), the check passes and subsequent file writes resolve through the symlink.\\n\\nThe `validate_path()` function (line 228) only validates path component names against `INVALID_DOTNAMES` — it performs zero filesystem symlink detection. On dulwich 1.2.7 (latest release), `build_file_from_blob()` has no symlink protection whatsoever.\\n\\n## Impact\\n\\nAn attacker can craft a malicious repository that, when a victim clones it and performs a stash pop operation, writes attacker-controlled content to arbitrary filesystem locations. Writing to `.git/hooks/post-checkout` achieves Remote Code Execution on the victim's machine on the next git checkout operation.\\n\\n## Attack Scenario\\n\\n1. Attacker creates a repository with branch `main` containing `link` (symlink → `../../.git/hooks`) and branch `feature` containing `link/post-checkout` (executable payload)\\n2. Victim clones the repository (landing on `main` — symlink `link` exists in worktree)\\n3. Victim checks out `feature`, makes changes, runs `stash.push()`\\n4. Victim checks out `main` (restoring the `link` symlink)\\n5. Victim runs `stash.pop(0)` — stash contains `link/post-checkout`\\n6. `os.path.exists(\\\"link\\\")` returns True (symlink to existing directory), `os.makedirs` skipped\\n7. `build_file_from_blob(blob, mode, \\\"link/post-checkout\\\")` → `open(\\\"link/post-checkout\\\", \\\"wb\\\")` follows the intermediate symlink → payload written to `.git/hooks/post-checkout`\\n8. Next checkout operation triggers the hook → RCE\\n\\n## Suggested Fix\\n\\nBefore writing any file, verify that no component of the target path resolves through a symlink outside the worktree. Use `os.path.realpath(parent_dir)` and confirm it stays within the repository root. Alternatively, use `os.open()` with `O_NOFOLLOW` on each path component.\\n\\nReported by **zx (Jace)**\", \"ghsa_id\": \"GHSA-cm62-gvxx-vmxx\", \"github_reviewed_at\": \"2026-10-02T18:52:53Z\", \"html_url\": \"https://github.com/advisories/GHSA-cm62-gvxx-vmxx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-cm62-gvxx-vmxx\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T18:52:53Z\", \"references\": [\"https://github.com/jelmer/dulwich/security/advisories/GHSA-cm62-gvxx-vmxx\", \"https://github.com/jelmer/dulwich/commit/40a542cb02f9ac39a9eeac1193472903098698f9\", \"https://github.com/jelmer/dulwich/releases/tag/dulwich-1.2.8\", \"https://github.com/advisories/GHSA-cm62-gvxx-vmxx\"], \"repository_advisory_url\": \"https://api.github.com/repos/jelmer/dulwich/security-advisories/GHSA-cm62-gvxx-vmxx\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jelmer/dulwich\", \"summary\": \"Dulwich: Symlink directory traversal in stash pop allows arbitrary file write via intermediate directory symlinks\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T18:52:55Z\", \"url\": \"https://api.github.com/advisories/GHSA-cm62-gvxx-vmxx\", \"vulnerabilities\": [{\"first_patched_version\": \"1.2.8\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"dulwich\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.22.5, <= 1.2.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-cm62-gvxx-vmxx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dulwich: >= 0.22.5, <= 1.2.7"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dulwich"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:11.924437Z",
+  "provenance": {
+    "content_sha256": "3b9a63aae2d2affba18ee65c068806f589dbdf5745eb0ec1af05d3fda5baf639",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T18:52:53Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-cm62-gvxx-vmxx",
+  "status": "active",
+  "title": "Dulwich: Symlink directory traversal in stash pop allows arbitrary file write via intermediate directory symlinks",
+  "updated_at": "2026-10-02T18:52:55Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-cm62-gvxx-vmxx"
+}

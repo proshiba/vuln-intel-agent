@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/54901715?v=4\", \"events_url\": \"https://api.github.com/users/Yasha-ops/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yasha-ops/followers\", \"following_url\": \"https://api.github.com/users/Yasha-ops/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yasha-ops/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yasha-ops\", \"id\": 54901715, \"login\": \"Yasha-ops\", \"node_id\": \"MDQ6VXNlcjU0OTAxNzE1\", \"organizations_url\": \"https://api.github.com/users/Yasha-ops/orgs\", \"received_events_url\": \"https://api.github.com/users/Yasha-ops/received_events\", \"repos_url\": \"https://api.github.com/users/Yasha-ops/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yasha-ops/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yasha-ops/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yasha-ops\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/286391906?v=4\", \"events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/followers\", \"following_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/iaohkut-from-NightWolf-Team\", \"id\": 286391906, \"login\": \"iaohkut-from-NightWolf-Team\", \"node_id\": \"U_kgDOERH-Yg\", \"organizations_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/orgs\", \"received_events_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/received_events\", \"repos_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/iaohkut-from-NightWolf-Team\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 8.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-59\", \"name\": \"Improper Link Resolution Before File Access ('Link Following')\"}], \"description\": \"### Summary\\nStaticFileHandler allows an unauthenticated attacker to read arbitrary files from the server's filesystem by requesting a path that resolves to a symbolic link placed inside the static root directory. Any application that serves user-uploadable content, or whose static directory is populated by a build/deploy pipeline that creates symlinks (e.g. npm link, webpack, Docker volume mounts, CDN sync tools), is affected. An attacker who can trigger the creation of a symlink pointing outside the static root—or exploit one that already exists—can retrieve sensitive files such as /etc/passwd, private keys, configuration files, or application secrets.\\n\\n\\n\\n### Details\\nThe vulnerability is in tornado.web.StaticFileHandler, specifically in the interaction between two methods in [tornado/web.py](vscode-webview://1grdaaa6v64itrol06qu70pq3d1b9h9im5c3npvvc9snaprc1q9f/tornado/web.py):\\n- [get_absolute_path](https://github.com/tornadoweb/tornado/blob/0ca3c5f8279d402b245718d16522bc18a8f5d958/tornado/web.py#L2932) uses `os.path.abspath()` to resolve the requested path:\\n- [validate_absolute_path](https://github.com/tornadoweb/tornado/blob/0ca3c5f8279d402b245718d16522bc18a8f5d958/tornado/web.py#L2935) uses the same `os.path.abspath()` on the root, then performs a string prefix check:\\n\\n`os.path.abspath()` normalises . and .. segments but does not resolve symbolic links. As a result, a path like `/var/www/static/link` passes the `startswith(\\\"/var/www/static/\\\")` check regardless of where `link` actually points.\\n\\nImmediately after, `os.path.exists()` and `os.path.isfile()`  **do follow symlinks**, so the file they ultimately open is the symlink's target. The fix would be to replace os.path.abspath() with os.path.realpath() in both methods, so the resolved real path of the symlink target is validated against the root, not just its string representation inside the static directory.\\n\\n### PoC\\n_Complete instructions, including specific configuration details, to reproduce the vulnerability._\\nPrerequisites: Python 3.x, Tornado installed.\\n1. Create the environment\\n```\\nmkdir -p /tmp/static\\necho \\\"DB_PASSWORD=s3cr3t\\\" > /tmp/secret.conf   \\nln -s /tmp/secret.conf /tmp/static/config.conf \\n```\\n2. Minimal vulnerable server (server.py):\\n```\\nimport tornado.web, tornado.ioloop\\n\\napp = tornado.web.Application([\\n    (r\\\"/static/(.*)\\\", tornado.web.StaticFileHandler, {\\\"path\\\": \\\"/tmp/static\\\"}),\\n])\\napp.listen(8888)\\ntornado.ioloop.IOLoop.current().start()\\n```\\n3. Exploit:\\n`curl http://localhost:8888/static/config.conf`\\n\\n### Impact\\nAny application using StaticFileHandler is potentially affected if:\\n- the static directory contains symlinks pointing outside it (common with build tooling), or\\n- the application allows file uploads into the static directory without stripping symlinks.\\n\\nAn unauthenticated remote attacker can read any file readable by the process user: application secrets, private TLS keys, database credentials, /etc/shadow, SSH keys, or source code (depending on the process's filesystem permissions).\", \"ghsa_id\": \"GHSA-c2m8-h5v5-343r\", \"github_reviewed_at\": \"2026-09-30T23:48:55Z\", \"html_url\": \"https://github.com/advisories/GHSA-c2m8-h5v5-343r\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c2m8-h5v5-343r\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-30T23:48:55Z\", \"references\": [\"https://github.com/tornadoweb/tornado/security/advisories/GHSA-c2m8-h5v5-343r\", \"https://github.com/tornadoweb/tornado/pull/3719\", \"https://github.com/tornadoweb/tornado/commit/437ab5f76565403b3403438d2e555d11f8128d32\", \"https://github.com/tornadoweb/tornado/commit/f9f50b8bab265a2abf9f2415a3d2da6264a5450b\", \"https://github.com/tornadoweb/tornado/releases/tag/v6.5.9\", \"https://github.com/advisories/GHSA-c2m8-h5v5-343r\"], \"repository_advisory_url\": \"https://api.github.com/repos/tornadoweb/tornado/security-advisories/GHSA-c2m8-h5v5-343r\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/tornadoweb/tornado\", \"summary\": \"Tornado: StaticFileHandler follows symlinks outside static root (path traversal)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T23:48:56Z\", \"url\": \"https://api.github.com/advisories/GHSA-c2m8-h5v5-343r\", \"vulnerabilities\": [{\"first_patched_version\": \"6.5.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"tornado\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 6.5.8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c2m8-h5v5-343r",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "tornado: <= 6.5.8"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "tornado"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.123839Z",
+  "provenance": {
+    "content_sha256": "1de96a44650fcf9ff1ca2b4509286ece35dee43e03ba6d0e089fbe7f723659d5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T23:48:55Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c2m8-h5v5-343r",
+  "status": "active",
+  "title": "Tornado: StaticFileHandler follows symlinks outside static root (path traversal)",
+  "updated_at": "2026-09-30T23:48:56Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c2m8-h5v5-343r"
+}

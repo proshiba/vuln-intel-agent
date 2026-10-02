@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 6, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/55462799?v=4\", \"events_url\": \"https://api.github.com/users/Forrof/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Forrof/followers\", \"following_url\": \"https://api.github.com/users/Forrof/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Forrof/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Forrof\", \"id\": 55462799, \"login\": \"Forrof\", \"node_id\": \"MDQ6VXNlcjU1NDYyNzk5\", \"organizations_url\": \"https://api.github.com/users/Forrof/orgs\", \"received_events_url\": \"https://api.github.com/users/Forrof/received_events\", \"repos_url\": \"https://api.github.com/users/Forrof/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Forrof/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Forrof/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Forrof\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-92938\", \"cvss\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"### Summary\\n\\nvm2 3.11.6 exposes Node.js's host `node:sqlite` module to `NodeVM` code when that builtin is allowed explicitly or through `builtin: ['*']`. The module is wrapped as read-only, but callable methods retain host-process authority. A sandboxed plugin can construct an in-memory database with extension loading enabled and call `DatabaseSync.loadExtension()` on a native library bundled in the plugin directory.\\n\\nSQLite loads the library into the Node.js host process and invokes its native extension entry point. This gives the untrusted plugin arbitrary native code execution outside the sandbox.\\n\\nThe exploit needs only the `node:sqlite` builtin and a compatible native library already present in the untrusted plugin package. It does not require `fs`, `process`, `module`, `child_process`, `worker_threads`, `vm`, `inspector`, vm2 nesting, or an existing database file.\\n\\n### Details\\n\\nThe vulnerable boundary spans the builtin inventory, resolver, runtime loader, and generic read-only wrapper.\\n\\nOn current Node.js versions, the builtin inventory contains the literal name `node:sqlite`. vm2 admits that name when it is explicitly configured or when the wildcard allowlist is expanded:\\n\\n```js\\nconst BUILTIN_MODULES = module.builtinModules.filter(/* denylist checks */);\\n```\\n\\nThe resolver then treats every request beginning with `node:` as a core-module request, even if the complete request string is not an allowlist key:\\n\\n```js\\nif (x.startsWith('node:') || this.builtins.has(x)) {\\n  return x;\\n}\\n```\\n\\nThe sandbox runtime removes exactly one `node:` prefix and looks up the remainder in the configured builtin map:\\n\\n```js\\nif (filename.startsWith('node:')) {\\n  id = filename.slice(5);\\n  return loadBuiltinModule(id);\\n}\\n```\\n\\nConsequently, the sandbox spelling below resolves to the configured map entry `node:sqlite`:\\n\\n```js\\nrequire('node:node:sqlite')\\n```\\n\\nThe default builtin loader imports the real module in the host realm and exposes it through `vm.readonly()`:\\n\\n```js\\nbuiltins.set(key, vm => vm.readonly(hostRequire(key)));\\n```\\n\\nRead-only wrapping prevents property assignment. It does not remove dangerous callable capabilities. Calls to `DatabaseSync` and `loadExtension()` are forwarded to the host implementation.\\n\\nThe complete exploit flow is:\\n\\n```text\\nattacker supplies an untrusted plugin package containing JavaScript and a native library\\n  -> host runs the JavaScript in NodeVM with node:sqlite allowed\\n  -> plugin resolves the host module as node:node:sqlite\\n  -> plugin creates an in-memory DatabaseSync with allowExtension enabled\\n  -> plugin derives the bundled library path from its own __dirname\\n  -> plugin calls database.loadExtension(libraryPath)\\n  -> vm2 forwards the call to host SQLite\\n  -> SQLite loads the library into the Node.js host process\\n  -> SQLite invokes the library's native extension entry point\\n  -> attacker native code executes with the host process's privileges\\n```\\n\\nThe path does not need to be read through a sandboxed filesystem API. CommonJS already supplies the plugin's own directory, so an attacker can concatenate `__dirname` with the known name of a bundled library. The host necessarily places the untrusted plugin package on disk before evaluating its JavaScript.\\n\\n### PoC\\n\\nThe attached PoC is local and harmless. Its native extension entry point writes one marker file and returns success. It does not launch a process, connect to a network service, or modify any other file.\\n\\nPrerequisites: macOS, Node.js with `node:sqlite`, npm, and a C compiler.\\n\\n1. Open the attached `poc` directory.\\n2. Install the exact affected package:\\n\\n   ```bash\\n   npm install --ignore-scripts\\n   ```\\n\\n3. Compile and run the proof:\\n\\n   ```bash\\n   npm run poc\\n   ```\\n\\nThe script compiles `extension_probe.c` as `libvm2_sqlite_probe.dylib`, then runs `untrusted-plugin.js` in this restrictive configuration:\\n\\n```js\\nnew NodeVM({\\n  console: 'off',\\n  require: { builtin: ['node:sqlite'] },\\n});\\n```\\n\\nThe sandboxed plugin performs only:\\n\\n```js\\nconst { DatabaseSync } = require('node:node:sqlite');\\nconst database = new DatabaseSync(':memory:', { allowExtension: true });\\ndatabase.loadExtension(__dirname + '/libvm2_sqlite_probe.dylib');\\ndatabase.close();\\n```\\n\\nA vulnerable result is:\\n\\n```json\\n{\\n  \\\"sandboxResult\\\": {\\n    \\\"nativeExtensionLoaded\\\": true,\\n    \\\"usedOnlySQLiteBuiltin\\\": true\\n  },\\n  \\\"markerExists\\\": true,\\n  \\\"markerText\\\": \\\"VM2_SQLITE_EXTENSION_ENTRYPOINT_EXECUTED\\\"\\n}\\n```\\n\\nThe marker is written from the compiled native extension entry point, not from JavaScript. `loadExtension()` also returns successfully, proving that SQLite both loaded the library and invoked its entry point.\\n\\n### Impact\\n\\nThis is a sandbox escape to arbitrary native code execution. The native code runs inside the Node.js host process with the operating-system identity and privileges of that process, beyond all vm2 JavaScript, module, and proxy restrictions.\\n\\nAn attacker can replace the marker-only extension with native code that:\\n\\n- reads application secrets, credentials, environment variables, and files available to the host account;\\n- modifies application data or executable files and establishes persistence;\\n- accesses internal services using the host's network identity;\\n- steals other tenants' data from the same process;\\n- terminates or corrupts the host process; and\\n- performs any other operating-system action permitted to the host account.\\n\\nThe realistic affected workflow is a plugin platform, automation service, notebook, build service, or multi-tenant code runner that stores attacker-supplied package contents and evaluates the package's JavaScript in `NodeVM` while allowing `node:sqlite` or all builtins. The attacker does not need pre-existing host execution, a writable database, or a command-execution builtin.\", \"epss\": {\"percentage\": 0.00616, \"percentile\": 0.47557}, \"ghsa_id\": \"GHSA-6w8r-xxw2-g3hx\", \"github_reviewed_at\": \"2026-10-01T15:29:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-6w8r-xxw2-g3hx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6w8r-xxw2-g3hx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-92938\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-01T15:29:04Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-6w8r-xxw2-g3hx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-92938\", \"https://github.com/patriksimek/vm2/commit/aa146a77f859325e079f3bfbfe6d8309af483daa\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.7\", \"https://www.vulncheck.com/advisories/vm2-3.11.3-through-3.11.6-remote-code-execution-via-node-sqlite\", \"https://github.com/advisories/GHSA-6w8r-xxw2-g3hx\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-6w8r-xxw2-g3hx\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 allows a sandboxed plugin to execute native code through `node:sqlite`\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-01T15:29:06Z\", \"url\": \"https://api.github.com/advisories/GHSA-6w8r-xxw2-g3hx\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 3.11.3, <= 3.11.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6w8r-xxw2-g3hx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: >= 3.11.3, <= 3.11.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-92938"
+    ],
+    "cvss_score": 9.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.016456Z",
+  "provenance": {
+    "content_sha256": "8baa870babe2774133d1e12e626b59d65532ee1ca6aef1f6f3e9f4469ce46c57",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-01T15:29:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6w8r-xxw2-g3hx",
+  "status": "active",
+  "title": "vm2 allows a sandboxed plugin to execute native code through `node:sqlite`",
+  "updated_at": "2026-10-01T15:29:06Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6w8r-xxw2-g3hx"
+}

