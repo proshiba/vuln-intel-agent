@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/218396309?v=4\", \"events_url\": \"https://api.github.com/users/mmadersbacher/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mmadersbacher/followers\", \"following_url\": \"https://api.github.com/users/mmadersbacher/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mmadersbacher/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mmadersbacher\", \"id\": 218396309, \"login\": \"mmadersbacher\", \"node_id\": \"U_kgDODQR2lQ\", \"organizations_url\": \"https://api.github.com/users/mmadersbacher/orgs\", \"received_events_url\": \"https://api.github.com/users/mmadersbacher/received_events\", \"repos_url\": \"https://api.github.com/users/mmadersbacher/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mmadersbacher/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mmadersbacher/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mmadersbacher\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}], \"description\": \"### Summary\\n\\n`nodemailer/lib/addressparser` parses one shape of address in O(n^2) time. A single ~640 KB address value blocks the Node.js event loop for roughly 7 seconds. And it is reachable without auth: mailparser feeds inbound email headers straight into this parser, so one crafted email is enough to stall a service that parses mail.\\n\\n### Details\\n\\nThe parser builds a single address by accumulating its atoms into one string. When the atoms are separated by RFC 5322 comments, like `a@b(c)@b(c)@b(c)...`, every atom re-joins that same growing string.\\n\\nThe join check in `src/addressparser/index.ts`:\\n\\n```js\\nconst joins =\\n    prevToken &&\\n    prevToken.noBreak &&\\n    parts.length &&\\n    (prevToken.value !== ')' || parts[parts.length - 1].slice(-1) === '@' || token.value.charAt(0) === '@');\\n```\\n\\nThe issue is the order of the last two operands. `parts[parts.length - 1].slice(-1)` runs before the cheap `token.value.charAt(0)`. `slice(-1)` has to flatten the accumulator to read its last character → O(current length) → and that runs on every token → O(n^2) over the whole value. Since `||` is left to right, the cheap `charAt(0)` that would short-circuit never gets the chance.\\n\\nThe chain: long comment-joined address → one growing accumulator → `slice(-1)` re-flattens it on every token → quadratic parse time.\\n\\n### PoC\\n\\nIsolated, just the parser (`npm i nodemailer@10.0.3`):\\n\\n```js\\nconst addressparser = require('nodemailer/lib/addressparser');\\nconst s = Date.now();\\naddressparser('a' + '@b(c)'.repeat(130000));\\nconsole.log(Date.now() - s, 'ms'); // ~7000 ms, blocking\\n```\\n\\nEnd to end through mailparser, the remote path (`npm i mailparser@3.9.24`):\\n\\n```js\\nconst { simpleParser } = require('mailparser');\\n(async () => {\\n  const to = 'a' + '@b(c)'.repeat(130000);\\n  const eml = `From: a@b.com\\\\r\\\\nTo: ${to}\\\\r\\\\nSubject: x\\\\r\\\\n\\\\r\\\\nhi\\\\r\\\\n`;\\n  const s = Date.now();\\n  await simpleParser(eml);\\n  console.log(Date.now() - s, 'ms'); // ~7000 ms, blocking\\n})();\\n```\\n\\nTimings measured on 10.0.3:\\n\\n| Address value | Parse time |\\n| --- | --- |\\n| 390 KB | 1.3 s |\\n| 585 KB | 5.6 s |\\n| 640 KB | 6.7 s |\\n| 976 KB | 18 s |\\n\\nIt survives RFC 5322 folding: fold the header at offsets that are a multiple of the atom length and every `)`+`@` junction stays intact, so the payload is a standards-compliant email with lines under 998 octets and still triggers it.\\n\\n### Impact\\n\\nAlgorithmic-complexity DoS. Node is single threaded, so the block stalls everything else in the process, and a handful of these back to back keeps a service down.\\n\\nAffected: anything that runs `addressparser` on attacker-controlled input, either the public export directly or address headers built from user input. The unauthenticated remote case is mailparser. 3.9.24 pins nodemailer 10.0.3 and calls the parser on inbound `To`/`From`/`Cc` with no length cap, so any service parsing inbound mail with it can be frozen by a single email.\\n\\n### Suggested fix\\n\\nSwap the last two operands so the cheap check runs first:\\n\\n```js\\n(prevToken.value !== ')' || token.value.charAt(0) === '@' || parts[parts.length - 1].slice(-1) === '@')\\n```\\n\\nPure boolean commutation, so the parse output is identical. Verified byte for byte on the test inputs, and the full 1276-test suite passes.\", \"ghsa_id\": \"GHSA-prgh-xp8r-p3m5\", \"github_reviewed_at\": \"2026-09-30T14:41:01Z\", \"html_url\": \"https://github.com/advisories/GHSA-prgh-xp8r-p3m5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-prgh-xp8r-p3m5\"}], \"nvd_published_at\": null, \"published_at\": \"2026-09-30T14:41:01Z\", \"references\": [\"https://github.com/nodemailer/nodemailer/security/advisories/GHSA-prgh-xp8r-p3m5\", \"https://github.com/nodemailer/nodemailer/commit/c07f17518d25aca8ab2ad66968dcbca538c24b89\", \"https://github.com/nodemailer/nodemailer/releases/tag/v10.0.5\", \"https://github.com/advisories/GHSA-prgh-xp8r-p3m5\"], \"repository_advisory_url\": \"https://api.github.com/repos/nodemailer/nodemailer/security-advisories/GHSA-prgh-xp8r-p3m5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nodemailer/nodemailer\", \"summary\": \"Nodemailer addressparser: O(n^2) on comment-joined addresses enables a remote DoS (reachable via mailparser)\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T14:41:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-prgh-xp8r-p3m5\", \"vulnerabilities\": [{\"first_patched_version\": \"10.0.5\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nodemailer\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 9.1.0, <= 10.0.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-prgh-xp8r-p3m5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nodemailer: >= 9.1.0, <= 10.0.4"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "nodemailer"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.267265Z",
+  "provenance": {
+    "content_sha256": "4ef95ecf282fd6edc96140dc9d04f7e28db3001e3134c3c20e7f0b7e4d273f72",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T14:41:01Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-prgh-xp8r-p3m5",
+  "status": "active",
+  "title": "Nodemailer addressparser: O(n^2) on comment-joined addresses enables a remote DoS (reachable via mailparser)",
+  "updated_at": "2026-09-30T14:41:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-prgh-xp8r-p3m5"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 4, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-92945\", \"cvss\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.2, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\n`isPathAllowedForModule` decides whether a resolved path belongs to an allowlisted external module using a raw string prefix test. `node_modules/foo2` starts with `node_modules/foo`, so a package whose name merely shares a prefix with an allowlisted one is treated as being inside it, and a relative require from the allowlisted package reaches it even with transitive loading disabled.\\n\\n## Where it is\\n\\n`lib/resolver-compat.js`, lines 122 to 132, quoted from HEAD `7a1f5100b96f48d34e0fe104ab37c0acc5944f92`:\\n\\n```js\\nisPathAllowedForModule(path, mod) {\\n    if (!super.isPathAllowed(path)) return false;\\n    if (mod) {\\n        if (mod.allowTransitive) return true;\\n        if (path.startsWith(mod.path)) {\\n            const rem = path.slice(mod.path.length);\\n            if (!/(?:^|[\\\\\\\\/])node_modules(?:$|[\\\\\\\\/])/.test(rem)) return true;\\n        }\\n    }\\n    return this.externals.some(regex => regex.test(path));\\n}\\n```\\n\\nWith `mod.path` of `.../node_modules/foo` and a resolved path of `.../node_modules/foo2/index.js`, `startsWith` is true and `rem` is `2/index.js`, which contains no `node_modules` segment, so the function returns true.\\n\\nThe `node_modules` test in `rem` is what stops a genuine transitive dependency from slipping through. It does not stop a sibling, because a sibling's remainder never contains that segment.\\n\\n## Impact\\n\\nCode running in `NodeVM` under an external module allowlist with `transitive: false` can reach a package that was not allowlisted, provided an allowlisted package performs a relative require to a prefix-sharing sibling.\\n\\nTwo preconditions are worth stating plainly rather than leaving implicit. The deployment must already have such a package layout, and an allowlisted package must have a reachable code path that does the relative require. This is not something the attacker creates; it is something they find. That narrows it considerably, and it is why I have not scored it higher.\\n\\n## Reachability\\n\\n`NodeVM.run` at `lib/nodevm.js:506` executes the script. `require` comes from `createRequireForModule` at `lib/setup-node-sandbox.js:168-172` and reaches the resolver callback at `lib/nodevm.js:380-384`. `LegacyResolver.resolveFull` at `lib/resolver-compat.js:145-160` sets `currMod` for direct requires, the relative specifier resolves through `DefaultResolver.resolveFull` and `tryFile` at `lib/resolver.js:327-330`, and the authorization decision lands on the function above.\\n\\n## Suggested fix\\n\\nRequire a separator after the prefix, so a sibling cannot match:\\n\\n```js\\nif (path === mod.path || path.startsWith(mod.path + path.sep)) {\\n```\\n\\nThat is the same anchoring the `rem` regex already applies to `node_modules`, applied one level earlier.\", \"epss\": {\"percentage\": 0.00277, \"percentile\": 0.17937}, \"ghsa_id\": \"GHSA-7q3f-wx44-378m\", \"github_reviewed_at\": \"2026-10-01T15:26:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-7q3f-wx44-378m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7q3f-wx44-378m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-92945\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-01T15:26:45Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-7q3f-wx44-378m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-92945\", \"https://github.com/patriksimek/vm2/commit/6ac3916da84e060c403e407b6b6318fcc66b0e72\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.7\", \"https://www.vulncheck.com/advisories/vm2-before-3.11.7-module-allowlist-bypass-via-prefix-matching\", \"https://github.com/advisories/GHSA-7q3f-wx44-378m\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-7q3f-wx44-378m\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2: External module allowlist uses a raw prefix test, so a prefix-sharing sibling package is treated as allowlisted\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-01T15:26:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-7q3f-wx44-378m\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7q3f-wx44-378m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.6"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-92945"
+    ],
+    "cvss_score": 4.2,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.033333Z",
+  "provenance": {
+    "content_sha256": "58823115715332da2d4d0155d51c714f1fe951b51ce9cf1098dfc970bf21115e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-01T15:26:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7q3f-wx44-378m",
+  "status": "active",
+  "title": "vm2: External module allowlist uses a raw prefix test, so a prefix-sharing sibling package is treated as allowlisted",
+  "updated_at": "2026-10-01T15:26:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7q3f-wx44-378m"
+}

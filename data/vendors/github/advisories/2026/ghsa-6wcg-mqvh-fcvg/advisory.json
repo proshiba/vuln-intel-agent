@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/54184933?v=4\", \"events_url\": \"https://api.github.com/users/Zerotistic/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Zerotistic/followers\", \"following_url\": \"https://api.github.com/users/Zerotistic/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Zerotistic/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Zerotistic\", \"id\": 54184933, \"login\": \"Zerotistic\", \"node_id\": \"MDQ6VXNlcjU0MTg0OTMz\", \"organizations_url\": \"https://api.github.com/users/Zerotistic/orgs\", \"received_events_url\": \"https://api.github.com/users/Zerotistic/received_events\", \"repos_url\": \"https://api.github.com/users/Zerotistic/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Zerotistic/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Zerotistic/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Zerotistic\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62314\", \"cvss\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}], \"description\": \"Any HTTP client can bypass Anubis bot protection on the default configuration by adding a single request header. No challenge needs to be solved.\\nAffected versions: v1.22.0 through v1.25.0 (introduced in commit d1d631a, PR #1015)\\n\\nThe root cause is in `lib/policy/checker.go`, `PathChecker.Check()`:\\n```go\\nfunc (pc *PathChecker) Check(r *http.Request) (bool, error) {\\n    originalUrl := r.Header.Get(\\\"X-Original-URI\\\")\\n    if originalUrl != \\\"\\\" {\\n        if pc.regexp.MatchString(originalUrl) {\\n            return true, nil\\n        }\\n    }\\n    if pc.regexp.MatchString(r.URL.Path) {\\n        return true, nil\\n    }\\n    return false, nil\\n}\\n```\\n\\nThe header value comes directly from the client request. The middleware chain never strips it. In reverse proxy mode an attacker fully controls it.\\nThe default policy imports `data/common/keep-internet-working.yaml`, which contains path-only ALLOW rules with no other conditions:\\n\\n```yaml\\n- name: well-known\\n  path_regex: ^/\\\\.well-known/.*$\\n  action: ALLOW\\n```\\n\\nWhen `X-Original-URI` matches one of those regexes, the rule fires as ALLOW and the request is forwarded upstream without any challenge or JWT check.\\n\\n\\n# Proof of concept\\n\\nNormal request, gets challenged:\\n```\\ncurl -s https://anubis.techaro.lol/ | grep -o \\\"<title>.*</title>\\\"\\n```\\n\\nBypass, gets upstream content:\\n```\\ncurl -s -H \\\"X-Original-URI: /.well-known/x\\\" https://anubis.techaro.lol/ | grep -o \\\"<title>.*</title>\\\"\\n```\\n\\nThe first command returns the Anubis challenge page title. The second returns the real site title directly, with no cookie set and no challenge issued. Verified live against anubis.techaro.lol.\\n\\n# Suggested fix\\nThe fix should probably be to strip the header from incoming client requests in the middleware chain before policy evaluation. In `auth_request` mode the header is set by the proxy after Anubis processes the middleware, so stripping it at ingress does not break that deployment mode.\", \"epss\": {\"percentage\": 0.00464, \"percentile\": 0.37547}, \"ghsa_id\": \"GHSA-6wcg-mqvh-fcvg\", \"github_reviewed_at\": \"2026-10-02T18:22:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-6wcg-mqvh-fcvg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6wcg-mqvh-fcvg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62314\"}], \"nvd_published_at\": \"2026-07-15T22:17:38Z\", \"published_at\": \"2026-10-02T18:22:08Z\", \"references\": [\"https://github.com/TecharoHQ/anubis/security/advisories/GHSA-6wcg-mqvh-fcvg\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62314\", \"https://github.com/TecharoHQ/anubis/pull/1630\", \"https://github.com/TecharoHQ/anubis/commit/276b537776b281b1c4e01421435bc03ade3d8fc4\", \"https://github.com/TecharoHQ/anubis/releases/tag/v1.26.0-pre1\", \"https://github.com/advisories/GHSA-6wcg-mqvh-fcvg\"], \"repository_advisory_url\": \"https://api.github.com/repos/TecharoHQ/anubis/security-advisories/GHSA-6wcg-mqvh-fcvg\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/TecharoHQ/anubis\", \"summary\": \"Anubis: Policy bypass via client controlled X-Original-URI header\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T18:22:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-6wcg-mqvh-fcvg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.26.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/TecharoHQ/anubis\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.22.0, < 1.26.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6wcg-mqvh-fcvg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/TecharoHQ/anubis: >= 1.22.0, < 1.26.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-62314"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/TecharoHQ/anubis"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-02T19:14:11.937372Z",
+  "provenance": {
+    "content_sha256": "a0950db92ccdcd3ab092084f2d54cc4c90be77324b844095732e878e0238c1d4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T18:22:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6wcg-mqvh-fcvg",
+  "status": "active",
+  "title": "Anubis: Policy bypass via client controlled X-Original-URI header",
+  "updated_at": "2026-10-02T18:22:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6wcg-mqvh-fcvg"
+}

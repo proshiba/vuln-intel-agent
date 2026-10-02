@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/173318515?v=4\", \"events_url\": \"https://api.github.com/users/sonicnew/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sonicnew/followers\", \"following_url\": \"https://api.github.com/users/sonicnew/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sonicnew/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sonicnew\", \"id\": 173318515, \"login\": \"sonicnew\", \"node_id\": \"U_kgDOClShcw\", \"organizations_url\": \"https://api.github.com/users/sonicnew/orgs\", \"received_events_url\": \"https://api.github.com/users/sonicnew/received_events\", \"repos_url\": \"https://api.github.com/users/sonicnew/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sonicnew/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sonicnew/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sonicnew\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-102823\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}], \"description\": \"### Summary\\nCVE-2026-68930 was fixed by adding `Session::is_established_channel()` in `russh/src/server/encrypted.rs`, which gates every channel-scoped SERVER-side message (CHANNEL_REQUEST, CHANNEL_DATA, CHANNEL_EOF, CHANNEL_CLOSE, CHANNEL_WINDOW_ADJUST, CHANNEL_EXTENDED_DATA) on `enc.channels.get(&channel).is_some_and(|c| c.confirmed)` before invoking any `Handler` callback. The identical validation was never added to the CLIENT side (`russh/src/client/encrypted.rs`), which processes channel-scoped messages sent by the SSH SERVER once the client has authenticated.\\n\\n### Details\\nIn `client_read_authenticated` (`russh/src/client/encrypted.rs`, ~lines 431-757), for CHANNEL_DATA, CHANNEL_EXTENDED_DATA, CHANNEL_EOF, CHANNEL_CLOSE, CHANNEL_OPEN_FAILURE, CHANNEL_SUCCESS, CHANNEL_FAILURE, and the CHANNEL_REQUEST sub-types exit-status/exit-signal/xon-xoff, the code only optionally forwards the event to the internal per-channel mpsc sender via `if let Some(chan) = self.channels.get(&channel_num) { ... }` (a no-op if the channel is unknown), but then **unconditionally** calls the corresponding public `Handler` trait method (`client.data(...)`, `client.exit_status(...)`, `client.channel_close(...)`, `client.channel_success(...)`, etc.) regardless of whether `channel_num` corresponds to any channel the client ever opened or that was ever confirmed. Only CHANNEL_OPEN_CONFIRMATION (closes the connection with `Error::Inconsistent` if unknown) and CHANNEL_WINDOW_ADJUST (returns early with `Ok(())` if unknown) correctly validate channel existence before acting.\\n\\nCorroborating evidence this check was intended but never wired up: `crate::Error` defines a dedicated `WrongChannel` variant documented as \\\"Message received/sent on unopened channel\\\" (`russh/src/lib_inner.rs`, ~line 144-146), yet a repo-wide search shows this variant is never constructed or returned anywhere in the codebase — dead code left over from (or intended for) exactly this validation.\\n\\nBecause `Session::new_channel_id()` (`russh/src/session.rs`, ~line 708) allocates channel IDs sequentially starting at 1, a malicious or compromised SSH server can trivially predict the ID of the client's next channel and inject spoofed lifecycle events for it before or interleaved with the real channel-open exchange, or replay events for already-closed channel IDs.\\n\\n### PoC\\nMany real-world consumers of russh-as-a-client (deployment/orchestration tools, CI runners connecting to build/bastion hosts, git-over-ssh style tooling, database/tunnel clients) implement the `client::Handler` trait directly and key their own state (e.g. `HashMap<ChannelId, CommandState>`, exit-code trackers, per-channel byte counters, completion futures) off the channel IDs the library hands them, trusting the documented contract that events like \\\"The remote process has exited\\\" (`exit_status`) or \\\"Called when the server closes a channel\\\" (`channel_close`) only fire for a channel the application itself opened.\\n\\nA malicious, MITM'd (via a compromised/rogue jump host the client is configured to trust), or simply hostile SSH server can send `SSH_MSG_CHANNEL_REQUEST` (exit-status/exit-signal), `SSH_MSG_CHANNEL_DATA`, `SSH_MSG_CHANNEL_CLOSE`, `SSH_MSG_CHANNEL_SUCCESS`/`FAILURE`, or `SSH_MSG_CHANNEL_OPEN_FAILURE` for an arbitrary/predicted/never-opened channel ID at any point after authentication completes. Because the library invokes the `Handler` callback unconditionally, this reaches application code with an ID it never registered.\\n\\n### Impact\\n(1) A reliable, purely protocol-level trigger for an application panic/DoS in any client that indexes per-channel state by `ChannelId` without itself re-checking channel validity — the exact class of bug CVE-2026-68930 fixed server-side; and (2) lets the server spoof exit-status/exit-signal/close/success/failure notifications for a channel the client has not yet opened or has already released, desynchronizing the client's command-completion bookkeeping (e.g. reporting a forged exit code 0 for a not-yet-run remote command, or a premature `channel_close` before real output/exit-status has arrived) — a business-logic-level integrity violation of the SSH channel lifecycle that automation built on russh implicitly relies on.\\n\\nSuggested fix: add the same `is_established_channel()`-style gate already used in `server/encrypted.rs` to `client/encrypted.rs`'s `client_read_authenticated`, checking `self.channels.get(&channel_num)` before invoking any `Handler` callback (not just the mpsc forward), for every channel-scoped message type.\\n\\nFor credit/changelog purposes, please use: Yazan Balawneh, Cystack.ps\", \"epss\": {\"percentage\": 0.00261, \"percentile\": 0.16167}, \"ghsa_id\": \"GHSA-47hw-gvq5-r2gm\", \"github_reviewed_at\": \"2026-09-30T23:27:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-47hw-gvq5-r2gm\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-47hw-gvq5-r2gm\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-102823\"}], \"nvd_published_at\": \"2026-09-29T19:17:24Z\", \"published_at\": \"2026-09-30T23:27:17Z\", \"references\": [\"https://github.com/Eugeny/russh/security/advisories/GHSA-47hw-gvq5-r2gm\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-102823\", \"https://github.com/Eugeny/russh/commit/3430fd26ecafc0dc3705210f5f39a9119fa22774\", \"https://github.com/Eugeny/russh/releases/tag/v0.63.1\", \"https://github.com/advisories/GHSA-47hw-gvq5-r2gm\"], \"repository_advisory_url\": \"https://api.github.com/repos/Eugeny/russh/security-advisories/GHSA-47hw-gvq5-r2gm\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/Eugeny/russh\", \"summary\": \"russh: Client-side channel-scoped Handler callbacks fire for channel IDs the client never opened\", \"type\": \"reviewed\", \"updated_at\": \"2026-09-30T23:27:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-47hw-gvq5-r2gm\", \"vulnerabilities\": [{\"first_patched_version\": \"0.63.1\", \"package\": {\"ecosystem\": \"rust\", \"name\": \"russh\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.63.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-47hw-gvq5-r2gm",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "russh: <= 0.63.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-102823",
+      "CVE-2026-68930"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "russh"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-02T19:14:12.171542Z",
+  "provenance": {
+    "content_sha256": "cc8eb74439298e01076c781b1d27b0d6460e62bc003d4e851600cb26d14b95ed",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-09-30T23:27:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-47hw-gvq5-r2gm",
+  "status": "active",
+  "title": "russh: Client-side channel-scoped Handler callbacks fire for channel IDs the client never opened",
+  "updated_at": "2026-09-30T23:27:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-47hw-gvq5-r2gm"
+}
