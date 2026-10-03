@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 5, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/148991397?v=4\", \"events_url\": \"https://api.github.com/users/EQSTLab/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EQSTLab/followers\", \"following_url\": \"https://api.github.com/users/EQSTLab/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EQSTLab/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EQSTLab\", \"id\": 148991397, \"login\": \"EQSTLab\", \"node_id\": \"U_kgDOCOFtpQ\", \"organizations_url\": \"https://api.github.com/users/EQSTLab/orgs\", \"received_events_url\": \"https://api.github.com/users/EQSTLab/received_events\", \"repos_url\": \"https://api.github.com/users/EQSTLab/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EQSTLab/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EQSTLab/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EQSTLab\", \"user_view_type\": \"public\"}}, {\"type\": \"finder\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/196280629?v=4\", \"events_url\": \"https://api.github.com/users/232-323/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/232-323/followers\", \"following_url\": \"https://api.github.com/users/232-323/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/232-323/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/232-323\", \"id\": 196280629, \"login\": \"232-323\", \"node_id\": \"U_kgDOC7MBNQ\", \"organizations_url\": \"https://api.github.com/users/232-323/orgs\", \"received_events_url\": \"https://api.github.com/users/232-323/received_events\", \"repos_url\": \"https://api.github.com/users/232-323/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/232-323/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/232-323/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/232-323\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-10032\", \"cvss\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-79\", \"name\": \"Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')\"}], \"description\": \"### Summary\\n\\nThe `openUrl` function in `@a2ui/web_core` passes an agent-controlled URL directly to `window.open()` without validating the URI scheme. A malicious agent can supply a `javascript:` URI as the `url` argument of a `Button` component's `functionCall` action. When the user clicks the rendered button, arbitrary JavaScript executes in the victim application's browser origin, constituting a stored/reflected XSS. No non-default configuration is required; the Basic Catalog is enabled by default.\\n\\n### Details\\n\\nThe vulnerability exists in the `openUrl` function implementation within the Basic Catalog of `@a2ui/web_core` (commit `23a003248abbf59da6c376ea64ace91d82d209ff`).\\n\\n**Sink** — `renderers/web_core/src/v0_9/basic_catalog/functions/basic_functions.ts:428-430`:\\n\\n```ts\\nexport const OpenUrlImplementation = createFunctionImplementation(OpenUrlApi, args => {\\n  if (args.url && typeof window !== 'undefined' && window.open) {\\n    window.open(args.url, '_blank');\\n  }\\n});\\n```\\n\\n`window.open` is called unconditionally with the agent-supplied `args.url` value. No scheme allowlist or blocklist is applied.\\n\\n**Insufficient schema validation** — `renderers/web_core/src/v0_9/basic_catalog/functions/basic_functions_api.ts:453-458`:\\n\\n```ts\\nexport const OpenUrlApi = {\\n  name: 'openUrl' as const,\\n  returnType: 'void' as const,\\n  schema: z.object({\\n    url: z.preprocess(v => (v === undefined ? undefined : String(v)), z.string()),\\n  }),\\n};\\n```\\n\\nThe Zod schema only requires a `string`; `javascript:` URIs pass validation without any rejection.\\n\\n**Full source-to-sink data flow:**\\n\\n1. `renderers/web_core/src/v0_9/basic_catalog/components/basic_components.ts:356` — `ButtonApi` accepts `action: ActionSchema` (entry point).  \\n2. `renderers/web_core/src/v0_9/schema/common-types.ts:126-130` — `ActionSchema` permits `{ functionCall: FunctionCallSchema }`.  \\n3. `renderers/web_core/src/v0_9/rendering/generic-binder.ts:243-255` — on click, bound action calls `resolveDeepSync` then `dispatchAction`.  \\n4. `renderers/web_core/src/v0_9/rendering/data-context.ts:93-105` — `resolveDynamicValue` detects the `call` key and invokes the named function.  \\n5. `renderers/web_core/src/v0_9/catalog/types.ts:177-186` — catalog invoker runs `fn.schema.parse(rawArgs)` then `fn.execute()`.  \\n6. `renderers/web_core/src/v0_9/basic_catalog/functions/basic_functions_api.ts:453-458` — `OpenUrlApi` validates `url` as `z.string()` only (no scheme check).  \\n7. `renderers/web_core/src/v0_9/basic_catalog/functions/basic_functions.ts:428-430` — **sink**: `window.open(args.url, '_blank')` executes the `javascript:` URI.\\n\\n**All three renderers implemented in the A2UI repository are affected:**\\n\\n- React: `renderers/react/src/v0_9/catalog/basic/components/Button.tsx:33` — `onClick={props.action}`  \\n- Lit: `renderers/lit/src/v0_9/catalogs/basic/components/Button.ts:112` — `@click=${() => props.action()}`  \\n- Angular: `renderers/angular/src/v0_9/catalog/basic/button.component.ts:103-110` — `handleClick()` → `dataContext.resolveAction` → `dispatchAction`\\n\\nAny other A2UI renderer which depends on `web_core` and uses its basic catalog implementation is also affected.\\n\\n### Remediation\\n\\nThe issue was fixed in [https://github.com/a2ui-project/a2ui/pull/1707](https://github.com/a2ui-project/a2ui/pull/1707) and released in web\\\\_core version 0.10.2, by blocking URLs that do not use the HTTP or HTTPS schemes, or those that are invalid.\\n\\nPlease fix this issue in your project by depending on a @a2ui/web\\\\_core version equal or greater than 0.10.2.\", \"epss\": {\"percentage\": 0.0013, \"percentile\": 0.02159}, \"ghsa_id\": \"GHSA-72qq-p3r5-f7wq\", \"github_reviewed_at\": \"2026-10-02T22:55:49Z\", \"html_url\": \"https://github.com/advisories/GHSA-72qq-p3r5-f7wq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-72qq-p3r5-f7wq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-10032\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T22:55:49Z\", \"references\": [\"https://github.com/a2ui-project/a2ui/security/advisories/GHSA-72qq-p3r5-f7wq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-10032\", \"https://github.com/a2ui-project/a2ui/pull/1707\", \"https://github.com/a2ui-project/a2ui/commit/71573078c4168b2dc166bb847c3a85715dadc675\", \"https://github.com/advisories/GHSA-72qq-p3r5-f7wq\"], \"repository_advisory_url\": \"https://api.github.com/repos/a2ui-project/a2ui/security-advisories/GHSA-72qq-p3r5-f7wq\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/a2ui-project/a2ui\", \"summary\": \"@a2ui/web_core: `openUrl` permits `javascript:` URI execution via agent-supplied button actions\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T22:55:50Z\", \"url\": \"https://api.github.com/advisories/GHSA-72qq-p3r5-f7wq\", \"vulnerabilities\": [{\"first_patched_version\": \"0.10.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"@a2ui/web_core\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.0, < 0.10.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-72qq-p3r5-f7wq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "@a2ui/web_core: >= 0.9.0, < 0.10.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-10032"
+    ],
+    "cvss_score": 9.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "@a2ui/web_core"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-10-03T19:59:33.248792Z",
+  "provenance": {
+    "content_sha256": "b6a0439e385fc1f17526eb43396e49527d0dacb1904c0d9ec7cffc188945640a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T22:55:49Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-72qq-p3r5-f7wq",
+  "status": "active",
+  "title": "@a2ui/web_core: `openUrl` permits `javascript:` URI execution via agent-supplied button actions",
+  "updated_at": "2026-10-02T22:55:50Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-72qq-p3r5-f7wq"
+}

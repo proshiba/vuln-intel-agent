@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2404584?v=4\", \"events_url\": \"https://api.github.com/users/geo-chen/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/geo-chen/followers\", \"following_url\": \"https://api.github.com/users/geo-chen/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/geo-chen/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/geo-chen\", \"id\": 2404584, \"login\": \"geo-chen\", \"node_id\": \"MDQ6VXNlcjI0MDQ1ODQ=\", \"organizations_url\": \"https://api.github.com/users/geo-chen/orgs\", \"received_events_url\": \"https://api.github.com/users/geo-chen/received_events\", \"repos_url\": \"https://api.github.com/users/geo-chen/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/geo-chen/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/geo-chen/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/geo-chen\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-639\", \"name\": \"Authorization Bypass Through User-Controlled Key\"}], \"description\": \"### Summary\\nThe dashboard replay action authorizes the source run (it must belong to the caller's org), but the target environment for the replayed run is taken verbatim from the request body and is never checked for org or project membership. The environment lookup used by the replay path filters by id only. As a result, an authenticated user can replay one of their own runs into another organization's or project's environment, creating a task run there that consumes the victim tenant's queue and compute and pollutes their run history.\\n\\n### Details\\nThe replay action member-scopes the source run correctly (apps/webapp/app/routes/resources.taskruns.$runParam.replay.ts, the findFirst on taskRun filtered by `project.organization.members.some.userId`), but passes the target environment straight from the submitted form, resources.taskruns.$runParam.replay.ts:344-346:\\n```js\\nconst replayRunService = new ReplayTaskRunService();\\nconst newRun = await replayRunService.call(taskRun, {\\n  environmentId: submission.value.environment,   // attacker-controlled, unvalidated\\n  payload: submission.value.payload,\\n  ...\\n});\\n```\\n`submission.value.environment` comes from ReplayRunData (apps/webapp/app/v3/replayTask.ts: `environment: z.string().optional()`), so it is fully client-controlled.\\n\\nReplayTaskRunService resolves it with no ownership check, apps/webapp/app/v3/services/replayTaskRun.server.ts:26-28:\\n```js\\nconst authenticatedEnvironment = await findEnvironmentById(\\n  overrideOptions.environmentId ?? existingTaskRun.runtimeEnvironmentId\\n);\\n```\\nfindEnvironmentById, apps/webapp/app/models/runtimeEnvironment.server.ts:197-211:\\n```js\\nexport async function findEnvironmentById(id) {\\n  const environment = await $replica.runtimeEnvironment.findFirst({\\n    where: { id },                 // no membership / org / project filter\\n    include: authIncludeWithParent,\\n  });\\n  if (!environment || environment.project.deletedAt !== null) return null;\\n  return toAuthenticated(environment);\\n}\\n```\\nThe resolved environment is then handed to TriggerTaskService.call (apps/webapp/app/v3/services/triggerTask.server.ts), which trusts the passed authenticatedEnvironment and performs no further authorization. The replay loader does constrain the environment picker to the run's own project (replay.ts around 178-184), but the action does not re-impose that constraint, so the server-side control is missing (UI-gated only).\\n\\n### PoC\\nAs an authenticated user who owns a run in their own org (run param runParam), and who knows a target environment id belonging to another org or project (a CUID, obtained or guessed):\\n```http\\nPOST /resources/taskruns/<own runParam>/replay\\nContent-Type: application/x-www-form-urlencoded\\n\\nenvironment=<environment id of the victim org/project>&failedRedirect=/...\\n```\\nThe replay resolves the victim environment with no membership check and calls TriggerTaskService against it, creating a run in the victim tenant.\\n\\nLive-validated: a Postgres database was seeded with two tenants (orgA with env_A, orgB with env_B_victim) and the verbatim findEnvironmentById lookup (findFirst joining the environment to its project, `WHERE id = $1`, the exact query the replay path runs) was executed with the victim env id as an orgA attacker. Captured:\\n```\\n[002 replay findEnvironmentById] attacker(orgA) supplied env_B_victim -> {\\\"id\\\":\\\"env_B_victim\\\",\\\"organization_id\\\":\\\"orgB\\\",\\\"project_id\\\":\\\"proj_B\\\",\\\"deleted_at\\\":null}\\nCROSS-TENANT: CONFIRMED (resolved another org's env with no membership check -> replay would run there)\\n```\\nThe lookup returned another organization's environment with no membership filter. That the replay action passes the client-supplied environmentId straight into this lookup (and TriggerTaskService trusts the returned env) is verified at source.\\n\\n### Impact\\nAn authenticated user can create task runs in another tenant's environment (including production), consuming that tenant's queue concurrency and compute and inserting entries into their run history. Practical exploitation requires knowing a target environment id (not enumerable) and, for the injected run to actually execute rather than error, a task identifier that exists in the target environment; this bounds reliability but not the unauthorized cross-tenant write itself.\\n\\n### Remediation\\nIn the replay action (or in ReplayTaskRunService), require the resolved target environment to belong to the source run's project/organization, for example assert `environment.projectId === existingTaskRun.projectId`, or re-validate the supplied environment id against the caller's membership (findEnvironmentBySlug with the validated projectId, or a members.some.userId filter), mirroring the constraint the loader already applies to the picker.\", \"ghsa_id\": \"GHSA-qxpp-qjg8-x4jv\", \"github_reviewed_at\": \"2026-10-02T19:31:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-qxpp-qjg8-x4jv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-qxpp-qjg8-x4jv\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T19:31:17Z\", \"references\": [\"https://github.com/triggerdotdev/trigger.dev/security/advisories/GHSA-qxpp-qjg8-x4jv\", \"https://github.com/triggerdotdev/trigger.dev/pull/4199\", \"https://github.com/triggerdotdev/trigger.dev/commit/34b1a181c2a1d33a53ebab88f84b05f81fea4254\", \"https://github.com/triggerdotdev/trigger.dev/releases/tag/v4.5.2\", \"https://github.com/advisories/GHSA-qxpp-qjg8-x4jv\"], \"repository_advisory_url\": \"https://api.github.com/repos/triggerdotdev/trigger.dev/security-advisories/GHSA-qxpp-qjg8-x4jv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/triggerdotdev/trigger.dev\", \"summary\": \"Trigger.dev: Run replay injects a task run into an attacker-chosen environment (cross-tenant write)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T19:31:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-qxpp-qjg8-x4jv\", \"vulnerabilities\": [{\"first_patched_version\": \"4.5.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"trigger.dev\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.5.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-qxpp-qjg8-x4jv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "trigger.dev: < 4.5.2"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "trigger.dev"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-03T19:59:33.341759Z",
+  "provenance": {
+    "content_sha256": "5f72cb98ad376ba10ef18120ed456609333402ef00d07d6f33e645eeb62af9fa",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T19:31:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-qxpp-qjg8-x4jv",
+  "status": "active",
+  "title": "Trigger.dev: Run replay injects a task run into an attacker-chosen environment (cross-tenant write)",
+  "updated_at": "2026-10-02T19:31:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-qxpp-qjg8-x4jv"
+}

