@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/213290975?v=4\", \"events_url\": \"https://api.github.com/users/manus-use/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/manus-use/followers\", \"following_url\": \"https://api.github.com/users/manus-use/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/manus-use/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/manus-use\", \"id\": 213290975, \"login\": \"manus-use\", \"node_id\": \"U_kgDODLaP3w\", \"organizations_url\": \"https://api.github.com/users/manus-use/orgs\", \"received_events_url\": \"https://api.github.com/users/manus-use/received_events\", \"repos_url\": \"https://api.github.com/users/manus-use/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/manus-use/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/manus-use/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/manus-use\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/117577436?v=4\", \"events_url\": \"https://api.github.com/users/maru1009/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maru1009/followers\", \"following_url\": \"https://api.github.com/users/maru1009/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maru1009/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maru1009\", \"id\": 117577436, \"login\": \"maru1009\", \"node_id\": \"U_kgDOBwIW3A\", \"organizations_url\": \"https://api.github.com/users/maru1009/orgs\", \"received_events_url\": \"https://api.github.com/users/maru1009/received_events\", \"repos_url\": \"https://api.github.com/users/maru1009/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maru1009/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maru1009/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maru1009\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-92934\", \"cvss\": {\"score\": 9.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.0, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 9.5, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H\"}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}], \"description\": \"## Summary\\nvm2 `3.11.6` (this fork's latest release) contains an incomplete-fix bypass of the Error.cause host-reference sanitization added in GHSA-m283-3h24-438v (commit `7e3faaf`). Sandbox code that catches a host-wrapped `AggregateError` which is *revisited within a single `handleException` traversal* (self-cycle, mutual-cycle, or the same host aggregate referenced twice in `errors[]`) receives a live, unsanitized host proxy inside the \\\"sanitized\\\" `errors[]`, yielding full host RCE on the throw channel that the fix and Defense Invariant #3 explicitly promise to sanitize.\\n\\n## Root Cause\\n`handleException` (`lib/setup-sandbox.js`) breaks recursion cycles at line 1819 with `if (apply(localWeakMapGet, visited, [e])) return e;` — returning the RAW host carrier on revisit. For plain-`Error` carriers this is safe because `sanitizeErrorCause`/`sanitizeHostOwnProps` seal the host object **in place** on first visit. But `sanitizeAggregateError` (~1954-1972) snapshot-and-rebuilds host-wrapped carriers into a fresh `LocalAggregateError` and does NOT seal the original in place. When such a carrier is revisited within one traversal, line 1819 hands back the still-live raw host proxy, which the rebuild re-embeds via `sanitizedArr[sanitizedArr.length] = handleException(item, visited)` (line 1965) into the \\\"sanitized\\\" `errors[]`.\\n\\n## Impact\\nFull host RCE (`child_process.execSync`) and host info disclosure (`process.env`, `.pid`) from within the vm2 sandbox — a complete sandbox escape on the caught-exception (throw) channel.\\n\\n## Proof of Concept\\n```js\\nconst {VM} = require('vm2');\\nconst vm = new VM({ sandbox: { hostThrow(){\\n  const shared = new AggregateError([], 'shared');\\n  shared.leak = process;                                  // incidental host ref\\n  throw new AggregateError([shared, shared], 'all failed'); // same host obj twice\\n}}});\\nconsole.log(vm.run(`\\n  try { hostThrow(); } catch (e) {\\n    e.errors[1].leak.mainModule.require('child_process').execSync('id').toString();\\n  }`));                                                   // -> uid=1000(...) host RCE\\n```\\nConfirmed vectors (all return real `id` output): AggregateError self-cycle (`agg.errors=[agg]; agg.leak=process`), duplicate-in-array (`[shared,shared]`), mutual-cycle (`a.errors=[b]; b.errors=[a]`), and nested mutual/duplicated host sub-AggregateError.\\n\\n## Attack Chain\\n1. **Entry** — embedder exposes a host function the sandbox invokes; it throws a host-wrapped `AggregateError` carrying a host reference in a rebuild-surviving slot plus a revisit trigger (`agg.errors=[agg]; agg.leak=process`). *Guard:* none at entry (throwing from an exposed host fn is normal). *Bypass proof:* same entry class as GHSA-m283-3h24-438v (embedder-exposed throwing fn, `docs/ATTACKS.md` Category 38), accepted in scope.\\n2. **Caught-exception sanitizer** — sandbox `try{hostThrow()}catch(e){…}`; transformer routes `e` through `handleException`. *Guard:* Defense Invariant #3 (Aggregate/Suppressed nested fields sanitized with cycle detection). *Bypass proof:* `handleException(agg)` marks `agg` visited (1820); proto-walk routes to `sanitizeAggregateError` (1865); host-wrapped branch reads `agg.errors` and calls `handleException(agg, visited)` on element 0 (1965); that inner call hits `visited.get(agg)===true` → `return e` (1819) → raw `agg` proxy pushed into `sanitizedArr` → becomes `newAgg.errors[0]`. The rebuild does NOT seal `agg` in place, so the returned proxy is fully live.\\n3. **Sink** — `e.errors[0].leak.mainModule.require('child_process').execSync('id')`. *Guard:* bridge `get` wraps host values. *Bypass proof:* the wrap is functional, not capability-restricting; instrumented trace shows `e.errors[0].isProxy===true` yet the chain executes and returns real `uid=1000(ubuntu)...`.\\n4. **Impact** — host RCE with host privileges; also `process.env`/`.pid` disclosure.\\n\\n## Bypass Evidence\\nExecuted on node v22.23, vm2 `3.11.6`:\\n- Baseline vector `throw new Error('x',{cause:process})` (plain Error `.cause`) → BLOCKED\\n- Plain Error own-prop `e.leak=process` (non-cyclic) → BLOCKED\\n- Non-cyclic host `AggregateError` w/ own-prop or single host sub-error leak → BLOCKED\\n- **AggregateError self-cycle / duplicate-in-array / mutual-cycle / nested → RCE (`uid=1000(ubuntu)…`)**\\n\\nEvery non-cyclic shape and the exact baseline `cause` vector are blocked; only the revisited host `AggregateError` leaks — proving the fix is present but this input shape evades it (INCOMPLETE FIX BYPASS, not a duplicate). Instrumented trace: `outerLeakType=\\\"undefined\\\"` (outer rebuilt safe), `isErrors0Proxy=true` (element 0 is a live host proxy), `rce=uid=1000(ubuntu)…`.\\n\\n## Affected Versions\\n`<= 3.11.6`. The bug exists from the sanitization fix (`7e3faaf`, tag `3.11.6`) onward — an incomplete-fix bypass exists only where the fix exists. `git diff 3.11.6 HEAD -- lib/setup-sandbox.js` is empty (HEAD identical).\\n\\n## Scope Note\\nThis advisory covers the **AggregateError** family only. A `SuppressedError` variant does NOT reproduce (`se.error` returns undefined; RCE blocked) and is excluded.\\n\\n## Suggested Fix\\nOn the cycle short-circuit (line 1819), return the memoized sandbox-realm *replacement* (keyed in `visited`) rather than the raw carrier; OR seal host-wrapped `AggregateError`/`SuppressedError` carriers in place *before* recursing into sub-errors, mirroring the plain-carrier `sanitizeHostOwnProps` invariant.\\n\\n---\\nReported by **zx (Jace)** — GitHub: @manus-use\", \"epss\": {\"percentage\": 0.00762, \"percentile\": 0.53513}, \"ghsa_id\": \"GHSA-x965-fc75-jpqh\", \"github_reviewed_at\": \"2026-10-05T22:38:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-x965-fc75-jpqh\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-x965-fc75-jpqh\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-92934\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-05T22:38:04Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-x965-fc75-jpqh\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-92934\", \"https://github.com/patriksimek/vm2/commit/c8c232530b860cfecf6f94bc8d0d0890aa381460\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.8\", \"https://www.vulncheck.com/advisories/vm2-before-3.11.8-sandbox-escape-rce-via-aggregateerror\", \"https://github.com/advisories/GHSA-x965-fc75-jpqh\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-x965-fc75-jpqh\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2 sandbox escape to host RCE via revisited host-wrapped AggregateError bypassing Error sanitization cycle short-circuit\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-05T22:38:05Z\", \"url\": \"https://api.github.com/advisories/GHSA-x965-fc75-jpqh\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.8\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.7\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-x965-fc75-jpqh",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.7"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-92934"
+    ],
+    "cvss_score": 9.0,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-10-06T19:13:48.915253Z",
+  "provenance": {
+    "content_sha256": "d28ee0bc61c68542fd046d7fc88c47f059ec3b1927ace77110bf9ee75b5fd881",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-05T22:38:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-x965-fc75-jpqh",
+  "status": "active",
+  "title": "vm2 sandbox escape to host RCE via revisited host-wrapped AggregateError bypassing Error sanitization cycle short-circuit",
+  "updated_at": "2026-10-05T22:38:05Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-x965-fc75-jpqh"
+}

