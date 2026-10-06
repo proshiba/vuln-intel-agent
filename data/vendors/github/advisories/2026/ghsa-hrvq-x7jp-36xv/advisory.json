@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/248169372?v=4\", \"events_url\": \"https://api.github.com/users/arkmarta/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arkmarta/followers\", \"following_url\": \"https://api.github.com/users/arkmarta/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arkmarta/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arkmarta\", \"id\": 248169372, \"login\": \"arkmarta\", \"node_id\": \"U_kgDODsrDnA\", \"organizations_url\": \"https://api.github.com/users/arkmarta/orgs\", \"received_events_url\": \"https://api.github.com/users/arkmarta/received_events\", \"repos_url\": \"https://api.github.com/users/arkmarta/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arkmarta/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arkmarta/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arkmarta\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-104853\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.8, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:L/VI:H/VA:L/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-73\", \"name\": \"External Control of File Name or Path\"}], \"description\": \"## Summary\\n\\n`nx migrate` reads each target package's `nx-migrations.migrations` value from its manifest and extracts the referenced file to a path built by joining that value onto a temporary directory. The value is never validated, so a package whose `migrations` field contains `..` segments (or an absolute path) steers the extraction to write outside the temporary directory. A hostile package — or any package pulled in transitively through a trusted package's `packageGroup` — can write attacker-controlled content, or truncate an existing file, anywhere the running user can write. This happens during migration *planning*, before the user reviews the migration list and before `--run-migrations`, so it does not require the user to approve or execute anything.\\n\\n**Most workspaces need no action.** By default `nx migrate` does not run the nx installed in your workspace — it installs `nx@latest` into a temporary directory and performs the upgrade planning, including this extraction, with that copy. Now that a patched nx is the latest release, a default `nx migrate` run is unaffected whatever version the workspace has installed. The installed version only runs, and is only then exposed, when that hand-off is bypassed — see Remediation.\\n\\n## Severity\\n\\nExploitable when the victim runs `nx migrate` against a package the attacker controls, directly or through a trusted package's `packageGroup`. The primary impact is a file write with attacker-controlled content and no path confinement; overwriting an auto-loaded file (a shell rc, a git hook, a CI script) escalates that write to code execution. There is no known evidence of exploitation in the wild.\\n\\n## Affected & Patched Versions\\n\\n| Package | Vulnerable | Patched |\\n| --- | --- | --- |\\n| `nx` | `>= 13.10.0, < 22.7.10`; `>= 23.0.0, < 23.2.1` | `22.7.10`, `23.2.1` |\\n\\nEvery version in the ranges above is affected. The lower bound is 13.10.0, the first release where `nx migrate` extracted a package's migrations file from its tarball; earlier versions resolved migrations without that extraction.\\n\\n> [!IMPORTANT]\\n> `nx migrate` normally fetches and runs `nx@latest` rather than the nx installed in your workspace. The ranges above therefore say where the vulnerable code ships, not who is exposed — it only runs when that hand-off is bypassed.\\n\\n## Remediation\\n\\n**If you run `nx migrate` normally, there is nothing to do.** It resolves and runs the latest nx, which is patched, so your workspace's own nx version does not matter for this flaw.\\n\\nUpgrade only if you bypass that hand-off and run the workspace's nx instead — that is, if you set `NX_USE_LOCAL` or `NX_MIGRATE_USE_LOCAL`, pin `NX_MIGRATE_CLI_VERSION` to an affected version, resume an existing run with `--run-id`, or run where the temporary install fails and `nx migrate` falls back to the local nx. In those cases upgrade to **22.7.10** (22.x line) or **23.2.1** (23.x line) or later:\\n\\n```\\nnx migrate 23.2.1\\n```\\n\\nThe fix is a drop-in — no configuration changes are required, and no legitimate `migrations` value is affected (real packages reference `./migrations.json` or another path within their own directory, all of which remain valid). Either way, do not run `nx migrate` against packages, or `packageGroup` members, that you do not trust.\\n\\n## Details\\n\\nWhile planning an upgrade, `nx migrate` extracts each target package's migrations file to a destination built by joining the package's own `nx-migrations.migrations` value onto a temporary directory. That value is read from the manifest without validation, and it is handled asymmetrically: the name Nx matches against the archive entries is normalized (so its `..` segments collapse), while the destination path it writes to is a raw join that keeps the `..` segments and resolves outside the temporary directory. Because the attacker controls the tarball, they name their entry to equal the normalized form; the match then succeeds and the bytes are written to the un-normalized, escaping destination. The normalization is not a defence — it only dictates what the attacker must name their entry.\\n\\nThe same value also seeds the directory used for prompt-file extraction, which has the same shape, so both writes are steerable from the one field.\\n\\nTwo distinct primitives fall out of this:\\n\\n- **Truncation** — the destination write stream is opened, and truncates, before any tar entry is inspected. So a package that points `migrations` at an existing file empties that file even when no tar entry matches — no crafted archive required.\\n- **Controlled write** — when a tar entry's name matches, its bytes are written to the escaping destination. The extractor performs no path containment of its own.\\n\\n## Credits\\n\\n- **Arkadiusz Marta** (RE:SOURCE) — Reporter\", \"epss\": {\"percentage\": 0.00174, \"percentile\": 0.06188}, \"ghsa_id\": \"GHSA-hrvq-x7jp-36xv\", \"github_reviewed_at\": \"2026-10-05T23:28:35Z\", \"html_url\": \"https://github.com/advisories/GHSA-hrvq-x7jp-36xv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-hrvq-x7jp-36xv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-104853\"}], \"nvd_published_at\": \"2026-10-02T17:17:03Z\", \"published_at\": \"2026-10-05T23:28:35Z\", \"references\": [\"https://github.com/nrwl/nx/security/advisories/GHSA-hrvq-x7jp-36xv\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-104853\", \"https://github.com/nrwl/nx/pull/36887\", \"https://github.com/nrwl/nx/commit/38cd82a0c05e8212e538bdb87ccb198d6504e58f\", \"https://github.com/nrwl/nx/commit/95474ab457e8e1dbdbefad29040c166105a8fb90\", \"https://github.com/nrwl/nx/commit/de37c5ebd1852fac700d70726326236ac398af3f\", \"https://github.com/nrwl/nx/releases/tag/22.7.10\", \"https://github.com/nrwl/nx/releases/tag/23.2.1\", \"https://github.com/advisories/GHSA-hrvq-x7jp-36xv\"], \"repository_advisory_url\": \"https://api.github.com/repos/nrwl/nx/security-advisories/GHSA-hrvq-x7jp-36xv\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nrwl/nx\", \"summary\": \"Nx: Path traversal in nx migrate package-migrations extraction\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-05T23:28:36Z\", \"url\": \"https://api.github.com/advisories/GHSA-hrvq-x7jp-36xv\", \"vulnerabilities\": [{\"first_patched_version\": \"22.7.10\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nx\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 13.10.0, < 22.7.10\"}, {\"first_patched_version\": \"23.2.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"nx\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 23.0.0, < 23.2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-hrvq-x7jp-36xv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "nx: >= 13.10.0, < 22.7.10",
+      "nx: >= 23.0.0, < 23.2.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-104853"
+    ],
+    "cvss_score": 5.8,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:L/VI:H/VA:L/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "known_exploited": true,
+    "mitigations": [],
+    "products": [
+      "nx"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-06T19:13:48.797662Z",
+  "provenance": {
+    "content_sha256": "1e68683968e173fac388c048edc74fb83c227370d927320cffadb1684ecf89db",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-05T23:28:35Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-hrvq-x7jp-36xv",
+  "status": "active",
+  "title": "Nx: Path traversal in nx migrate package-migrations extraction",
+  "updated_at": "2026-10-05T23:28:36Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-hrvq-x7jp-36xv"
+}
