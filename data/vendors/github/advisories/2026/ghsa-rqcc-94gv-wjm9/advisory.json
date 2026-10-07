@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/293707138?v=4\", \"events_url\": \"https://api.github.com/users/de3erve-hunter/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/de3erve-hunter/followers\", \"following_url\": \"https://api.github.com/users/de3erve-hunter/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/de3erve-hunter/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/de3erve-hunter\", \"id\": 293707138, \"login\": \"de3erve-hunter\", \"node_id\": \"U_kgDOEYGdgg\", \"organizations_url\": \"https://api.github.com/users/de3erve-hunter/orgs\", \"received_events_url\": \"https://api.github.com/users/de3erve-hunter/received_events\", \"repos_url\": \"https://api.github.com/users/de3erve-hunter/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/de3erve-hunter/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/de3erve-hunter/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/de3erve-hunter\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62253\", \"cvss\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 9.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}], \"description\": \"### Summary\\nBoth JWT middleware functions (`JWTMiddleware` and `JWTMiddlewareV4`) immediately return `next(c)` when `jwtSecret == \\\"\\\"`. The JWT secret defaults to an empty string. On a default installation, all protected API endpoints under `/api/v1`, `/api/v3`, and `/api/v4` are completely unauthenticated.\\n\\n### Details\\n**`coordinator/handlers/auth.go` lines 298-304:**\\n```go\\nfunc (h *Auth) JWTMiddleware() echo.MiddlewareFunc {\\n    return func(next echo.HandlerFunc) echo.HandlerFunc {\\n        return func(c echo.Context) error {\\n            if h.jwtSecret == \\\"\\\" {\\n                return next(c)  // bypass — no validation performed\\n            }\\n```\\n\\n**`coordinator/handlers/auth_v4_helpers.go` lines 177-182:**\\n```go\\nfunc (h *Auth) JWTMiddlewareV4() echo.MiddlewareFunc {\\n    return func(next echo.HandlerFunc) echo.HandlerFunc {\\n        return func(c echo.Context) error {\\n            if h.jwtSecret == \\\"\\\" {\\n                return next(c)  // same bypass\\n```\\n\\n**`coordinator/coordinator.go` lines 315-317:**\\n```go\\nif c.config.JWT.Secret != \\\"\\\" {\\n    protected.Use(authHandler.JWTMiddleware())  // middleware not even registered when secret is empty\\n}\\n```\\n\\n**`config/config.go` line 845:** `Secret` field struct tag has `default:\\\"\\\"`.\\nThe example config ships a placeholder value, but the Go struct default (used when no config is provided) is empty.\\n\\n### PoC\\n```bash\\n# On a default Homer installation (no JWT secret configured), all protected routes are open:\\ncurl http://<homer-host>/api/v3/users\\n# Returns full user list with no credentials\\n\\ncurl http://<homer-host>/api/v3/databases\\n# Returns all database connection strings\\n\\ncurl -X POST http://<homer-host>/api/v3/users \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"username\\\":\\\"attacker\\\",\\\"password\\\":\\\"pw\\\",\\\"partid\\\":10,\\\"usergroup\\\":\\\"admin\\\"}'\\n# Creates a new admin user with no credentials\\n```\\n\\n### Impact\\nMissing Authentication for Critical Function (CWE-306). On a default Homer installation with no JWT secret configured, every admin API endpoint is completely unauthenticated. Attackers can read/write all configuration, users, database connections, and stored VoIP call data.\\n\\n### Fix\\nFail closed: if `JWT.Secret` is empty at startup, abort with a fatal error requiring the operator to set a strong secret. Remove the empty-string shortcircuit from both middleware functions:\\n```go\\nif h.jwtSecret == \\\"\\\" {\\n    log.Fatal(\\\"coordinator.jwt.secret must be set to a non-empty value\\\")\\n}\\n```\\n\\nIf possible, please apply for a CVE number when posting.\", \"ghsa_id\": \"GHSA-rqcc-94gv-wjm9\", \"github_reviewed_at\": \"2026-10-07T16:11:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-rqcc-94gv-wjm9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-rqcc-94gv-wjm9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62253\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-07T16:11:58Z\", \"references\": [\"https://github.com/sipcapture/homer/security/advisories/GHSA-rqcc-94gv-wjm9\", \"https://github.com/sipcapture/homer/pull/839\", \"https://github.com/sipcapture/homer/commit/5e90809657c9df321db191a69c6050f873f5646b\", \"https://github.com/sipcapture/homer/releases/tag/11.0.283\", \"https://github.com/advisories/GHSA-rqcc-94gv-wjm9\"], \"repository_advisory_url\": \"https://api.github.com/repos/sipcapture/homer/security-advisories/GHSA-rqcc-94gv-wjm9\", \"severity\": \"critical\", \"source_code_location\": \"https://github.com/sipcapture/homer\", \"summary\": \"Homer: Complete Authentication Bypass When coordinator.jwt.secret Is Empty (Default)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T16:11:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-rqcc-94gv-wjm9\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260625093330-5e90809657c9\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/sipcapture/homer-app\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260625093330-5e90809657c9\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-rqcc-94gv-wjm9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/sipcapture/homer-app: < 0.0.0-20260625093330-5e90809657c9"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-62253"
+    ],
+    "cvss_score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/sipcapture/homer-app"
+    ],
+    "remote": true,
+    "vendor_severity": "critical"
+  },
+  "first_seen_at": "2026-10-07T19:15:14.178966Z",
+  "provenance": {
+    "content_sha256": "833b9fd6d4cf06ce267961e712ac69ea289b2ab2bf263b17cc832f72329870b2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T16:11:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-rqcc-94gv-wjm9",
+  "status": "active",
+  "title": "Homer: Complete Authentication Bypass When coordinator.jwt.secret Is Empty (Default)",
+  "updated_at": "2026-10-07T16:11:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-rqcc-94gv-wjm9"
+}

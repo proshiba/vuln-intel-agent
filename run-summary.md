@@ -1,35 +1,30 @@
 # Vulnerability collection run
 
 - Profile: daily
-- Started: 2026-10-06T19:09:22.884126+00:00
-- Completed: 2026-10-06T19:23:45.205443+00:00
+- Started: 2026-10-07T19:10:57.527101+00:00
+- Completed: 2026-10-07T19:20:17.810812+00:00
 
 ## Changes
 
-- new: 233
-- quarantined: 7
-- unchanged: 2070
-- updated: 405
+- new: 208
+- quarantined: 6
+- unchanged: 2427
+- updated: 246
 
 ## Priorities
 
-- INFO: 2521
-- P1: 9
-- P2: 2
-- P3: 183
+- INFO: 2708
+- P1: 8
+- P3: 171
 
 ## Source outcomes
 
-- failed: 7
-- not_modified: 69
+- failed: 6
+- not_modified: 74
 - partial: 0
-- success: 90
+- success: 86
 
 ## Unsuccessful sources
-
-- dell_technologies (failed, browser): records=0, parse_failures=0 — browser: dell_technologies: browser navigation failed: Page.wait_for_selector: Timeout 30000ms exceeded.
-Call log:
-  - waiting for locator("a[href*='/support/kbdoc/'][href*='/dsa-']")
 
 - envoy_github (failed, json_api): records=0, parse_failures=0 — json_api: envoy_github: JSON exceeds configured limit of 100 items
 - gitea_github (failed, json_api): records=0, parse_failures=0 — json_api: gitea_github: JSON exceeds configured limit of 100 items

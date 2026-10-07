@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"remediation_developer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/700235?v=4\", \"events_url\": \"https://api.github.com/users/erichare/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/erichare/followers\", \"following_url\": \"https://api.github.com/users/erichare/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/erichare/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/erichare\", \"id\": 700235, \"login\": \"erichare\", \"node_id\": \"MDQ6VXNlcjcwMDIzNQ==\", \"organizations_url\": \"https://api.github.com/users/erichare/orgs\", \"received_events_url\": \"https://api.github.com/users/erichare/received_events\", \"repos_url\": \"https://api.github.com/users/erichare/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/erichare/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/erichare/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/erichare\", \"user_view_type\": \"public\"}}, {\"type\": \"remediation_reviewer\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/115162146?v=4\", \"events_url\": \"https://api.github.com/users/andifilhohub/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/andifilhohub/followers\", \"following_url\": \"https://api.github.com/users/andifilhohub/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/andifilhohub/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/andifilhohub\", \"id\": 115162146, \"login\": \"andifilhohub\", \"node_id\": \"U_kgDOBt08Ig\", \"organizations_url\": \"https://api.github.com/users/andifilhohub/orgs\", \"received_events_url\": \"https://api.github.com/users/andifilhohub/received_events\", \"repos_url\": \"https://api.github.com/users/andifilhohub/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/andifilhohub/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/andifilhohub/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/andifilhohub\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-105741\", \"cvss\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}, {\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}], \"description\": \"**Description**:\\n### Summary\\nAn IP spoofing vulnerability in the Model Context Protocol (MCP) configuration installation endpoint (`POST /api/v1/mcp/project/{project_id}/install`) allowed authenticated remote attackers to bypass the \\\"local-only\\\" access restriction. By sending a spoofed `X-Forwarded-For: 127.0.0.1` header, an attacker could make the server treat the request as originating from localhost, letting them write/overwrite an MCP client configuration file on the server's filesystem.\\n\\n### Details\\nThe vulnerability lived in the `get_client_ip` helper, used to enforce the local-only gate for `install_mcp_config`. It trusted the leftmost (fully client-controlled) entry of `X-Forwarded-For` unconditionally, with no check for whether the request had actually passed through a trusted proxy.\\n\\n**Vulnerable code (introduced by commit `d3d06be8e5`, first released in v1.5.0):** `src/backend/base/langflow/api/v1/mcp_projects.py`\\n\\n```python\\ndef get_client_ip(request: Request) -> str:\\n    # Check for X-Forwarded-For header (common when behind proxies)\\n    forwarded_for = request.headers.get(\\\"X-Forwarded-For\\\")\\n    if forwarded_for:\\n        # The client IP is the first one in the list\\n        return forwarded_for.split(\\\",\\\")[0].strip()\\n    if request.client:\\n        return request.client.host\\n    return \\\"255.255.255.255\\\"\\n\\n\\n@router.post(\\\"/{project_id}/install\\\")\\nasync def install_mcp_config(\\n    project_id: UUID,\\n    body: MCPInstallRequest,        # {client: str, transport: \\\"sse\\\" | \\\"streamablehttp\\\" | None}\\n    request: Request,\\n    current_user: CurrentActiveMCPUser,\\n):\\n    client_ip = get_client_ip(request)\\n    if not is_local_ip(client_ip):\\n        raise HTTPException(status_code=500, detail=\\\"MCP configuration can only be installed from a local connection\\\")\\n    ...\\n```\\n\\n**Correction vs. the original report:** the request body accepted by this endpoint is `MCPInstallRequest {client: str, transport: str | None}` (`src/backend/base/langflow/api/v1/schemas/__init__.py`). There is no `mcp_path` field, and the destination path is never attacker-supplied. `install_mcp_config` resolves the write target itself, via `get_config_path(body.client)`, to one of a fixed, small set of well-known per-OS developer-tool config paths under the server process's home directory: `~/.cursor/mcp.json` (Cursor), `~/.codeium/windsurf/mcp_config.json` (Windsurf), or the Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\\\\Claude\\\\claude_desktop_config.json` on Windows/WSL). The impact is therefore \\\"attacker-influenced content written into one of these fixed files,\\\" not an arbitrary-path write.\\n\\n### PoC\\n1. Authenticate to obtain a valid access token.\\n2. Identify a `project_id` the attacker has access to.\\n3. Send:\\n   ```bash\\n   curl -X POST \\\"http://<server-ip>:7860/api/v1/mcp/project/<project_id>/install\\\" \\\\\\n        -H \\\"Authorization: Bearer <token>\\\" \\\\\\n        -H \\\"X-Forwarded-For: 127.0.0.1\\\" \\\\\\n        -H \\\"Content-Type: application/json\\\" \\\\\\n        -d '{\\\"client\\\": \\\"cursor\\\"}'\\n   ```\\n4. The server returns `200 OK` and writes/overwrites `~/.cursor/mcp.json` on the host with an attacker-influenced MCP server entry, despite the request originating from a remote, non-local address.\\n\\n### Impact\\nAuthenticated Remote Configuration Write to one of a fixed set of IDE/MCP client config files on the host. Could be leveraged to:\\n- Inject a malicious MCP server definition into Cursor/Windsurf/Claude Desktop config, so a local developer who later opens that IDE on the host connects to an attacker-controlled MCP server.\\n- Disrupt or corrupt the existing MCP configuration for those tools.\\n- Bypass an intended network-boundary control (\\\"local-only\\\").\\n\\n### Status: already fixed\\nThis exact bypass (single-line, comma-separated `X-Forwarded-For` spoofing, default configuration) is fixed as of:\\n- **Fix PR:** langflow-ai/langflow#13915 — \\\"fix(security): stop trusting X-Forwarded-For for the MCP install locality check\\\", landed as part of the broader hardening effort in langflow-ai/langflow#13530.\\n- **Fix:** `get_client_ip` now uses the real TCP peer (`request.client.host`) by default and ignores `X-Forwarded-For` entirely unless the operator has explicitly opted in via the `rate_limit_trust_proxy` setting (default `False`); when opted in, it takes the **rightmost** entry, mirroring `langflow.services.rate_limit.service.get_client_ip`.\\n- **Released in:** v1.11.0, and backported to v1.10.3 (langflow-ai/langflow#14071).\\n- **Related follow-up:** a narrower, related bypass — reachable only when an operator has explicitly set `rate_limit_trust_proxy=true` behind a proxy that emits `X-Forwarded-For` as repeated header lines rather than a single comma-separated line (e.g. HAProxy's `option forwardfor`) — was separately closed by langflow-ai/langflow#14425, released in v1.11.3. This does not affect default deployments (`rate_limit_trust_proxy` defaults to `False`).\\n- This report is a near-duplicate of GHSA-qvvj-g573-9638, which describes the same root cause and is fixed by the same PR.\\n\\n### Affected versions\\n- The vulnerable endpoint/helper was introduced in **v1.5.0** (langflow-ai/langflow#8271, \\\"add one click install to mcp servers on specific clients\\\", 2025-07-08). Versions prior to v1.5.0 do not contain this endpoint and are not affected by this issue.\\n- **Vulnerable:** >= 1.5.0, < 1.10.3 (and < 1.11.0 on mainline).\\n- **Fixed:** v1.10.3 (backport) and v1.11.0 onward.\", \"epss\": {\"percentage\": 0.00212, \"percentile\": 0.10481}, \"ghsa_id\": \"GHSA-4f6c-2vvp-gw82\", \"github_reviewed_at\": \"2026-10-07T16:18:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-4f6c-2vvp-gw82\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4f6c-2vvp-gw82\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-105741\"}], \"nvd_published_at\": \"2026-10-05T21:16:35Z\", \"published_at\": \"2026-10-07T16:18:23Z\", \"references\": [\"https://github.com/langflow-ai/langflow/security/advisories/GHSA-4f6c-2vvp-gw82\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-105741\", \"https://github.com/langflow-ai/langflow/pull/13915\", \"https://github.com/langflow-ai/langflow/commit/1f39a4b9d62c9dfa1b21fa7f85e23a180c351b72\", \"https://github.com/langflow-ai/langflow/commit/94859df33acd70b2a1f816e26d68f5e89a7e5639\", \"https://github.com/langflow-ai/langflow/releases/tag/v1.10.3\", \"https://github.com/advisories/GHSA-4f6c-2vvp-gw82\"], \"repository_advisory_url\": \"https://api.github.com/repos/langflow-ai/langflow/security-advisories/GHSA-4f6c-2vvp-gw82\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/langflow-ai/langflow\", \"summary\": \"Langflow: IP Spoofing Bypass via `X-Forwarded-For` Allowing Remote Configuration Write\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T16:18:25Z\", \"url\": \"https://api.github.com/advisories/GHSA-4f6c-2vvp-gw82\", \"vulnerabilities\": [{\"first_patched_version\": \"1.10.3\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"langflow\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.5.0, < 1.10.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4f6c-2vvp-gw82",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "langflow: >= 1.5.0, < 1.10.3"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-105741"
+    ],
+    "cvss_score": 7.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "langflow"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-07T19:15:14.148863Z",
+  "provenance": {
+    "content_sha256": "88312b33cbb4b67df180217a1d410e30a469f4071ddd86c1ea67dd59582eede0",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T16:18:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4f6c-2vvp-gw82",
+  "status": "active",
+  "title": "Langflow: IP Spoofing Bypass via `X-Forwarded-For` Allowing Remote Configuration Write",
+  "updated_at": "2026-10-07T16:18:25Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4f6c-2vvp-gw82"
+}
