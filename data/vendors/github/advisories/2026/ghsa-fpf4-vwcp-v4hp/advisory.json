@@ -1,0 +1,63 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/10059871?v=4\", \"events_url\": \"https://api.github.com/users/BrianWillows/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/BrianWillows/followers\", \"following_url\": \"https://api.github.com/users/BrianWillows/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/BrianWillows/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/BrianWillows\", \"id\": 10059871, \"login\": \"BrianWillows\", \"node_id\": \"MDQ6VXNlcjEwMDU5ODcx\", \"organizations_url\": \"https://api.github.com/users/BrianWillows/orgs\", \"received_events_url\": \"https://api.github.com/users/BrianWillows/received_events\", \"repos_url\": \"https://api.github.com/users/BrianWillows/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/BrianWillows/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/BrianWillows/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/BrianWillows\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107290\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-407\", \"name\": \"Inefficient Algorithmic Complexity\"}, {\"cwe_id\": \"CWE-1333\", \"name\": \"Inefficient Regular Expression Complexity\"}], \"description\": \"### Summary\\n\\nThe local web-fetch tool (`web_fetch_tool`, also used as the `WebFetch` capability's local fallback) processed responses with several steps whose running time grows quadratically with the size of certain server-controlled inputs, and ran them on the event loop: decoding the body with whichever charset the server declared, extracting the page title with a backtracking regular expression, and converting the HTML to markdown. An application that exposes this tool to untrusted prompts can be steered to fetch an attacker-controlled page of a megabyte or two that blocks the event loop for minutes, stalling every other coroutine in the process — other agent runs, other requests being served — for the duration.\\n\\nThis is an **availability** issue only. SSRF protections and the download size limit introduced in GHSA-v2xh-2vp8-57h8 are unaffected; that limit bounds how much is downloaded, not how long the response takes to process.\\n\\n### Details\\n\\nTitle extraction used a backtracking pattern over the raw response body, so a body made of repeated unterminated tag openings cost time proportional to the square of its size. The HTML-to-markdown conversion had the same shape in three of its steps: normalizing whitespace, stripping preformatted blocks, and numbering ordered lists all took time proportional to the square of a run of spaces or a list's length. All of it ran on the event loop, and the regex steps hold the interpreter lock even when moved off it, so the whole process paid for the size of a server-controlled response.\\n\\nThe response body was also decoded on the event loop with the codec named by the `charset` parameter of the response's `Content-Type`, looked up in Python's codec registry. That registry includes `punycode`, whose decoder takes time proportional to the square of its input: a response of about one megabyte labelled `charset=punycode` blocked the event loop for roughly half a minute, with no HTML required. The registry also includes codecs that aren't text encodings at all, such as `rot_13` and `base64_codec`; a response labelled with one of those raised an unexpected exception out of the tool, aborting the agent run that fetched it.\\n\\nSeparately, the HTML-to-markdown conversion recursed once per nested element, so a page nested a few hundred elements deep raised a `RecursionError` out of the tool, aborting the agent run that fetched it. A JSON response nested deeper than the interpreter allows did the same. These only affect that one run.\\n\\n### Who Is Affected\\n\\nYou are affected if your application registers the local web-fetch tool (or relies on the `WebFetch` capability's local fallback) and exposes the agent to untrusted prompts. `allowed_domains` narrows the exposure to pages on those domains but does not remove it. Applications that only fetch developer-controlled URLs are not exposed to the model-chosen attack path.\\n\\n### Remediation\\n\\nUpgrade to a patched version. The title is now found with a single linear scan, the conversion steps above run in linear time, and decoding, title extraction and conversion all run in a worker thread. A charset naming a codec that isn't a text encoding, and a page too deeply nested to convert, are reported back to the model as a failed fetch instead of aborting the run; a JSON body too deeply nested to parse is returned as plain text.\\n\\n### Credits\\n\\nReported privately by @BrianWillows, whose report covered the quadratic title extraction. The response decoding, the codecs that are not text encodings, and the quadratic steps in the HTML-to-markdown conversion were found while fixing it.\", \"ghsa_id\": \"GHSA-fpf4-vwcp-v4hp\", \"github_reviewed_at\": \"2026-10-08T16:48:25Z\", \"html_url\": \"https://github.com/advisories/GHSA-fpf4-vwcp-v4hp\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fpf4-vwcp-v4hp\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107290\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T16:48:25Z\", \"references\": [\"https://github.com/pydantic/pydantic-ai/security/advisories/GHSA-fpf4-vwcp-v4hp\", \"https://github.com/pydantic/pydantic-ai/pull/8397\", \"https://github.com/pydantic/pydantic-ai/pull/8399\", \"https://github.com/pydantic/pydantic-ai/pull/8418\", \"https://github.com/pydantic/pydantic-ai/pull/8433\", \"https://github.com/pydantic/pydantic-ai/pull/8434\", \"https://github.com/pydantic/pydantic-ai/commit/2faa6181d8a17d83bc9516d035c5270db8730fa0\", \"https://github.com/pydantic/pydantic-ai/commit/9cdc952e4c3319e85a3e04f2de49fbbb765bd38b\", \"https://github.com/pydantic/pydantic-ai/commit/a93ea5226be1e93ae13131ae3f22287190411389\", \"https://github.com/pydantic/pydantic-ai/commit/c3fd1cc1f15fdbf750d78e4e3ec1e8b4d6a3d920\", \"https://github.com/pydantic/pydantic-ai/commit/fb92ccfc3ca2735dab877e2ed73856681bf72ad1\", \"https://github.com/pydantic/pydantic-ai/releases/tag/v1.107.6\", \"https://github.com/pydantic/pydantic-ai/releases/tag/v2.44.0\", \"https://github.com/advisories/GHSA-fpf4-vwcp-v4hp\"], \"repository_advisory_url\": \"https://api.github.com/repos/pydantic/pydantic-ai/security-advisories/GHSA-fpf4-vwcp-v4hp\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pydantic/pydantic-ai\", \"summary\": \"Pydantic AI: Event loop blocked by quadratic title extraction in `web_fetch`\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T16:48:27Z\", \"url\": \"https://api.github.com/advisories/GHSA-fpf4-vwcp-v4hp\", \"vulnerabilities\": [{\"first_patched_version\": \"1.107.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pydantic-ai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.77.0, < 1.107.6\"}, {\"first_patched_version\": \"2.44.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pydantic-ai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0b1, < 2.44.0\"}, {\"first_patched_version\": \"1.107.6\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pydantic-ai-slim\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.77.0, < 1.107.6\"}, {\"first_patched_version\": \"2.44.0\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pydantic-ai-slim\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0b1, < 2.44.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fpf4-vwcp-v4hp",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pydantic-ai-slim: >= 1.77.0, < 1.107.6",
+      "pydantic-ai-slim: >= 2.0.0b1, < 2.44.0",
+      "pydantic-ai: >= 1.77.0, < 1.107.6",
+      "pydantic-ai: >= 2.0.0b1, < 2.44.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-107290"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pydantic-ai",
+      "pydantic-ai-slim"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.763197Z",
+  "provenance": {
+    "content_sha256": "326bc73b1b7a1fb32cf5952678343d4d19659080bee17a219f2857b176b08ab7",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T16:48:25Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fpf4-vwcp-v4hp",
+  "status": "active",
+  "title": "Pydantic AI: Event loop blocked by quadratic title extraction in `web_fetch`",
+  "updated_at": "2026-10-08T16:48:27Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fpf4-vwcp-v4hp"
+}

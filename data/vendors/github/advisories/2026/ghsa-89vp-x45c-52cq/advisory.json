@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/129682958?v=4\", \"events_url\": \"https://api.github.com/users/lisusuy/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/lisusuy/followers\", \"following_url\": \"https://api.github.com/users/lisusuy/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/lisusuy/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/lisusuy\", \"id\": 129682958, \"login\": \"lisusuy\", \"node_id\": \"U_kgDOB7rODg\", \"organizations_url\": \"https://api.github.com/users/lisusuy/orgs\", \"received_events_url\": \"https://api.github.com/users/lisusuy/received_events\", \"repos_url\": \"https://api.github.com/users/lisusuy/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/lisusuy/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/lisusuy/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/lisusuy\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-106101\", \"cvss\": {\"score\": 3.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 3.1, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-843\", \"name\": \"Access of Resource Using Incompatible Type ('Type Confusion')\"}], \"description\": \"### Summary\\n\\nA DOM Clobbering vulnerability exists in Quasar's `openURL()` utility when handling the iOS `SafariViewController` bridge.\\n\\nThe vulnerable implementation only checks whether `window.SafariViewController` exists before invoking it as a native bridge object. An attacker who can inject HTML content containing a named element such as `<a id=\\\"SafariViewController\\\">` can cause the browser to expose that element as `window.SafariViewController`.\\n\\nWhen `openURL()` is later called in an iOS environment, Quasar incorrectly treats the DOM element as the native bridge object and attempts to invoke bridge methods that do not exist, resulting in:\\n\\n```\\nTypeError: window.SafariViewController.isAvailable is not a function\\n```\\n\\nThis can cause client-side denial of service and break navigation-related workflows in Quasar applications.\\n\\n### Details\\n\\nQuasar provides the `openURL()` utility to open external URLs. On iOS platforms, this utility supports integration with the native `SafariViewController` bridge.\\n\\nThe vulnerable code is located in:\\n\\n```\\nui/src/utils/open-url/open-url.js\\n````\\n\\nThe affected logic is:\\n\\n```javascript\\nif (Platform.is.ios && window.SafariViewController !== void 0) {\\n  window.SafariViewController.isAvailable(available => {\\n    if (available) {\\n      window.SafariViewController.show({ url }, noop, reject)\\n    }\\n  })\\n}\\n````\\n\\nThe issue is that Quasar only verifies that `window.SafariViewController` is not `undefined`. It does not verify whether the value is the expected native bridge object or whether required methods such as `isAvailable()` and `show()` are valid functions.\\n\\nModern browsers expose elements with specific `id` or `name` attributes as properties of the global `window` object. Therefore, attacker-controlled HTML such as:\\n\\n```html\\n<a id=\\\"SafariViewController\\\"></a>\\n```\\n\\ncan cause:\\n\\n```javascript\\nwindow.SafariViewController\\n```\\n\\nto resolve to an `HTMLAnchorElement` instead of the expected native bridge object.\\n\\nWhen Quasar later executes:\\n\\n```javascript\\nwindow.SafariViewController.isAvailable(...)\\n```\\n\\nthe DOM element is incorrectly treated as the bridge object, causing:\\n\\n```\\nTypeError: window.SafariViewController.isAvailable is not a function\\n```\\n\\nThe root cause is insufficient validation of browser-controlled global properties before using them as trusted native bridge objects.\\n\\nThe vulnerability was verified through the Quasar `QEditor` rendering path. When attacker-controlled HTML content is rendered into the DOM and creates the `SafariViewController` named element, subsequent calls to `openURL()` fail.\\n\\nAdditional component-level affected paths were identified in `QSelect` and `QChatMessage` when applications enable HTML rendering features and provide attacker-controlled content. These paths require specific application configurations and were not used as the primary end-to-end reproduction.\\n\\n### PoC\\n\\n#### Steps to reproduce\\n\\n1. Render attacker-controlled HTML content through a Quasar HTML rendering component such as `QEditor`.\\n2. Insert the following payload:\\n```html\\n<a id=\\\"SafariViewController\\\" href=\\\"#bridge\\\">\\n  SafariViewController\\n</a>\\n````\\n\\n3. Verify that the browser exposes the element as a global property:   \\n\\n```javascript\\nwindow.SafariViewController\\n```\\n\\nThe value resolves to the injected DOM element instead of the expected native bridge object.\\n\\n4. Trigger a normal workflow that invokes:    \\n\\n```javascript\\nopenURL('https://example.com')\\n```\\n\\n5. Observe the browser console output:    \\n\\n```\\nTypeError: window.SafariViewController.isAvailable is not a function\\n```\\n\\nThe URL opening workflow fails because Quasar attempts to invoke native bridge methods on the DOM element.\\n\\nThe same underlying issue can also affect other HTML rendering paths such as `QSelect` and `QChatMessage` when attacker-controlled HTML is rendered and the application later calls `openURL()`.\\n\\n### Impact\\n\\nThis vulnerability is a client-side DOM Clobbering and type confusion issue affecting Quasar applications that use the iOS `SafariViewController` integration. An attacker who can control HTML content rendered into the application DOM may cause Quasar's `openURL()` functionality to fail by replacing the expected native bridge object with a DOM element through browser named property resolution.\\n\\nPotentially affected workflows include external URL navigation, OAuth/login redirects, help or documentation links, payment flows, third-party service redirects, and other application actions that rely on URL opening functionality.\\n\\nThe confirmed impact is client-side denial of service and navigation or workflow disruption. When the vulnerable condition is triggered, Quasar throws an exception while attempting to invoke methods on the clobbered `SafariViewController` object, preventing the expected URL opening behavior.\", \"epss\": {\"percentage\": 0.00259, \"percentile\": 0.16146}, \"ghsa_id\": \"GHSA-89vp-x45c-52cq\", \"github_reviewed_at\": \"2026-10-07T20:23:47Z\", \"html_url\": \"https://github.com/advisories/GHSA-89vp-x45c-52cq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-89vp-x45c-52cq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-106101\"}], \"nvd_published_at\": \"2026-10-06T17:17:24Z\", \"published_at\": \"2026-10-07T20:23:47Z\", \"references\": [\"https://github.com/quasarframework/quasar/security/advisories/GHSA-89vp-x45c-52cq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-106101\", \"https://github.com/quasarframework/quasar/commit/52d874bf55309dd3656fb02aed033ab025d477ec\", \"https://github.com/quasarframework/quasar/releases/tag/quasar-v2.32.2\", \"https://github.com/advisories/GHSA-89vp-x45c-52cq\"], \"repository_advisory_url\": \"https://api.github.com/repos/quasarframework/quasar/security-advisories/GHSA-89vp-x45c-52cq\", \"severity\": \"low\", \"source_code_location\": \"https://github.com/quasarframework/quasar\", \"summary\": \"Quasar Framework: DOM Clobbering in Quasar openURL() SafariViewController Integration Causes Client-Side Denial of Service\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:23:48Z\", \"url\": \"https://api.github.com/advisories/GHSA-89vp-x45c-52cq\", \"vulnerabilities\": [{\"first_patched_version\": \"2.32.2\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"quasar\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.32.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-89vp-x45c-52cq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "quasar: <= 2.32.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-106101"
+    ],
+    "cvss_score": 3.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "quasar"
+    ],
+    "remote": true,
+    "vendor_severity": "low"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.890389Z",
+  "provenance": {
+    "content_sha256": "dff9bdd442df41a19ce8c92ebef292c3e707b57395b11c525b9607e9d3538de3",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:23:47Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-89vp-x45c-52cq",
+  "status": "active",
+  "title": "Quasar Framework: DOM Clobbering in Quasar openURL() SafariViewController Integration Causes Client-Side Denial of Service",
+  "updated_at": "2026-10-07T20:23:48Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-89vp-x45c-52cq"
+}

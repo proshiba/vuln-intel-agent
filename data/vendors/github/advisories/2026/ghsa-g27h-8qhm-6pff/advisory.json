@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107220\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-125\", \"name\": \"Out-of-bounds Read\"}, {\"cwe_id\": \"CWE-129\", \"name\": \"Improper Validation of Array Index\"}], \"description\": \"### Summary\\n\\nA worksheet containing `<mergeCell ref=\\\"\\\"/>` makes `mergeCellsParser` leave the cached rectangle empty, and `cellInRange` then indexes that empty slice without a length check. Every non-streaming cell API panics with `index out of range [0] with length 0` on the first cell read after opening the file.\\n\\n### Where it is\\n\\n`cell.go`, `cellInRange`\\n\\n    func cellInRange(cell, ref []int) bool {\\n    \\treturn cell[0] >= ref[0] && cell[0] <= ref[2] && cell[1] >= ref[1] && cell[1] <= ref[3]\\n    }\\n\\n`ref` is indexed at four positions with no bounds check.\\n\\nThe caller that can hand it an empty slice, `mergeCellsParser`\\n\\n    if ref := ws.MergeCells.Cells[i].Ref; len(ws.MergeCells.Cells[i].rect) == 0 && ref != \\\"\\\" {\\n    \\tif strings.Count(ref, \\\":\\\") != 1 {\\n    \\t\\tref += \\\":\\\" + ref\\n    \\t}\\n    \\trect, err := rangeRefToCoordinates(ref)\\n    \\tif err != nil {\\n    \\t\\treturn cell, err\\n    \\t}\\n    \\t_ = sortCoordinates(rect)\\n    \\tws.MergeCells.Cells[i].rect = rect\\n    }\\n    if cellInRange([]int{col, row}, ws.MergeCells.Cells[i].rect) {\\n\\nThe `ref != \\\"\\\"` condition means an empty `ref` skips the block that populates `rect`, so `rect` stays nil. The `cellInRange` call on the next line is unconditional and receives that nil slice.\\n\\n`Ref` comes straight from `xl/worksheets/sheetN.xml` through `encoding/xml`, so an empty string is entirely attacker-controlled.\\n\\n### Impact\\n\\nAny consumer that opens an untrusted workbook and reads a cell panics. The loop scans every merged cell, so any cell reference triggers it, not a specific one. Affected entry points include `GetCellValue`, `GetCellType`, `GetCellFormula`, `SetCellValue` and the in-cell branch of `GetPictures`. The streaming `Rows` and `GetRows` use the SAX path and do not go through this parser, and `GetMergeCells` routes through `Rect()` which errors cleanly, which is probably why this has not surfaced before.\\n\\nThere is no option or flag involved; opening the file succeeds and the panic fires on the first cell read. Unless the caller wraps the call in `recover()` it takes the process down.\\n\\nThis is a regression. Commit a34c81e (PR #1500, 2023-03-20) replaced `checkCellInRangeRef`, whose `len(rng) != 2` guard returned cleanly for an empty ref, with the cached-rect fast path above, and the guard did not come along. `git merge-base --is-ancestor` confirms that commit is an ancestor of v2.11.0, so released versions are affected as well as HEAD.\\n\\n### Proof of concept\\n\\nExecuted at HEAD.\\n\\nBuild a minimal xlsx whose `xl/worksheets/sheet1.xml` contains:\\n\\n    <mergeCells count=\\\"1\\\"><mergeCell ref=\\\"\\\"></mergeCell></mergeCells>\\n\\nThen:\\n\\n    f, err := excelize.OpenReader(bytes.NewReader(data))\\n    if err != nil { t.Fatal(err) }\\n    _, _ = f.GetCellValue(\\\"Sheet1\\\", \\\"A1\\\")\\n\\nObserved, running against the repository at HEAD:\\n\\n    panic: runtime error: index out of range [0] with length 0\\n      excelize.cellInRange           cell.go:1691\\n      excelize.(*xlsxWorksheet).mergeCellsParser  cell.go:1660\\n      excelize.(*File).getCellStringFunc          cell.go:1512\\n      excelize.(*File).GetCellValue               cell.go:72\\n\\n`OpenReader` itself returns no error; the file is 1656 bytes. A1, B1 and A2 all reproduce it.\\n\\nFor context on how targeted this is, I ran a battery of 38 crafted files covering data validation, conditional formatting, cell and row references, number formats, cols, hyperlinks, dimension, shared strings and tables. Only the empty-ref merge cell panicked; everything else returned a clean error. The other parsing paths look well guarded.\\n\\n### Suggested fix\\n\\nSkip the entry when the rectangle is empty, before the range test:\\n\\n    if len(ws.MergeCells.Cells[i].rect) == 0 {\\n    \\tcontinue\\n    }\\n\\nCredit goes to arpitjain099.\", \"ghsa_id\": \"GHSA-g27h-8qhm-6pff\", \"github_reviewed_at\": \"2026-10-07T20:23:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-g27h-8qhm-6pff\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g27h-8qhm-6pff\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107220\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-07T20:23:17Z\", \"references\": [\"https://github.com/qax-os/excelize/security/advisories/GHSA-g27h-8qhm-6pff\", \"https://github.com/qax-os/excelize/pull/2379\", \"https://github.com/qax-os/excelize/commit/99903a3240e58a47ff28fb8e05a03bd9d496ec24\", \"https://github.com/advisories/GHSA-g27h-8qhm-6pff\"], \"repository_advisory_url\": \"https://api.github.com/repos/qax-os/excelize/security-advisories/GHSA-g27h-8qhm-6pff\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/qax-os/excelize\", \"summary\": \"Excelize: Panic in cellInRange on a worksheet with an empty mergeCell ref\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:23:18Z\", \"url\": \"https://api.github.com/advisories/GHSA-g27h-8qhm-6pff\", \"vulnerabilities\": [{\"first_patched_version\": \"2.11.1-0.20260820023833-99903a3240e5\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/xuri/excelize/v2\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 2.7.1, < 2.11.1-0.20260820023833-99903a3240e5\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g27h-8qhm-6pff",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/xuri/excelize/v2: >= 2.7.1, < 2.11.1-0.20260820023833-99903a3240e5"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107220"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/xuri/excelize/v2"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.896791Z",
+  "provenance": {
+    "content_sha256": "db2e908c2cba6d048bb36c50a631f735681a82e41244fe790ef004545e4f50e9",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:23:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g27h-8qhm-6pff",
+  "status": "active",
+  "title": "Excelize: Panic in cellInRange on a worksheet with an empty mergeCell ref",
+  "updated_at": "2026-10-07T20:23:18Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g27h-8qhm-6pff"
+}
