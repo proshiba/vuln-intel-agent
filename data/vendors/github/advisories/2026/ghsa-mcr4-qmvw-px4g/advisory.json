@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [], \"cve_id\": \"CVE-2026-106451\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.3, \"vector_string\": \"CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-367\", \"name\": \"Time-of-check Time-of-use (TOCTOU) Race Condition\"}, {\"cwe_id\": \"CWE-377\", \"name\": \"Insecure Temporary File\"}], \"description\": \"### Summary\\n\\nWhen no system-installed `liblz4-java` is found, `net.jpountz.util.Native.load()` extracts the bundled native library to `java.io.tmpdir` and loads it with `System.load`. The path of the extracted library can be predicted before it is created, and the library file is opened without exclusive creation. Another local user who can write to the same temporary directory can therefore create the file first and control the code that is loaded.\\n\\n### Details\\n\\n```java\\ntempLibLock = File.createTempFile(\\\"liblz4-java-\\\", \\\".\\\" + os().libExtension + \\\".lck\\\");\\ntempLib = new File(tempLibLock.getAbsolutePath().replaceFirst(\\\".lck$\\\", \\\"\\\"));\\n// copy to tempLib\\ntry (FileOutputStream out = new FileOutputStream(tempLib)) { ... }\\n...\\nSystem.load(tempLib.getAbsolutePath());\\n```\\n\\nOnly the `.lck` file is created safely, with a random name and exclusive creation. The library path is the `.lck` name without the `.lck` suffix, and nothing reserves it. `new FileOutputStream(tempLib)` opens it with `O_CREAT|O_TRUNC` and follows symlinks.\\n\\nIn a shared, world-writable temporary directory, another user can watch for the `.lck` file and create the corresponding library file before it is opened. If they win that race, they own the file. The victim then writes into the attacker-owned file, and the attacker can overwrite it again before `System.load`.\\n\\nWhether this can be exploited depends on the host:\\n\\n- With `fs.protected_regular = 0`, the attacker can pre-create a world-writable file, and their code is then loaded into the victim's JVM.\\n- With `fs.protected_regular >= 1` (the default on many systemd-based distributions), the victim's open fails. The library then fails to load and the library falls back to the Java implementations, so the attacker can only cause a denial of service.\\n- A symlink variant is blocked by `fs.protected_symlinks = 1`.\\n- Temporary directories without the sticky bit, or shared across users in containers, are exploitable whatever these settings are.\\n\\nThis behaviour was introduced upstream in commit c3ddae5 (lz4-java 1.7.0), which swapped which of the two files is created with `createTempFile`.\\n\\n### Impact\\n\\nA local user who can write to the same temporary directory as a victim process that uses the bundled JNI library may be able to execute code as the victim. Exploitation requires a shared temporary directory, host settings that permit it, and winning a race.\\n\\nThe issue does not apply if `liblz4-java` is found on `java.library.path`, if `java.io.tmpdir` is private to the user (for example systemd `PrivateTmp`, or a per-user temporary directory), or if only the Java implementations are used.\\n\\n### Patch\\n\\nFixed in lz4-java 1.11.4. The native library is now extracted directly into a file created by `File.createTempFile`, which has a random name and is created exclusively, so a file or symlink planted in advance cannot be reused. The `.lck` lock files are no longer used. Instead, the startup cleanup removes stale `liblz4-java-*` temporary files (including `.lck` files left by older versions) only once they are more than one hour old.\\n\\nFor older versions, the workaround is to set `java.io.tmpdir` to a directory writable only by the application user, or install `liblz4-java` on `java.library.path`.\", \"epss\": {\"percentage\": 0.00083, \"percentile\": 0.00215}, \"ghsa_id\": \"GHSA-mcr4-qmvw-px4g\", \"github_reviewed_at\": \"2026-10-07T20:35:51Z\", \"html_url\": \"https://github.com/advisories/GHSA-mcr4-qmvw-px4g\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-mcr4-qmvw-px4g\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-106451\"}], \"nvd_published_at\": \"2026-10-06T20:17:27Z\", \"published_at\": \"2026-10-07T20:35:51Z\", \"references\": [\"https://github.com/yawkat/lz4-java/security/advisories/GHSA-mcr4-qmvw-px4g\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-106451\", \"https://github.com/yawkat/lz4-java/commit/7a48b7f6b8099b9dab6541e4ac2ee0979dc55aa3\", \"https://github.com/yawkat/lz4-java/releases/tag/v1.11.4\", \"https://github.com/advisories/GHSA-mcr4-qmvw-px4g\"], \"repository_advisory_url\": \"https://api.github.com/repos/yawkat/lz4-java/security-advisories/GHSA-mcr4-qmvw-px4g\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/yawkat/lz4-java\", \"summary\": \"yawkat LZ4 Java: Native library extraction to a shared temporary directory is vulnerable to file replacement by another local user\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:35:52Z\", \"url\": \"https://api.github.com/advisories/GHSA-mcr4-qmvw-px4g\", \"vulnerabilities\": [{\"first_patched_version\": \"1.11.4\", \"package\": {\"ecosystem\": \"maven\", \"name\": \"at.yawk.lz4:lz4-java\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.11.3\"}, {\"first_patched_version\": null, \"package\": {\"ecosystem\": \"maven\", \"name\": \"org.lz4:lz4-java\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.7.0, <= 1.8.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-mcr4-qmvw-px4g",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "at.yawk.lz4:lz4-java: <= 1.11.3",
+      "org.lz4:lz4-java: >= 1.7.0, <= 1.8.1"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-106451"
+    ],
+    "cvss_score": 7.3,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "at.yawk.lz4:lz4-java",
+      "org.lz4:lz4-java"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.827109Z",
+  "provenance": {
+    "content_sha256": "1e17eabe0d7c4d95cf402cedc17aca0e24eadfdbfdbdbe8c0f11b25049db340a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:35:51Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-mcr4-qmvw-px4g",
+  "status": "active",
+  "title": "yawkat LZ4 Java: Native library extraction to a shared temporary directory is vulnerable to file replacement by another local user",
+  "updated_at": "2026-10-07T20:35:52Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-mcr4-qmvw-px4g"
+}

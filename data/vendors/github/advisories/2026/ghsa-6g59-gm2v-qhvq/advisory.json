@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/149681061?v=4\", \"events_url\": \"https://api.github.com/users/dinhvaren/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dinhvaren/followers\", \"following_url\": \"https://api.github.com/users/dinhvaren/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dinhvaren/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dinhvaren\", \"id\": 149681061, \"login\": \"dinhvaren\", \"node_id\": \"U_kgDOCOvzpQ\", \"organizations_url\": \"https://api.github.com/users/dinhvaren/orgs\", \"received_events_url\": \"https://api.github.com/users/dinhvaren/received_events\", \"repos_url\": \"https://api.github.com/users/dinhvaren/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dinhvaren/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dinhvaren/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dinhvaren\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61429\", \"cvss\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-367\", \"name\": \"Time-of-check Time-of-use (TOCTOU) Race Condition\"}, {\"cwe_id\": \"CWE-918\", \"name\": \"Server-Side Request Forgery (SSRF)\"}], \"description\": \"## Summary\\n\\nThe DNS-rebinding / redirect SSRF bypass in PRAI-05 is **not limited to the httpx/urllib backend**. When `crawl4ai` (headless Chromium via Playwright) is installed, `web_crawl` auto-selects `provider=crawl4ai`, and the headless browser re-resolves DNS and follows redirects on its own — with no per-connection SSRF guard. Runtime-confirmed read-back of the internal canary via both DNS rebinding and redirect (`provider: \\\"crawl4ai\\\"`). Status: runtime-confirmed addendum to PRAI-05.\\n\\n## Details\\n\\n### Affected component\\n- Package `praisonaiagents` 4.6.63. Backend selected when `crawl4ai`+Playwright are installed.\\n- Files: `src/praisonai-agents/praisonaiagents/tools/web_crawl_tools.py` (`_crawl_with_crawl4ai`) and `src/praisonai-agents/praisonaiagents/tools/crawl4ai_tools.py` (standalone crawl wrappers).\\n\\n### Vulnerable code / root cause\\n\\nPath:\\n`src/praisonai-agents/praisonaiagents/tools/web_crawl_tools.py`\\n\\nFunction:\\n`_crawl_with_crawl4ai`\\n\\nSnippet:\\n```python\\nasync with AsyncWebCrawler() as crawler:\\n    for url in urls:\\n        result = await crawler.arun(url=url)   # headless browser: re-resolves DNS, follows redirects\\n```\\n\\nPath:\\n`src/praisonai-agents/praisonaiagents/tools/crawl4ai_tools.py`\\n\\nFunction:\\n`Crawl4AITools.crawl` / `crawl4ai`\\n\\nSnippet:\\n```python\\nresult = await crawler.arun(url=url, config=config)   # no _is_safe_crawl_url / no per-connect validation\\n```\\n\\nIssue: the only SSRF check is the single pre-fetch `_is_safe_crawl_url()` on the initial URL string in `web_crawl()` (see PRAI-05). The headless browser then resolves and connects independently and follows redirects in-browser — no resolved-IP pinning, no per-hop/per-connect validation. Input (`urls`) is attacker/agent-controlled; the sink is `crawler.arun(url=...)`; the guard is bypassed by DNS rebinding (TOCTOU) and by redirects (followed in-browser).\\n\\n### Attack flow / Why bypassed / Security boundary\\nIdentical to PRAI-05: TOCTOU between the guard's resolution and the browser's connection; redirects followed in-browser; internal response returned as crawl `content`. See PRAI-05.\\n\\n## Proof of Concept\\n\\n### Environment\\n`crawl4ai` + Playwright Chromium installed in a dedicated runtime container (`127.0.0.1:18081`), same controlled internal canary + rebinding DNS. Runnable assets: `PraisonAI-Runtime-Repro\\\\runtime-files\\\\` (`docker-compose.crawl.yml`).\\n\\n### Steps to reproduce\\n1. `SSRF-04-01-Crawl4AI-DNS-Rebind-Trigger` → `127.0.0.1:18081`:\\n```http\\nPOST /tool/web_crawl HTTP/1.1\\nHost: 127.0.0.1:18081\\nContent-Type: application/json\\n\\n{\\\"url\\\":\\\"http://rebind.lab:8081/secret\\\"}\\n```\\n2. Redirect variant `SSRF-04-03-Crawl4AI-Redirect-Readback`: `{\\\"url\\\":\\\"http://redirector:8082/redirect-to-internal\\\"}`.\\n\\n### Expected result\\nThe crawl backend refuses internal destinations regardless of DNS timing/redirects.\\n\\n### Actual result\\nHTTP 200, `\\\"provider\\\":\\\"crawl4ai\\\"`, response `content` contains `PRAISONAI_INTERNAL_SECRET_CANARY_7f3a91` + `FAKE_INTERNAL_TOKEN_DO_NOT_USE_7f3a91` for both the DNS-rebinding and the redirect payload.\\n\\n### Screenshots\\n\\n**Crawl4AI DNS rebinding read-back**\\n\\nThe attacker-controlled `rebind.lab` URL is accepted by the Crawl4AI-backed `web_crawl` endpoint. PraisonAI returns the internal canary response body containing `PRAISONAI_INTERNAL_SECRET_CANARY_7f3a91`.\\n\\n<img width=\\\"1542\\\" height=\\\"763\\\" alt=\\\"01-Crawl4AI-Burp-Readback\\\" src=\\\"https://github.com/user-attachments/assets/a03b3a1c-e382-4f67-8ea6-b766dceb4a69\\\" />\\n\\n**Crawl4AI DNS rebinding runtime evidence**\\n\\nThe runtime log shows the Crawl4AI/Chromium backend resolving `rebind.lab` to an internal Docker IP during the fetch phase. The internal canary receives `GET /secret` from a headless Chrome user agent.\\n\\n<img width=\\\"1659\\\" height=\\\"946\\\" alt=\\\"02-Crawl4AI-DNS-Log-And-Internal-Hit\\\" src=\\\"https://github.com/user-attachments/assets/d93db090-3e39-43d0-af3b-5d1d8f614db8\\\" />\\n\\n**Crawl4AI redirect read-back**\\n\\nThe attacker-controlled redirector URL is accepted by the Crawl4AI-backed endpoint. PraisonAI follows the redirect and returns the internal canary response body.\\n\\n<img width=\\\"1544\\\" height=\\\"771\\\" alt=\\\"03-Crawl4AI-Redirect-Readback\\\" src=\\\"https://github.com/user-attachments/assets/7d05c8aa-5bda-45bc-b94c-bef0bdcf055c\\\" />\\n\\n**Crawl4AI redirect runtime evidence**\\n\\nThe controlled redirector returns `302 -> http://internal-canary:8081/secret`, and the internal canary receives `GET /secret` from the Crawl4AI/Chromium backend.\\n\\n<img width=\\\"1590\\\" height=\\\"920\\\" alt=\\\"04-Crawl4AI-Redirect-Internal-Hit-Log\\\" src=\\\"https://github.com/user-attachments/assets/dd9c0fec-3583-43ab-b83c-4470fa6aa409\\\" />\\n\\n\\n## Impact\\nSame class as PRAI-05: read-back SSRF to internal/metadata services, now on the crawl4ai backend. Broadens the affected surface (the flaw is in the shared validate-without-pinning design, not one backend).\\n\\n## Suggested remediation\\nResolve-once + IP-pin + per-connect validation must also cover the crawl4ai backend (constrain the headless browser to the validated IP, or allowlist crawl destinations).\", \"epss\": {\"percentage\": 0.00348, \"percentile\": 0.25574}, \"ghsa_id\": \"GHSA-6g59-gm2v-qhvq\", \"github_reviewed_at\": \"2026-10-07T20:22:17Z\", \"html_url\": \"https://github.com/advisories/GHSA-6g59-gm2v-qhvq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6g59-gm2v-qhvq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61429\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-07T20:22:17Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-6g59-gm2v-qhvq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61429\", \"https://www.vulncheck.com/advisories/praisonai-before-ssrf-via-crawl4ai-chromium-backend\", \"https://github.com/advisories/GHSA-6g59-gm2v-qhvq\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-6g59-gm2v-qhvq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: Crawl4AI/Chromium backend is also affected by the `web_crawl` SSRF validation bypass\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-07T20:22:17Z\", \"url\": \"https://api.github.com/advisories/GHSA-6g59-gm2v-qhvq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.78\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.77\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6g59-gm2v-qhvq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: <= 1.6.77"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-61429"
+    ],
+    "cvss_score": 8.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.905836Z",
+  "provenance": {
+    "content_sha256": "332575b3ec5318ae3f6cc31113594b2d6ee017ec84b9256f97a7b49b052acd0e",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-07T20:22:17Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6g59-gm2v-qhvq",
+  "status": "active",
+  "title": "PraisonAI: Crawl4AI/Chromium backend is also affected by the `web_crawl` SSRF validation bypass",
+  "updated_at": "2026-10-07T20:22:17Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6g59-gm2v-qhvq"
+}

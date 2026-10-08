@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-60087\", \"cvss\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.1, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nPraisonAI gates dangerous tools (file writes, deletes, shell/code execution) behind an interactive approval prompt. The first approval of a tool is cached for the remainder of the run and silently reused for all later invocations of that tool with arbitrary, unreviewed arguments.\\n\\n## Root cause\\n\\n`ApprovalRegistry.is_already_approved` (`src/praisonai-agents/praisonaiagents/approval/registry.py`, around line 181) returns `True` whenever the tool name is present in a per-run context set. The cache is keyed on tool name only — arguments are not part of the key.\\n\\n`approve_sync` / `approve_async` (around lines 224-226 / 278-279) short-circuit on that cache before the approval backend is consulted.\\n\\n`clear_approved` (around lines 186-187) is the only routine that clears the cache, but it is never invoked in the shipped library (only in tests). The cache persists for the entire agent run and is inherited by child tasks via `contextvars`.\\n\\nCritical-tier tools (`execute_command`, `execute_code`) are exempt from the cache. But high-risk tools like `write_file` are not.\\n\\n## Proof of concept\\n\\n```python\\nfrom praisonaiagents.approval.registry import ApprovalRegistry\\nfrom praisonaiagents.approval.protocols import ApprovalDecision, ApprovalRequest\\n\\nclass CountingBackend:\\n    def __init__(self): self.prompts = []\\n    def request_approval_sync(self, request):\\n        self.prompts.append((request.tool_name, dict(request.arguments)))\\n        return ApprovalDecision(approved=True, reason=\\\"human approved\\\")\\n\\nbackend = CountingBackend()\\nreg = ApprovalRegistry()\\nreg.set_backend(backend)\\nreg.add_requirement(\\\"write_file\\\", \\\"high\\\")\\n\\nd1 = reg.approve_sync(\\\"agent\\\", \\\"write_file\\\", {\\\"path\\\": \\\"/tmp/safe.txt\\\", \\\"content\\\": \\\"hi\\\"})\\n# Human prompted — approves a benign write\\n\\nd2 = reg.approve_sync(\\\"agent\\\", \\\"write_file\\\", {\\\"path\\\": \\\"/etc/crontab\\\", \\\"content\\\": \\\"* * * * * root evil\\\"})\\n# NO prompt — auto-approved from cache\\n\\nassert len(backend.prompts) == 1\\nassert d2.reason == \\\"Already approved in context\\\"\\n```\\n\\nNegative control: `execute_command` (critical) re-prompts on every call — 2 prompts for 2 calls.\\n\\n## Impact\\n\\nA `write_file` approval for a benign path authorizes every later `write_file` call in the session with arbitrary arguments. A model steered by malicious input can write to sensitive locations with no further human prompt.\\n\\n## Suggested fix\\n\\n- Include arguments in the approval cache key, or re-prompt on argument change.\\n- Expire the cache per-call or per-turn.\\n- Do not inherit the cache into child tasks.\", \"epss\": {\"percentage\": 0.00148, \"percentile\": 0.03502}, \"ghsa_id\": \"GHSA-29r9-67vg-qj56\", \"github_reviewed_at\": \"2026-10-08T16:43:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-29r9-67vg-qj56\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-29r9-67vg-qj56\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-60087\"}], \"nvd_published_at\": \"2026-07-15T17:16:52Z\", \"published_at\": \"2026-10-08T16:43:45Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-29r9-67vg-qj56\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-60087\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-62164\", \"https://www.vulncheck.com/advisories/praisonai-before-tool-approval-cache-bypass\", \"https://github.com/advisories/GHSA-29r9-67vg-qj56\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-29r9-67vg-qj56\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: Human-in-the-loop tool approval is cached by tool name and silently reused for all subsequent calls with arbitrary arguments\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T16:43:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-29r9-67vg-qj56\", \"vulnerabilities\": [{\"first_patched_version\": \"1.6.78\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"praisonaiagents\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 1.6.77\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-29r9-67vg-qj56",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonaiagents: <= 1.6.77"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-60087",
+      "CVE-2026-62164"
+    ],
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonaiagents"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-08T19:16:36.773076Z",
+  "provenance": {
+    "content_sha256": "613fae79d580d4cca377cf43c38617b1ee68f67cb97aebe93ed0e12d1a21db77",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T16:43:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-29r9-67vg-qj56",
+  "status": "active",
+  "title": "PraisonAI: Human-in-the-loop tool approval is cached by tool name and silently reused for all subsequent calls with arbitrary arguments",
+  "updated_at": "2026-10-08T16:43:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-29r9-67vg-qj56"
+}
