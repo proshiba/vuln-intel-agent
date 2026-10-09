@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 4, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/3242828?v=4\", \"events_url\": \"https://api.github.com/users/arpitjain099/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/arpitjain099/followers\", \"following_url\": \"https://api.github.com/users/arpitjain099/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/arpitjain099/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/arpitjain099\", \"id\": 3242828, \"login\": \"arpitjain099\", \"node_id\": \"MDQ6VXNlcjMyNDI4Mjg=\", \"organizations_url\": \"https://api.github.com/users/arpitjain099/orgs\", \"received_events_url\": \"https://api.github.com/users/arpitjain099/received_events\", \"repos_url\": \"https://api.github.com/users/arpitjain099/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/arpitjain099/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/arpitjain099/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/arpitjain099\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107813\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"## Summary\\n\\nIncomplete fix of GHSA-5v7c-xpfp-p65m: the secure-session (OTP step-up) requirement added to the nginx, cert, dns, backup, site, and stream mutation routers was not applied to the parallel api/cluster router, so cluster node management and cluster-wide nginx reload/restart run with only a JWT and no step-up. An authenticated user whose JWT is stolen or persisted, but who does not hold a fresh secure-session, can perform cluster node CRUD (including reading and rewriting a node token secret) and trigger cluster-wide nginx reload/restart. Confirmed at HEAD 2cb7ee9102c9d87274de2fa104db804841d140a0.\\n\\n## The defect\\n\\nGHSA-5v7c-xpfp-p65m required a fresh secure session (an OTP step-up beyond the JWT) for sensitive mutation routes. The fix wrapped the nginx, cert, dns, backup, site, and stream mutation handlers in middleware.RequireSecureSession() and added reload/restart to the MCP sensitive-tool list. It did not touch the physically separate api/cluster package, whose router registers the same class of sensitive operations on the bare authenticated group.\\n\\nThe fixed sibling, api/nginx/router.go:\\n\\n```go\\no := r.Group(\\\"\\\", middleware.RequireSecureSession())   // line 28\\n{\\n    o.POST(\\\"nginx/reload\\\", Reload)                     // line 30\\n    o.POST(\\\"nginx/restart\\\", Restart)                   // line 31\\n}\\n```\\n\\nThe missed router, api/cluster/router.go, registers every sensitive operation directly on r with no RequireSecureSession wrapper:\\n\\n```go\\nnodeGroup := r.Group(\\\"nodes\\\")                          // line 9, no step-up\\n{\\n    nodeGroup.POST(\\\"\\\", AddNode)                        // line 12\\n    nodeGroup.POST(\\\"/:id\\\", EditNode)                   // line 13\\n    nodeGroup.DELETE(\\\"/:id\\\", DeleteNode)               // line 14\\n}\\nr.POST(\\\"nodes/reload_nginx\\\", ReloadNginx)              // line 17\\nr.POST(\\\"nodes/restart_nginx\\\", RestartNginx)            // line 18\\nr.POST(\\\"namespaces\\\", AddNamespace)                     // line 22\\nr.POST(\\\"namespaces/:id\\\", ModifyNamespace)              // line 23\\nr.DELETE(\\\"namespaces/:id\\\", DeleteNamespace)            // line 24\\n```\\n\\nBoth routers mount on the same group in router/routers.go: `g := root.Group(\\\"/\\\", middleware.AuthRequired(), middleware.Proxy())` (line 87); nginx.InitRouter(g) creates its own RequireSecureSession subgroup, cluster.InitRouter(g) does not. So the cluster routes inherit only AuthRequired and Proxy, exactly the pre-fix posture the advisory closed for the nginx routes. AuthRequired has no role gate, so any authenticated user reaches them.\\n\\n## Attacker model and impact\\n\\nAn authenticated, OTP-enabled user who does not present a fresh X-Secure-Session-ID (the parent advisory's model: a stolen or persisted JWT used without the step-up). Such a user can: add/edit/delete cluster nodes (AddNode/EditNode store an AES-serialized node token, the secret used to control a remote node, so this reads back and rewrites a cross-node credential); trigger nodes/reload_nginx and nodes/restart_nginx across the cluster (the exact reload/restart action class the fix protected on the single-node path); and add/modify/delete/reorder namespaces.\\n\\nProof of concept: with a valid JWT but no fresh secure session, call POST /api/nodes (AddNode) or POST /api/nodes/reload_nginx. The nginx equivalent POST /api/nginx/reload returns the secure-session challenge; the cluster route succeeds.\\n\\n## Verification\\n\\nSource-verified at HEAD: the nginx router wraps reload/restart in RequireSecureSession, the cluster router registers node/namespace/reload/restart directly on the group with no such wrapper, and both mount on the AuthRequired+Proxy-only group. I did not stand up a live nginx-ui.\\n\\n## Suggested fix\\n\\nWrap the cluster router's mutation handlers (node CRUD, nodes/reload_nginx, nodes/restart_nginx, namespace CRUD) in middleware.RequireSecureSession(), mirroring api/nginx/router.go. Secondary lower-confidence items worth checking in the same pass: the system/restart handler, the core-upgrade websocket, and the upstream socket PUT also appear to run without the step-up (I did not fully trace these).\", \"ghsa_id\": \"GHSA-h246-wpgf-vmq5\", \"github_reviewed_at\": \"2026-10-09T17:08:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-h246-wpgf-vmq5\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-h246-wpgf-vmq5\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107813\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T17:08:06Z\", \"references\": [\"https://github.com/0xJacky/nginx-ui/security/advisories/GHSA-h246-wpgf-vmq5\", \"https://github.com/0xJacky/nginx-ui/commit/a3999bd78a3b97ab22e6b5e9fd478ac57598a954\", \"https://github.com/0xJacky/nginx-ui/releases/tag/v2.5.0\", \"https://github.com/advisories/GHSA-h246-wpgf-vmq5\"], \"repository_advisory_url\": \"https://api.github.com/repos/0xJacky/nginx-ui/security-advisories/GHSA-h246-wpgf-vmq5\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/0xJacky/nginx-ui\", \"summary\": \"Nginx UI: Incomplete fix of CVE-2026-84315 - the api/cluster router was not -  wrapped in RequireSecureSession, so those sensitive mutations run without OTP step-up\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T17:08:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-h246-wpgf-vmq5\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.10-0.20260728074433-a3999bd78a3b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/0xJacky/Nginx-UI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728074433-a3999bd78a3b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-h246-wpgf-vmq5",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/0xJacky/Nginx-UI: >= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728074433-a3999bd78a3b"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-107813",
+      "CVE-2026-84315"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/0xJacky/Nginx-UI"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.289223Z",
+  "provenance": {
+    "content_sha256": "2aec270a4652fbe761cd175536dd951b4cf021d3146696eabe595ed694afd887",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T17:08:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-h246-wpgf-vmq5",
+  "status": "active",
+  "title": "Nginx UI: Incomplete fix of CVE-2026-84315 - the api/cluster router was not -  wrapped in RequireSecureSession, so those sensitive mutations run without OTP step-up",
+  "updated_at": "2026-10-09T17:08:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-h246-wpgf-vmq5"
+}

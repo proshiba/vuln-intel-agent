@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/95986478?v=4\", \"events_url\": \"https://api.github.com/users/SnailSploit/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/SnailSploit/followers\", \"following_url\": \"https://api.github.com/users/SnailSploit/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/SnailSploit/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/SnailSploit\", \"id\": 95986478, \"login\": \"SnailSploit\", \"node_id\": \"U_kgDOBbijLg\", \"organizations_url\": \"https://api.github.com/users/SnailSploit/orgs\", \"received_events_url\": \"https://api.github.com/users/SnailSploit/received_events\", \"repos_url\": \"https://api.github.com/users/SnailSploit/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/SnailSploit/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/SnailSploit/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/SnailSploit\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107715\", \"cvss\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-522\", \"name\": \"Insufficiently Protected Credentials\"}], \"description\": \"## Summary\\n\\n`mechanize` leaked credentials to the redirect target when an HTTP redirect crossed to another host. Credentials set through `Mechanize#request_headers=` leaked even when they were `Authorization`.\\n\\n## Details\\n\\nTwo defects, both in `lib/mechanize/http/agent.rb`.\\n\\n**1. `Mechanize#request_headers=` bypassed the redirect strip entirely.** `#request_add_headers` copied `@request_headers` onto every request unconditionally, with no host check, including the request issued after a redirect. The strip in `#response_redirect` mutated only the per-request headers hash and never touched agent state. Because `request_headers=` is the documented way to set a default credential for every request, the header the code explicitly protected — `Authorization` — was the one most likely to leak.\\n\\n**2. The strip list omitted `Proxy-Authorization` and `Cookie2`.** Only `CREDENTIAL_HEADERS = ['Authorization']` and `COOKIE_HEADERS = ['Cookie']` were removed from the per-request headers hash on a cross-host redirect.\\n\\nCookies held in `Mechanize#cookie_jar` and credentials held in `Mechanize::HTTP::AuthStore` are **not** affected. Both are looked up per-URI, so they never follow a redirect to a foreign host. The exposure was limited to headers the caller set by hand.\\n\\n## PoC\\n\\n```ruby\\nagent = Mechanize.new\\nagent.request_headers = { 'Authorization' => 'Bearer secret' }\\nagent.get('https://example.test/redirects-to-attacker')\\n# the request to the attacker's host carries \\\"Authorization: Bearer secret\\\"\\n```\\n\\n## Impact\\n\\nAn attacker who controls a redirect target — through an open redirect on the site being fetched, an attacker-supplied fetch URL, DNS rebinding, or MITM — captures bearer tokens and session cookies from any `mechanize` agent that sets credentials through `request_headers=` or the per-request `headers` argument. Disclosure only; no integrity or availability impact.\\n\\n## Patches\\n\\nFixed in `mechanize` v2.14.1.\\n\\n- Credentials and cookies are withheld from a request that follows a redirect across an origin, from **both** header sources: the per-request `headers` argument and `Mechanize#request_headers=`.\\n- `CREDENTIAL_HEADERS` gains `Proxy-Authorization`; `COOKIE_HEADERS` gains `Cookie2`.\\n\\n`Proxy-Authorization` is withheld here although curl does not withhold it, because `Net::HTTP` tunnels `https:` requests with `CONNECT`, so a caller-supplied `Proxy-Authorization` travels inside the tunnel to the origin server rather than to the proxy.\\n\\nHeaders set through `Mechanize#request_headers=` no longer reach a redirect target on another origin when they are credentials. Callers that relied on the previous behavior will see those headers withheld.\\n\\n### What this fix does not cover\\n\\nOnly the headers in `CREDENTIAL_HEADERS` and `COOKIE_HEADERS` are withheld. A caller-supplied header that carries a credential under some other name — `X-API-Key`, `X-Vault-Token`, or any bespoke token header — still follows a redirect to another origin, matching the behavior of curl's `CURLOPT_HTTPHEADER`. If you set such a header, do not enable redirect following for requests that carry it, or scope it to a single request whose destination you control.\\n\\n## Workarounds\\n\\nSet `Mechanize#redirect_ok = false` and handle redirects explicitly, or avoid `request_headers=` for credentials and pass them per-request only to hosts you intend to authenticate to.\\n\\n## Credit\\n\\nReported by @SnailSploit.\", \"ghsa_id\": \"GHSA-2mwr-xjcg-37j7\", \"github_reviewed_at\": \"2026-10-08T22:09:00Z\", \"html_url\": \"https://github.com/advisories/GHSA-2mwr-xjcg-37j7\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-2mwr-xjcg-37j7\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107715\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T22:09:00Z\", \"references\": [\"https://github.com/sparklemotion/mechanize/security/advisories/GHSA-2mwr-xjcg-37j7\", \"https://github.com/sparklemotion/mechanize/pull/676\", \"https://github.com/sparklemotion/mechanize/commit/02a1235842d6eda8d4a5a3d8f13aba2cecf52e4f\", \"https://github.com/sparklemotion/mechanize/commit/94e0902867296be804f36eccbb47acf7d5018745\", \"https://github.com/sparklemotion/mechanize/commit/ac49abf2869297d83c3b11bbfb8b18e63b588c95\", \"https://github.com/sparklemotion/mechanize/releases/tag/v2.14.1\", \"https://github.com/advisories/GHSA-2mwr-xjcg-37j7\"], \"repository_advisory_url\": \"https://api.github.com/repos/sparklemotion/mechanize/security-advisories/GHSA-2mwr-xjcg-37j7\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/sparklemotion/mechanize\", \"summary\": \"Mechanize sends credential headers to another host after an HTTP redirect\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T22:09:01Z\", \"url\": \"https://api.github.com/advisories/GHSA-2mwr-xjcg-37j7\", \"vulnerabilities\": [{\"first_patched_version\": \"2.14.1\", \"package\": {\"ecosystem\": \"rubygems\", \"name\": \"mechanize\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 2.14.1\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-2mwr-xjcg-37j7",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "mechanize: < 2.14.1"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107715"
+    ],
+    "cvss_score": 6.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "mechanize"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.341835Z",
+  "provenance": {
+    "content_sha256": "b3ed43a0f78642ad391d6700985d5bf00ff557646750e5d1c88092281fb5c3e2",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T22:09:00Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-2mwr-xjcg-37j7",
+  "status": "active",
+  "title": "Mechanize sends credential headers to another host after an HTTP redirect",
+  "updated_at": "2026-10-08T22:09:01Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-2mwr-xjcg-37j7"
+}
