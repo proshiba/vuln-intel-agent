@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/149681061?v=4\", \"events_url\": \"https://api.github.com/users/dinhvaren/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/dinhvaren/followers\", \"following_url\": \"https://api.github.com/users/dinhvaren/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/dinhvaren/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/dinhvaren\", \"id\": 149681061, \"login\": \"dinhvaren\", \"node_id\": \"U_kgDOCOvzpQ\", \"organizations_url\": \"https://api.github.com/users/dinhvaren/orgs\", \"received_events_url\": \"https://api.github.com/users/dinhvaren/received_events\", \"repos_url\": \"https://api.github.com/users/dinhvaren/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/dinhvaren/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/dinhvaren/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/dinhvaren\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-61426\", \"cvss\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.6, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-200\", \"name\": \"Exposure of Sensitive Information to an Unauthorized Actor\"}, {\"cwe_id\": \"CWE-284\", \"name\": \"Improper Access Control\"}, {\"cwe_id\": \"CWE-306\", \"name\": \"Missing Authentication for Critical Function\"}], \"description\": \"## Summary\\n\\nThe AgentOS server in the `praisonai` TypeScript/npm package ships an insecure default: it binds `0.0.0.0`, sets no API key, and uses CORS `*` with credentials. The API-key middleware is only registered when an API key is configured, so the documented quickstart (`new AgentOS({agents:[...]}).serve({port})`) exposes, **unauthenticated**, `GET /api/agents` (which leaks agent names/roles/instructions, i.e. system prompts) and `POST /api/chat` (which invokes agents). Any network peer can read agent system prompts and drive the agent. Runtime-confirmed; severity High.\\n\\n## Details\\n\\n### Affected component\\n- Package: `praisonai` (npm / TypeScript). Files `src/praisonai-ts/src/os/config.ts` and `src/praisonai-ts/src/os/agentos.ts` (`AgentOS`).\\n\\n### Vulnerable code / root cause\\n\\nPath:\\n`src/praisonai-ts/src/os/config.ts`\\n\\nClass/const:\\n`DEFAULT_AGENTOS_CONFIG` / `mergeConfig`\\n\\nSnippet:\\n```ts\\nexport const DEFAULT_AGENTOS_CONFIG = {\\n  host: '0.0.0.0',\\n  corsOrigins: ['*'],\\n  apiKey: '',\\n  // ...\\n};\\n// mergeConfig: apiKey = userConfig?.apiKey ?? process.env.PRAISONAI_AGENTOS_API_KEY ?? '';\\n```\\nIssue: defaults bind all interfaces, with an empty API key and wildcard CORS. `apiKey` stays empty unless the developer explicitly sets it.\\n\\nPath:\\n`src/praisonai-ts/src/os/agentos.ts`\\n\\nFunction:\\n`serve` / `_registerRoutes` (Express app)\\n\\nSnippet:\\n```ts\\nif (this.config.apiKey) {              // auth middleware ONLY added when apiKey is set\\n  app.use((req,res,next) => { /* 401 unless Bearer/x-auth-token matches */ });\\n}\\n// routes:\\napp.get(`${apiPrefix}/agents`, ...)    // returns name/role/instructions\\napp.post(`${apiPrefix}/chat`,  ...)    // calls agent.chat(message)\\n```\\nIssue: the only auth gate is conditional on a non-empty `apiKey`. With the default empty key, no auth middleware is registered, and `GET /api/agents` (system-prompt disclosure) and `POST /api/chat` (agent invocation) are served to any network client. CORS sets `Access-Control-Allow-Credentials: true` with a wildcard origin.\\n\\n### Attack flow\\n1. Developer deploys AgentOS via the quickstart without setting `apiKey`/`PRAISONAI_AGENTOS_API_KEY`.\\n2. Any network peer calls `GET /api/agents` → receives agent instructions/system prompts.\\n3. Any network peer calls `POST /api/chat` → invokes the agent.\\n\\n### Why existing protection is bypassed\\nThere is no protection in the default config — the auth gate is skipped when `apiKey` is empty (the default), and the server binds all interfaces.\\n\\n### Security boundary\\nUnauthenticated network access to agent metadata + invocation. This is the CVE-2026-44338 anti-pattern recurring in the TS package, and worse (0.0.0.0 is the default).\\n\\n## Proof of Concept\\n\\n### Environment\\nReal AgentOS from `src/praisonai-ts` run via ts-node in a node container with default config (stub agent, no LLM needed). `127.0.0.1:18000`. Runnable assets: `PraisonAI-Runtime-Repro\\\\runtime-files\\\\` (`docker-compose.agentos.yml`).\\n\\n### Steps to reproduce\\n1. `PRAI-01-01-AgentOS-Agents-NoAuth`: `GET /api/agents` (no Authorization) → `127.0.0.1:18000`.\\n2. `PRAI-01-02-AgentOS-Chat-NoAuth`: `POST /api/chat {\\\"message\\\":\\\"hello from attacker\\\"}` (no Authorization).\\n\\n### Expected result\\nNon-loopback exposure should require authentication; agent instructions should not be disclosed unauthenticated.\\n\\n### Actual result\\n- `GET /api/agents` → `200`, leaks `\\\"instructions\\\":\\\"SYSTEM PROMPT SECRET ... PRAISONAI_INTERNAL_SECRET_CANARY_7f3a91\\\"`; response header `Access-Control-Allow-Credentials: true`.\\n- `POST /api/chat` → `200`, agent invoked (`\\\"response\\\":\\\"...PRAISONAI_AGENTOS_CANARY_7f3a91...\\\"`).\\n\\n### Screenshots\\n\\n**Unauthenticated `/api/agents` leaks agent instructions**\\n\\nA GET request to `/api/agents` succeeds without an `Authorization` header. The response exposes agent metadata and instructions, including the canary system-prompt value.\\n\\n<img width=\\\"1535\\\" height=\\\"829\\\" alt=\\\"01-AgentOS-Agents-NoAuth\\\" src=\\\"https://github.com/user-attachments/assets/705087e1-8017-46f6-9a91-edb8312e2f26\\\" />\\n\\n**Unauthenticated `/api/chat` invokes the agent**\\n\\nA POST request to `/api/chat` succeeds without an `Authorization` header. The response confirms that the attacker-controlled message was processed by the configured agent.\\n\\n<img width=\\\"1537\\\" height=\\\"833\\\" alt=\\\"02-AgentOS-Chat-NoAuth\\\" src=\\\"https://github.com/user-attachments/assets/5cdf8f56-b8d8-498b-87bd-44834f39998c\\\" />\\n\\n### Reproduction assets\\n\\nThe attached archive contains the local Docker runtime used to reproduce the issue with controlled canary values only. It does not contain real secrets, third-party API keys, or production credentials.\\n\\n[PraisonAI-Runtime-Repro.zip](https://github.com/user-attachments/files/29143421/PraisonAI-Runtime-Repro.zip)\\n\\n## Impact\\nUnauthenticated disclosure of agent configuration/system prompts; unauthenticated agent invocation; LLM cost abuse; possible tool abuse depending on the configured agent's tools; permissive CORS-with-credentials.\\n\\n## Suggested remediation\\n- Default `host` to `127.0.0.1`; require `apiKey` (fail closed) when binding non-loopback.\\n- Do not default `corsOrigins` to `['*']`, especially with `Access-Control-Allow-Credentials: true`.\\n- Do not return full `instructions` on an unauthenticated endpoint.\", \"epss\": {\"percentage\": 0.00478, \"percentile\": 0.3858}, \"ghsa_id\": \"GHSA-6wjp-v33h-5cvq\", \"github_reviewed_at\": \"2026-10-08T22:01:29Z\", \"html_url\": \"https://github.com/advisories/GHSA-6wjp-v33h-5cvq\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-6wjp-v33h-5cvq\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-61426\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T22:01:29Z\", \"references\": [\"https://github.com/MervinPraison/PraisonAI/security/advisories/GHSA-6wjp-v33h-5cvq\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-61426\", \"https://www.vulncheck.com/advisories/praisonai-before-unauthenticated-agent-access-via-insecure-defaults\", \"https://github.com/advisories/GHSA-6wjp-v33h-5cvq\"], \"repository_advisory_url\": \"https://api.github.com/repos/MervinPraison/PraisonAI/security-advisories/GHSA-6wjp-v33h-5cvq\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/MervinPraison/PraisonAI\", \"summary\": \"PraisonAI: AgentOS defaults to network-exposed no-auth mode, allowing unauthenticated agent invocation and instruction disclosure\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T22:01:31Z\", \"url\": \"https://api.github.com/advisories/GHSA-6wjp-v33h-5cvq\", \"vulnerabilities\": [{\"first_patched_version\": \"1.7.3\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"praisonai\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"< 1.7.3\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-6wjp-v33h-5cvq",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "praisonai: < 1.7.3"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-44338",
+      "CVE-2026-61426"
+    ],
+    "cvss_score": 8.6,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "praisonai"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.357403Z",
+  "provenance": {
+    "content_sha256": "4f6bc9f79e1c897f57e96c8f5ac21371bc80a45bd0b4c347d57695f8fd60c266",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T22:01:29Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-6wjp-v33h-5cvq",
+  "status": "active",
+  "title": "PraisonAI: AgentOS defaults to network-exposed no-auth mode, allowing unauthenticated agent invocation and instruction disclosure",
+  "updated_at": "2026-10-08T22:01:31Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-6wjp-v33h-5cvq"
+}

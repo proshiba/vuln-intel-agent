@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 5, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/69960711?v=4\", \"events_url\": \"https://api.github.com/users/EchoSkorJjj/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/EchoSkorJjj/followers\", \"following_url\": \"https://api.github.com/users/EchoSkorJjj/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/EchoSkorJjj/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/EchoSkorJjj\", \"id\": 69960711, \"login\": \"EchoSkorJjj\", \"node_id\": \"MDQ6VXNlcjY5OTYwNzEx\", \"organizations_url\": \"https://api.github.com/users/EchoSkorJjj/orgs\", \"received_events_url\": \"https://api.github.com/users/EchoSkorJjj/received_events\", \"repos_url\": \"https://api.github.com/users/EchoSkorJjj/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/EchoSkorJjj/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/EchoSkorJjj/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/EchoSkorJjj\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107392\", \"cvss\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 6.2, \"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-248\", \"name\": \"Uncaught Exception\"}, {\"cwe_id\": \"CWE-400\", \"name\": \"Uncontrolled Resource Consumption\"}], \"description\": \"## Summary\\n`DsfParser.parseChunks` skips an unrecognised chunk's payload with an **un-awaited** call:\\n```js\\nthis.tokenizer.ignore(Number(chunkHeader.size) - ChunkHeader.len);   // lib/dsf/DsfParser.js:51 — no await\\n```\\n`ChunkHeader.len` is 12. A crafted `.dsf` chunk with `id != 'fmt '` and `size` in `0..11` makes the\\nargument negative; strtok3 (≥ 10.3.5) throws `RangeError` on a negative `ignore`. Because the call\\nis fire-and-forget, the rejection is **detached from the `parseBuffer()` promise chain** → unhandled\\nrejection → Node's default (≥ 15) **crashes the process** — **after** `parseBuffer()` already\\nresolved, so a caller's `try/catch` catches nothing and is still taken down.\\n\\nResidual of GHSA-v6c2-xwv6-8xf7: the ASF site was fixed in 11.12.3 (size validation) and strtok3\\nnow throws on negative `ignore`; the DSF site was never validated, and its missing `await`\\nescalates that throw into an **uncatchable** crash.\\n\\n## Root cause (`lib/dsf/DsfParser.js:34-56`)\\n```js\\nwhile (bytesRemaining >= ChunkHeader.len) {               // ChunkHeader.len = 12\\n  const chunkHeader = await this.tokenizer.readToken(ChunkHeader);   // { id, size }\\n  switch (chunkHeader.id) {\\n    case 'fmt ': { ...; return; }\\n    default: this.tokenizer.ignore(Number(chunkHeader.size) - ChunkHeader.len); break;  // size<12 -> negative, no await\\n  }\\n  bytesRemaining -= chunkHeader.size;\\n}\\n```\\nstrtok3 `AbstractTokenizer.ignore` (L78-79): `if (length < 0) throw new RangeError('ignore length must be ≥ 0 bytes');`\\n\\n## Steps to reproduce\\n`repro/` — public API only, Node's default unhandled-rejection mode, `try/catch` around the parse:\\n```\\nnpm install && node poc.mjs\\n```\\nConfirmed on 11.14.0:\\n```\\n[app] parseBuffer() RESOLVED — the caller saw no error to catch.\\nRangeError: ignore length must be ≥ 0 bytes\\n    at DsfParser.parseChunks (.../lib/dsf/DsfParser.js:51)\\n   <process exits non-zero — the \\\"process survived\\\" line never prints>\\n```\\n\\n## Impact\\nDoS: a single crafted `.dsf` (or any file with the `DSD ` magic) crashes the Node process of any\\napp parsing untrusted audio with music-metadata (2.2M weekly downloads). The crash bypasses the\\ncaller's error handling, so even apps that correctly `try/catch` per-file parsing are killed — one\\nmalicious upload can take down a shared server/worker.\\n\\n## Remediation\\nAdd `await` on line 51 (makes the `RangeError` a catchable parse error), and validate\\n`chunkHeader.size >= ChunkHeader.len` before the skip (as the ASF fix did; also guards the loop\\ncounter). Audit other parsers for un-awaited `tokenizer.ignore()`/`readToken()`.\\n\\n## Scope / honesty\\nRequires the DSF path (a `DSD `-magic file — normal auto-detection). Relies on Node's default\\nunhandled-rejection mode (`throw`, default since Node 15); the point is that the standard defensive\\nper-parse `try/catch` does not protect against it. Crash (availability), not disclosure/RCE.\\nNegatives confirmed alongside: ASF infinite loop fixed; negative-`ignore` infinite-loop class\\nclosed at strtok3; unbounded allocation bounded by strtok3's read bound-check.\\n\\n## Credits\\nIssue also reported by @ryu7eroo\", \"ghsa_id\": \"GHSA-8j4c-6x6g-rq3j\", \"github_reviewed_at\": \"2026-10-08T19:40:45Z\", \"html_url\": \"https://github.com/advisories/GHSA-8j4c-6x6g-rq3j\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-8j4c-6x6g-rq3j\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107392\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T19:40:45Z\", \"references\": [\"https://github.com/Borewit/music-metadata/security/advisories/GHSA-8j4c-6x6g-rq3j\", \"https://github.com/Borewit/music-metadata/pull/2700\", \"https://github.com/Borewit/music-metadata/commit/e7fc27a96e789d41ece41fdac590fc7618274a41\", \"https://github.com/Borewit/music-metadata/releases/tag/v11.15.0\", \"https://github.com/advisories/GHSA-8j4c-6x6g-rq3j\"], \"repository_advisory_url\": \"https://api.github.com/repos/Borewit/music-metadata/security-advisories/GHSA-8j4c-6x6g-rq3j\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/Borewit/music-metadata\", \"summary\": \"music-metadata: uncatchable process crash parsing a crafted `.dsf` (residual of GHSA-v6c2-xwv6-8xf7)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T19:40:46Z\", \"url\": \"https://api.github.com/advisories/GHSA-8j4c-6x6g-rq3j\", \"vulnerabilities\": [{\"first_patched_version\": \"11.15.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"music-metadata\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 11.14.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-8j4c-6x6g-rq3j",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "music-metadata: <= 11.14.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107392"
+    ],
+    "cvss_score": 6.2,
+    "cvss_vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "music-metadata"
+    ],
+    "remote": false,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.424737Z",
+  "provenance": {
+    "content_sha256": "ffaff61a51e2971846dd91b596b608f7f7d4a8e5864759dc37d573f96866e13c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T19:40:45Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-8j4c-6x6g-rq3j",
+  "status": "active",
+  "title": "music-metadata: uncatchable process crash parsing a crafted `.dsf` (residual of GHSA-v6c2-xwv6-8xf7)",
+  "updated_at": "2026-10-08T19:40:46Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-8j4c-6x6g-rq3j"
+}

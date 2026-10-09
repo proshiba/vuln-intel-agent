@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/128204523?v=4\", \"events_url\": \"https://api.github.com/users/1491342590/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/1491342590/followers\", \"following_url\": \"https://api.github.com/users/1491342590/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/1491342590/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/1491342590\", \"id\": 128204523, \"login\": \"1491342590\", \"node_id\": \"U_kgDOB6Q-6w\", \"organizations_url\": \"https://api.github.com/users/1491342590/orgs\", \"received_events_url\": \"https://api.github.com/users/1491342590/received_events\", \"repos_url\": \"https://api.github.com/users/1491342590/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/1491342590/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/1491342590/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/1491342590\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107809\", \"cvss\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 8.8, \"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-352\", \"name\": \"Cross-Site Request Forgery (CSRF)\"}], \"description\": \"## Summary\\nNginx-UI v2.4.3 stores the API JWT in a browser cookie named `token` and the `AuthRequired` middleware accepts that cookie as an authentication source. Because management endpoints are protected by `AuthRequired` and do not enforce a universal CSRF token or Origin/Referer check, a remote attacker can induce a logged-in administrator to submit cross-site state-changing requests. The attacker does not need to read the cross-origin response; the browser-sent cookie is enough to authenticate the request.\\n\\n## Details\\nThe root cause is a trust-boundary failure between browser-managed cookies and API bearer-token authentication. In `app/src/pinia/moudule/user.ts:25-35`, the front end writes the JWT to a `token` cookie when the token changes. In `internal/middleware/middleware.go:16-36`, `getToken` first checks the `Authorization` header and `token` query parameter, then falls back to `c.Cookie(\\\"token\\\")`. That fallback causes browser-initiated cross-site requests to carry a valid API credential automatically. The route group in `router/routers.go:87-110` applies `middleware.AuthRequired()` to many management modules, including `config.InitRouter`, `nginx.InitRouter`, `settings.InitRouter`, and backup-related handlers. For accounts without OTP/Passkey, `RequireSecureSession` does not provide a universal second factor for all state-changing operations. A representative sink is `api/config/add.go:68-78`, where an authenticated request writes Nginx configuration with `os.WriteFile` and then calls `nginx.Control(nginx.Reload)`. CORS does not mitigate this issue because preventing cross-origin response reads does not prevent cross-site form or no-cors requests from being sent with cookies.\\n\\nCore vulnerable code path:\\n\\n```typescript\\n// app/src/pinia/moudule/user.ts:25-35\\nwatch(token, v => {\\n    if (v) {\\n      cookies.set('token', v, getCookieOptions(86400))\\n      if (!shortToken.value) {\\n        void fetchShortToken()\\n      }\\n    }\\n    else {\\n      cookies.remove('token', { path: '/' })\\n      shortToken.value = ''\\n    }\\n  })\\n```\\n\\nThe front end stores the authentication token in a `token` cookie. The cookie is created client-side and is not shown here as HttpOnly; it becomes the credential that the back end later accepts through cookie fallback.\\n\\n```go\\n// internal/middleware/middleware.go:16-36\\n// getToken from header, cookie or query\\nfunc getToken(c *gin.Context) (token string) {\\n\\tif token = c.GetHeader(\\\"Authorization\\\"); token != \\\"\\\" {\\n\\t\\treturn\\n\\t}\\n\\n\\tif token = c.Query(\\\"token\\\"); token != \\\"\\\" {\\n\\t\\tif len(token) > 16 {\\n\\t\\t\\t// Long token (base64 encoded JWT)\\n\\t\\t\\ttokenBytes, _ := base64.StdEncoding.DecodeString(token)\\n\\t\\t\\treturn string(tokenBytes)\\n\\t\\t}\\n\\t\\t// Short token (16 characters)\\n\\t\\treturn token\\n\\t}\\n\\n\\tif token, _ = c.Cookie(\\\"token\\\"); token != \\\"\\\" {\\n\\t\\treturn token\\n\\t}\\n\\n\\treturn \\\"\\\"\\n}\\n```\\n\\n`getToken` accepts the `token` cookie as an authentication credential after checking the header and query parameter. That behavior lets a browser-sent cookie authenticate state-changing API requests triggered from another origin.\\n\\n```go\\n// router/routers.go:87-110\\n// Authorization required and not websocket request\\n\\t\\tg := root.Group(\\\"/\\\", middleware.AuthRequired(), middleware.Proxy())\\n\\t\\t{\\n\\t\\t\\tdebug.InitRouter(g)\\n\\t\\t\\tuser.InitUserRouter(g)\\n\\t\\t\\tanalytic.InitRouter(g)\\n\\t\\t\\tuser.InitManageUserRouter(g)\\n\\t\\t\\tnginx.InitRouter(g)\\n\\t\\t\\tsites.InitRouter(g)\\n\\t\\t\\tstreams.InitRouter(g)\\n\\t\\t\\tconfig.InitRouter(g)\\n\\t\\t\\ttemplate.InitRouter(g)\\n\\t\\t\\tcertificate.InitCertificateRouter(g)\\n\\t\\t\\tcertificate.InitDNSCredentialRouter(g)\\n\\t\\t\\tcertificate.InitAcmeUserRouter(g)\\n\\t\\t\\tdnsapi.InitRouter(g)\\n\\t\\t\\tsystem.InitPrivateRouter(g)\\n\\t\\t\\tsettings.InitRouter(g)\\n\\t\\t\\tllm.InitRouter(g)\\n\\t\\t\\tcluster.InitRouter(g)\\n\\t\\t\\tnotification.InitRouter(g)\\n\\t\\t\\texternal_notify.InitRouter(g)\\n\\t\\t\\tbackup.InitAutoBackupRouter(g)\\n\\t\\t\\tnginxLog.InitRouter(g)\\n\\t\\t\\tupstream.InitHTTPRouter(g)\\n```\\n\\nMany management modules, including Nginx, configuration, settings, backup, and user management, are placed behind `AuthRequired`. The cookie fallback therefore protects high-impact state-changing routes, not only read-only endpoints.\\n\\n```go\\n// api/config/add.go:68-78\\nerr = os.WriteFile(path, []byte(content), 0644)\\n\\tif err != nil {\\n\\t\\tcosy.ErrHandler(c, err)\\n\\t\\treturn\\n\\t}\\n\\n\\tres := nginx.Control(nginx.Reload)\\n\\tif res.IsError() {\\n\\t\\tres.RespError(c)\\n\\t\\treturn\\n\\t}\\n```\\n\\nThis representative sink shows why the CSRF is high impact: once authenticated through the cookie fallback, a request can write Nginx configuration content and trigger a reload.\\n\\n## POC\\nPrerequisites: an administrator is logged in to Nginx-UI and has a browser `token` cookie; the administrator account has not enabled OTP/Passkey, or the chosen target endpoint does not require secure-session proof; the attacker knows the Nginx-UI management URL and can induce the administrator to visit an attacker-controlled page. Reproduction: (1) Host an attacker page at `GET /csrf.html` that automatically submits a cross-site request to the victim instance. (2) The page submits `POST /api/configs` with configuration fields such as `base_dir`, `name`, `content`, `overwrite`, and `sync_node_ids`; the attacker does not need to read the response. (3) When the administrator visits the page, the browser attaches the victim site's `token` cookie. (4) Expected result: `AuthRequired` authenticates from the cookie, `AddConfig` writes the Nginx configuration, and the application attempts an Nginx reload. Testing should use a harmless configuration in an isolated environment.\\n\\n## Impact\\nAn attacker can trigger administrative operations while an administrator is logged in, including Nginx configuration creation or modification, reload/restart operations, settings changes, and backup-related actions depending on endpoint protections. Direct impacts include traffic redirection, reverse proxy tampering, denial of service, and sensitive configuration changes. In deployments with permissive Nginx modules or dangerous configuration capabilities, configuration tampering may lead to further server-side impact or internal network abuse.\", \"ghsa_id\": \"GHSA-33rr-wq23-g6gg\", \"github_reviewed_at\": \"2026-10-09T17:08:10Z\", \"html_url\": \"https://github.com/advisories/GHSA-33rr-wq23-g6gg\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-33rr-wq23-g6gg\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107809\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T17:08:10Z\", \"references\": [\"https://github.com/0xJacky/nginx-ui/security/advisories/GHSA-33rr-wq23-g6gg\", \"https://github.com/0xJacky/nginx-ui/commit/a3999bd78a3b97ab22e6b5e9fd478ac57598a954\", \"https://github.com/0xJacky/nginx-ui/releases/tag/v2.5.0\", \"https://github.com/advisories/GHSA-33rr-wq23-g6gg\"], \"repository_advisory_url\": \"https://api.github.com/repos/0xJacky/nginx-ui/security-advisories/GHSA-33rr-wq23-g6gg\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/0xJacky/nginx-ui\", \"summary\": \"Nginx-UI AuthRequired token cookie fallback enables CSRF against management APIs\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T17:08:11Z\", \"url\": \"https://api.github.com/advisories/GHSA-33rr-wq23-g6gg\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.10-0.20260728074433-a3999bd78a3b\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/0xJacky/Nginx-UI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728074433-a3999bd78a3b\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-33rr-wq23-g6gg",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/0xJacky/Nginx-UI: >= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728074433-a3999bd78a3b"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107809"
+    ],
+    "cvss_score": 8.8,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/0xJacky/Nginx-UI"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.287133Z",
+  "provenance": {
+    "content_sha256": "b8bbd787db2e8ac79d1cf3893e885a0da0da45c8c7929da74352d0caf81c3c6a",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T17:08:10Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-33rr-wq23-g6gg",
+  "status": "active",
+  "title": "Nginx-UI AuthRequired token cookie fallback enables CSRF against management APIs",
+  "updated_at": "2026-10-09T17:08:11Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-33rr-wq23-g6gg"
+}

