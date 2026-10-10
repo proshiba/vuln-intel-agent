@@ -1,0 +1,57 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 0, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/219919212?v=4\", \"events_url\": \"https://api.github.com/users/JellowBeanz26/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/JellowBeanz26/followers\", \"following_url\": \"https://api.github.com/users/JellowBeanz26/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/JellowBeanz26/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/JellowBeanz26\", \"id\": 219919212, \"login\": \"JellowBeanz26\", \"node_id\": \"U_kgDODRuzbA\", \"organizations_url\": \"https://api.github.com/users/JellowBeanz26/orgs\", \"received_events_url\": \"https://api.github.com/users/JellowBeanz26/received_events\", \"repos_url\": \"https://api.github.com/users/JellowBeanz26/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/JellowBeanz26/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/JellowBeanz26/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/JellowBeanz26\", \"user_view_type\": \"public\"}}], \"cve_id\": null, \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 6.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-862\", \"name\": \"Missing Authorization\"}], \"description\": \"### Summary\\nCreating a task relation over CalDAV does not run the `TaskRelation.CanCreate` permission check that the REST API enforces. An attacker can attach a relation to any task whose UID they know, including tasks in projects they have no access to. The identical operation over REST is correctly refused with 403.\\n\\n### Details\\n`persistRelations` (`pkg/routes/caldav/listStorageProvider.go`, ~line 986) resolves the related task with an **unscoped** UID lookup (`models.GetTaskSimpleByUUID`) and calls `rel.Create(s, a)` directly, with no `CanCreate` check. `pkg/caldav/parsing.go` maps `RELATED-TO;RELTYPE=CHILD` to `RelationKindSubtask`. Because the CalDAV path never invokes the model's permission method, an authenticated user can create a subtask/parent relation between a task they own and an arbitrary victim task identified only by its UID.\\n\\nTask UIDs are `json:\\\"-\\\"` (never exposed over REST) but are exposed over CalDAV to anyone who has ever had read access to the containing project. Revoking that access does not unlearn the UID, so the realistic attacker is a removed collaborator.\\n\\nThis write primitive also feeds the cross-project subtask-disclosure issue (GHSA-3hc7-r24j-rpwc): it lets an attacker create the very cross-project subtask edge that read path leaks across, removing that finding's \\\"the attacker cannot create one to a project they can't access\\\" precondition.\\n\\nA secondary effect of the same unchecked path: the `createDummy` branch can `Create` a task unchecked when the referenced UID does not resolve.\\n\\n### PoC (verified at runtime against v2.5.0, commit c775a6c8)\\nBaseline control — REST refuses:\\n```\\nPUT /api/v1/tasks/{attackerTask}/relations   (attacker JWT)\\n{\\\"task_id\\\":{attackerTask},\\\"other_task_id\\\":{victimTask},\\\"relation_kind\\\":\\\"subtask\\\"}\\n-> HTTP 403 Forbidden\\n```\\nExploit — CalDAV succeeds:\\n```\\nPUT /dav/projects/{attackerProject}/{attackerTaskUID}.ics   (BasicAuth attacker)\\nBEGIN:VCALENDAR\\nVERSION:2.0\\nBEGIN:VTODO\\nUID:{attackerTaskUID}\\nRELATED-TO;RELTYPE=CHILD:{victimTaskUID}\\nEND:VTODO\\nEND:VCALENDAR\\n-> HTTP 201\\n```\\nResult: a `task_relations` row is written with `task_id={victimTask}`, `relation_kind=parenttask`, `created_by_id={attacker}` — a persisted, attacker-attributable write onto a task in a project the attacker cannot access.\\n\\n### Impact\\nBroken access control (missing authorization) on relation creation. An attacker can pollute the relation set of arbitrary tasks by UID and create the cross-project edges that enable subtask disclosure. Read of the related task's contents still requires the separate disclosure path; this finding is the unauthorized **write**.\\n\\n### Fix\\nRoute CalDAV relation creation through `TaskRelation.CanCreate`, and scope the UID lookup to projects the caller can access.\", \"ghsa_id\": \"GHSA-g38j-7v97-x298\", \"github_reviewed_at\": \"2026-10-09T20:54:43Z\", \"html_url\": \"https://github.com/advisories/GHSA-g38j-7v97-x298\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-g38j-7v97-x298\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T20:54:43Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-g38j-7v97-x298\", \"https://github.com/go-vikunja/vikunja/pull/3688\", \"https://github.com/go-vikunja/vikunja/commit/077dc4de79ce6f1ab59215a2c7bf9b30423685f2\", \"https://github.com/go-vikunja/vikunja/releases/tag/v2.6.0\", \"https://github.com/advisories/GHSA-g38j-7v97-x298\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-g38j-7v97-x298\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja: CalDAV relation creation bypasses TaskRelation.CanCreate, allowing an unauthorized write into any task by known UID\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T20:54:44Z\", \"url\": \"https://api.github.com/advisories/GHSA-g38j-7v97-x298\", \"vulnerabilities\": [{\"first_patched_version\": \"2.6.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \"<= 2.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-g38j-7v97-x298",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: <= 2.5.0"
+    ],
+    "authentication_required": false,
+    "cves": [],
+    "cvss_score": 6.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-10T19:12:40.385261Z",
+  "provenance": {
+    "content_sha256": "74d73e653b058bf454ca0680eb48478873b27908260ddc1fc09b16044079ba0c",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T20:54:43Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-g38j-7v97-x298",
+  "status": "active",
+  "title": "Vikunja: CalDAV relation creation bypasses TaskRelation.CanCreate, allowing an unauthorized write into any task by known UID",
+  "updated_at": "2026-10-09T20:54:44Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-g38j-7v97-x298"
+}

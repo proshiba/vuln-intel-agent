@@ -1,0 +1,60 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 4, \"credits\": [{\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/81830661?v=4\", \"events_url\": \"https://api.github.com/users/maskop9/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/maskop9/followers\", \"following_url\": \"https://api.github.com/users/maskop9/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/maskop9/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/maskop9\", \"id\": 81830661, \"login\": \"maskop9\", \"node_id\": \"MDQ6VXNlcjgxODMwNjYx\", \"organizations_url\": \"https://api.github.com/users/maskop9/orgs\", \"received_events_url\": \"https://api.github.com/users/maskop9/received_events\", \"repos_url\": \"https://api.github.com/users/maskop9/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/maskop9/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/maskop9/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/maskop9\", \"user_view_type\": \"public\"}}, {\"type\": \"reporter\", \"user\": {\"avatar_url\": \"https://avatars.githubusercontent.com/u/183680293?v=4\", \"events_url\": \"https://api.github.com/users/evilgensec/events{/privacy}\", \"followers_url\": \"https://api.github.com/users/evilgensec/followers\", \"following_url\": \"https://api.github.com/users/evilgensec/following{/other_user}\", \"gists_url\": \"https://api.github.com/users/evilgensec/gists{/gist_id}\", \"gravatar_id\": \"\", \"html_url\": \"https://github.com/evilgensec\", \"id\": 183680293, \"login\": \"evilgensec\", \"node_id\": \"U_kgDOCvK9JQ\", \"organizations_url\": \"https://api.github.com/users/evilgensec/orgs\", \"received_events_url\": \"https://api.github.com/users/evilgensec/received_events\", \"repos_url\": \"https://api.github.com/users/evilgensec/repos\", \"site_admin\": false, \"starred_url\": \"https://api.github.com/users/evilgensec/starred{/owner}{/repo}\", \"subscriptions_url\": \"https://api.github.com/users/evilgensec/subscriptions\", \"type\": \"User\", \"url\": \"https://api.github.com/users/evilgensec\", \"user_view_type\": \"public\"}}], \"cve_id\": \"CVE-2026-62367\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 7.5, \"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-287\", \"name\": \"Improper Authentication\"}, {\"cwe_id\": \"CWE-290\", \"name\": \"Authentication Bypass by Spoofing\"}, {\"cwe_id\": \"CWE-345\", \"name\": \"Insufficient Verification of Data Authenticity\"}], \"description\": \"## Summary\\n\\nWith the per-provider OIDC `emailfallback` option enabled, Vikunja links an SSO login to a pre-existing **local** (username+password) account using only the `email` claim — no `email_verified` (or Microsoft `xms_edov`) check and no password check, on the unauthenticated callback. An attacker who can make the configured issuer emit a token bearing a victim's email logs in as that victim with a full session and no victim interaction (the nOAuth / Grafana CVE-2023-3128 class). The 2.3.0 fix for GHSA-8jvc-mcx6-r4cg added a TOTP gate, not an `email_verified` gate, so users without TOTP remain exposed.\\n\\n## Details\\n\\nReferences are `pkg/modules/auth/openid/openid.go` at HEAD. Identity is first resolved on the immutable `(issuer, subject)` pair (`openid.go:428`). On a subject miss with `emailfallback` on, `fallbackSearchUsers` adds an email-only lookup against local accounts:\\n\\n```go\\n// openid.go:413\\nsearches = append(searches, &user.User{Issuer: user.IssuerLocal, Email: cl.Email})\\n```\\n\\n`getUser` resolves this via `s.Get()`, which ANDs non-zero fields -> `WHERE issuer='local' AND email=?`. Local users always have `Issuer=\\\"local\\\"` (`user_create.go:38`), so the lookup matches any local account by email alone; `getOrCreateUser` returns it and the caller mints a session — the password is never read. The `claims` struct has no `email_verified` field (`openid.go:80`) and `getClaims` never consults one; a repo-wide grep for `email_verified`/`xms_edov` returns nothing. The code already warns about this at `openid.go:388` (\\\"Discouraged for untrusted providers where someone can set email without verification\\\") — but enforces nothing.\\n\\n## Impact\\n\\nUnauthenticated takeover of any existing **local** account (read/write/delete its projects, tasks, attachments, shares), bypassing the password. Scope notes: only `issuer='local'` accounts are matched (not pure-SSO users); the attacker's `sub` is not bound to the victim record, but the attack is repeatable; TOTP users are protected by the 2.3.0 `enforceTOTPIfRequired` gate (`openid.go:250`), non-TOTP users are not.\\n\\n## Preconditions\\n\\n1. Admin enabled `emailfallback: true` (defaults false — a default install is unaffected).\\n2. The configured issuer lets the attacker assert the victim's unverified email: a self-service IdP (Keycloak/Authentik/Auth0/Dex with editable email), a mixed federation, or a multi-tenant Entra `/common` app. `iss`/`aud` are pinned, but the attacker controls `email`, not the issuer.\\n3. The victim has a local account.\\n\\nNot reachable against a single-tenant IdP that verifies email and disallows self-set addresses.\\n\\n## Recommended Fix\\n\\nAdd `email_verified` to the `claims` struct and require it `true` on the email-fallback branch before linking to a local account; reject when absent/false. For Entra also require `xms_edov` and pin multi-tenant configs to an allowed-tenant list. Fail closed on an email collision not backed by a verified email from a trusted single-tenant issuer rather than silently logging the caller in.\", \"ghsa_id\": \"GHSA-xv7q-fvmc-jx96\", \"github_reviewed_at\": \"2026-10-09T20:49:06Z\", \"html_url\": \"https://github.com/advisories/GHSA-xv7q-fvmc-jx96\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-xv7q-fvmc-jx96\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-62367\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T20:49:06Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-xv7q-fvmc-jx96\", \"https://github.com/go-vikunja/vikunja/commit/7854f2729ab72000210b61c25929678fd6901630\", \"https://github.com/go-vikunja/vikunja/releases/tag/v2.4.0\", \"https://github.com/advisories/GHSA-xv7q-fvmc-jx96\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-xv7q-fvmc-jx96\", \"severity\": \"high\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja: OIDC email-fallback account linking ignores email_verified, enabling local-account takeover\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T20:49:07Z\", \"url\": \"https://api.github.com/advisories/GHSA-xv7q-fvmc-jx96\", \"vulnerabilities\": [{\"first_patched_version\": \"2.4.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, <= 2.3.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-xv7q-fvmc-jx96",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: >= 1.0.0, <= 2.3.0"
+    ],
+    "authentication_required": false,
+    "cves": [
+      "CVE-2023-3128",
+      "CVE-2026-62367"
+    ],
+    "cvss_score": 7.5,
+    "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": false,
+    "vendor_severity": "high"
+  },
+  "first_seen_at": "2026-10-10T19:12:40.443071Z",
+  "provenance": {
+    "content_sha256": "63c450fbb060ef7e308b581eb439a8c656f5641b52d0574c5a9df08c98c53ead",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T20:49:06Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-xv7q-fvmc-jx96",
+  "status": "active",
+  "title": "Vikunja: OIDC email-fallback account linking ignores email_verified, enabling local-account takeover",
+  "updated_at": "2026-10-09T20:49:07Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-xv7q-fvmc-jx96"
+}

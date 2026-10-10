@@ -1,0 +1,59 @@
+{
+  "ai": {
+    "affected_assets": [],
+    "evidence_urls": [],
+    "exposure_conditions": [],
+    "recommended_actions": [],
+    "status": "pending",
+    "uncertainties": []
+  },
+  "body_excerpt": "{\"comments\": 1, \"credits\": [], \"cve_id\": \"CVE-2026-91983\", \"cvss\": {\"score\": null, \"vector_string\": null}, \"cvss_severities\": {\"cvss_v3\": {\"score\": 0.0, \"vector_string\": null}, \"cvss_v4\": {\"score\": 5.3, \"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N\"}}, \"cwes\": [{\"cwe_id\": \"CWE-863\", \"name\": \"Incorrect Authorization\"}], \"description\": \"## Summary\\n\\nAPI token permission checks only match the HTTP method and route path. The `expand` query parameter on task read endpoints embeds data from other permission groups (task comments, reactions, time entry counts) without checking whether the token holds those scopes. A token scoped only to `tasks` read permissions can therefore read task comments and reactions it was explicitly not granted.\\n\\n## Details\\n\\n`models.CanDoAPIRoute` (`pkg/models/api_routes.go`, ~line 440) authorises API tokens purely by comparing `method` and `c.Path()` against the routes stored for each granted permission group. The query string is never consulted.\\n\\nThe task read endpoints accept `expand`:\\n\\n- `GET /api/v1/tasks/:task`, `GET /api/v1/tasks` (`pkg/models/tasks.go` ReadOne/ReadAll, `pkg/models/task_collection.go`)\\n- `GET /api/v2/tasks/:id`, `GET /api/v2/tasks`, `GET /api/v2/projects/:project/tasks` (`pkg/routes/api/v2/tasks.go`, `task_collection.go`)\\n\\nAccepted values include `comments`, `comment_count`, `reactions`, `time_entries_count`. `addMoreInfoToTasks` (`pkg/models/tasks.go`, ~line 683) loads and embeds that data. At that layer only a `web.Auth` (the plain owner user, resolved by `auth.GetAuthFromClaims`) is available, so the token's scopes cannot be enforced there either.\\n\\nResult: the `tasks_comments`, `reactions`, and `time_entries` permission groups are advisory for any data reachable through a task expansion.\\n\\n## Impact\\n\\nA holder of an API token scoped to `tasks: [read_one]` or `tasks: [read_all]` (or `projects_views_tasks: [read_all]`) can read the full bodies of task comments, all reactions, and time entry counts on every task the token owner can access, despite `GET /api/v1|v2/tasks/:task/comments` and the reactions endpoints correctly returning 401 for the same token.\\n\\nThe leak is limited to data the token owner can already see, and is read-only. The realistic victim is a user who grants a narrowly scoped token to a third-party integration expecting comments to stay private.\\n\\n## Proof of Concept\\n\\nAgainst the test fixtures (`pkg/db/fixtures/api_tokens.yml`, token 1 has `{\\\"tasks\\\":[\\\"read_all\\\",\\\"update\\\"]}`, plaintext `tk_2eef46f40ebab3304919ab2e7e39993f75f29d2e`):\\n\\n```\\nGET /api/v2/tasks/1/comments\\nAuthorization: Bearer tk_2eef46f40ebab3304919ab2e7e39993f75f29d2e\\n-> 401 {\\\"code\\\":11,\\\"message\\\":\\\"missing, malformed, expired or otherwise invalid token provided\\\"}\\n\\nGET /api/v2/tasks?expand=comments&filter=id%3D1\\nAuthorization: Bearer tk_2eef46f40ebab3304919ab2e7e39993f75f29d2e\\n-> 200, response items[0].comments contains the full comment objects\\n```\\n\\nSame behaviour with `expand=reactions`, and on the v1 endpoints `GET /api/v1/tasks?expand=comments` / `GET /api/v1/tasks/1?expand=comments`. Any user-created token with only `tasks` read permissions reproduces this.\\n\\n## Recommended Fix\\n\\nEnforce expansions in the single existing choke point, `models.CanDoAPIRoute`: after the method/path match succeeds, read `c.QueryParams()[\\\"expand\\\"]` and require the token to hold the owning group's read permission for each value, e.g.\\n\\n- `comments`, `comment_count` -> `tasks_comments.read_all`\\n- `reactions` -> `reactions.read_all`\\n- `time_entries_count` -> `time_entries.read_all`\\n\\n(`subtasks`, `buckets`, `is_unread` are task-level data and need nothing extra.) Doing this in the middleware covers both v1 and v2 without handler or model changes. Add a table-driven test alongside `pkg/webtests/api_token_method_matching_test.go` asserting a `tasks`-only token gets 401 with `expand=comments` and 200 once `tasks_comments.read_all` is added.\", \"epss\": {\"percentage\": 0.00305, \"percentile\": 0.20638}, \"ghsa_id\": \"GHSA-9rg3-v78m-26q8\", \"github_reviewed_at\": \"2026-10-09T20:51:52Z\", \"html_url\": \"https://github.com/advisories/GHSA-9rg3-v78m-26q8\", \"identifiers\": [{\"type\": \"GHSA\", \"value\": \"GHSA-9rg3-v78m-26q8\"}, {\"type\": \"CVE\", \"value\": \"CVE-2026-91983\"}], \"nvd_published_at\": null, \"published_at\": \"2026-10-09T20:51:52Z\", \"references\": [\"https://github.com/go-vikunja/vikunja/security/advisories/GHSA-9rg3-v78m-26q8\", \"https://nvd.nist.gov/vuln/detail/CVE-2026-91983\", \"https://github.com/go-vikunja/vikunja/pull/3688\", \"https://github.com/go-vikunja/vikunja/commit/077dc4de79ce6f1ab59215a2c7bf9b30423685f2\", \"https://github.com/go-vikunja/vikunja/releases/tag/v2.6.0\", \"https://www.vulncheck.com/advisories/vikunja-before-2.6.0-api-token-scope-bypass-via-expand-parameter\", \"https://github.com/advisories/GHSA-9rg3-v78m-26q8\"], \"repository_advisory_url\": \"https://api.github.com/repos/go-vikunja/vikunja/security-advisories/GHSA-9rg3-v78m-26q8\", \"severity\": \"medium\", \"source_code_location\": \"https://github.com/go-vikunja/vikunja\", \"summary\": \"Vikunja: API token scopes bypassed via task expand parameter (comments, reactions, time entry counts)\", \"type\": \"reviewed\", \"updated_at\": \"2026-10-09T20:51:53Z\", \"url\": \"https://api.github.com/advisories/GHSA-9rg3-v78m-26q8\", \"vulnerabilities\": [{\"first_patched_version\": \"2.6.0\", \"package\": {\"ecosystem\": \"go\", \"name\": \"code.vikunja.io/api\"}, \"vulnerable_functions\": [], \"vulnerable_version_range\": \">= 1.0.0, <= 2.5.0\"}], \"withdrawn_at\": null}",
+  "canonical_id": "github:ghsa-9rg3-v78m-26q8",
+  "decision": {
+    "priority": "INFO",
+    "reasons": [
+      "資産不一致または判定情報不足"
+    ]
+  },
+  "enrichment": {
+    "asset_match": false,
+    "cisa_kev": false,
+    "internet_exposed": false,
+    "kev_entries": {},
+    "kev_ransomware": false,
+    "matched_asset_ids": []
+  },
+  "facts": {
+    "affected_versions": [
+      "code.vikunja.io/api: >= 1.0.0, <= 2.5.0"
+    ],
+    "authentication_required": true,
+    "cves": [
+      "CVE-2026-91983"
+    ],
+    "cvss_score": 5.3,
+    "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+    "fixed_versions": [],
+    "mitigations": [],
+    "products": [
+      "code.vikunja.io/api"
+    ],
+    "remote": true,
+    "vendor_severity": "medium"
+  },
+  "first_seen_at": "2026-10-10T19:12:40.426161Z",
+  "provenance": {
+    "content_sha256": "915e979f229b0e8d32996822421c76bfb806cccaa4762f30fa58b72d68e0c1c5",
+    "extractor_version": "0.1.0",
+    "source_type": "json_api"
+  },
+  "published_at": "2026-10-09T20:51:52Z",
+  "schema_version": 1,
+  "source_id": "github_advisory_database",
+  "source_url": "https://github.com/advisories/GHSA-9rg3-v78m-26q8",
+  "status": "active",
+  "title": "Vikunja: API token scopes bypassed via task expand parameter (comments, reactions, time entry counts)",
+  "updated_at": "2026-10-09T20:51:53Z",
+  "vendor": "GitHub",
+  "vendor_advisory_id": "GHSA-9rg3-v78m-26q8"
+}
