@@ -39,7 +39,7 @@ def test_registry_has_all_sources_enabled_for_collection() -> None:
     assert schneider.max_detail_fetches == 0
 
     collector_counts = Counter(source.collector for source in registry.sources)
-    assert collector_counts["html"] == 27
+    assert collector_counts["html"] == 26
     assert collector_counts["csaf"] == 6
 
 

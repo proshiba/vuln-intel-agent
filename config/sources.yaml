@@ -225,17 +225,20 @@ sources:
     category: network_security
     vendor: "WatchGuard"
     products: ["Firebox", "Fireware", "Secure Wi-Fi", "Dimension", "Endpoint"]
-    advisory_url: "https://www.watchguard.com/wgrd-psirt/advisories"
-    collector: feed
-    url: "https://www.watchguard.com/wgrd-psirt/advisories.xml"
-    allowed_hosts: ["www.watchguard.com"]
-    parser: feed
-    detail_collector: html
-    content_types: ["application/rss+xml", "application/xml", "text/xml"]
+    advisory_url: "https://psirt.watchguard.com/"
+    collector: json_api
+    # 旧 www.watchguard.com/wgrd-psirt/advisories.xml は psirt.watchguard.com へ移行し、
+    # 空の channel だけを返すようになったため、新ポータルが公開している検索インデックス
+    # （一覧ページが実際に読み込む JSON）へ切り替える。
+    url: "https://psirt.watchguard.com/search-index.json"
+    allowed_hosts: ["psirt.watchguard.com"]
+    parser: json
+    max_items: 2000
+    content_types: ["application/json"]
     feed:
       status: available
-      formats: [rss]
-      note: "ページ内RSS"
+      formats: [api]
+      note: "PSIRTポータルの検索インデックス（JSON）"
 
   - id: sophos
     category: network_security
@@ -283,12 +286,19 @@ sources:
     advisory_url: "https://support.hpe.com/connect/s/securitybulletinlibrary?archive=false&language=en_US"
     collector: browser
     url: "https://support.hpe.com/connect/s/securitybulletinlibrary?archive=false&language=en_US#sort=%40hpescuniversaldate%20descending&layout=table&numberOfResults=25&f:@kmdocsecuritybulletin=[4000017]&f:@kmdoclanguagecode=[cv1871440]&hpe=1"
-    allowed_hosts: ["support.hpe.com", "platform.cloud.coveo.com"]
+    # 検索結果は Coveo の組織エンドポイントから読み込まれる。このホストを許可しないと
+    # ブラウザコレクタが当該リクエストを遮断し、結果が描画されず wait_for が必ず時間切れになる。
+    allowed_hosts:
+      - "support.hpe.com"
+      - "platform.cloud.coveo.com"
+      - "hewlettpackardproductioniwmg9b9w.org.coveo.com"
     parser: generic
+    # 結果リンクの class は styled-components のハッシュ（StyledAnchor-sc-...）に変わり
+    # CoveoResultLink は付与されなくなったため、安定している href で選択する。
     selectors:
-      item: "a.CoveoResultLink[href*='/hpesc/public/docDisplay?docId=hpesb']"
+      item: "a[href*='/hpesc/public/docDisplay?docId=hpesb']"
       link: "a[href]"
-    wait_for: "a.CoveoResultLink[href*='/hpesc/public/docDisplay?docId=hpesb']"
+    wait_for: "a[href*='/hpesc/public/docDisplay?docId=hpesb']"
     max_detail_fetches: 0
     feed:
       status: available
@@ -392,15 +402,23 @@ sources:
     category: network_security
     vendor: "TP-Link"
     products: ["Archer", "Deco", "Omada", "Tapo", "Kasa", "CPE"]
-    advisory_url: "https://www.tp-link.com/us/press/security-advisory/"
-    collector: html
-    url: "https://www.tp-link.com/us/press/security-advisory/"
-    allowed_hosts: ["www.tp-link.com"]
+    # /us/press/security-advisory/ は /us/product-security/security-advisory/ へ移転した。
+    # 新ページは一覧をクライアント側で描画するため、静的HTMLには advisory リンクが無い。
+    advisory_url: "https://www.tp-link.com/us/product-security/security-advisory/"
+    collector: browser
+    url: "https://www.tp-link.com/us/product-security/security-advisory/"
+    allowed_hosts: ["www.tp-link.com", "static-page.tp-link.com", "static.tp-link.com"]
     parser: generic
+    # 一覧の各項目は /support/faq/<id>（ロケール接頭辞なし）。グローバルナビの
+    # "FAQs" は /us/support/faq/ なので、前方一致にすることで一覧の描画完了を
+    # 待てるようになる（部分一致ではナビのリンクに即座に一致してしまい、
+    # クライアント描画前のHTMLを取得してしまう）。
     selectors:
-      item: "a[href*='/us/support/faq/']"
+      item: "a[href^='/support/faq/']"
       link: "a[href]"
-      title_pattern: "^\\[?\\d+\\]?\\s*Security Advisory"
+      # 一覧の見出しは "Security Advisory ..." と "Statement on ..." の2系統。
+      title_pattern: "security advisor|statement on"
+    wait_for: "a[href^='/support/faq/']"
     max_items: 500
     max_detail_fetches: 10
     content_types: ["text/html", "application/xhtml+xml"]
@@ -712,12 +730,19 @@ sources:
     advisory_url: "https://support.hpe.com/connect/s/securitybulletinlibrary?archive=false&language=en_US"
     collector: browser
     url: "https://support.hpe.com/connect/s/securitybulletinlibrary?archive=false&language=en_US"
-    allowed_hosts: ["support.hpe.com", "platform.cloud.coveo.com"]
+    # 検索結果は Coveo の組織エンドポイントから読み込まれる。このホストを許可しないと
+    # ブラウザコレクタが当該リクエストを遮断し、結果が描画されず wait_for が必ず時間切れになる。
+    allowed_hosts:
+      - "support.hpe.com"
+      - "platform.cloud.coveo.com"
+      - "hewlettpackardproductioniwmg9b9w.org.coveo.com"
     parser: generic
+    # 結果リンクの class は styled-components のハッシュ（StyledAnchor-sc-...）に変わり
+    # CoveoResultLink は付与されなくなったため、安定している href で選択する。
     selectors:
-      item: "a.CoveoResultLink[href*='/hpesc/public/docDisplay?docId=hpesb']"
+      item: "a[href*='/hpesc/public/docDisplay?docId=hpesb']"
       link: "a[href]"
-    wait_for: "a.CoveoResultLink[href*='/hpesc/public/docDisplay?docId=hpesb']"
+    wait_for: "a[href*='/hpesc/public/docDisplay?docId=hpesb']"
     max_detail_fetches: 0
     feed:
       status: available
@@ -939,6 +964,12 @@ sources:
     parser: csaf
     max_index_items: 100000
     max_detail_fetches: 100
+    # changes.csv は配信ディレクトリへ未反映のドキュメントを先頭に数百行並べることが
+    # あるため、100件取得できるまで更新リストを辿れる試行回数を確保する。
+    max_detail_attempts: 800
+    # 静的配信（CDN）の JSON を多数取得するため、既定の 1 req/s では未公開行の
+    # 読み飛ばしに数分かかる。公式の静的エンドポイント向けに控えめに引き上げる。
+    rate_limit_per_second: 8
     content_types: ["text/csv", "application/json"]
     feed:
       status: available

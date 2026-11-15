@@ -535,3 +535,123 @@ async def test_csaf_tolerates_a_small_fraction_of_detail_failures(
 
     assert len(result.records) == total - 1
     assert result.complete_snapshot is False
+
+
+@respx.mock
+async def test_csaf_skips_unpublished_documents_and_keeps_walking_the_change_list() -> None:
+    index_url = "https://vendor.example.com/csaf/changes.csv"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://vendor.example.com/advisories",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["vendor.example.com"],
+        parser="csaf",
+        max_detail_fetches=2,
+        max_detail_attempts=10,
+        content_types=["text/csv", "application/json"],
+    )
+    rows = "\n".join(
+        f'"2026/adv-{index}.json","2026-07-01T00:00:00+00:00"' for index in range(6)
+    )
+    respx.get(index_url).mock(
+        return_value=httpx.Response(200, text=rows, headers={"content-type": "text/csv"})
+    )
+    # 先頭4件はまだ配信されていない（更新リストにだけ載っている）。
+    for index in range(4):
+        respx.get(f"https://vendor.example.com/csaf/2026/adv-{index}.json").mock(
+            return_value=httpx.Response(404)
+        )
+    for index in (4, 5):
+        respx.get(f"https://vendor.example.com/csaf/2026/adv-{index}.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"document": {"title": f"ADV-{index}", "tracking": {"id": f"ADV-{index}"}}},
+                headers={"content-type": "application/json"},
+            )
+        )
+
+    result = await CsafCollector().collect(
+        source,
+        SourceState(source_id="example"),
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert [record.url.rsplit("/", 1)[-1] for record in result.records] == [
+        "adv-4.json",
+        "adv-5.json",
+    ]
+
+
+@respx.mock
+async def test_csaf_fails_when_every_change_list_document_is_unpublished() -> None:
+    index_url = "https://vendor.example.com/csaf/changes.csv"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://vendor.example.com/advisories",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["vendor.example.com"],
+        parser="csaf",
+        max_detail_fetches=2,
+        max_detail_attempts=5,
+        content_types=["text/csv", "application/json"],
+    )
+    rows = "\n".join(
+        f'"2026/adv-{index}.json","2026-07-01T00:00:00+00:00"' for index in range(3)
+    )
+    respx.get(index_url).mock(
+        return_value=httpx.Response(200, text=rows, headers={"content-type": "text/csv"})
+    )
+    for index in range(3):
+        respx.get(f"https://vendor.example.com/csaf/2026/adv-{index}.json").mock(
+            return_value=httpx.Response(404)
+        )
+
+    with pytest.raises(ParserChangedError, match="are published yet"):
+        await CsafCollector().collect(
+            source,
+            SourceState(source_id="example"),
+            datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+@respx.mock
+async def test_csaf_still_fails_on_systemic_detail_errors() -> None:
+    index_url = "https://vendor.example.com/csaf/changes.csv"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://vendor.example.com/advisories",
+        enabled=True,
+        collector=CollectorKind.CSAF,
+        url=index_url,
+        allowed_hosts=["vendor.example.com"],
+        parser="csaf",
+        max_detail_fetches=3,
+        content_types=["text/csv", "application/json"],
+    )
+    rows = "\n".join(
+        f'"2026/adv-{index}.json","2026-07-01T00:00:00+00:00"' for index in range(3)
+    )
+    respx.get(index_url).mock(
+        return_value=httpx.Response(200, text=rows, headers={"content-type": "text/csv"})
+    )
+    for index in range(3):
+        respx.get(f"https://vendor.example.com/csaf/2026/adv-{index}.json").mock(
+            return_value=httpx.Response(500)
+        )
+
+    with pytest.raises(CollectorError, match="CSAF detail documents failed"):
+        await CsafCollector().collect(
+            source,
+            SourceState(source_id="example"),
+            datetime(2026, 1, 1, tzinfo=UTC),
+        )

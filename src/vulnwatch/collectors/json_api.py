@@ -72,6 +72,9 @@ class JsonApiCollector:
         seen_items: set[tuple[str, str]] = set()
         seen_pages = {first_page.url}
         indexed_items = 0
+        raw_items = 0
+        windowed = self._is_github_repo_advisory_feed(first_page.url)
+        window_exhausted = False
         fetched = first_page
         page_count = 0
         while True:
@@ -81,6 +84,13 @@ class JsonApiCollector:
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise CollectorError(f"{source.id}: invalid JSON: {exc}") from exc
             items = _items(payload)
+            raw_items += len(items)
+            if windowed:
+                # リポジトリ単位の GitHub Security Advisories API は updated の降順で
+                # 全履歴を返し、更新日での絞り込みに対応していない。収集窓より古い項目を
+                # ここで落とし、窓を抜けた時点でページングを止める（さもなければ件数が
+                # 履歴の長さに比例して増え続け、max_items を必ず超える）。
+                items, window_exhausted = self._window_items(items, since)
             indexed_items += len(items)
             if indexed_items > source.max_index_items:
                 raise CollectorError(
@@ -108,6 +118,8 @@ class JsonApiCollector:
                         f"{source.id}: JSON exceeds configured limit of {source.max_items} items"
                     )
 
+            if window_exhausted:
+                break
             next_url = (
                 fetched.next_url
                 or self._netapp_next_url(source, fetched.url, payload, len(items))
@@ -127,6 +139,14 @@ class JsonApiCollector:
                 raise CollectorError(f"{source.id}: unexpected 304 during JSON pagination")
 
         if not records:
+            if windowed and raw_items:
+                # 収集窓に更新がなかっただけで、応答の形は保たれている。
+                return CollectionResult(
+                    source_id=source.id,
+                    etag=first_page.etag,
+                    last_modified=first_page.last_modified,
+                    complete_snapshot=False,
+                )
             raise ParserChangedError(f"{source.id}: JSON contained zero items")
         return CollectionResult(
             source_id=source.id,
@@ -135,6 +155,54 @@ class JsonApiCollector:
             last_modified=first_page.last_modified,
             complete_snapshot=False,
         )
+
+    @staticmethod
+    def _is_github_repo_advisory_feed(url: str) -> bool:
+        """Does this URL list one repository's advisories, newest update first?"""
+
+        parsed = urlsplit(url)
+        if (parsed.hostname or "").casefold() != "api.github.com":
+            return False
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 4 or parts[0] != "repos" or parts[3] != "security-advisories":
+            return False
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        # 降順であることが早期打ち切りの前提。並び順の指定が無い／異なる場合は窓を
+        # 適用しない（取りこぼしを防ぐ）。
+        return query.get("sort") == "updated" and query.get("direction") == "desc"
+
+    @staticmethod
+    def _window_items(
+        items: list[dict[str, Any]],
+        since: datetime,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Keep items updated at or after ``since``; report when the window ended."""
+
+        since_utc = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+        kept: list[dict[str, Any]] = []
+        exhausted = False
+        for item in items:
+            observed: datetime | None = None
+            for key in ("updated_at", "published_at"):
+                value = item.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                observed = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+                break
+            if observed is None:
+                # 日付が読めない項目は落とさない。古いかどうか判断できないため、
+                # 打ち切り判定にも使わない。
+                kept.append(item)
+                continue
+            if observed.astimezone(UTC) < since_utc:
+                exhausted = True
+                continue
+            kept.append(item)
+        return kept, exhausted
 
     @staticmethod
     def _identity(item: dict[str, Any]) -> set[tuple[str, str]]:
@@ -234,6 +302,7 @@ class JsonApiCollector:
             or item.get("external_url")
             or item.get("html_url")
             or item.get("item_link")
+            or item.get("page_url")
             or item.get("href")
         )
         return client.advisory_url(candidate, base_url=source.url or source.advisory_url)

@@ -3,17 +3,25 @@ from __future__ import annotations
 import csv
 import io
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
-from vulnwatch.collectors.base import CollectorError, ParserChangedError, SafeHttpClient
+from vulnwatch.collectors.base import (
+    CollectorError,
+    FetchedContent,
+    ParserChangedError,
+    SafeHttpClient,
+)
 from vulnwatch.models import CollectionResult, RawRecord, SourceDefinition, SourceState
 
 OSV_MODIFIED_INDEX_URL = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
 OSV_STORAGE_HOST = "storage.googleapis.com"
 OSV_DETAIL_BASE_URL = "https://storage.googleapis.com/osv-vulnerabilities/"
 OSV_ADVISORY_BASE_URL = "https://osv.dev/vulnerability/"
+# 変更インデックスを読む単位。最新側だけ読めば足りるため、1回で収まる大きさにする。
+_INDEX_CHUNK_BYTES = 4_194_304
 
 
 def _utc_now() -> datetime:
@@ -89,7 +97,8 @@ class OsvGlobalCollector:
         self._validate_source(source)
         assert source.url is not None
         client = SafeHttpClient(source)
-        fetched_index = await client.fetch(source.url, state, conditional=True)
+        threshold = self._threshold(source, state, since)
+        fetched_index = await self._fetch_index_prefix(client, source, state, threshold)
         if fetched_index.not_modified:
             return CollectionResult(
                 source_id=source.id,
@@ -99,21 +108,24 @@ class OsvGlobalCollector:
                 complete_snapshot=False,
             )
 
-        threshold = _as_utc(since)
-        if state.last_success_at is not None:
-            threshold = max(threshold, _as_utc(state.last_success_at))
-        elif source.bootstrap_window_hours is not None:
-            # The global index can contain hundreds of thousands of changes for a
-            # normal 90-day pipeline window. Activate it from a short, explicit
-            # boundary; subsequent runs always continue from last_success_at.
-            bootstrap_threshold = _utc_now() - timedelta(hours=source.bootstrap_window_hours)
-            threshold = max(threshold, bootstrap_threshold)
         paths = self._recent_paths(source, fetched_index.body, threshold)
         if len(paths) > source.max_detail_fetches:
-            raise CollectorError(
-                f"{source.id}: OSV delta exceeds configured detail fetch limit of "
-                f"{source.max_detail_fetches} items"
-            )
+            # 長期間失敗したままになると境界が古くなり、差分が取得上限を超えて以後ずっと
+            # 失敗し続ける。ブートストラップ窓を持つソースはそこから再活性化し、最新分の
+            # 収集を再開する（間の期間は履歴カバレッジの既知の欠落として扱う）。
+            reactivated = self._reactivation_threshold(source, threshold)
+            if reactivated is None:
+                raise CollectorError(
+                    f"{source.id}: OSV delta exceeds configured detail fetch limit of "
+                    f"{source.max_detail_fetches} items"
+                )
+            threshold = reactivated
+            paths = self._recent_paths(source, fetched_index.body, threshold)
+            if len(paths) > source.max_detail_fetches:
+                raise CollectorError(
+                    f"{source.id}: OSV delta exceeds configured detail fetch limit of "
+                    f"{source.max_detail_fetches} items"
+                )
 
         records: list[RawRecord] = []
         seen_ids: set[str] = set()
@@ -149,6 +161,104 @@ class OsvGlobalCollector:
             last_modified=fetched_index.last_modified,
             complete_snapshot=False,
         )
+
+    @staticmethod
+    def _threshold(
+        source: SourceDefinition,
+        state: SourceState,
+        since: datetime,
+    ) -> datetime:
+        threshold = _as_utc(since)
+        if state.last_success_at is not None:
+            threshold = max(threshold, _as_utc(state.last_success_at))
+        elif source.bootstrap_window_hours is not None:
+            # The global index can contain hundreds of thousands of changes for a
+            # normal 90-day pipeline window. Activate it from a short, explicit
+            # boundary; subsequent runs always continue from last_success_at.
+            bootstrap_threshold = _utc_now() - timedelta(hours=source.bootstrap_window_hours)
+            threshold = max(threshold, bootstrap_threshold)
+        return threshold
+
+    @staticmethod
+    def _reactivation_threshold(
+        source: SourceDefinition,
+        threshold: datetime,
+    ) -> datetime | None:
+        if source.bootstrap_window_hours is None:
+            return None
+        candidate = _utc_now() - timedelta(hours=source.bootstrap_window_hours)
+        return candidate if candidate > threshold else None
+
+    @classmethod
+    async def _fetch_index_prefix(
+        cls,
+        client: SafeHttpClient,
+        source: SourceDefinition,
+        state: SourceState,
+        threshold: datetime,
+    ) -> FetchedContent:
+        """Read only the newest part of the modified index.
+
+        The index lists every change OSV ever published, newest first, and is far
+        larger than a single response may be. Rows older than the collection
+        boundary are never used, so the read stops as soon as the boundary is
+        reached -- or as soon as the delta is already bigger than the detail
+        fetch budget, because reading further cannot change the outcome.
+        """
+
+        assert source.url is not None
+        first: FetchedContent | None = None
+        body = b""
+        offset = 0
+        while True:
+            fetched = await client.fetch(
+                source.url,
+                state if offset == 0 else None,
+                conditional=offset == 0,
+                byte_range=(offset, _INDEX_CHUNK_BYTES),
+            )
+            if fetched.not_modified:
+                return fetched
+            if first is None:
+                first = fetched
+            if not fetched.body:
+                break
+            body += fetched.body
+            offset += len(fetched.body)
+            _, row_count, last_modified_value = cls._complete_rows(source, body)
+            if fetched.total_bytes is None:
+                # 範囲取得に応じず全体が返された場合は、このまま使う。
+                break
+            if offset >= fetched.total_bytes or offset >= source.max_response_bytes:
+                break
+            if row_count > source.max_detail_fetches:
+                break
+            if last_modified_value is not None and last_modified_value <= threshold:
+                break
+        if first is None:
+            raise ParserChangedError(f"{source.id}: OSV modified index returned no content")
+        rows, _, _ = cls._complete_rows(source, body)
+        return replace(first, body=rows, not_modified=False)
+
+    @staticmethod
+    def _complete_rows(
+        source: SourceDefinition,
+        body: bytes,
+    ) -> tuple[bytes, int, datetime | None]:
+        """Trim a partial read to whole rows and report its size and oldest row."""
+
+        boundary = body.rfind(b"\n")
+        rows = body if boundary < 0 else body[: boundary + 1]
+        if not rows:
+            return b"", 0, None
+        lines = rows.splitlines()
+        row_count = len(lines)
+        last_modified_value: datetime | None = None
+        if lines:
+            first_field = lines[-1].split(b",", 1)[0].decode("utf-8", errors="replace").strip()
+            if first_field:
+                last_modified_value = _modified_at(first_field, source.id)
+        return rows, row_count, last_modified_value
 
     @staticmethod
     def _validate_source(source: SourceDefinition) -> None:

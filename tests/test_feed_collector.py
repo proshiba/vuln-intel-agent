@@ -320,3 +320,55 @@ async def test_feed_fails_closed_when_title_pattern_matches_nothing() -> None:
             SourceState(source_id="example"),
             datetime(2026, 1, 1, tzinfo=UTC),
         )
+
+
+@respx.mock
+async def test_feed_detail_url_drops_percent_encoded_trailing_space() -> None:
+    feed_url = "https://vendor.example.com/advisories/feed.xml"
+    source = SourceDefinition(
+        id="example",
+        category="test",
+        vendor="Example",
+        advisory_url="https://vendor.example.com/advisories",
+        enabled=True,
+        collector=CollectorKind.FEED,
+        url=feed_url,
+        allowed_hosts=["vendor.example.com"],
+        parser="feed",
+        detail_collector=CollectorKind.HTML,
+        max_detail_fetches=5,
+        content_types=["application/rss+xml", "application/xml", "text/xml"],
+        rate_limit_per_second=20,
+    )
+    # 公式フィードのリンク末尾に %20 が混ざることがあり、そのまま取得すると404になる。
+    feed_body = """<?xml version="1.0"?>
+    <rss version="2.0"><channel>
+      <item>
+        <title>CVE-2026-28336</title>
+        <link>https://vendor.example.com/advisories/cve-2026-28336%20</link>
+        <pubDate>Wed, 01 Jul 2026 00:00:00 GMT</pubDate>
+      </item>
+    </channel></rss>"""
+    respx.get(feed_url).mock(
+        return_value=httpx.Response(
+            200, text=feed_body, headers={"content-type": "application/rss+xml"}
+        )
+    )
+    detail = respx.get("https://vendor.example.com/advisories/cve-2026-28336").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body><main>Advisory body</main></body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+
+    result = await FeedCollector().collect(
+        source,
+        SourceState(source_id="example"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert detail.called
+    assert [record.url for record in result.records] == [
+        "https://vendor.example.com/advisories/cve-2026-28336"
+    ]

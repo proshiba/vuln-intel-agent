@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -345,4 +345,128 @@ async def test_osv_global_rejects_invalid_detail_json(
             _source(),
             SourceState(source_id="osv"),
             datetime(2026, 7, 1, tzinfo=UTC),
+        )
+
+
+def _ranged_index_handler(text: str) -> object:
+    """Serve the index like object storage does: honour Range, report the total."""
+
+    body = text.encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested = request.headers.get("range")
+        if requested is None:
+            return httpx.Response(200, content=body, headers={"content-type": "text/csv"})
+        _, _, spec = requested.partition("=")
+        start_text, _, end_text = spec.partition("-")
+        start, end = int(start_text), int(end_text)
+        chunk = body[start : end + 1]
+        if not chunk:
+            return httpx.Response(
+                416,
+                headers={"content-range": f"bytes */{len(body)}"},
+            )
+        return httpx.Response(
+            206,
+            content=chunk,
+            headers={
+                "content-type": "text/csv",
+                "content-range": f"bytes {start}-{start + len(chunk) - 1}/{len(body)}",
+            },
+        )
+
+    return handler
+
+
+@respx.mock
+async def test_osv_reads_only_the_newest_part_of_a_large_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1行ずつ読む大きさにして、境界に到達した時点で読み止めることを確かめる。
+    monkeypatch.setattr("vulnwatch.collectors.osv_global._INDEX_CHUNK_BYTES", 48)
+    rows = [
+        ("2026-07-10T00:00:00Z", "PyPI/GHSA-new"),
+        ("2026-07-09T00:00:00Z", "PyPI/GHSA-also-new"),
+        ("2026-01-01T00:00:00Z", "PyPI/GHSA-old"),
+    ]
+    rows += [(f"2025-01-{day:02d}T00:00:00Z", f"PyPI/GHSA-ancient-{day}") for day in range(1, 20)]
+    text = "".join(f"{modified},{path}\n" for modified, path in rows)
+    index_route = respx.get(OSV_MODIFIED_INDEX_URL).mock(side_effect=_ranged_index_handler(text))
+    for identifier in ("GHSA-new", "GHSA-also-new"):
+        respx.get(f"{OSV_DETAIL_BASE_URL}PyPI/{identifier}.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": identifier, "modified": "2026-07-10T00:00:00Z"},
+                headers={"content-type": "application/json"},
+            )
+        )
+
+    result = await OsvGlobalCollector().collect(
+        _source(),
+        SourceState(source_id="osv", last_success_at=datetime(2026, 7, 1, tzinfo=UTC)),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert [record.url.rsplit("/", 1)[-1] for record in result.records] == [
+        "GHSA-new",
+        "GHSA-also-new",
+    ]
+    # 全体を読み切らずに境界で止まっていること。
+    requested_bytes = sum(
+        int(str(call.request.headers["range"]).split("-")[-1])
+        - int(str(call.request.headers["range"]).split("=")[1].split("-")[0])
+        + 1
+        for call in index_route.calls
+    )
+    assert requested_bytes < len(text.encode())
+
+
+@respx.mock
+async def test_osv_reactivates_from_bootstrap_window_when_the_boundary_is_stale() -> None:
+    now = datetime.now(UTC)
+    recent = [
+        ((now - timedelta(minutes=minute)).strftime("%Y-%m-%dT%H:%M:%SZ"), f"PyPI/GHSA-r{minute}")
+        for minute in (5, 10)
+    ]
+    stale = [
+        ((now - timedelta(days=day)).strftime("%Y-%m-%dT%H:%M:%SZ"), f"PyPI/GHSA-s{day}")
+        for day in range(1, 8)
+    ]
+    text = "".join(f"{modified},{path}\n" for modified, path in recent + stale)
+    respx.get(OSV_MODIFIED_INDEX_URL).mock(side_effect=_ranged_index_handler(text))
+    for _, path in recent:
+        identifier = path.rsplit("/", 1)[-1]
+        respx.get(f"{OSV_DETAIL_BASE_URL}{path}.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": identifier, "modified": "2026-07-10T00:00:00Z"},
+                headers={"content-type": "application/json"},
+            )
+        )
+
+    result = await OsvGlobalCollector().collect(
+        _source(max_detail_fetches=2, bootstrap_window_hours=1),
+        SourceState(source_id="osv", last_success_at=now - timedelta(days=60)),
+        now - timedelta(days=90),
+    )
+
+    assert sorted(record.url.rsplit("/", 1)[-1] for record in result.records) == [
+        "GHSA-r10",
+        "GHSA-r5",
+    ]
+
+
+@respx.mock
+async def test_osv_without_bootstrap_window_still_fails_on_oversized_delta() -> None:
+    rows = [
+        (f"2026-07-{day:02d}T00:00:00Z", f"PyPI/GHSA-{day}") for day in range(19, 9, -1)
+    ]
+    text = "".join(f"{modified},{path}\n" for modified, path in rows)
+    respx.get(OSV_MODIFIED_INDEX_URL).mock(side_effect=_ranged_index_handler(text))
+
+    with pytest.raises(CollectorError, match="detail fetch limit"):
+        await OsvGlobalCollector().collect(
+            _source(max_detail_fetches=2, bootstrap_window_hours=None),
+            SourceState(source_id="osv", last_success_at=datetime(2026, 1, 1, tzinfo=UTC)),
+            datetime(2026, 1, 1, tzinfo=UTC),
         )

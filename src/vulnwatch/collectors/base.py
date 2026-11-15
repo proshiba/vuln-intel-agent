@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -18,6 +19,24 @@ _USER_AGENT = (
     "vulnwatch/0.1"
 )
 _SCHNEIDER_USER_AGENT = "vulnwatch/0.1 (+public vulnerability intelligence collection)"
+# 公式フィードのリンク末尾に紛れ込んだ空白（%20 など、パーセントエンコード済みで
+# str.strip() では落ちない）を除去するための前後一致。実在するパスの一部ではなく
+# 編集時の混入であり、そのまま取得すると確実に404になる。
+_ENCODED_EDGE_WHITESPACE = re.compile(
+    r"^(?:%(?:20|09|0a|0d)|%c2%a0)+|(?:%(?:20|09|0a|0d)|%c2%a0)+$",
+    re.IGNORECASE,
+)
+
+
+def _strip_edge_whitespace(value: str) -> str:
+    """Drop literal and percent-encoded whitespace from both ends of a link."""
+
+    previous = ""
+    current = value.strip()
+    while current != previous:
+        previous = current
+        current = _ENCODED_EDGE_WHITESPACE.sub("", current).strip()
+    return current
 
 
 class CollectorError(RuntimeError):
@@ -26,6 +45,10 @@ class CollectorError(RuntimeError):
 
 class ParserChangedError(CollectorError):
     """The source responded successfully but expected content was absent."""
+
+
+class NotFoundError(CollectorError):
+    """The requested document does not exist (yet) at the official endpoint."""
 
 
 class OptionalDependencyError(CollectorError):
@@ -50,6 +73,8 @@ class FetchedContent:
     last_modified: str | None
     not_modified: bool = False
     next_url: str | None = None
+    # Content-Range が返した対象全体のバイト数（範囲取得時のみ）。
+    total_bytes: int | None = None
 
 
 class SafeHttpClient:
@@ -84,10 +109,10 @@ class SafeHttpClient:
 
         fallback = self.source.advisory_url
         self._validate_url(fallback)
-        if not isinstance(candidate, str) or not candidate.strip():
+        if not isinstance(candidate, str) or not _strip_edge_whitespace(candidate):
             return fallback
         try:
-            resolved = urljoin(base_url, candidate.strip())
+            resolved = urljoin(base_url, _strip_edge_whitespace(candidate))
             self._validate_url(resolved)
         except (CollectorError, ValueError):
             return fallback
@@ -99,13 +124,26 @@ class SafeHttpClient:
         state: SourceState | None = None,
         *,
         conditional: bool = False,
+        byte_range: tuple[int, int] | None = None,
     ) -> FetchedContent:
+        """Fetch a document, optionally only the given half-open byte range.
+
+        ``byte_range`` lets a collector read just the newest part of a very large
+        official index instead of the whole object.
+        """
+
         self._validate_url(url)
         timeout = httpx.Timeout(self.source.timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             current = url
             for redirect_count in range(6):
                 headers = self._headers(current, state, conditional=conditional)
+                if byte_range is not None:
+                    start, length = byte_range
+                    if start < 0 or length <= 0:
+                        raise CollectorError(f"{self.source.id}: invalid byte range requested")
+                    headers["Range"] = f"bytes={start}-{start + length - 1}"
+                    headers["Accept-Encoding"] = "identity"
                 response = await self._request_with_retry(client, current, headers)
                 if response.status_code == 304:
                     return FetchedContent(
@@ -136,6 +174,10 @@ class SafeHttpClient:
                             f"{self.source.id}: GitHub API rate limit exhausted; "
                             "set GH_TOKEN or GITHUB_TOKEN"
                         )
+                    if response.status_code in {404, 410}:
+                        raise NotFoundError(
+                            f"{self.source.id}: HTTP {response.status_code} from {current}"
+                        )
                     raise CollectorError(
                         f"{self.source.id}: HTTP {response.status_code} from {current}"
                     )
@@ -159,6 +201,7 @@ class SafeHttpClient:
                     etag=response.headers.get("etag"),
                     last_modified=response.headers.get("last-modified"),
                     next_url=self._next_url(response),
+                    total_bytes=self._content_range_total(response),
                 )
         raise CollectorError(f"{self.source.id}: fetch failed")
 
@@ -222,6 +265,14 @@ class SafeHttpClient:
             headers["Origin"] = "https://www.manageengine.com"
             headers["Referer"] = "https://www.manageengine.com/security/advisory/"
         return headers
+
+    @staticmethod
+    def _content_range_total(response: httpx.Response) -> int | None:
+        if response.status_code != 206:
+            return None
+        value = str(response.headers.get("content-range", "")).strip()
+        _, _, total = value.partition("/")
+        return int(total) if total.isdecimal() else None
 
     @staticmethod
     def _github_token() -> str | None:

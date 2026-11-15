@@ -37,6 +37,13 @@ that activation, it collects every delta newer than its tracked `last_success_at
 OSV source state unless intentionally reactivating it, and treat the bootstrap boundary as a known
 historical-coverage limit rather than claiming that the first run backfilled all OSV history.
 
+The OSV modified index lists every change OSV ever published, newest first, and is far larger than
+a single response may be, so it is read with ranged requests that stop at the collection boundary.
+If the boundary itself has gone stale -- the source failed long enough that the delta no longer fits
+the detail fetch budget -- the collector re-activates from the same one-hour bootstrap window
+instead of failing on every subsequent run. The skipped span is a known historical-coverage gap for
+that period; record it as such rather than treating the resumed run as full coverage.
+
 After collection, inspect the current `run-manifest.json`, advisory JSON, and their public source
 URLs. When the manifest contains new, updated, or withdrawn advisories, use AI to write both required
 Japanese section summaries, then pass them while generating the report:

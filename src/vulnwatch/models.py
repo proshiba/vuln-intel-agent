@@ -119,6 +119,9 @@ class SourceDefinition(StrictModel):
     max_items: int = Field(default=1000, gt=0, le=100_000)
     max_index_items: int = Field(default=100_000, gt=0, le=1_000_000)
     max_detail_fetches: int = Field(default=100, ge=0, le=100_000)
+    # 更新リストに未公開ドキュメントが混ざるソース向けの試行回数上限。
+    # 既定（0）では max_detail_fetches と同じ＝従来どおり先頭から順に取得する。
+    max_detail_attempts: int = Field(default=0, ge=0, le=100_000)
     bootstrap_window_hours: int | None = Field(default=None, gt=0, le=168)
     parser: str | None = None
     osv_ecosystem: str | None = None

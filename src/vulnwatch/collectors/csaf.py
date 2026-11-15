@@ -13,7 +13,12 @@ import feedparser
 from bs4 import BeautifulSoup
 from dateutil.parser import parse as parse_date
 
-from vulnwatch.collectors.base import CollectorError, ParserChangedError, SafeHttpClient
+from vulnwatch.collectors.base import (
+    CollectorError,
+    NotFoundError,
+    ParserChangedError,
+    SafeHttpClient,
+)
 from vulnwatch.models import CollectionResult, RawRecord, SourceDefinition, SourceState
 
 # CSAF詳細取得は最新の抽出サンプルであり、単発の404・タイムアウト・不正ドキュメントは
@@ -104,14 +109,26 @@ class CsafCollector:
                 last_modified=fetched.last_modified,
                 complete_snapshot=False,
             )
-        selected_links = unique_links[: source.max_detail_fetches]
-        if not selected_links:
+        if not source.max_detail_fetches:
             raise CollectorError(f"{source.id}: CSAF detail fetch budget is zero")
+        # 更新リストには、まだ配信ディレクトリに出ていないドキュメントが先に載ることが
+        # ある（Red Hat の changes.csv では先頭数百行がこの状態になる）。見つからない行で
+        # 打ち切らず次の行へ進み、取得できた分で max_detail_fetches を満たす。無限に
+        # 辿らないよう試行回数は max_detail_attempts で上限を持たせる。
+        attempt_budget = max(source.max_detail_attempts, source.max_detail_fetches)
+        attempted = 0
         failed_details = 0
-        for link in selected_links:
+        missing_details = 0
+        for link in unique_links:
+            if len(records) >= source.max_detail_fetches or attempted >= attempt_budget:
+                break
+            attempted += 1
             try:
                 detail = await client.fetch(link)
                 payload = self._load_json(detail.body)
+            except NotFoundError:
+                missing_details += 1
+                continue
             except (CollectorError, json.JSONDecodeError):
                 failed_details += 1
                 continue
@@ -119,12 +136,17 @@ class CsafCollector:
                 records.append(self._record(source, detail.url, payload, detail.content_type))
             else:
                 failed_details += 1
-        if failed_details > int(len(selected_links) * _CSAF_DETAIL_FAILURE_FRACTION):
+        considered = attempted - missing_details
+        if failed_details > int(considered * _CSAF_DETAIL_FAILURE_FRACTION):
             raise CollectorError(
-                f"{source.id}: {failed_details} of {len(selected_links)} "
-                "CSAF detail documents failed"
+                f"{source.id}: {failed_details} of {considered} CSAF detail documents failed"
             )
         if not records:
+            if missing_details:
+                raise ParserChangedError(
+                    f"{source.id}: none of the {attempted} CSAF documents in the change "
+                    "list are published yet"
+                )
             raise ParserChangedError(f"{source.id}: CSAF index yielded zero documents")
         return CollectionResult(
             source_id=source.id,

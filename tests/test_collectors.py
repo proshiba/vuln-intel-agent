@@ -630,3 +630,110 @@ async def test_netapp_api_rejects_reported_total_over_index_limit() -> None:
             SourceState(source_id="netapp"),
             datetime(2026, 7, 1, tzinfo=UTC),
         )
+
+
+@respx.mock
+async def test_github_repository_advisories_stop_at_the_collection_window() -> None:
+    first_url = (
+        "https://api.github.com/repos/example/project/security-advisories"
+        "?sort=updated&direction=desc&per_page=100"
+    )
+    second_url = (
+        "https://api.github.com/repos/example/project/security-advisories"
+        "?sort=updated&direction=desc&per_page=100&page=2"
+    )
+    source = SourceDefinition(
+        id="example_github",
+        category="test",
+        vendor="Example",
+        advisory_url="https://github.com/example/project/security/advisories",
+        enabled=True,
+        collector=CollectorKind.JSON_API,
+        url=first_url,
+        allowed_hosts=["api.github.com", "github.com"],
+        parser="github_advisory",
+        max_items=2,
+        content_types=["application/json"],
+        rate_limit_per_second=20,
+    )
+    respx.get(re.compile(rf"{re.escape(first_url)}$")).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "ghsa_id": "GHSA-recent",
+                    "html_url": "https://github.com/example/project/security/advisories/1",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                },
+                {
+                    "ghsa_id": "GHSA-ancient",
+                    "html_url": "https://github.com/example/project/security/advisories/2",
+                    "updated_at": "2020-01-01T00:00:00Z",
+                },
+            ],
+            headers={
+                "content-type": "application/json",
+                "link": f'<{second_url}>; rel="next"',
+            },
+        )
+    )
+    second = respx.get(re.compile(rf"{re.escape(second_url)}$")).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "ghsa_id": "GHSA-older",
+                    "html_url": "https://github.com/example/project/security/advisories/3",
+                    "updated_at": "2019-01-01T00:00:00Z",
+                }
+            ],
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    result = await JsonApiCollector().collect(
+        source,
+        SourceState(source_id="example_github"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert [record.metadata.get("ghsa_id") for record in result.records] == ["GHSA-recent"]
+    # 窓の外に出たページの先は読まない（履歴が増えても max_items を超えない）。
+    assert not second.called
+
+
+@respx.mock
+async def test_github_repository_advisories_without_recent_updates_succeed_empty() -> None:
+    url = (
+        "https://api.github.com/repos/example/project/security-advisories"
+        "?sort=updated&direction=desc&per_page=100"
+    )
+    source = SourceDefinition(
+        id="example_github",
+        category="test",
+        vendor="Example",
+        advisory_url="https://github.com/example/project/security/advisories",
+        enabled=True,
+        collector=CollectorKind.JSON_API,
+        url=url,
+        allowed_hosts=["api.github.com", "github.com"],
+        parser="github_advisory",
+        content_types=["application/json"],
+        rate_limit_per_second=20,
+    )
+    respx.get(re.compile(rf"{re.escape(url)}$")).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"ghsa_id": "GHSA-ancient", "updated_at": "2020-01-01T00:00:00Z"}],
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    result = await JsonApiCollector().collect(
+        source,
+        SourceState(source_id="example_github"),
+        datetime(2026, 4, 1, tzinfo=UTC),
+    )
+
+    assert result.records == []
+    assert not result.not_modified
