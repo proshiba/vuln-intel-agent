@@ -119,6 +119,9 @@ class SourceDefinition(StrictModel):
     max_items: int = Field(default=1000, gt=0, le=100_000)
     max_index_items: int = Field(default=100_000, gt=0, le=1_000_000)
     max_detail_fetches: int = Field(default=100, ge=0, le=100_000)
+    # 公式側が自動取得を拒否している等、こちらの修正では解消できない失敗を日次ゲートの
+    # 対象外にする。収集は従来どおり試行し、失敗は outcome と run-summary に必ず残る。
+    failure_tolerated: bool = False
     # 更新リストに未公開ドキュメントが混ざるソース向けの試行回数上限。
     # 既定（0）では max_detail_fetches と同じ＝従来どおり先頭から順に取得する。
     max_detail_attempts: int = Field(default=0, ge=0, le=100_000)
@@ -451,6 +454,9 @@ class SourceOutcome(StrictModel):
     parsed_count: int = Field(default=0, ge=0)
     parse_failure_count: int = Field(default=0, ge=0)
     error: str | None = None
+    # 設定で許容扱いにしたソースかどうか。日次ゲート（workflow の検証ステップと
+    # vulnwatch validate）は、この印が付いた失敗を不成功件数に数えない。
+    failure_tolerated: bool = False
 
     @field_validator("endpoint_url")
     @classmethod

@@ -15,14 +15,28 @@ Then run:
 
 ```bash
 .venv/bin/vulnwatch config validate
-.venv/bin/vulnwatch collect --profile daily --since 90d --output staging
+.venv/bin/vulnwatch collect --profile daily --since 7d --output staging
 .venv/bin/vulnwatch summarize --root staging
 ```
+
+The daily window is deliberately short: `--since 7d` collects what changed in the last seven days.
+A longer window makes every source re-walk its history, and a source that has been failing for a
+while can then never catch up within its own fetch budget. Ask for a wider window only
+deliberately -- the collection workflow takes `since` as a `workflow_dispatch` input -- and expect
+it to cost proportionally more requests.
 
 After `collect`, verify `run-manifest.json.source_outcomes` before summarizing. A daily run must have
 exactly one outcome for every enabled source (currently 166). `success` and `not_modified` are
 acceptable; if any outcome is missing, `failed`, or `partial`, stop before summary, report, or
 publish, inspect its endpoint/count/error fields and `quarantine/`, then fix or retry the source.
+
+A source whose official endpoint refuses automated collection outright (an HTTP 403/405 that no
+change on our side fixes) may carry `failure_tolerated: true` in `config/sources.yaml`. It is still
+collected every run, and its failure is still written to `source_outcomes` and to the
+`Tolerated source failures` section of `run-summary.md`, but it does not count toward the
+unsuccessful-source limit that stops the run. Treat the flag as a temporary waiver: re-check those
+endpoints periodically and remove the flag once collection works again. Never add it to silence a
+failure that our own configuration or code causes.
 `vulnwatch validate` independently rejects incomplete or unsuccessful outcomes; use it only as a
 failure check until collection is complete. The scheduled workflow performs the same completeness
 check before handing off generated data.
@@ -32,7 +46,7 @@ without creating daily report change rows. Do not mistake their absence from a r
 collection failure; use `source_outcomes` to assess collection completeness.
 
 The global OSV source has an explicit one-hour bootstrap window on its first successful activation;
-the normal 90-day window would otherwise require hundreds of thousands of detail downloads. After
+even a short window would otherwise require hundreds of thousands of detail downloads. After
 that activation, it collects every delta newer than its tracked `last_success_at`. Do not delete the
 OSV source state unless intentionally reactivating it, and treat the bootstrap boundary as a known
 historical-coverage limit rather than claiming that the first run backfilled all OSV history.

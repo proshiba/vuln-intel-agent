@@ -10,7 +10,7 @@ on:
       since:
         description: Collection window
         required: false
-        default: 90d
+        default: 7d
         type: string
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
       - name: Collect advisories
         env:
           GH_TOKEN: ${{ secrets.VULNWATCH_GITHUB_TOKEN }}
-          SINCE: ${{ inputs.since || '90d' }}
+          SINCE: ${{ inputs.since || '7d' }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "::error::VULNWATCH_GITHUB_TOKEN is required to collect GitHub advisories"
@@ -55,17 +55,29 @@ jobs:
         run: |
           expected=$(python -c 'from vulnwatch.config import load_sources; print(sum(source.enabled for source in load_sources().sources))')
           observed=$(jq '.source_outcomes | length' staging/run-manifest.json)
-          unsuccessful=$(jq '[.source_outcomes[] | select(.status == "failed" or .status == "partial")] | length' staging/run-manifest.json)
+          # 許容扱い（config の failure_tolerated）のソースの失敗は、公式側が自動取得を
+          # 拒否している等こちらで解消できないものなので、記録はするが件数には数えない。
+          unsuccessful=$(jq '[.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated != true))] | length' staging/run-manifest.json)
+          tolerated=$(jq '[.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated == true))] | length' staging/run-manifest.json)
           allowed=$(python -c "from vulnwatch.validation import max_unsuccessful_sources; print(max_unsuccessful_sources($expected))")
           # Always record which sources were unsuccessful. Full detail (with per-source counts
           # and errors) also persists in staging/run-manifest.json and staging/run-summary.md.
           if [ "$unsuccessful" -ne 0 ]; then
             echo "Unsuccessful sources ($unsuccessful of $expected; allowed <= $allowed):"
-            jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "  \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            jq -r '.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated != true)) | "  \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
             {
               echo "### Unsuccessful sources ($unsuccessful of $expected; allowed <= $allowed)"
               echo
-              jq -r '.source_outcomes[] | select(.status == "failed" or .status == "partial") | "- \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+              jq -r '.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated != true)) | "- \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$tolerated" -ne 0 ]; then
+            echo "Tolerated source failures ($tolerated; not counted against the gate):"
+            jq -r '.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated == true)) | "  \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
+            {
+              echo "### Tolerated source failures ($tolerated; not counted against the gate)"
+              echo
+              jq -r '.source_outcomes[] | select((.status == "failed" or .status == "partial") and (.failure_tolerated == true)) | "- \(.source_id): \(.status): \(.error // "unknown error")"' staging/run-manifest.json
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           # A source that produced no outcome at all is a real coverage gap.

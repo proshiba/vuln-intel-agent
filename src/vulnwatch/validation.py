@@ -100,10 +100,14 @@ def _validate_source_outcomes(manifest: RunManifest) -> None:
             f"source outcomes do not match the {manifest.profile} profile ({'; '.join(details)})"
         )
 
+    # 許容扱い（config の failure_tolerated）のソースは、公式側が自動取得を拒んでいる等
+    # こちらの修正では解消できない失敗であり、日次全体を止める理由にしない。失敗自体は
+    # source_outcomes と run-summary.md の "Tolerated source failures" に残る。
     unsuccessful = [
         outcome
         for outcome in manifest.source_outcomes
         if outcome.status in {SourceOutcomeStatus.FAILED, SourceOutcomeStatus.PARTIAL}
+        and not outcome.failure_tolerated
     ]
     allowed = max_unsuccessful_sources(len(expected_ids))
     if len(unsuccessful) > allowed:

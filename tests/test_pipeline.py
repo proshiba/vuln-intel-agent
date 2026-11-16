@@ -12,9 +12,12 @@ from vulnwatch.collectors.base import CollectorError
 from vulnwatch.models import (
     ChangeStatus,
     CollectionResult,
+    CollectorKind,
     Priority,
     RawRecord,
+    RunManifest,
     SourceDefinition,
+    SourceOutcome,
     SourceOutcomeStatus,
     SourceRole,
     SourceState,
@@ -587,3 +590,41 @@ def test_withdrawal_requires_three_misses_and_24_hours(tmp_path: Path, advisory_
     assert manifest.changes[0].status == ChangeStatus.WITHDRAWN
     stored = pipeline.storage.find(advisory.canonical_id)
     assert stored is not None and stored[1].status == "withdrawn"
+
+
+def test_run_summary_separates_tolerated_source_failures(tmp_path: Path) -> None:
+    sources, products = _write_config(tmp_path)
+    output_root = tmp_path / "staging"
+    output_root.mkdir()
+    pipeline = Pipeline(tmp_path, output_root, sources, products)
+    manifest = RunManifest(
+        started_at=datetime(2026, 7, 19, tzinfo=UTC),
+        profile=Tier.DAILY,
+        since=datetime(2026, 7, 18, tzinfo=UTC),
+        source_outcomes=[
+            SourceOutcome(
+                source_id="blocked_upstream",
+                status=SourceOutcomeStatus.FAILED,
+                collector=CollectorKind.FEED,
+                endpoint_url="https://blocked.example.com/feed",
+                error="feed: blocked_upstream: HTTP 403 from https://blocked.example.com/feed",
+                failure_tolerated=True,
+            ),
+            SourceOutcome(
+                source_id="broken_source",
+                status=SourceOutcomeStatus.FAILED,
+                collector=CollectorKind.FEED,
+                endpoint_url="https://broken.example.com/feed",
+                error="feed: broken_source: HTTP 500 from https://broken.example.com/feed",
+            ),
+        ],
+    )
+
+    pipeline._write_summary(manifest)
+
+    summary = (output_root / "run-summary.md").read_text(encoding="utf-8")
+    unsuccessful_section = summary.split("## Unsuccessful sources", 1)[1]
+    assert "broken_source" in unsuccessful_section.split("## Tolerated source failures", 1)[0]
+    tolerated_section = summary.split("## Tolerated source failures", 1)[1]
+    assert "blocked_upstream" in tolerated_section
+    assert "HTTP 403" in tolerated_section

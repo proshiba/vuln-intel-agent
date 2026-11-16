@@ -178,6 +178,7 @@ class Pipeline:
                 collector=collector or source.collector,
                 endpoint_url=source.url,
                 record_count=len(result.records) if result is not None else 0,
+                failure_tolerated=source.failure_tolerated,
             )
             outcomes[source.id] = outcome
             try:
@@ -631,17 +632,22 @@ class Pipeline:
             ),
             key=lambda outcome: outcome.source_id,
         )
-        if unsuccessful:
+        for heading, group in (
+            ("Unsuccessful sources", [o for o in unsuccessful if not o.failure_tolerated]),
+            ("Tolerated source failures", [o for o in unsuccessful if o.failure_tolerated]),
+        ):
+            if not group:
+                continue
             lines.extend(
                 [
-                    "## Unsuccessful sources",
+                    f"## {heading}",
                     "",
                     *[
                         f"- {outcome.source_id} ({outcome.status}, {outcome.collector}): "
                         f"records={outcome.record_count}, "
                         f"parse_failures={outcome.parse_failure_count}"
                         + (f" — {outcome.error}" if outcome.error else "")
-                        for outcome in unsuccessful
+                        for outcome in group
                     ],
                     "",
                 ]

@@ -59,7 +59,7 @@ def config_validate(
 @app.command()
 def collect(
     profile: Annotated[Tier, typer.Option()] = Tier.DAILY,
-    since: Annotated[str, typer.Option()] = "90d",
+    since: Annotated[str, typer.Option()] = "7d",
     output: Annotated[Path, typer.Option()] = Path("staging"),
 ) -> None:
     pipeline = Pipeline(Path.cwd(), output)

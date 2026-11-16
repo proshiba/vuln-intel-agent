@@ -48,7 +48,7 @@ export LLM_MODEL="..."
 日次収集は、リポジトリ直下ではなく一時ディレクトリ `staging/` に生成します。
 
 ```bash
-.venv/bin/vulnwatch collect --profile daily --since 90d --output staging
+.venv/bin/vulnwatch collect --profile daily --since 7d --output staging
 ```
 
 収集後は、`staging/run-manifest.json` の `source_outcomes` を確認します。対象ソースごとに 1 件の outcome があり、`status` が `success` または `not_modified` であれば正常です。`failed`、`partial`、欠落がある場合は、`quarantine/<source-id>/latest.json` と outcome の `endpoint`、`count`、`error` を確認してから再実行してください。
@@ -90,7 +90,7 @@ AI 要約を手動で指定する場合は、Critical 表と「悪用済み・Po
 | コマンド | 用途 |
 |---|---|
 | `vulnwatch config validate` | `config/sources.yaml` と `config/products.yaml` を検証します。 |
-| `vulnwatch collect --profile daily --since 90d --output staging` | 有効な収集ソースから脆弱性情報を取得し、`staging/` に保存します。 |
+| `vulnwatch collect --profile daily --since 7d --output staging` | 有効な収集ソースから脆弱性情報を取得し、`staging/` に保存します。 |
 | `vulnwatch summarize --root staging` | 個別アドバイザリと日次レポート用の日本語 AI 要約を生成します。 |
 | `vulnwatch report --root staging` | 収集結果から Markdown の日次レポートを生成します。 |
 | `vulnwatch validate --root staging` | 生成ツリー、収集完全性、レポート、台帳を検証します。 |

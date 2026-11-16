@@ -47,13 +47,17 @@ def _registry() -> SourceRegistry:
 
 
 def _outcome(
-    source_id: str, status: SourceOutcomeStatus = SourceOutcomeStatus.SUCCESS
+    source_id: str,
+    status: SourceOutcomeStatus = SourceOutcomeStatus.SUCCESS,
+    *,
+    failure_tolerated: bool = False,
 ) -> SourceOutcome:
     return SourceOutcome(
         source_id=source_id,
         status=status,
         collector=CollectorKind.FEED,
         endpoint_url=f"https://{source_id}.example.com/feed",
+        failure_tolerated=failure_tolerated,
     )
 
 
@@ -174,6 +178,38 @@ def test_validate_tree_rejects_too_many_unsuccessful_sources(
     outcomes = [_outcome(f"s{index}") for index in range(20)]
     outcomes[0] = _outcome("s0", SourceOutcomeStatus.FAILED)
     outcomes[1] = _outcome("s1", SourceOutcomeStatus.PARTIAL)  # 2 of 20; allowed = 1
+
+    _write_manifest(tmp_path, profile=Tier.DAILY, outcomes=outcomes)
+
+    with pytest.raises(ValueError, match="too many unsuccessful"):
+        validation.validate_tree(tmp_path)
+
+
+def test_validate_tree_does_not_count_tolerated_source_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validation, "load_sources", lambda *_: _large_registry(20))
+    outcomes = [_outcome(f"s{index}") for index in range(20)]
+    # 許容扱いの失敗が許容数（1件）を超えて並んでも、ゲートは通る。
+    for index in range(5):
+        outcomes[index] = _outcome(
+            f"s{index}", SourceOutcomeStatus.FAILED, failure_tolerated=True
+        )
+    outcomes[5] = _outcome("s5", SourceOutcomeStatus.FAILED)  # 数えるのはこの1件のみ
+
+    _write_manifest(tmp_path, profile=Tier.DAILY, outcomes=outcomes)
+
+    assert validation.validate_tree(tmp_path) == (0, 0)
+
+
+def test_validate_tree_still_rejects_untolerated_failures_beside_tolerated_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validation, "load_sources", lambda *_: _large_registry(20))
+    outcomes = [_outcome(f"s{index}") for index in range(20)]
+    outcomes[0] = _outcome("s0", SourceOutcomeStatus.FAILED, failure_tolerated=True)
+    outcomes[1] = _outcome("s1", SourceOutcomeStatus.FAILED)
+    outcomes[2] = _outcome("s2", SourceOutcomeStatus.PARTIAL)  # 2 of 20; allowed = 1
 
     _write_manifest(tmp_path, profile=Tier.DAILY, outcomes=outcomes)
 

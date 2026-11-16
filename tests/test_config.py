@@ -109,3 +109,20 @@ def test_duplicate_yaml_keys_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="duplicate key"):
         load_sources(path)
+
+
+def test_only_endpoints_that_refuse_automation_are_tolerated() -> None:
+    registry = load_sources()
+    tolerated = {source.id for source in registry.sources if source.failure_tolerated}
+
+    # 公式側が自動取得を 403/405 で拒否しており、こちらの設定・コードでは解消できない
+    # ソースだけを日次ゲートの対象外にする。復旧したら印を外す。
+    assert tolerated == {
+        "dell_technologies",
+        "huntress_blog",
+        "qnap",
+        "rockwell_automation",
+    }
+    assert all(
+        source.enabled for source in registry.sources if source.id in tolerated
+    ), "許容扱いは収集を止める設定ではない"
